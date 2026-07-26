@@ -110,11 +110,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             geometryCheckBeforeScroll
         )
 
-        coordinator.handleBottomAnchorGeometryUpdate(
-            isBottomAnchorVisible: true
-        ) { step in
-            anchorSteps.append(step)
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         XCTAssertEqual(loadLatestWindowCount, 1)
         XCTAssertTrue(coordinator.isReadyToShow)
@@ -131,7 +127,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             ]]
         )
         XCTAssertEqual(groupingRequests, [["Alice@Example.com", "bob@example.com"]])
-        XCTAssertTrue(sleepCalls.isEmpty)
+        XCTAssertEqual(
+            sleepCalls,
+            [UInt64(UIConfig.initialScrollDelay * 1_000_000_000)]
+        )
         XCTAssertEqual(
             anchorSteps,
             [
@@ -246,6 +245,16 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         XCTAssertFalse(coordinator.isReadyToShow)
+        var geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        geometryCheckID = coordinator.initialAnchorGeometryCheckID
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: false
         ) { step in
@@ -275,21 +284,20 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             ]
         )
 
-        coordinator.handleBottomAnchorGeometryUpdate(
-            isBottomAnchorVisible: false
-        ) { _ in
-            XCTFail("Fallback confirmation must not issue a third scroll")
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
         }
+        await confirmInitialBottomAnchor(coordinator)
         XCTAssertTrue(coordinator.isReadyToShow)
 
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: false
         ) { _ in
-            XCTFail("Initial anchor must not retry after the fallback reveal")
+            XCTFail("Initial anchor must not retry after confirmed reveal")
         }
     }
 
-    func testUserScrollDuringPendingInitialRevealCancelsForcedAnchoring() async throws {
+    func testUserScrollDuringPendingStabilizationCancelsForcedAnchoring() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
             "second@example.com"
@@ -311,6 +319,13 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         XCTAssertFalse(coordinator.isReadyToShow)
 
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail("A visible anchor should begin confirmation without scrolling")
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
         coordinator.handleUserScrollInteraction()
 
         XCTAssertTrue(coordinator.isReadyToShow)
@@ -319,6 +334,79 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in
             XCTFail("User interaction must cancel later initial scroll attempts")
         }
+    }
+
+    func testBottomMovingOffscreenDuringStabilizationReanchorsAndRequiresFreshConfirmation() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        let geometryCheckBeforeReanchor = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
+            ]
+        )
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckBeforeReanchor
+        }
+
+        let geometryCheckBeforeConfirmation = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckBeforeConfirmation
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(anchorSteps.count, 1)
     }
 
     func testTransientReappearanceDoesNotRecaptureUnreadOrConsumeHiddenArrival() {
@@ -1025,11 +1113,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             latestWindowKnownCounts.contains(2)
         }
 
-        coordinator.handleBottomAnchorGeometryUpdate(
-            isBottomAnchorVisible: true
-        ) { step in
-            anchorSteps.append(step)
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         XCTAssertTrue(coordinator.isReadyToShow)
         XCTAssertEqual(updatedReplyTargets, [messages.last?.id])
@@ -1099,11 +1183,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             latestWindowKnownCounts.contains(4)
         }
 
-        coordinator.handleBottomAnchorGeometryUpdate(
-            isBottomAnchorVisible: true
-        ) { step in
-            anchorSteps.append(step)
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         XCTAssertTrue(coordinator.isReadyToShow)
         XCTAssertEqual(loadResolvedDisplayNameCount, 1)
@@ -1152,12 +1232,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 1,
             isInitialWindowLoaded: true
         ) { _ in
-            XCTFail("Single-message appear should not schedule bottom anchoring")
+            XCTFail("Single-message appear should not require a bottom scroll")
         }
 
-        await waitUntil {
-            coordinator.isReadyToShow
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         loadLatestWindowCount = 0
         loadResolvedDisplayNameCount = 0
@@ -1236,10 +1314,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 1,
             isInitialWindowLoaded: true
         ) { _ in
-            XCTFail("Single-message appear should not schedule bottom anchoring")
+            XCTFail("Single-message appear should not require a bottom scroll")
         }
 
-        XCTAssertTrue(coordinator.isReadyToShow)
+        await confirmInitialBottomAnchor(coordinator)
         loadResolvedDisplayNameCount = 0
 
         coordinator.handleMessageCountChange(
@@ -1295,12 +1373,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 1,
             isInitialWindowLoaded: true
         ) { _ in
-            XCTFail("Single-message appear should not schedule bottom anchoring")
+            XCTFail("Single-message appear should not require a bottom scroll")
         }
 
-        await waitUntil {
-            coordinator.isReadyToShow
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         coordinator.handleMessageCountChange(
             oldCount: 1,
@@ -1372,11 +1448,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isInitialWindowLoaded: true
         ) { _ in }
 
-        coordinator.handleBottomAnchorGeometryUpdate(
-            isBottomAnchorVisible: true
-        ) { _ in
-            XCTFail("A visible initial anchor should not request a scroll")
-        }
+        await confirmInitialBottomAnchor(coordinator)
         XCTAssertTrue(coordinator.isReadyToShow)
 
         coordinator.handleReplySendCompleted(
@@ -1554,12 +1626,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 1,
             isInitialWindowLoaded: true
         ) { _ in
-            XCTFail("Single-message appear should not schedule bottom anchoring")
+            XCTFail("Single-message appear should not require a bottom scroll")
         }
 
-        await waitUntil {
-            coordinator.isReadyToShow
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         XCTAssertEqual(loadLatestWindowCount, 0)
 
@@ -1668,11 +1738,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { step in
             anchorSteps.append(step)
         }
-        coordinator.handleBottomAnchorGeometryUpdate(
-            isBottomAnchorVisible: true
-        ) { step in
-            anchorSteps.append(step)
-        }
+        await confirmInitialBottomAnchor(coordinator)
         XCTAssertTrue(coordinator.isReadyToShow)
         XCTAssertEqual(
             anchorSteps,
@@ -1861,6 +1927,37 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isShowingLatestWindow: true,
             isBottomAnchorVisible: isBottomAnchorVisible
         )
+    }
+
+    private func confirmInitialBottomAnchor(
+        _ coordinator: ChatMessagesCoordinator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let geometryCheckBeforeConfirmation = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail(
+                "A visible initial anchor should not request a scroll",
+                file: file,
+                line: line
+            )
+        }
+        await waitUntil(file: file, line: line) {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckBeforeConfirmation
+        }
+        XCTAssertFalse(coordinator.isReadyToShow, file: file, line: line)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail(
+                "A stable visible initial anchor should not request a scroll",
+                file: file,
+                line: line
+            )
+        }
+        XCTAssertTrue(coordinator.isReadyToShow, file: file, line: line)
     }
 
     private func waitUntil(

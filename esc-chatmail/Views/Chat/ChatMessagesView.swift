@@ -267,7 +267,7 @@ struct ChatMessagesView: View {
             .contentShape(Rectangle())
             .onTapGesture { isTextFieldFocused.wrappedValue = false }
         }
-        .defaultScrollAnchor(.top)
+        .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         .simultaneousGesture(
             DragGesture(minimumDistance: 2)
@@ -283,8 +283,7 @@ struct ChatMessagesView: View {
                             frame: frame,
                             viewportSize: geometryProxy.size,
                             layoutID: scrollState.latestWindowLayoutID,
-                            scrollProxy: scrollProxy,
-                            advanceInitialReveal: false
+                            scrollProxy: scrollProxy
                         )
                     }
                     .onChange(of: frame) { _, newFrame in
@@ -292,8 +291,7 @@ struct ChatMessagesView: View {
                             frame: newFrame,
                             viewportSize: geometryProxy.size,
                             layoutID: scrollState.latestWindowLayoutID,
-                            scrollProxy: scrollProxy,
-                            advanceInitialReveal: false
+                            scrollProxy: scrollProxy
                         )
                     }
                     .onChange(of: geometryProxy.size) { _, newSize in
@@ -301,8 +299,7 @@ struct ChatMessagesView: View {
                             frame: frame,
                             viewportSize: newSize,
                             layoutID: scrollState.latestWindowLayoutID,
-                            scrollProxy: scrollProxy,
-                            advanceInitialReveal: false
+                            scrollProxy: scrollProxy
                         )
                     }
                     .onChange(of: coordinator.initialAnchorGeometryCheckID) { _, _ in
@@ -310,8 +307,7 @@ struct ChatMessagesView: View {
                             frame: frame,
                             viewportSize: geometryProxy.size,
                             layoutID: scrollState.latestWindowLayoutID,
-                            scrollProxy: scrollProxy,
-                            advanceInitialReveal: true
+                            scrollProxy: scrollProxy
                         )
                     }
             }
@@ -453,8 +449,7 @@ struct ChatMessagesView: View {
         frame: CGRect,
         viewportSize: CGSize,
         layoutID: UUID,
-        scrollProxy: ScrollViewProxy,
-        advanceInitialReveal: Bool
+        scrollProxy: ScrollViewProxy
     ) {
         let isVisible = isBottomAnchorVisible(frame: frame, viewportSize: viewportSize)
         let becameVisible = !isBottomAnchorVisible && isVisible
@@ -466,11 +461,9 @@ struct ChatMessagesView: View {
                 conversationID: conversation.id.uuidString
             )
         }
-        if advanceInitialReveal || becameVisible {
-            coordinator.handleBottomAnchorGeometryUpdate(
-                isBottomAnchorVisible: isVisible
-            ) { performBottomAnchor($0, proxy: scrollProxy) }
-        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: isVisible
+        ) { performBottomAnchor($0, proxy: scrollProxy) }
         coordinator.handleLatestWindowLayout(
             layoutID: layoutID,
             isChatActiveAndUncovered: isChatActiveAndUncovered,

@@ -14,11 +14,16 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     private enum InitialRevealState: Equatable {
         case waitingForRows
-        case pending(scrollAttempts: Int)
+        case pending(scrollAttempts: Int, phase: InitialRevealPhase)
         case ready(wasEmptyConversation: Bool)
     }
 
-    private static let maximumInitialScrollAttempts = 2
+    private enum InitialRevealPhase: Equatable {
+        case awaitingGeometry
+        case checkingAfterScroll
+        case confirmingVisibility
+        case validatingVisibility
+    }
 
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
@@ -51,6 +56,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let sleep: Sleep
     private let taskManager = ViewModelTaskManager()
     private var initialRevealState: InitialRevealState = .waitingForRows
+    private var isInitialBottomAnchorVisible = false
     private var hasCapturedInitialUnreadSnapshot = false
     private var isVisible = false
     private var pendingAutoReadMessageIDsByEventID: [UUID: [NSManagedObjectID]] = [:]
@@ -295,28 +301,33 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// Advances the initial reveal only from actual bottom-anchor geometry.
     ///
     /// Call this whenever the bottom anchor first lays out or its frame/viewport changes.
-    /// A visible anchor completes the reveal immediately. An offscreen anchor can request
-    /// at most two nonanimated scrolls. A geometry check is requested after each
-    /// attempt; if the anchor is still offscreen after both, the content is revealed
-    /// as a fallback so the loading state cannot remain indefinitely.
+    /// A visible anchor starts a delayed confirmation. The content is revealed only if
+    /// the anchor remains visible through that delay. If late layout moves the anchor
+    /// offscreen, a nonanimated scroll is requested and geometry is checked again.
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
         scrollAction: BottomAnchorAction
     ) {
-        guard case let .pending(scrollAttempts) = initialRevealState else { return }
+        isInitialBottomAnchorVisible = isBottomAnchorVisible
+        guard case let .pending(scrollAttempts, phase) = initialRevealState else { return }
 
         if isBottomAnchorVisible {
-            completeInitialReveal(wasVisiblyConfirmed: true)
+            if phase == .validatingVisibility {
+                completeInitialReveal()
+                return
+            }
+            guard phase != .confirmingVisibility else { return }
+            beginInitialVisibilityConfirmation(scrollAttempts: scrollAttempts)
             return
         }
 
-        guard scrollAttempts < Self.maximumInitialScrollAttempts else {
-            completeInitialReveal(wasVisiblyConfirmed: false)
-            return
-        }
+        guard phase != .checkingAfterScroll else { return }
 
         let nextAttempt = scrollAttempts + 1
-        initialRevealState = .pending(scrollAttempts: nextAttempt)
+        initialRevealState = .pending(
+            scrollAttempts: nextAttempt,
+            phase: .checkingAfterScroll
+        )
         scrollAction(
             BottomAnchorStep(
                 delay: 0,
@@ -328,11 +339,17 @@ final class ChatMessagesCoordinator: ObservableObject {
         )
         taskManager.run(TaskKey.initialGeometryCheck) { [weak self] in
             await Task.yield()
+            guard !Task.isCancelled else { return }
             guard let self,
-                  case .pending(let currentAttempts) = self.initialRevealState,
+                  case .pending(let currentAttempts, .checkingAfterScroll) =
+                    self.initialRevealState,
                   currentAttempts == nextAttempt else {
                 return
             }
+            self.initialRevealState = .pending(
+                scrollAttempts: currentAttempts,
+                phase: .awaitingGeometry
+            )
             self.initialAnchorGeometryCheckID = UUID()
         }
     }
@@ -341,6 +358,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleUserScrollInteraction() {
         guard case .pending = initialRevealState else { return }
 
+        taskManager.cancel(TaskKey.initialGeometryCheck)
         initialRevealState = .ready(wasEmptyConversation: false)
         isReadyToShow = true
         Log.diagnostic(
@@ -663,20 +681,10 @@ final class ChatMessagesCoordinator: ObservableObject {
             return
         }
 
-        // Single-message threads stay top-pinned at initial presentation.
-        guard messageCount > 1 else {
-            initialRevealState = .ready(wasEmptyConversation: false)
-            isReadyToShow = true
-            Log.diagnostic(
-                .chatView,
-                level: .info,
-                "ChatView initial anchor skipped for short conversation reason=\(reason) messages=\(messageCount)",
-                category: .ui
-            )
-            return
-        }
-
-        initialRevealState = .pending(scrollAttempts: 0)
+        initialRevealState = .pending(
+            scrollAttempts: 0,
+            phase: .awaitingGeometry
+        )
         initialAnchorGeometryCheckID = UUID()
         Log.diagnostic(
             .chatView,
@@ -684,8 +692,10 @@ final class ChatMessagesCoordinator: ObservableObject {
             "ChatView initial anchor awaiting layout reason=\(reason) messages=\(messageCount)",
             category: .ui
         )
-        taskManager.run(TaskKey.initialBottomAnchor) { [loadLatestWindowIfNeeded] in
-            await loadLatestWindowIfNeeded(nil)
+        if messageCount > 1 {
+            taskManager.run(TaskKey.initialBottomAnchor) { [loadLatestWindowIfNeeded] in
+                await loadLatestWindowIfNeeded(nil)
+            }
         }
     }
 
@@ -697,17 +707,38 @@ final class ChatMessagesCoordinator: ObservableObject {
         initialRevealState == .ready(wasEmptyConversation: true)
     }
 
-    private func completeInitialReveal(wasVisiblyConfirmed: Bool) {
+    private func beginInitialVisibilityConfirmation(scrollAttempts: Int) {
+        initialRevealState = .pending(
+            scrollAttempts: scrollAttempts,
+            phase: .confirmingVisibility
+        )
+        taskManager.run(TaskKey.initialGeometryCheck) { [weak self, sleep] in
+            await sleep(UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
+            guard !Task.isCancelled,
+                  let self,
+                  case .pending(let currentAttempts, .confirmingVisibility) =
+                    self.initialRevealState,
+                  currentAttempts == scrollAttempts,
+                  self.isInitialBottomAnchorVisible else {
+                return
+            }
+            self.initialRevealState = .pending(
+                scrollAttempts: currentAttempts,
+                phase: .validatingVisibility
+            )
+            self.initialAnchorGeometryCheckID = UUID()
+        }
+    }
+
+    private func completeInitialReveal() {
         guard case .pending = initialRevealState else { return }
 
         initialRevealState = .ready(wasEmptyConversation: false)
         isReadyToShow = true
         Log.diagnostic(
             .chatView,
-            level: wasVisiblyConfirmed ? .info : .warning,
-            wasVisiblyConfirmed
-                ? "ChatView initial anchor visibly confirmed"
-                : "ChatView initial anchor attempts exhausted; revealing fallback",
+            level: .info,
+            "ChatView initial anchor remained visible through stabilization",
             category: .ui
         )
     }
@@ -725,9 +756,6 @@ final class ChatMessagesCoordinator: ObservableObject {
         knownTotalCount: Int? = nil,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        // Unlike performInitialScroll, single-message threads are not exempt here:
-        // keyboard/focus changes still need to reveal an occluded bubble bottom.
-        // ScrollView clamping keeps short content top-aligned either way.
         guard messageCount > 0 else { return }
 
         var steps = [
