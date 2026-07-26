@@ -8,14 +8,22 @@ final class ChatMessagesCoordinator: ObservableObject {
     private enum TaskKey {
         static let bottomAnchor = "bottomAnchor"
         static let initialBottomAnchor = "initialBottomAnchor"
+        static let initialGeometryCheck = "initialGeometryCheck"
         static let latestWindow = "latestWindow"
     }
+
+    private enum InitialRevealState: Equatable {
+        case waitingForRows
+        case pending(scrollAttempts: Int)
+        case ready(wasEmptyConversation: Bool)
+    }
+
+    private static let maximumInitialScrollAttempts = 2
 
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
         let animated: Bool
         let logMessage: String
-        var marksReady: Bool = false
     }
 
     typealias BottomAnchorAction = @MainActor (BottomAnchorStep) -> Void
@@ -27,6 +35,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     @Published private(set) var isReadyToShow = false
     @Published private(set) var contactRefreshToken = 0
     @Published private(set) var senderGroupingKeysByEmail: [String: String] = [:]
+    @Published private(set) var initialAnchorGeometryCheckID = UUID()
 
     private let loadLatestWindowIfNeeded: LatestWindowLoader
     private let markConversationAsReadIfNeeded: () -> Void
@@ -41,8 +50,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let clearPersonCache: AsyncAction
     private let sleep: Sleep
     private let taskManager = ViewModelTaskManager()
-    private var hasStartedInitialAnchor = false
-    private var initialAnchorWasForEmptyConversation = false
+    private var initialRevealState: InitialRevealState = .waitingForRows
     private var hasCapturedInitialUnreadSnapshot = false
     private var isVisible = false
     private var pendingAutoReadMessageIDsByEventID: [UUID: [NSManagedObjectID]] = [:]
@@ -180,8 +188,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         taskManager.cancelAll()
         cancelPrefetch()
         if !isReadyToShow {
-            hasStartedInitialAnchor = false
-            initialAnchorWasForEmptyConversation = false
+            initialRevealState = .waitingForRows
         }
     }
 
@@ -285,6 +292,65 @@ final class ChatMessagesCoordinator: ObservableObject {
         markUnreadInboxMessagesAsReadIfNeeded(verifiedMessageIDs)
     }
 
+    /// Advances the initial reveal only from actual bottom-anchor geometry.
+    ///
+    /// Call this whenever the bottom anchor first lays out or its frame/viewport changes.
+    /// A visible anchor completes the reveal immediately. An offscreen anchor can request
+    /// at most two nonanimated scrolls. A geometry check is requested after each
+    /// attempt; if the anchor is still offscreen after both, the content is revealed
+    /// as a fallback so the loading state cannot remain indefinitely.
+    func handleBottomAnchorGeometryUpdate(
+        isBottomAnchorVisible: Bool,
+        scrollAction: BottomAnchorAction
+    ) {
+        guard case let .pending(scrollAttempts) = initialRevealState else { return }
+
+        if isBottomAnchorVisible {
+            completeInitialReveal(wasVisiblyConfirmed: true)
+            return
+        }
+
+        guard scrollAttempts < Self.maximumInitialScrollAttempts else {
+            completeInitialReveal(wasVisiblyConfirmed: false)
+            return
+        }
+
+        let nextAttempt = scrollAttempts + 1
+        initialRevealState = .pending(scrollAttempts: nextAttempt)
+        scrollAction(
+            BottomAnchorStep(
+                delay: 0,
+                animated: false,
+                logMessage: nextAttempt == 1
+                    ? "ChatView initial layout scroll -> bottom anchor"
+                    : "ChatView initial layout retry -> bottom anchor"
+            )
+        )
+        taskManager.run(TaskKey.initialGeometryCheck) { [weak self] in
+            await Task.yield()
+            guard let self,
+                  case .pending(let currentAttempts) = self.initialRevealState,
+                  currentAttempts == nextAttempt else {
+                return
+            }
+            self.initialAnchorGeometryCheckID = UUID()
+        }
+    }
+
+    /// Stops initial auto-anchoring once the user takes control of the scroll view.
+    func handleUserScrollInteraction() {
+        guard case .pending = initialRevealState else { return }
+
+        initialRevealState = .ready(wasEmptyConversation: false)
+        isReadyToShow = true
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "ChatView initial anchor cancelled by user scroll",
+            category: .ui
+        )
+    }
+
     func handleMessageCountChange(
         oldCount: Int,
         newCount: Int,
@@ -310,8 +376,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 )
             } else {
                 isReadyToShow = false
-                hasStartedInitialAnchor = false
-                initialAnchorWasForEmptyConversation = false
+                initialRevealState = .waitingForRows
                 if isInitialWindowLoaded {
                     requestLatestWindowIfNeeded(knownTotalCount: newCount)
                 }
@@ -550,8 +615,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         let anchorMessageCount = max(messageCount, totalMessageCount)
 
         guard anchorMessageCount > 0 else {
-            hasStartedInitialAnchor = true
-            initialAnchorWasForEmptyConversation = true
+            initialRevealState = .ready(wasEmptyConversation: true)
             isReadyToShow = true
             Log.diagnostic(
                 .chatView,
@@ -582,13 +646,12 @@ final class ChatMessagesCoordinator: ObservableObject {
             return
         }
 
-        performInitialScroll(messageCount: anchorMessageCount, reason: reason, scrollAction: scrollAction)
+        performInitialScroll(messageCount: anchorMessageCount, reason: reason)
     }
 
     private func performInitialScroll(
         messageCount: Int,
-        reason: String,
-        scrollAction: @escaping BottomAnchorAction
+        reason: String
     ) {
         guard !hasStartedInitialAnchor else {
             Log.diagnostic(
@@ -600,10 +663,9 @@ final class ChatMessagesCoordinator: ObservableObject {
             return
         }
 
-        hasStartedInitialAnchor = true
-        initialAnchorWasForEmptyConversation = false
         // Single-message threads stay top-pinned at initial presentation.
         guard messageCount > 1 else {
+            initialRevealState = .ready(wasEmptyConversation: false)
             isReadyToShow = true
             Log.diagnostic(
                 .chatView,
@@ -614,43 +676,39 @@ final class ChatMessagesCoordinator: ObservableObject {
             return
         }
 
+        initialRevealState = .pending(scrollAttempts: 0)
+        initialAnchorGeometryCheckID = UUID()
         Log.diagnostic(
             .chatView,
             level: .info,
-            "ChatView initial anchor scheduled reason=\(reason) messages=\(messageCount)",
+            "ChatView initial anchor awaiting layout reason=\(reason) messages=\(messageCount)",
             category: .ui
         )
-        scheduleBottomAnchor(
-            taskKey: TaskKey.initialBottomAnchor,
-            steps: [
-                BottomAnchorStep(
-                    delay: UIConfig.contentChangeScrollDelay,
-                    animated: false,
-                    logMessage: "ChatView initial scroll -> bottom anchor",
-                    marksReady: true
-                ),
-                BottomAnchorStep(
-                    delay: UIConfig.initialScrollDelay,
-                    animated: false,
-                    logMessage: "ChatView follow-up scroll -> bottom anchor"
-                ),
-                BottomAnchorStep(
-                    delay: 0.25,
-                    animated: false,
-                    logMessage: "ChatView stabilization scroll (0.25s) -> bottom anchor"
-                ),
-                BottomAnchorStep(
-                    delay: 0.75,
-                    animated: false,
-                    logMessage: "ChatView stabilization scroll (0.75s) -> bottom anchor"
-                ),
-                BottomAnchorStep(
-                    delay: 1.5,
-                    animated: false,
-                    logMessage: "ChatView stabilization scroll (1.5s) -> bottom anchor"
-                )
-            ],
-            scrollAction: scrollAction
+        taskManager.run(TaskKey.initialBottomAnchor) { [loadLatestWindowIfNeeded] in
+            await loadLatestWindowIfNeeded(nil)
+        }
+    }
+
+    private var hasStartedInitialAnchor: Bool {
+        initialRevealState != .waitingForRows
+    }
+
+    private var initialAnchorWasForEmptyConversation: Bool {
+        initialRevealState == .ready(wasEmptyConversation: true)
+    }
+
+    private func completeInitialReveal(wasVisiblyConfirmed: Bool) {
+        guard case .pending = initialRevealState else { return }
+
+        initialRevealState = .ready(wasEmptyConversation: false)
+        isReadyToShow = true
+        Log.diagnostic(
+            .chatView,
+            level: wasVisiblyConfirmed ? .info : .warning,
+            wasVisiblyConfirmed
+                ? "ChatView initial anchor visibly confirmed"
+                : "ChatView initial anchor attempts exhausted; revealing fallback",
+            category: .ui
         )
     }
 
@@ -714,18 +772,6 @@ final class ChatMessagesCoordinator: ObservableObject {
                 guard !Task.isCancelled else { return }
 
                 scrollAction(step)
-
-                if step.marksReady {
-                    self.isReadyToShow = true
-                    if taskKey == TaskKey.initialBottomAnchor {
-                        Log.diagnostic(
-                            .chatView,
-                            level: .info,
-                            "ChatView initial anchor completed",
-                            category: .ui
-                        )
-                    }
-                }
             }
         }
     }

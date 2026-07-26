@@ -2,18 +2,53 @@ import Foundation
 import CoreData
 import Combine
 
+/// Composer-only state kept separate from the thread's broader presentation state.
+///
+/// Views that render the reply composer should observe this object directly. Its
+/// changes are intentionally not forwarded through `ChatViewModel.objectWillChange`
+/// so typing and reply-target updates do not invalidate the message list.
+@MainActor
+final class ChatComposerState: ObservableObject {
+    @Published var replyText: String
+    @Published var replyingTo: Message?
+
+    init(
+        replyText: String = "",
+        replyingTo: Message? = nil
+    ) {
+        self.replyText = replyText
+        self.replyingTo = replyingTo
+    }
+}
+
 /// ViewModel for ChatView - manages chat state and message operations
 @MainActor
 final class ChatViewModel: ObservableObject {
     // MARK: - Published State
 
-    @Published var replyText = ""
-    @Published var replyingTo: Message?
     @Published var forwardComposeContext: ComposeForwardModeContext?
     @Published var destination: ChatDestination?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
     @Published var sendErrorAlert: ChatSendErrorAlert?
+
+    // MARK: - Composer State
+
+    let composerState = ChatComposerState()
+
+    /// Source-compatible access for existing callers. Composer UI should observe
+    /// `composerState` directly rather than the full chat view model.
+    var replyText: String {
+        get { composerState.replyText }
+        set { composerState.replyText = newValue }
+    }
+
+    /// Source-compatible access for existing callers. Composer UI should observe
+    /// `composerState` directly rather than the full chat view model.
+    var replyingTo: Message? {
+        get { composerState.replyingTo }
+        set { composerState.replyingTo = newValue }
+    }
 
     // MARK: - Composed Services
 
@@ -118,7 +153,10 @@ final class ChatViewModel: ObservableObject {
 
     func latestVisibleMessage() -> Message? {
         let request = NSFetchRequest<Message>(entityName: "Message")
-        request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
         request.predicate = MessagePredicates.visibleInChat(conversation: conversation)
         request.fetchLimit = 1
         request.fetchBatchSize = 1
