@@ -224,6 +224,22 @@ struct ChatMessagesView: View {
         bottomContentInset: CGFloat,
         scrollProxy: ScrollViewProxy
     ) -> some View {
+        GeometryReader { viewport in
+            messagesScrollViewContent(
+                displayedMessages: displayedMessages,
+                bottomContentInset: bottomContentInset,
+                viewportHeight: viewport.size.height,
+                scrollProxy: scrollProxy
+            )
+        }
+    }
+
+    private func messagesScrollViewContent(
+        displayedMessages: [ChatMessageRowModel],
+        bottomContentInset: CGFloat,
+        viewportHeight: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) -> some View {
         ScrollView {
             LazyVStack(spacing: 8) {
                 ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
@@ -258,12 +274,19 @@ struct ChatMessagesView: View {
                 Color.clear
                     .frame(height: 1)
                     .id(bottomID)
-                    .anchorPreference(key: ChatBottomAnchorBoundsPreferenceKey.self, value: .bounds) {
-                        $0
+                    .anchorPreference(key: ChatScrollGeometryPreferenceKey.self, value: .bounds) {
+                        ChatScrollGeometryPreference(bottomAnchorBounds: $0)
                     }
             }
             .padding(.horizontal)
             .padding(.top, 8)
+            .frame(minHeight: viewportHeight, alignment: .bottom)
+            .transformAnchorPreference(
+                key: ChatScrollGeometryPreferenceKey.self,
+                value: .bounds
+            ) { preference, contentBounds in
+                preference.contentBounds = contentBounds
+            }
             .contentShape(Rectangle())
             .onTapGesture { isTextFieldFocused.wrappedValue = false }
         }
@@ -273,45 +296,38 @@ struct ChatMessagesView: View {
             DragGesture(minimumDistance: 2)
                 .onChanged { _ in coordinator.handleUserScrollInteraction() }
         )
-        .overlayPreferenceValue(ChatBottomAnchorBoundsPreferenceKey.self) { anchor in
+        .overlayPreferenceValue(ChatScrollGeometryPreferenceKey.self) { preference in
             GeometryReader { geometryProxy in
-                let frame = anchor.map { geometryProxy[$0] } ?? .null
+                let frame = preference.bottomAnchorBounds
+                    .map { geometryProxy[$0] } ?? .null
+                let contentFrame = preference.contentBounds
+                    .map { geometryProxy[$0] } ?? .null
+                let geometry = ChatScrollGeometry(
+                    bottomAnchorFrame: frame,
+                    contentFrame: contentFrame,
+                    viewportSize: geometryProxy.size
+                )
                 Color.clear
                     .id(scrollState.latestWindowLayoutID)
                     .onAppear {
                         handleBottomAnchorGeometryUpdate(
-                            frame: frame,
-                            viewportSize: geometryProxy.size,
+                            geometry: geometry,
                             layoutID: scrollState.latestWindowLayoutID,
-                            scrollProxy: scrollProxy,
-                            advanceInitialReveal: false
+                            scrollProxy: scrollProxy
                         )
                     }
-                    .onChange(of: frame) { _, newFrame in
+                    .onChange(of: geometry) { _, newGeometry in
                         handleBottomAnchorGeometryUpdate(
-                            frame: newFrame,
-                            viewportSize: geometryProxy.size,
+                            geometry: newGeometry,
                             layoutID: scrollState.latestWindowLayoutID,
-                            scrollProxy: scrollProxy,
-                            advanceInitialReveal: false
-                        )
-                    }
-                    .onChange(of: geometryProxy.size) { _, newSize in
-                        handleBottomAnchorGeometryUpdate(
-                            frame: frame,
-                            viewportSize: newSize,
-                            layoutID: scrollState.latestWindowLayoutID,
-                            scrollProxy: scrollProxy,
-                            advanceInitialReveal: false
+                            scrollProxy: scrollProxy
                         )
                     }
                     .onChange(of: coordinator.initialAnchorGeometryCheckID) { _, _ in
                         handleBottomAnchorGeometryUpdate(
-                            frame: frame,
-                            viewportSize: geometryProxy.size,
+                            geometry: geometry,
                             layoutID: scrollState.latestWindowLayoutID,
-                            scrollProxy: scrollProxy,
-                            advanceInitialReveal: true
+                            scrollProxy: scrollProxy
                         )
                     }
             }
@@ -450,13 +466,15 @@ struct ChatMessagesView: View {
     }
 
     private func handleBottomAnchorGeometryUpdate(
-        frame: CGRect,
-        viewportSize: CGSize,
+        geometry: ChatScrollGeometry,
         layoutID: UUID,
-        scrollProxy: ScrollViewProxy,
-        advanceInitialReveal: Bool
+        scrollProxy: ScrollViewProxy
     ) {
-        let isVisible = isBottomAnchorVisible(frame: frame, viewportSize: viewportSize)
+        let frame = geometry.bottomAnchorFrame
+        let isVisible = isBottomAnchorVisible(
+            frame: frame,
+            viewportSize: geometry.viewportSize
+        )
         let becameVisible = !isBottomAnchorVisible && isVisible
         if isBottomAnchorVisible != isVisible {
             isBottomAnchorVisible = isVisible
@@ -466,11 +484,16 @@ struct ChatMessagesView: View {
                 conversationID: conversation.id.uuidString
             )
         }
-        if advanceInitialReveal || becameVisible {
-            coordinator.handleBottomAnchorGeometryUpdate(
-                isBottomAnchorVisible: isVisible
-            ) { performBottomAnchor($0, proxy: scrollProxy) }
-        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: isVisible,
+            contentMinY: geometry.contentFrame.isNull
+                ? nil
+                : geometry.contentFrame.minY,
+            contentHeight: geometry.contentFrame.isNull
+                ? nil
+                : geometry.contentFrame.height,
+            viewportHeight: geometry.viewportSize.height
+        ) { performBottomAnchor($0, proxy: scrollProxy) }
         coordinator.handleLatestWindowLayout(
             layoutID: layoutID,
             isChatActiveAndUncovered: isChatActiveAndUncovered,
@@ -628,13 +651,35 @@ private struct ChatReplyComposerOverlay: View {
     }
 }
 
-private struct ChatBottomAnchorBoundsPreferenceKey: PreferenceKey {
-    static let defaultValue: Anchor<CGRect>? = nil
+private struct ChatScrollGeometryPreference {
+    var bottomAnchorBounds: Anchor<CGRect>?
+    var contentBounds: Anchor<CGRect>?
+
+    init(
+        bottomAnchorBounds: Anchor<CGRect>? = nil,
+        contentBounds: Anchor<CGRect>? = nil
+    ) {
+        self.bottomAnchorBounds = bottomAnchorBounds
+        self.contentBounds = contentBounds
+    }
+}
+
+private struct ChatScrollGeometry: Equatable {
+    let bottomAnchorFrame: CGRect
+    let contentFrame: CGRect
+    let viewportSize: CGSize
+}
+
+private struct ChatScrollGeometryPreferenceKey: PreferenceKey {
+    static let defaultValue = ChatScrollGeometryPreference()
 
     static func reduce(
-        value: inout Anchor<CGRect>?,
-        nextValue: () -> Anchor<CGRect>?
+        value: inout ChatScrollGeometryPreference,
+        nextValue: () -> ChatScrollGeometryPreference
     ) {
-        value = nextValue() ?? value
+        let nextValue = nextValue()
+        value.bottomAnchorBounds =
+            nextValue.bottomAnchorBounds ?? value.bottomAnchorBounds
+        value.contentBounds = nextValue.contentBounds ?? value.contentBounds
     }
 }
