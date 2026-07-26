@@ -53,6 +53,18 @@ extension Message {
         }
 
         guard !emails.isEmpty else { return nil }
+
+        // Mailing-list mail keys by its persisted List-Id, mirroring the
+        // header path's list branch. Messages persisted before the listId
+        // attribute existed have nil here and stay participant-keyed unless a
+        // later full refetch supplies List-Id and reroutes that individual row.
+        // There is intentionally no all-mail historical backfill.
+        if let listId, !listId.isEmpty {
+            return makeListSetIdentity(normalizedListId: listId,
+                                       normalizedEmails: emails,
+                                       myAliases: myAliases)
+        }
+
         return makeParticipantSetIdentity(normalizedEmails: emails, myAliases: myAliases)
     }
 }

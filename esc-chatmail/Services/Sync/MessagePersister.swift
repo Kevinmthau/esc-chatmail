@@ -1,6 +1,93 @@
 import Foundation
 import CoreData
 
+/// Per-`saveMessages` buffer for source conversations whose rollups became
+/// stale after a message reroute.
+///
+/// Conversation creation may save the supplied context before the batch
+/// finishes. The synchronous will-save observer drains this buffer on that
+/// context's queue so relationship moves and their repaired rollups cross every
+/// durability boundary together.
+final class MessagePersisterReroutedSourceRollupBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var conversationIDs = Set<NSManagedObjectID>()
+    private var willSaveObserver: (any NSObjectProtocol)?
+
+    init(observing context: NSManagedObjectContext) {
+        willSaveObserver = NotificationCenter.default.addObserver(
+            forName: NSManagedObjectContext.willSaveObjectsNotification,
+            object: context,
+            queue: nil
+        ) { [weak self] notification in
+            guard let self,
+                  let savingContext = notification.object as? NSManagedObjectContext else {
+                return
+            }
+            self.drainAndApply(in: savingContext)
+        }
+    }
+
+    func register(_ conversationID: NSManagedObjectID) {
+        lock.lock()
+        conversationIDs.insert(conversationID)
+        lock.unlock()
+    }
+
+    /// Must be called on `context`'s queue.
+    func drainAndApply(in context: NSManagedObjectContext) {
+        let pendingConversationIDs = takeConversationIDs()
+        guard !pendingConversationIDs.isEmpty else { return }
+
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "SELF IN %@", pendingConversationIDs)
+        request.relationshipKeyPathsForPrefetching = ["messages", "messages.labels"]
+
+        let conversations: [Conversation]
+        do {
+            conversations = try context.fetch(request)
+        } catch {
+            Log.error(
+                "Failed to prefetch rerouted source conversation rollups; falling back to registered objects",
+                category: .coreData,
+                error: error
+            )
+            conversations = pendingConversationIDs.compactMap {
+                try? context.existingObject(with: $0) as? Conversation
+            }
+        }
+
+        for conversation in conversations {
+            ConversationRollupSnapshot.make(
+                from: conversation.messages ?? []
+            ).apply(to: conversation)
+        }
+    }
+
+    func stopObserving() {
+        let observer: (any NSObjectProtocol)?
+        lock.lock()
+        observer = willSaveObserver
+        willSaveObserver = nil
+        lock.unlock()
+
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    deinit {
+        stopObserving()
+    }
+
+    private func takeConversationIDs() -> Set<NSManagedObjectID> {
+        lock.lock()
+        defer { lock.unlock() }
+        let pendingConversationIDs = conversationIDs
+        conversationIDs.removeAll(keepingCapacity: true)
+        return pendingConversationIDs
+    }
+}
+
 /// Handles persisting messages to Core Data.
 ///
 /// The service is split across multiple files for organization:
@@ -10,6 +97,12 @@ import CoreData
 /// - `MessagePersister+Participants.swift` - Participant handling
 /// - `MessagePersister+Helpers.swift` - Helper methods
 actor MessagePersister {
+    struct RemoteCommittedSendMutationResolution {
+        let recordObjectIDs: [NSManagedObjectID]
+        let anchoredListConversationObjectID: NSManagedObjectID?
+        let anchoredListId: String?
+        let shouldConsumeAfterPersistence: Bool
+    }
 
     // MARK: - Properties
 
@@ -83,11 +176,21 @@ actor MessagePersister {
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
         )
+        let remoteCommittedSendMutation: RemoteCommittedSendMutationResolution?
+        if case .processed(let processedMessage) = prepared {
+            remoteCommittedSendMutation = await remoteCommittedSendMutationResolutions(
+                for: [processedMessage.id],
+                in: context
+            )[processedMessage.id]
+        } else {
+            remoteCommittedSendMutation = nil
+        }
         await persist(
             prepared,
             labelIds: labelIds,
             myAliases: myAliases,
             modificationTransaction: modificationTransaction,
+            remoteCommittedSendMutation: remoteCommittedSendMutation,
             in: context
         )
     }
@@ -115,6 +218,14 @@ actor MessagePersister {
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
         )
+        let processedMessageIDs = Set(prepared.compactMap { outcome -> String? in
+            guard case .processed(let processedMessage) = outcome else { return nil }
+            return processedMessage.id
+        })
+        let remoteCommittedSendMutations = await remoteCommittedSendMutationResolutions(
+            for: processedMessageIDs,
+            in: context
+        )
 
         // One batch fetch primes the context's Person cache so the
         // per-participant find-or-create calls during persistence become
@@ -126,14 +237,33 @@ actor MessagePersister {
             }
         }
 
+        let reroutedSourceRollupBuffer = MessagePersisterReroutedSourceRollupBuffer(
+            observing: context
+        )
+        defer { reroutedSourceRollupBuffer.stopObserving() }
+
         for outcome in prepared {
             await persist(
                 outcome,
                 labelIds: labelIds,
                 myAliases: myAliases,
                 modificationTransaction: modificationTransaction,
+                reroutedSourceRollupBuffer: reroutedSourceRollupBuffer,
+                remoteCommittedSendMutation: {
+                    guard case .processed(let processedMessage) = outcome else {
+                        return nil
+                    }
+                    return remoteCommittedSendMutations[processedMessage.id]
+                }(),
                 in: context
             )
+        }
+
+        // Take pending IDs only after entering the context queue. Otherwise an
+        // interleaved context save could observe an empty buffer before this
+        // final repair reaches the queue.
+        await context.perform {
+            reroutedSourceRollupBuffer.drainAndApply(in: context)
         }
     }
 
@@ -241,6 +371,8 @@ actor MessagePersister {
         labelIds: Set<String>?,
         myAliases: Set<String>,
         modificationTransaction: ModificationTracker.Transaction?,
+        reroutedSourceRollupBuffer: MessagePersisterReroutedSourceRollupBuffer? = nil,
+        remoteCommittedSendMutation: RemoteCommittedSendMutationResolution?,
         in context: NSManagedObjectContext
     ) async {
         switch prepared {
@@ -257,10 +389,24 @@ actor MessagePersister {
 
         case .processed(let processedMessage):
             // Check for existing message and update if needed
-            if await updateExistingMessage(
+            if let reroutedSourceRollupBuffer {
+                if await updateExistingMessageDeferringSourceRollup(
+                    processedMessage,
+                    labelIds: labelIds,
+                    myAliases: myAliases,
+                    modificationTransaction: modificationTransaction,
+                    reroutedSourceRollupBuffer: reroutedSourceRollupBuffer,
+                    remoteCommittedSendMutation: remoteCommittedSendMutation,
+                    in: context
+                ) {
+                    return
+                }
+            } else if await updateExistingMessage(
                 processedMessage,
                 labelIds: labelIds,
+                myAliases: myAliases,
                 modificationTransaction: modificationTransaction,
+                remoteCommittedSendMutation: remoteCommittedSendMutation,
                 in: context
             ) {
                 return
@@ -273,6 +419,7 @@ actor MessagePersister {
                     labelIds: labelIds,
                     myAliases: myAliases,
                     modificationTransaction: modificationTransaction,
+                    remoteCommittedSendMutation: remoteCommittedSendMutation,
                     in: context
                 )
             } catch {

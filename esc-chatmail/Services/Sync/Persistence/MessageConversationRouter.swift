@@ -23,6 +23,7 @@ final class MessageConversationRouter {
     func resolveConversationObjectID(
         for processedMessage: ProcessedMessage,
         myAliases: Set<String>,
+        reuseArchivedWithoutReactivation: Bool = false,
         in context: NSManagedObjectContext
     ) async throws -> NSManagedObjectID {
         let shouldReactivateConversation = routingPolicy.shouldReactivateArchivedConversation(
@@ -35,6 +36,14 @@ final class MessageConversationRouter {
             myAliases: myAliases
         )
 
+        if reuseArchivedWithoutReactivation,
+           let existingObjectID = try await existingConversationObjectID(
+               for: identity,
+               in: context
+           ) {
+            return existingObjectID
+        }
+
         return try await conversationManager.findOrCreateConversationObjectID(
             for: identity,
             initialLastMessageDate: processedMessage.internalDate,
@@ -44,8 +53,36 @@ final class MessageConversationRouter {
                 isUnread: processedMessage.isUnread,
                 messageDate: processedMessage.internalDate
             ),
-            reactivateArchivedIfNeeded: shouldReactivateConversation,
+            reactivateArchivedIfNeeded: reuseArchivedWithoutReactivation
+                ? false
+                : shouldReactivateConversation,
             in: context
         )
+    }
+
+    /// Existing-message repair must not apply new-arrival epoch semantics. If a
+    /// durable List-Id conversation already exists, reuse it whether active or
+    /// archived and leave its archive state untouched.
+    private func existingConversationObjectID(
+        for identity: ConversationIdentity,
+        in context: NSManagedObjectContext
+    ) async throws -> NSManagedObjectID? {
+        let routingPolicy = self.routingPolicy
+        return try await context.perform { () throws -> NSManagedObjectID? in
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "participantHash == %@ AND listId == %@",
+                identity.participantHash,
+                identity.listId ?? ""
+            )
+            request.fetchBatchSize = 10
+            request.includesPendingChanges = false
+
+            let conversations = try context.fetch(request)
+            return routingPolicy.selectParticipantHashConversation(
+                from: conversations,
+                reactivateArchivedIfNeeded: true
+            )?.objectID
+        }
     }
 }

@@ -32,6 +32,7 @@ extension GmailSendService {
         case authenticationFailed
         case optimisticCreationFailed
         case conversationNotFound
+        case replyTargetUnavailable
         case sendAsAliasUnavailable(String)
 
         var errorDescription: String? {
@@ -46,6 +47,8 @@ extension GmailSendService {
                 return "Failed to prepare message for sending"
             case .conversationNotFound:
                 return "Failed to find conversation for message"
+            case .replyTargetUnavailable:
+                return "The message you selected moved or is no longer available. Reopen the conversation and try again."
             case .sendAsAliasUnavailable(let address):
                 return "This message was sent to \(address), but Gmail is not configured to send from that address. Add it in Gmail Settings -> Accounts -> Send mail as."
             }

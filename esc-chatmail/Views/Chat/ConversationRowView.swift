@@ -16,8 +16,10 @@ struct ConversationSnapshot: Equatable {
     let participantEmails: [String]
     let participantDisplayNameFingerprint: String
     let showsGroupAvatar: Bool
+    let conversationType: ConversationType
 
     init(from conversation: Conversation) {
+        let conversationType = conversation.conversationType
         self.objectID = conversation.objectID
         self.inboxUnreadCount = conversation.inboxUnreadCount
         self.pinned = conversation.pinned
@@ -25,9 +27,14 @@ struct ConversationSnapshot: Equatable {
         self.lastMessageDate = conversation.lastMessageDate
         self.displayNameHint = conversation.displayName
         self.participantHash = conversation.participantHash
-        self.participantEmails = Self.participantEmails(from: conversation)
-        self.participantDisplayNameFingerprint = Self.participantDisplayNameFingerprint(from: conversation)
-        self.showsGroupAvatar = conversation.conversationType != .oneToOne
+        self.participantEmails = conversationType == .list
+            ? []
+            : Self.participantEmails(from: conversation)
+        self.participantDisplayNameFingerprint = conversationType == .list
+            ? ""
+            : Self.participantDisplayNameFingerprint(from: conversation)
+        self.showsGroupAvatar = conversationType != .oneToOne
+        self.conversationType = conversationType
     }
 
     private static func participantEmails(from conversation: Conversation) -> [String] {
@@ -193,7 +200,13 @@ struct ConversationRowView: View {
     }
 
     private var effectiveParticipantInfo: ParticipantLoader.ParticipantInfo? {
-        Self.resolvedParticipantInfo(
+        guard Self.shouldLoadParticipantInfo(
+            conversationType: snapshot.conversationType
+        ) else {
+            return nil
+        }
+
+        return Self.resolvedParticipantInfo(
             cachedFull: cachedFullParticipantInfo,
             cachedBase: cachedBaseParticipantInfo,
             uncached: currentUncachedParticipantInfo
@@ -209,20 +222,31 @@ struct ConversationRowView: View {
     }
 
     private var displayName: String {
-        effectiveParticipantInfo?.formattedDisplayName ?? fallbackDisplayName
+        Self.resolvedDisplayName(
+            conversationType: snapshot.conversationType,
+            storedDisplayName: fallbackDisplayName,
+            participantInfo: effectiveParticipantInfo
+        )
     }
 
     private var participantNames: [String] {
-        effectiveParticipantInfo?.avatarDisplayNames ?? []
+        Self.resolvedAvatarDisplayNames(
+            conversationType: snapshot.conversationType,
+            participantInfo: effectiveParticipantInfo
+        )
     }
 
     private var avatarPhotos: [ProfilePhoto?] {
-        effectiveParticipantInfo?.avatarPhotos ?? []
+        Self.resolvedAvatarPhotos(
+            conversationType: snapshot.conversationType,
+            participantInfo: effectiveParticipantInfo
+        )
     }
 
     private var showsGroupAvatar: Bool {
         Self.resolvedShowsGroupAvatar(
             snapshotShowsGroupAvatar: snapshot.showsGroupAvatar,
+            conversationType: snapshot.conversationType,
             participantInfo: effectiveParticipantInfo
         )
     }
@@ -242,6 +266,12 @@ struct ConversationRowView: View {
     }
 
     private var needsParticipantLoad: Bool {
+        guard Self.shouldLoadParticipantInfo(
+            conversationType: snapshot.conversationType
+        ) else {
+            return false
+        }
+
         if snapshot.participantHash?.isEmpty == false {
             return cachedFullParticipantInfo == nil
         }
@@ -279,8 +309,13 @@ struct ConversationRowView: View {
 
     static func resolvedShowsGroupAvatar(
         snapshotShowsGroupAvatar: Bool,
+        conversationType: ConversationType,
         participantInfo: ParticipantLoader.ParticipantInfo?
     ) -> Bool {
+        if conversationType == .list {
+            return true
+        }
+
         if let participantInfo {
             return participantInfo.totalUniqueParticipants > 1
         }
@@ -288,7 +323,51 @@ struct ConversationRowView: View {
         return snapshotShowsGroupAvatar
     }
 
+    static func shouldLoadParticipantInfo(
+        conversationType: ConversationType
+    ) -> Bool {
+        conversationType != .list
+    }
+
+    static func resolvedAvatarDisplayNames(
+        conversationType: ConversationType,
+        participantInfo: ParticipantLoader.ParticipantInfo?
+    ) -> [String] {
+        guard shouldLoadParticipantInfo(conversationType: conversationType) else {
+            return []
+        }
+        return participantInfo?.avatarDisplayNames ?? []
+    }
+
+    static func resolvedAvatarPhotos(
+        conversationType: ConversationType,
+        participantInfo: ParticipantLoader.ParticipantInfo?
+    ) -> [ProfilePhoto?] {
+        guard shouldLoadParticipantInfo(conversationType: conversationType) else {
+            return []
+        }
+        return participantInfo?.avatarPhotos ?? []
+    }
+
+    static func resolvedDisplayName(
+        conversationType: ConversationType,
+        storedDisplayName: String,
+        participantInfo: ParticipantLoader.ParticipantInfo?
+    ) -> String {
+        if conversationType == .list {
+            return storedDisplayName
+        }
+
+        return participantInfo?.formattedDisplayName ?? storedDisplayName
+    }
+
     private func loadContactInfo(for participantInfoKey: String) async {
+        guard Self.shouldLoadParticipantInfo(
+            conversationType: snapshot.conversationType
+        ) else {
+            return
+        }
+
         let info = await participantLoader.loadParticipants(
             from: conversationObjectID,
             in: conversationContext,
@@ -305,6 +384,12 @@ struct ConversationRowView: View {
     }
 
     private func refreshParticipantInfoIfNeeded(for notification: Notification) {
+        guard Self.shouldLoadParticipantInfo(
+            conversationType: snapshot.conversationType
+        ) else {
+            return
+        }
+
         let changedEmails = PersonDisplayInfoChangeNotification.emails(from: notification)
         guard changedEmails.isEmpty || !Set(snapshot.participantEmails).isDisjoint(with: changedEmails) else {
             return

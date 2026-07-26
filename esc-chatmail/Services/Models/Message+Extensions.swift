@@ -110,6 +110,9 @@ extension Message {
     @NSManaged public var isFromMe: Bool
     @NSManaged public var isUnread: Bool
     @NSManaged public var isNewsletter: Bool
+    /// Normalized List-Id header value (see `ParsedListId.parse`); nil for
+    /// non-list mail and for rows persisted before this attribute existed.
+    @NSManaged public var listId: String?
     @NSManaged public var hasAttachments: Bool
     @NSManaged public var bodyStorageURI: String?
     @NSManaged public var bodyText: String?
@@ -118,6 +121,8 @@ extension Message {
     @NSManaged public var messageId: String?
     @NSManaged public var references: String?
     @NSManaged public var replyFromAddress: String?
+    /// Raw RFC Reply-To header. A single header may contain a mailbox list.
+    @NSManaged public var replyTo: String?
     @NSManaged public var localModifiedAt: Date?
     @NSManaged public var conversation: Conversation?
     @NSManaged public var labels: Set<Label>?

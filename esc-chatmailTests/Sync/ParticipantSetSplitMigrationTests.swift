@@ -586,6 +586,141 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         )
     }
 
+    func testCorrectlyHomedListMessagesAreNotYankedByMigration() async throws {
+        // Fresh installs run this migration after list grouping is live: a
+        // list message's strict identity must match its conversation's "l|"
+        // hash, or Phase 1 yanks list mail back out into participant chats.
+        let listId = "announce.lists.example.com"
+        let listHash = calculateListConversationHash(fromNormalizedListId: listId)
+        let inbox = LabelBuilder().inbox().build(in: context)
+        let listConversation = ConversationBuilder()
+            .withParticipantHash(listHash)
+            .withListId(listId)
+            .asList()
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        let listConversationID = listConversation.id
+
+        let message = try addMessage(
+            id: "msg-list", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me],
+            labels: [inbox], in: listConversation
+        )
+        message.listId = listId
+        try context.save()
+
+        await runMigration()
+
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.participantSetSplitMigrationKey))
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 1, "A correctly-homed list message must not be re-homed")
+        XCTAssertEqual(states.first?.id, listConversationID)
+        XCTAssertEqual(states.first?.messageIDs, ["msg-list"])
+        XCTAssertEqual(states.first?.participantHash, listHash)
+    }
+
+    func testMisHomedListMessageMintsListDestination() async throws {
+        // A list message stranded in a participant chat (the pre-flip shape on
+        // a fresh install mid-sync) must move to a freshly minted list
+        // conversation carrying the "l|" hash, .list type, and the listId.
+        let listId = "announce.lists.example.com"
+        let listHash = calculateListConversationHash(fromNormalizedListId: listId)
+        let inbox = LabelBuilder().inbox().build(in: context)
+        let lumped = ConversationBuilder()
+            .withParticipantHash(Self.hashAlice)
+            .withLastMessageDate(Date(timeIntervalSince1970: 200))
+            .visible()
+            .build(in: context)
+        let lumpedID = lumped.id
+
+        try addMessage(
+            id: "msg-a", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me],
+            labels: [inbox], in: lumped
+        )
+        let listMessage = try addMessage(
+            id: "msg-list", date: Date(timeIntervalSince1970: 200),
+            from: Self.alice, to: [Self.me],
+            labels: [inbox], in: lumped
+        )
+        listMessage.listId = listId
+        try context.save()
+
+        await runMigration()
+
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 2)
+        let aliceState = try XCTUnwrap(states.first { $0.id == lumpedID })
+        XCTAssertEqual(aliceState.messageIDs, ["msg-a"])
+        let listState = try state(listHash, in: states)
+        XCTAssertEqual(listState.messageIDs, ["msg-list"])
+        XCTAssertEqual(listState.typeRaw, ConversationType.list.rawValue)
+        XCTAssertEqual(listState.listId, listId)
+    }
+
+    func testTouchedListConversationKeepsCreationSeededRows() async throws {
+        // Phase 2c rebuilds a touched conversation's rows from any one message
+        // sharing its hash — sound for "p|" chats, where one hash implies one
+        // participant set, but unsound for "l|" chats, whose members vary per
+        // message: the rebuild would copy whichever message the unordered
+        // relationship yields first. List rows seed once at creation and must
+        // survive the pass. The stored row here deliberately matches NEITHER
+        // member message, so a rebuild from any pick is observable.
+        let listId = "announce.lists.example.com"
+        let listHash = calculateListConversationHash(fromNormalizedListId: listId)
+        let inbox = LabelBuilder().inbox().build(in: context)
+
+        let listConversation = ConversationBuilder()
+            .withParticipantHash(listHash)
+            .withListId(listId)
+            .asList()
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: Self.carol, to: listConversation)
+        let homed = try addMessage(
+            id: "msg-list-1", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me],
+            labels: [inbox], in: listConversation
+        )
+        homed.listId = listId
+
+        // A mis-homed list message moving in is what marks the list chat as
+        // touched and exposes it to the row-rebuild pass.
+        let lumped = ConversationBuilder()
+            .withParticipantHash(Self.hashBob)
+            .withLastMessageDate(Date(timeIntervalSince1970: 200))
+            .visible()
+            .build(in: context)
+        try addMessage(
+            id: "msg-b", date: Date(timeIntervalSince1970: 150),
+            from: Self.bob, to: [Self.me],
+            labels: [inbox], in: lumped
+        )
+        let misHomed = try addMessage(
+            id: "msg-list-2", date: Date(timeIntervalSince1970: 200),
+            from: Self.bob, to: [Self.me],
+            labels: [inbox], in: lumped
+        )
+        misHomed.listId = listId
+        try context.save()
+
+        await runMigration()
+
+        let states = try fetchConversationStates()
+        let listState = try state(listHash, in: states)
+        XCTAssertEqual(
+            listState.messageIDs, ["msg-list-1", "msg-list-2"],
+            "Fixture guard: the mis-homed list message must actually move in"
+        )
+        XCTAssertEqual(
+            listState.participantEmails, [Self.carol],
+            "Creation-seeded list rows must survive the row-rebuild pass"
+        )
+        XCTAssertEqual(listState.typeRaw, ConversationType.list.rawValue)
+    }
+
     // MARK: - Fixture Helpers
 
     private func runMigration(
@@ -657,6 +792,7 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
     private struct ConversationState: Equatable {
         let id: UUID
         let participantHash: String?
+        let listId: String?
         let archivedAt: Date?
         let hasInbox: Bool
         let inboxUnreadCount: Int32
@@ -681,6 +817,7 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
                 ConversationState(
                     id: conversation.id,
                     participantHash: conversation.participantHash,
+                    listId: conversation.listId,
                     archivedAt: conversation.archivedAt,
                     hasInbox: conversation.hasInbox,
                     inboxUnreadCount: conversation.inboxUnreadCount,

@@ -58,6 +58,15 @@ extension GmailSendService {
                 Log.error("Failed to resolve existing conversation for optimistic message", category: .message)
                 throw SendError.conversationNotFound
             }
+            guard conversation.managedObjectContext === viewContext,
+                  !conversation.isDeleted,
+                  !conversation.isRetainedDrainedShell else {
+                Log.warning(
+                    "Blocked optimistic reply insertion into an invalid conversation anchor",
+                    category: .message
+                )
+                throw SendError.replyTargetUnavailable
+            }
         } else {
             // Use the same alias set the sync router excludes so the optimistic
             // conversation and the synced-back copy of this send hash identically.
@@ -84,6 +93,11 @@ extension GmailSendService {
         message.bodyText = body
         message.gmThreadId = gmThreadId
         message.subject = subject
+        // Anchored list replies must carry the same durable identity as their
+        // conversation immediately. Otherwise selecting the optimistic bubble
+        // for a follow-up reply fails the exact-list safety check until sync
+        // happens to refetch the sent message.
+        message.listId = conversation.listId
         message.hasAttachments = hasAttachments
 
         let attachmentObjects = resolveAttachments(from: attachments)
@@ -186,13 +200,48 @@ extension GmailSendService {
         optimisticMessageID: String,
         result: SendResult
     ) throws -> Bool {
-        if fetchMessageSync(byID: result.messageId) != nil {
+        if let remoteMessage = fetchMessageSync(byID: result.messageId) {
+            if let snapshot = fetchFreshOptimisticSendMutationSnapshot(
+                messageID: optimisticMessageID
+            ), !snapshot.newlyInsertedConversation {
+                guard let recordedConversation = resolveConversation(for: snapshot) else {
+                    Log.info(
+                        "Retaining remote committed send \(optimisticMessageID) until its existing conversation route resolves",
+                        category: .message
+                    )
+                    return false
+                }
+                if recordedConversation.conversationType == .list {
+                    guard let anchor = resolveAnchoredListConversation(for: snapshot) else {
+                        Log.info(
+                            "Retaining remote committed list send \(optimisticMessageID) until a reusable list conversation resolves",
+                            category: .message
+                        )
+                        return false
+                    }
+                    rehomeRemoteCommittedMessage(
+                        remoteMessage,
+                        to: anchor.conversation,
+                        listId: anchor.listId
+                    )
+                }
+            }
             deleteSupersededOptimisticMessageIfNeeded(messageID: optimisticMessageID)
             try deleteOptimisticSendMutationRecordAndSave(messageID: optimisticMessageID)
             return true
         }
 
         guard let message = fetchMessageSync(byID: optimisticMessageID) else {
+            if let snapshot = fetchFreshOptimisticSendMutationSnapshot(
+                messageID: optimisticMessageID
+            ), !snapshot.newlyInsertedConversation {
+                Log.info(
+                    "Retaining remote committed anchored send \(optimisticMessageID) for sync routing",
+                    category: .message
+                )
+                return false
+            }
+
             Log.warning(
                 "Remote committed send \(optimisticMessageID) has no local optimistic message; clearing mutation record and relying on sync",
                 category: .message
@@ -754,6 +803,97 @@ extension GmailSendService {
             Log.error("Failed to resolve optimistic send conversation", category: .message, error: error)
             return nil
         }
+    }
+
+    @MainActor
+    private func resolveAnchoredListConversation(
+        for snapshot: OptimisticSendMutationSnapshot
+    ) -> (conversation: Conversation, listId: String)? {
+        guard !snapshot.newlyInsertedConversation,
+              let recordedConversation = resolveConversation(for: snapshot),
+              recordedConversation.managedObjectContext != nil,
+              !recordedConversation.isDeleted,
+              recordedConversation.conversationType == .list,
+              let listId = recordedConversation.listId,
+              !listId.isEmpty else {
+            return nil
+        }
+
+        let conversation: Conversation
+        if recordedConversation.isRetainedDrainedShell {
+            guard let replacement = recoverableListConversation(
+                listId: listId,
+                excluding: recordedConversation.objectID
+            ) else {
+                return nil
+            }
+            conversation = replacement
+        } else {
+            conversation = recordedConversation
+        }
+
+        return (conversation, listId)
+    }
+
+    @MainActor
+    private func recoverableListConversation(
+        listId: String,
+        excluding excludedObjectID: NSManagedObjectID
+    ) -> Conversation? {
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "listId == %@ AND SELF != %@",
+            listId,
+            excludedObjectID
+        )
+        request.includesPendingChanges = true
+
+        guard let conversations = try? viewContext.fetch(request) else {
+            return nil
+        }
+        let candidates = conversations.filter {
+            !$0.isDeleted &&
+                !$0.isRetainedDrainedShell &&
+                $0.conversationType == .list
+        }
+        return ConversationRoutingPolicy().selectParticipantHashConversation(
+            from: candidates,
+            reactivateArchivedIfNeeded: true
+        )
+    }
+
+    @MainActor
+    private func rehomeRemoteCommittedMessage(
+        _ message: Message,
+        to conversation: Conversation,
+        listId: String
+    ) {
+        let source = message.conversation
+        guard source?.objectID != conversation.objectID || message.listId != listId else {
+            return
+        }
+
+        message.conversation = conversation
+        message.listId = listId
+        viewContext.processPendingChanges()
+
+        let rollupUpdater = ConversationRollupUpdater()
+        if let source, source != conversation {
+            let sourceWillBeEmpty =
+                source.mutableSetValue(forKey: "messages").count == 0
+            if sourceWillBeEmpty {
+                conversation.pinned = conversation.pinned || source.pinned
+                conversation.muted = conversation.muted || source.muted
+            }
+            rollupUpdater.updateRollups(
+                for: source,
+                myEmail: authSession.userEmail ?? ""
+            )
+        }
+        rollupUpdater.updateRollups(
+            for: conversation,
+            myEmail: authSession.userEmail ?? ""
+        )
     }
 }
 

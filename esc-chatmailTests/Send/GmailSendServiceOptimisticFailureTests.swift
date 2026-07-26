@@ -311,6 +311,169 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(try conversationCount(in: context), 1)
     }
 
+    func testColdRecovery_missingOptimisticListReplyRetainsRouteUntilSentSyncConsumesItAtomically() async throws {
+        let context = coreDataStack.viewContext
+        let listId = "list.example.com"
+        let listConversation = ConversationBuilder()
+            .asList()
+            .withListId(listId)
+            .withParticipantHash(
+                calculateListConversationHash(fromNormalizedListId: listId)
+            )
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+        let anchoredConversationID = listConversation.id
+        let remoteResult = GmailSendService.SendResult(
+            messageId: "gmail-cold-list-reply",
+            threadId: "gmail-cold-list-thread"
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["post@list.example.com"],
+            body: "Committed list reply",
+            threadId: remoteResult.threadId,
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: listConversation.objectID)
+            )
+        )
+        try sendService.recordRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: remoteResult
+        )
+
+        // Exact process-death window: the mutation record is durable, while
+        // the optimistic Message (including its inherited List-Id) is not.
+        coreDataStack.resetViewContext()
+        let coldStartSendService = GmailSendService(
+            viewContext: coreDataStack.viewContext
+        )
+        XCTAssertNil(
+            coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+
+        coldStartSendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertEqual(try durableMutationRecordCount(), 1)
+        XCTAssertNil(try durableMessageState(id: remoteResult.messageId))
+
+        let processedSentMessage = makeHeaderlessSentMessage(
+            id: remoteResult.messageId,
+            threadId: remoteResult.threadId
+        )
+        let syncContext = coreDataStack.newBackgroundContext()
+        let isolatedCoreDataStack = CoreDataStack(
+            persistentContainerForTesting: coreDataStack.persistentContainer
+        )
+        let persister = MessagePersister(
+            coreDataStack: isolatedCoreDataStack,
+            messageProcessor: StubRemoteSentMessageProcessor(
+                processedMessage: processedSentMessage
+            ),
+            photoPrefetcher: { _ in }
+        )
+        await persister.saveMessage(
+            GmailMessage(
+                id: remoteResult.messageId,
+                threadId: remoteResult.threadId,
+                labelIds: ["SENT"],
+                snippet: processedSentMessage.snippet,
+                historyId: nil,
+                internalDate: nil,
+                payload: nil,
+                sizeEstimate: nil
+            ),
+            myAliases: ["me@example.com"],
+            in: syncContext
+        )
+
+        // The record deletion remains pending beside the routed Message.
+        // Another process/context still sees the route until one atomic save.
+        XCTAssertEqual(try durableMutationRecordCount(), 1)
+        XCTAssertNil(try durableMessageState(id: remoteResult.messageId))
+
+        try await syncContext.perform {
+            try syncContext.save()
+        }
+
+        let durableMessage = try XCTUnwrap(
+            durableMessageState(id: remoteResult.messageId)
+        )
+        XCTAssertEqual(durableMessage.conversationID, anchoredConversationID)
+        XCTAssertEqual(durableMessage.listId, listId)
+        XCTAssertEqual(durableMessage.conversationListId, listId)
+        XCTAssertEqual(try durableMutationRecordCount(), 0)
+    }
+
+    func testColdRecovery_remoteListReplyAlreadyFetchedElsewhereRehomesBeforeClearingRoute() async throws {
+        let context = coreDataStack.viewContext
+        let listId = "list.example.com"
+        let listConversation = ConversationBuilder()
+            .asList()
+            .withListId(listId)
+            .withParticipantHash(
+                calculateListConversationHash(fromNormalizedListId: listId)
+            )
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+        let anchoredConversationID = listConversation.id
+        let remoteResult = GmailSendService.SendResult(
+            messageId: "gmail-prefetched-list-reply",
+            threadId: "gmail-prefetched-list-thread"
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["post@list.example.com"],
+            body: "Committed list reply",
+            threadId: remoteResult.threadId,
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: listConversation.objectID)
+            )
+        )
+        try sendService.recordRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: remoteResult
+        )
+        coreDataStack.resetViewContext()
+
+        let wrongConversation = ConversationBuilder()
+            .withParticipantHash(
+                calculateParticipantHash(from: ["post@list.example.com"])
+            )
+            .withDisplayName("Wrong participant route")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1_700_000_100))
+            .withSnippet("Committed list reply")
+            .setPinned()
+            .setMuted()
+            .visible()
+            .build(in: context)
+        let remoteMessage = MessageBuilder()
+            .withId(remoteResult.messageId)
+            .withThreadId(remoteResult.threadId)
+            .withDate(Date(timeIntervalSince1970: 1_700_000_100))
+            .withSnippet("Committed list reply")
+            .fromMe()
+            .inConversation(wrongConversation)
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        let coldStartSendService = GmailSendService(viewContext: context)
+        coldStartSendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertEqual(remoteMessage.conversation?.id, anchoredConversationID)
+        XCTAssertEqual(remoteMessage.listId, listId)
+        XCTAssertEqual(remoteMessage.conversation?.listId, listId)
+        XCTAssertTrue(remoteMessage.conversation?.pinned ?? false)
+        XCTAssertTrue(remoteMessage.conversation?.muted ?? false)
+        XCTAssertNil(wrongConversation.lastMessageDate)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+    }
+
     func testReconcileAbandonedOptimisticSendMutations_remoteMessageAlreadyFetchedDeletesOptimisticDuplicate() async throws {
         let context = coreDataStack.viewContext
         let recipient = "remote-fetched@example.com"
@@ -525,5 +688,80 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         let request = Message.fetchRequest()
         request.includesPendingChanges = true
         return try context.count(for: request)
+    }
+
+    private struct DurableMessageState {
+        let listId: String?
+        let conversationID: UUID?
+        let conversationListId: String?
+    }
+
+    private func durableMutationRecordCount() throws -> Int {
+        let verificationContext = coreDataStack.newBackgroundContext()
+        return try verificationContext.performAndWait {
+            let request = OutboundSendMutationRecord.fetchRequest()
+            request.includesPendingChanges = false
+            return try verificationContext.count(for: request)
+        }
+    }
+
+    private func durableMessageState(id: String) throws -> DurableMessageState? {
+        let verificationContext = coreDataStack.newBackgroundContext()
+        return try verificationContext.performAndWait {
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id(id)
+            request.fetchLimit = 1
+            request.relationshipKeyPathsForPrefetching = ["conversation"]
+            guard let message = try verificationContext.fetch(request).first else {
+                return nil
+            }
+            return DurableMessageState(
+                listId: message.listId,
+                conversationID: message.conversation?.id,
+                conversationListId: message.conversation?.listId
+            )
+        }
+    }
+
+    private func makeHeaderlessSentMessage(
+        id: String,
+        threadId: String
+    ) -> ProcessedMessage {
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: List topic"
+        headers.from = "Me <me@example.com>"
+        headers.to = [
+            EmailAddress(email: "post@list.example.com", displayName: nil)
+        ]
+        headers.isFromMe = true
+        headers.listId = nil
+
+        var processedMessage = ProcessedMessage()
+        processedMessage.id = id
+        processedMessage.gmThreadId = threadId
+        processedMessage.snippet = "Committed list reply"
+        processedMessage.cleanedSnippet = "Committed list reply"
+        processedMessage.chatPreviewText = "Committed list reply"
+        processedMessage.internalDate = Date(timeIntervalSince1970: 1_700_000_000)
+        processedMessage.headers = headers
+        processedMessage.plainTextBody = "Committed list reply"
+        processedMessage.labelIds = ["SENT"]
+        return processedMessage
+    }
+}
+
+private final class StubRemoteSentMessageProcessor: MessageProcessor, @unchecked Sendable {
+    private let processedMessage: ProcessedMessage
+
+    init(processedMessage: ProcessedMessage) {
+        self.processedMessage = processedMessage
+    }
+
+    override func processGmailMessage(
+        _ gmailMessage: GmailMessage,
+        myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias] = []
+    ) async -> ProcessedMessage? {
+        processedMessage
     }
 }

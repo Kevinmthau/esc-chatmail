@@ -185,7 +185,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         _ request: OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks = .none
     ) async throws -> OutboundMessageResult? {
-        let preparedSend = try prepare(request)
+        let preparedSend = try await prepare(request)
         guard !preparedSend.recipientEmails.isEmpty else {
             Log.warning("Skipping outbound send with no recipients", category: .message)
             return nil
@@ -248,7 +248,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         )
     }
 
-    private func prepare(_ request: OutboundMessageRequest) throws -> PreparedSend {
+    private func prepare(_ request: OutboundMessageRequest) async throws -> PreparedSend {
         switch request {
         case .compose(let compose):
             let body = normalizedBody(compose.body)
@@ -301,7 +301,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
 
         case .reply(let reply):
             let body = normalizedBody(reply.body)
-            let metadata = try outboundReplyContextBuilder.buildReplyMetadata(
+            let metadata = try await outboundReplyContextBuilder.buildReplyMetadata(
                 reply.context
             )
 

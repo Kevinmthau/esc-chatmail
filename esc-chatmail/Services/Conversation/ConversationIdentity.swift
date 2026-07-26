@@ -12,21 +12,41 @@ func calculateParticipantHash(from participants: [String]) -> String {
         .joined()
 }
 
+/// Calculates the conversation hash for a mailing-list identity.
+/// CANONICAL IMPLEMENTATION - use this everywhere, do not duplicate.
+/// The "l|" namespace keeps list hashes disjoint from every participant-set
+/// hash ("p|"), so both kinds share the Conversation.participantHash attribute
+/// without collisions.
+/// - Parameter listId: Normalized List-Id (see `ParsedListId.parse`)
+/// - Returns: SHA256 hex string of the list key
+func calculateListConversationHash(fromNormalizedListId listId: String) -> String {
+    let listKey = "l|\(listId)"
+    return SHA256.hash(data: Data(listKey.utf8))
+        .map { String(format: "%02x", $0) }
+        .joined()
+}
+
 struct ConversationIdentity {
-    let key: String              // "p|alice@example.com" (one-to-one) OR "p|alice@x|bob@y" (group)
+    let key: String              // "p|alice@example.com" (one-to-one) OR "p|alice@x|bob@y" (group) OR "l|<list-id>" (mailing list)
     let keyHash: String          // SHA256 hex of key (unique per conversation instance)
-    let participantHash: String  // SHA256 hex of participant key (same for all convos with same participants)
+    let participantHash: String  // SHA256 hex of participant key (same for all convos with same participants), or of the list key
     let type: ConversationType
     let participants: [String]   // normalized emails, excluding "me"
     let participantDisplayNames: [String: String]  // normalized email -> display name
+    let listId: String?          // normalized List-Id when this is a mailing-list identity
+    let listTitle: String?       // List-Id display phrase, consumed once at conversation creation
 }
 
 /// The participant-set core of a conversation identity: the sorted, self-excluded
 /// participant list and its canonical hash, without the per-instance keyHash/epoch parts.
+/// When `listId` is non-nil the identity is a mailing-list identity: `participantHash`
+/// is derived from the List-Id ("l|" namespace) and `participants` only seeds
+/// display/reply rows.
 struct ParticipantSetIdentity {
     let participants: [String]   // sorted, normalized, aliases removed (or self-fallback)
     let participantHash: String
     let type: ConversationType
+    let listId: String?
 }
 
 /// CANONICAL participant-set derivation shared by the sync router (via
@@ -58,7 +78,26 @@ func makeParticipantSetIdentity(normalizedEmails: Set<String>,
     return ParticipantSetIdentity(
         participants: participants,
         participantHash: calculateParticipantHash(from: participants),
-        type: participants.count <= 1 ? .oneToOne : .group
+        type: participants.count <= 1 ? .oneToOne : .group,
+        listId: nil
+    )
+}
+
+/// CANONICAL mailing-list identity derivation shared by the sync router (via
+/// `makeConversationIdentity`) and `Message.strictParticipantSetIdentity`. The
+/// conversation is keyed by the normalized List-Id alone; the message's
+/// participant set only seeds display/reply rows. Both paths must agree on the
+/// hash or the same list forks into duplicate chats.
+func makeListSetIdentity(normalizedListId: String,
+                         normalizedEmails: Set<String>,
+                         myAliases: Set<String>) -> ParticipantSetIdentity {
+    let setIdentity = makeParticipantSetIdentity(normalizedEmails: normalizedEmails,
+                                                 myAliases: myAliases)
+    return ParticipantSetIdentity(
+        participants: setIdentity.participants,
+        participantHash: calculateListConversationHash(fromNormalizedListId: normalizedListId),
+        type: .list,
+        listId: normalizedListId
     )
 }
 
@@ -129,6 +168,21 @@ func makeConversationIdentity(from headers: [MessageHeader],
     }
 
     let (allEmails, displayNames) = extractEmailsWithDisplayNames()
+
+    // Mailing-list mail groups by List-Id, not by participant set: list
+    // participants vary per message (rotating From, changing Cc), which would
+    // shatter one list into many chats. A malformed List-Id parses to nil and
+    // falls back to participant grouping.
+    let rawListId = headers.first { $0.name.caseInsensitiveCompare("List-Id") == .orderedSame }?.value
+    if let parsed = ParsedListId.parse(rawListId) {
+        let listIdentity = makeListSetIdentity(normalizedListId: parsed.id,
+                                               normalizedEmails: allEmails,
+                                               myAliases: myAliases)
+        return makeConversationIdentity(from: listIdentity,
+                                        displayNames: displayNames,
+                                        listTitle: parsed.title)
+    }
+
     let setIdentity = makeParticipantSetIdentity(normalizedEmails: allEmails, myAliases: myAliases)
 
     #if DEBUG
@@ -143,12 +197,18 @@ func makeConversationIdentity(from headers: [MessageHeader],
 /// participant-set identity. Used by the header path above and by callers that
 /// derive the participant set without headers (the participant-set split migration).
 func makeConversationIdentity(from setIdentity: ParticipantSetIdentity,
-                              displayNames: [String: String] = [:]) -> ConversationIdentity {
-    let participantKey = "p|\(setIdentity.participants.joined(separator: "|"))"
+                              displayNames: [String: String] = [:],
+                              listTitle: String? = nil) -> ConversationIdentity {
+    let baseKey: String
+    if let listId = setIdentity.listId {
+        baseKey = "l|\(listId)"
+    } else {
+        baseKey = "p|\(setIdentity.participants.joined(separator: "|"))"
+    }
 
     // Create unique key for this conversation instance (includes UUID for uniqueness)
     // This allows multiple conversations with the same participants (archived vs active)
-    let uniqueKey = "\(participantKey)|\(UUID().uuidString)"
+    let uniqueKey = "\(baseKey)|\(UUID().uuidString)"
     let keyHash = SHA256.hash(data: Data(uniqueKey.utf8)).map { String(format:"%02x", $0) }.joined()
 
     return ConversationIdentity(
@@ -157,6 +217,8 @@ func makeConversationIdentity(from setIdentity: ParticipantSetIdentity,
         participantHash: setIdentity.participantHash,
         type: setIdentity.type,
         participants: setIdentity.participants,
-        participantDisplayNames: displayNames
+        participantDisplayNames: displayNames,
+        listId: setIdentity.listId,
+        listTitle: setIdentity.listId != nil ? listTitle : nil
     )
 }

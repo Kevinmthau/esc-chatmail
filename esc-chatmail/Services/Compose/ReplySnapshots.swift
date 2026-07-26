@@ -1,18 +1,22 @@
 import Foundation
+import CoreData
 
 struct ReplyConversationSnapshot: Sendable {
     let participantEmails: [String]
+    let isListConversation: Bool
     let latestThreadId: String?
     let deliveredToAddress: String?
     let replyFromAddress: String?
 
     init(
         participantEmails: [String],
+        isListConversation: Bool = false,
         latestThreadId: String?,
         deliveredToAddress: String? = nil,
         replyFromAddress: String? = nil
     ) {
         self.participantEmails = participantEmails
+        self.isListConversation = isListConversation
         self.latestThreadId = latestThreadId
         self.deliveredToAddress = deliveredToAddress
         self.replyFromAddress = replyFromAddress
@@ -20,23 +24,89 @@ struct ReplyConversationSnapshot: Sendable {
 
     @MainActor
     init(conversation: Conversation, sendAsAliases: [SendAsAlias] = []) {
-        let messages = Array(conversation.messages ?? [])
-            .sorted { $0.internalDate > $1.internalDate }
-        let latestReplyAddressHint = messages
-            .filter { !$0.isFromMe }
-            .lazy
-            .compactMap { ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases) }
-            .first
+        let isListConversation = conversation.conversationType == .list
+        let latestListInboundMessage = isListConversation
+            ? Self.latestInboundListMessage(in: conversation)
+            : nil
+        let nonListMessages = isListConversation
+            ? []
+            : Array(conversation.messages ?? []).sorted(by: Self.messageSort)
+        let latestReplyAddressHint: ReplyAddressHint?
+        if isListConversation {
+            latestReplyAddressHint = latestListInboundMessage.flatMap {
+                ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases)
+            }
+        } else {
+            latestReplyAddressHint = nonListMessages
+                .filter { !$0.isFromMe }
+                .lazy
+                .compactMap { ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases) }
+                .first
+        }
 
-        self.participantEmails = Array(conversation.participants ?? [])
-            .compactMap { $0.person?.email }
-        self.latestThreadId = messages.first?.gmThreadId
+        if isListConversation {
+            self.participantEmails = latestListInboundMessage.map {
+                ReplyParticipantSnapshot.recipientEmails(
+                    from: $0,
+                    replacingFromWithReplyTo: true
+                )
+            } ?? []
+        } else {
+            self.participantEmails = Array(conversation.participants ?? [])
+                .compactMap { $0.person?.email }
+        }
+        self.isListConversation = isListConversation
+        self.latestThreadId = (isListConversation
+            ? latestListInboundMessage
+            : nonListMessages.first)?.gmThreadId
         self.deliveredToAddress = latestReplyAddressHint?.deliveredToAddress
         self.replyFromAddress = latestReplyAddressHint?.replyFromAddress
+    }
+
+    private static func latestInboundListMessage(
+        in conversation: Conversation
+    ) -> Message? {
+        guard let listId = conversation.listId, !listId.isEmpty else {
+            return nil
+        }
+
+        guard let context = conversation.managedObjectContext else {
+            return Array(conversation.messages ?? [])
+                .sorted(by: messageSort)
+                .first { !$0.isFromMe && $0.listId == listId }
+        }
+
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "conversation == %@ AND isFromMe == NO AND listId == %@",
+            conversation,
+            listId
+        )
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
+        request.fetchLimit = 1
+        request.fetchBatchSize = 1
+        request.includesPendingChanges = true
+        request.relationshipKeyPathsForPrefetching = [
+            "participants",
+            "participants.person"
+        ]
+
+        return try? context.fetch(request).first
+    }
+
+    private static func messageSort(_ lhs: Message, _ rhs: Message) -> Bool {
+        if lhs.internalDate != rhs.internalDate {
+            return lhs.internalDate > rhs.internalDate
+        }
+        return lhs.id > rhs.id
     }
 }
 
 struct ReplyTargetSnapshot: Sendable {
+    let participantEmails: [String]
     let subject: String?
     let threadId: String?
     let messageId: String?
@@ -46,6 +116,7 @@ struct ReplyTargetSnapshot: Sendable {
     let originalMessage: QuotedMessage
 
     init(
+        participantEmails: [String],
         subject: String?,
         threadId: String?,
         messageId: String?,
@@ -54,6 +125,7 @@ struct ReplyTargetSnapshot: Sendable {
         replyFromAddress: String?,
         originalMessage: QuotedMessage
     ) {
+        self.participantEmails = participantEmails
         self.subject = subject
         self.threadId = threadId
         self.messageId = messageId
@@ -66,6 +138,10 @@ struct ReplyTargetSnapshot: Sendable {
     @MainActor
     init(message: Message, sendAsAliases: [SendAsAlias] = [], originalHTML: String? = nil) {
         let replyAddressHint = ReplyAddressHint.from(message: message, sendAsAliases: sendAsAliases)
+        self.participantEmails = ReplyParticipantSnapshot.recipientEmails(
+            from: message,
+            replacingFromWithReplyTo: message.conversation?.conversationType == .list
+        )
         self.subject = message.subject
         self.threadId = message.gmThreadId
         self.messageId = message.messageIdValue
@@ -87,6 +163,7 @@ struct ReplyTargetSnapshot: Sendable {
 
     func withOriginalHTML(_ originalHTML: String?) -> ReplyTargetSnapshot {
         ReplyTargetSnapshot(
+            participantEmails: participantEmails,
             subject: subject,
             threadId: threadId,
             messageId: messageId,
@@ -101,6 +178,70 @@ struct ReplyTargetSnapshot: Sendable {
                 originalHTML: originalHTML
             )
         )
+    }
+}
+
+private enum ReplyParticipantSnapshot {
+    @MainActor
+    static func recipientEmails(
+        from message: Message,
+        replacingFromWithReplyTo: Bool = false
+    ) -> [String] {
+        let replyToEmails = replacingFromWithReplyTo
+            ? message.replyTo.map { EmailAddressListParser.emailAddresses(from: $0) } ?? []
+            : []
+        let participants = Array(message.participants ?? [])
+            .filter {
+                $0.participantKind != .bcc &&
+                    (replyToEmails.isEmpty || $0.participantKind != .from)
+            }
+            .sorted(by: participantSort)
+
+        var seen = Set<String>()
+        var recipientEmails: [String] = []
+
+        for email in replyToEmails {
+            let normalized = EmailNormalizer.normalize(email)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else {
+                continue
+            }
+            recipientEmails.append(email)
+        }
+
+        recipientEmails.append(contentsOf: participants.compactMap { participant in
+            guard let email = participant.person?.email else { return nil }
+            let normalized = EmailNormalizer.normalize(email)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else {
+                return nil
+            }
+            return email
+        })
+        return recipientEmails
+    }
+
+    private static func participantSort(_ lhs: MessageParticipant, _ rhs: MessageParticipant) -> Bool {
+        let lhsRank = participantKindRank(lhs.participantKind)
+        let rhsRank = participantKindRank(rhs.participantKind)
+        if lhsRank != rhsRank {
+            return lhsRank < rhsRank
+        }
+
+        let lhsEmail = lhs.person?.email ?? ""
+        let rhsEmail = rhs.person?.email ?? ""
+        return lhsEmail.localizedCaseInsensitiveCompare(rhsEmail) == .orderedAscending
+    }
+
+    private static func participantKindRank(_ kind: ParticipantKind) -> Int {
+        switch kind {
+        case .from:
+            return 0
+        case .to:
+            return 1
+        case .cc:
+            return 2
+        case .bcc:
+            return 3
+        }
     }
 }
 

@@ -44,7 +44,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(replyContext.optimisticConversation?.existingConversationReference, conversationReference)
     }
 
-    func testBuildReplyMetadata_readsReplyMetadataFromManagedObjects() throws {
+    func testBuildReplyMetadata_readsReplyMetadataFromManagedObjects() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let replyingTo = MessageBuilder()
@@ -58,12 +58,14 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         try context.obtainPermanentIDs(for: [conversation, replyingTo])
         replyingTo.messageId = "<message-1@example.com>"
         replyingTo.references = "<older@example.com>"
+        addMessageParticipant(email: "different-target@example.com", kind: .from, to: replyingTo)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: replyingTo)
         _ = htmlContentHandler.saveHTML(
             "<html><body><p>Original <strong>HTML</strong></p></body></html>",
             for: replyingTo.id
         )
 
-        let metadata = try makeBuilder().buildReplyMetadata(
+        let metadata = try await makeBuilder().buildReplyMetadata(
             .init(
                 conversationObjectID: conversation.objectID,
                 replyingToMessageObjectID: replyingTo.objectID,
@@ -84,7 +86,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertTrue(metadata.originalMessage?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
     }
 
-    func testBuildReplyMetadata_usesCurrentManagedObjectValuesAfterRequestCreation() throws {
+    func testBuildReplyMetadata_usesCurrentManagedObjectValuesAfterRequestCreation() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "before@example.com")
         let replyingTo = MessageBuilder()
@@ -130,7 +132,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             for: replyingTo.id
         )
 
-        let metadata = try makeBuilder().buildReplyMetadata(replyContext)
+        let metadata = try await makeBuilder().buildReplyMetadata(replyContext)
 
         XCTAssertEqual(metadata.recipientEmails, ["after@example.com"])
         XCTAssertEqual(metadata.subject, "Re: After Subject")
@@ -144,7 +146,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertFalse(metadata.originalMessage?.originalHTML?.contains("Before HTML") == true)
     }
 
-    func testBuildReplyMetadata_withoutReplyTargetUsesLatestInboundReplyFromAlias() throws {
+    func testBuildReplyMetadata_withoutReplyTargetUsesLatestInboundReplyFromAlias() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let account = AccountBuilder()
@@ -163,6 +165,14 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         inbound.replyFromAddress = "alias@example.com"
 
         _ = MessageBuilder()
+            .withId("newer-inbound-without-hint")
+            .withThreadId("thread-alias")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withDate(Date(timeIntervalSince1970: 150))
+            .inConversation(conversation)
+            .build(in: context)
+
+        _ = MessageBuilder()
             .withId("latest-optimistic")
             .withThreadId("thread-alias")
             .withSender(email: "me@example.com", name: "Me")
@@ -174,7 +184,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         optimisticObjects.append(conversation)
         try context.obtainPermanentIDs(for: optimisticObjects)
 
-        let metadata = try makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
             .init(
                 conversationObjectID: conversation.objectID,
                 replyingToMessageObjectID: nil,
@@ -189,7 +199,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(metadata.recipientEmails, ["friend@example.com"])
     }
 
-    func testBuildReplyMetadata_backfillsReplyFromAliasFromLegacyTargetParticipants() throws {
+    func testBuildReplyMetadata_backfillsReplyFromAliasFromLegacyTargetParticipants() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let account = AccountBuilder()
@@ -210,7 +220,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         addMessageParticipant(person: aliasPerson, kind: .to, to: replyingTo)
         try context.obtainPermanentIDs(for: [conversation, replyingTo])
 
-        let metadata = try makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
             .init(
                 conversationObjectID: conversation.objectID,
                 replyingToMessageObjectID: replyingTo.objectID,
@@ -223,7 +233,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(metadata.fromEmail, "alias@example.com")
     }
 
-    func testBuildReplyMetadata_usesLegacyAccountAliasesWhenSendAsAliasesAreMissing() throws {
+    func testBuildReplyMetadata_usesLegacyAccountAliasesWhenSendAsAliasesAreMissing() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         _ = AccountBuilder()
@@ -241,7 +251,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         replyingTo.replyFromAddress = "alias@example.com"
         try context.obtainPermanentIDs(for: [conversation, replyingTo])
 
-        let metadata = try makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
             .init(
                 conversationObjectID: conversation.objectID,
                 replyingToMessageObjectID: replyingTo.objectID,
@@ -254,7 +264,379 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(metadata.fromEmail, "alias@example.com")
     }
 
-    private func makeBuilder(userEmail: String = "me@example.com") -> OutboundReplyContextBuilder {
+    func testBuildReplyMetadata_listReplyUsesSelectedLaterMessageParticipants() async throws {
+        let fixture = try makeRotatingListConversation()
+        let newestMatchingMessage = MessageBuilder()
+            .withId("newest-matching-list-message")
+            .withThreadId("thread-newest-matching")
+            .withDate(Date(timeIntervalSince1970: 300))
+            .withSender(email: "newest-sender@example.com", name: "Newest Sender")
+            .withListId("list.example.com")
+            .inConversation(fixture.conversation)
+            .build(in: coreDataStack.viewContext)
+        addMessageParticipant(email: "newest-sender@example.com", kind: .from, to: newestMatchingMessage)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: newestMatchingMessage)
+        addMessageParticipant(email: "newest-list@example.com", kind: .to, to: newestMatchingMessage)
+        try coreDataStack.viewContext.obtainPermanentIDs(for: [newestMatchingMessage])
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: fixture.laterMessage.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            metadata.recipientEmails,
+            [
+                "later-sender@example.com",
+                "later-list@example.com",
+                "later-cc@example.com"
+            ]
+        )
+        XCTAssertEqual(metadata.threadId, "thread-later")
+        XCTAssertFalse(metadata.recipientEmails.contains("first-sender@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("first-list@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("first-cc@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("newest-sender@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("newest-list@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("later-bcc@example.com"))
+    }
+
+    func testBuildReplyMetadata_listTargetUsesGitHubReplyToMailboxListInsteadOfFrom() async throws {
+        let fixture = try makeRotatingListConversation()
+        fixture.laterMessage.replyTo =
+            #""octocat/Hello-World" <reply+123456@reply.github.com>, Later List <LATER-LIST@example.com>"#
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: fixture.laterMessage.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            metadata.recipientEmails,
+            [
+                "reply+123456@reply.github.com",
+                "later-list@example.com",
+                "later-cc@example.com"
+            ]
+        )
+        XCTAssertFalse(metadata.recipientEmails.contains("later-sender@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("later-bcc@example.com"))
+        XCTAssertEqual(
+            metadata.recipientEmails.filter {
+                EmailNormalizer.normalize($0) == "later-list@example.com"
+            }.count,
+            1
+        )
+    }
+
+    func testBuildReplyMetadata_listConversationUsesLatestInboundReplyToInsteadOfFrom() async throws {
+        let fixture = try makeRotatingListConversation()
+        fixture.laterMessage.replyTo = #"GitHub <reply+conversation@reply.github.com>"#
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: nil,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            metadata.recipientEmails,
+            [
+                "reply+conversation@reply.github.com",
+                "later-list@example.com",
+                "later-cc@example.com"
+            ]
+        )
+        XCTAssertFalse(metadata.recipientEmails.contains("later-sender@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("later-bcc@example.com"))
+    }
+
+    func testBuildReplyMetadata_listTargetWithInvalidReplyToFallsBackToFrom() async throws {
+        let fixture = try makeRotatingListConversation()
+        fixture.laterMessage.replyTo = "undisclosed-recipients:;"
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: fixture.laterMessage.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            metadata.recipientEmails,
+            [
+                "later-sender@example.com",
+                "later-list@example.com",
+                "later-cc@example.com"
+            ]
+        )
+        XCTAssertFalse(metadata.recipientEmails.contains("later-bcc@example.com"))
+    }
+
+    func testBuildReplyMetadata_listReplyToReconciledOptimisticMessageFallsBackToLatestInboundRecipients() async throws {
+        let fixture = try makeRotatingListConversation()
+        let reconciledOptimisticMessage = MessageBuilder()
+            .withId("reconciled-optimistic")
+            .withThreadId("thread-optimistic")
+            .withSubject("Optimistic Subject")
+            .withDate(Date(timeIntervalSince1970: 300))
+            .withSender(email: "me@example.com", name: "Me")
+            .withListId("list.example.com")
+            .fromMe()
+            .inConversation(fixture.conversation)
+            .build(in: coreDataStack.viewContext)
+        reconciledOptimisticMessage.messageId = "<optimistic@example.com>"
+        try coreDataStack.viewContext.obtainPermanentIDs(for: [reconciledOptimisticMessage])
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: reconciledOptimisticMessage.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            metadata.recipientEmails,
+            [
+                "later-sender@example.com",
+                "later-list@example.com",
+                "later-cc@example.com"
+            ]
+        )
+        XCTAssertEqual(metadata.subject, "Re: Optimistic Subject")
+        XCTAssertEqual(metadata.threadId, "thread-optimistic")
+        XCTAssertEqual(metadata.inReplyTo, "<optimistic@example.com>")
+    }
+
+    func testBuildReplyMetadata_listReplyWithoutTargetUsesLatestInboundListMessageParticipants() async throws {
+        let fixture = try makeRotatingListConversation()
+        let newerOtherListMessage = MessageBuilder()
+            .withId("newer-other-list")
+            .withThreadId("thread-other-list")
+            .withDate(Date(timeIntervalSince1970: 250))
+            .withSender(email: "other-sender@example.com", name: "Other Sender")
+            .withListId("other.example.com")
+            .inConversation(fixture.conversation)
+            .build(in: coreDataStack.viewContext)
+        addMessageParticipant(email: "other-sender@example.com", kind: .from, to: newerOtherListMessage)
+        addMessageParticipant(email: "other-list@example.com", kind: .to, to: newerOtherListMessage)
+        let latestOutbound = MessageBuilder()
+            .withId("latest-outbound")
+            .withThreadId("thread-list")
+            .withDate(Date(timeIntervalSince1970: 300))
+            .withSender(email: "me@example.com", name: "Me")
+            .withListId("list.example.com")
+            .fromMe()
+            .inConversation(fixture.conversation)
+            .build(in: coreDataStack.viewContext)
+        addMessageParticipant(email: "me@example.com", kind: .from, to: latestOutbound)
+        addMessageParticipant(email: "outbound-only@example.com", kind: .to, to: latestOutbound)
+        try coreDataStack.viewContext.obtainPermanentIDs(
+            for: [newerOtherListMessage, latestOutbound]
+        )
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: nil,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            metadata.recipientEmails,
+            [
+                "later-sender@example.com",
+                "later-list@example.com",
+                "later-cc@example.com"
+            ]
+        )
+        XCTAssertEqual(metadata.threadId, "thread-later")
+        XCTAssertFalse(metadata.recipientEmails.contains("first-sender@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("other-sender@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("other-list@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("outbound-only@example.com"))
+        XCTAssertFalse(metadata.recipientEmails.contains("later-bcc@example.com"))
+    }
+
+    func testBuildReplyMetadata_listReplyWithoutMatchingInboundNeverUsesConversationParticipants() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("expected.example.com")
+            .withDisplayName("Expected List")
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: "stale-first-sender@example.com", to: conversation)
+        addConversationParticipant(email: "stale-first-list@example.com", to: conversation)
+
+        let otherListMessage = MessageBuilder()
+            .withId("only-other-list-message")
+            .withThreadId("thread-other")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withListId("other.example.com")
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(email: "other-sender@example.com", kind: .from, to: otherListMessage)
+        addMessageParticipant(email: "other-list@example.com", kind: .to, to: otherListMessage)
+        try context.obtainPermanentIDs(for: [conversation, otherListMessage])
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: nil,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.recipientEmails, [])
+        XCTAssertNil(metadata.threadId)
+    }
+
+    func testBuildReplyMetadata_listReplyExcludesSelfContactAlias() async throws {
+        let fixture = try makeRotatingListConversation()
+        addMessageParticipant(
+            email: "my-self-contact-alias@example.com",
+            kind: .cc,
+            to: fixture.laterMessage
+        )
+
+        let metadata = try await makeBuilder(
+            userEmail: "me@example.com",
+            userAliases: ["me@example.com", "my-self-contact-alias@example.com"]
+        ).buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: fixture.laterMessage.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertFalse(metadata.recipientEmails.contains("my-self-contact-alias@example.com"))
+        XCTAssertTrue(metadata.recipientEmails.contains("later-sender@example.com"))
+    }
+
+    func testBuildReplyMetadata_listReplyFailsClosedWhenSelectedTargetReroutes() async throws {
+        let fixture = try makeRotatingListConversation()
+        let otherConversation = ConversationBuilder()
+            .asList()
+            .withListId("other.example.com")
+            .withDisplayName("Other List")
+            .visible()
+            .build(in: coreDataStack.viewContext)
+        try coreDataStack.viewContext.obtainPermanentIDs(for: [otherConversation])
+        let replyContext = makeBuilder().build(
+            conversationObjectID: fixture.conversation.objectID,
+            replyingToMessageObjectID: fixture.laterMessage.objectID,
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: fixture.conversation.objectID)
+            )
+        )
+
+        fixture.laterMessage.conversation = otherConversation
+
+        do {
+            _ = try await makeBuilder().buildReplyMetadata(replyContext)
+            XCTFail("Expected replyTargetUnavailable")
+        } catch {
+            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
+                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            }
+        }
+    }
+
+    func testBuildReplyMetadata_listReplyFailsClosedForMismatchedTargetListId() async throws {
+        let fixture = try makeRotatingListConversation()
+        let replyContext = makeBuilder().build(
+            conversationObjectID: fixture.conversation.objectID,
+            replyingToMessageObjectID: fixture.laterMessage.objectID,
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: fixture.conversation.objectID)
+            )
+        )
+
+        fixture.laterMessage.listId = "other.example.com"
+
+        do {
+            _ = try await makeBuilder().buildReplyMetadata(replyContext)
+            XCTFail("Expected replyTargetUnavailable")
+        } catch {
+            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
+                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            }
+        }
+    }
+
+    func testBuildReplyMetadata_nilTargetFailsClosedWhenConversationDrainsDuringAliasLoad() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(
+            in: context,
+            friendEmail: "friend@example.com"
+        )
+        try context.obtainPermanentIDs(for: [conversation])
+        let aliasLoader = SuspendedUserAliasLoader()
+        let builder = makeBuilder(
+            loadUserAliases: { await aliasLoader.load() }
+        )
+        let replyContext = builder.build(
+            conversationObjectID: conversation.objectID,
+            replyingToMessageObjectID: nil,
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: conversation.objectID)
+            )
+        )
+
+        let metadataTask = Task {
+            try await builder.buildReplyMetadata(replyContext)
+        }
+        await aliasLoader.waitUntilStarted()
+
+        conversation.hidden = true
+        conversation.archivedAt = Date()
+        conversation.lastMessageDate = nil
+        aliasLoader.resume()
+
+        do {
+            _ = try await metadataTask.value
+            XCTFail("Expected replyTargetUnavailable")
+        } catch {
+            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
+                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            }
+        }
+    }
+
+    private func makeBuilder(
+        userEmail: String = "me@example.com",
+        userAliases: Set<String> = [],
+        loadUserAliases: (@MainActor () async -> Set<String>)? = nil
+    ) -> OutboundReplyContextBuilder {
         OutboundReplyContextBuilder(
             viewContext: coreDataStack.viewContext,
             replyMetadataBuilder: ReplyMetadataBuilder(
@@ -263,7 +645,8 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             replyHTMLContentLoader: HTMLContentLoader(
                 contentHandler: htmlContentHandler,
                 sanitizer: .shared
-            )
+            ),
+            loadUserAliases: loadUserAliases ?? { userAliases }
         )
     }
 
@@ -302,6 +685,84 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         return conversation
     }
 
+    private func makeRotatingListConversation() throws -> (
+        conversation: Conversation,
+        laterMessage: Message
+    ) {
+        let context = coreDataStack.viewContext
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("list.example.com")
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+
+        for email in [
+            "me@example.com",
+            "first-sender@example.com",
+            "first-list@example.com",
+            "first-cc@example.com"
+        ] {
+            let person = PersonBuilder()
+                .withEmail(email)
+                .noDisplayName()
+                .build(in: context)
+            let participant = context.insertTestObject(ConversationParticipant.self)
+            participant.id = UUID()
+            participant.person = person
+            participant.participantRole = .normal
+            participant.conversation = conversation
+        }
+
+        let firstMessage = MessageBuilder()
+            .withId("first-list-message")
+            .withThreadId("thread-first")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSender(email: "first-sender@example.com", name: "First Sender")
+            .withListId("list.example.com")
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(email: "first-sender@example.com", kind: .from, to: firstMessage)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: firstMessage)
+        addMessageParticipant(email: "first-list@example.com", kind: .to, to: firstMessage)
+        addMessageParticipant(email: "first-cc@example.com", kind: .cc, to: firstMessage)
+
+        let laterMessage = MessageBuilder()
+            .withId("later-list-message")
+            .withThreadId("thread-later")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .withSender(email: "later-sender@example.com", name: "Later Sender")
+            .withListId("list.example.com")
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(email: "later-sender@example.com", kind: .from, to: laterMessage)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: laterMessage)
+        addMessageParticipant(email: "later-list@example.com", kind: .to, to: laterMessage)
+        addMessageParticipant(email: "later-cc@example.com", kind: .cc, to: laterMessage)
+        addMessageParticipant(email: "later-bcc@example.com", kind: .bcc, to: laterMessage)
+
+        var objects = Array(conversation.messages ?? []).map { $0 as NSManagedObject }
+        objects.append(conversation)
+        try context.obtainPermanentIDs(for: objects)
+        return (conversation, laterMessage)
+    }
+
+    private func addConversationParticipant(
+        email: String,
+        to conversation: Conversation
+    ) {
+        let person = PersonBuilder()
+            .withEmail(email)
+            .noDisplayName()
+            .build(in: coreDataStack.viewContext)
+        let participant = coreDataStack.viewContext.insertTestObject(ConversationParticipant.self)
+        participant.id = UUID()
+        participant.person = person
+        participant.participantRole = .normal
+        participant.conversation = conversation
+    }
+
     private var sendAsAliases: [SendAsAlias] {
         [
             SendAsAlias(
@@ -331,6 +792,18 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         participant.message = message
     }
 
+    private func addMessageParticipant(
+        email: String,
+        kind: ParticipantKind,
+        to message: Message
+    ) {
+        let person = PersonBuilder()
+            .withEmail(email)
+            .noDisplayName()
+            .build(in: coreDataStack.viewContext)
+        addMessageParticipant(person: person, kind: kind, to: message)
+    }
+
     private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {
         let authSession = AuthSession(
             tokenManagerProvider: { MockTokenManager() },
@@ -343,5 +816,33 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         )
         authSession.userEmail = userEmail
         return authSession
+    }
+}
+
+@MainActor
+private final class SuspendedUserAliasLoader {
+    private var didStart = false
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    private var resultContinuation: CheckedContinuation<Set<String>, Never>?
+
+    func load() async -> Set<String> {
+        didStart = true
+        startContinuation?.resume()
+        startContinuation = nil
+        return await withCheckedContinuation {
+            resultContinuation = $0
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !didStart else { return }
+        await withCheckedContinuation {
+            startContinuation = $0
+        }
+    }
+
+    func resume(with aliases: Set<String> = []) {
+        resultContinuation?.resume(returning: aliases)
+        resultContinuation = nil
     }
 }

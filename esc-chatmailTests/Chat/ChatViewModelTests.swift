@@ -84,6 +84,154 @@ final class ChatViewModelTests: XCTestCase {
         withExtendedLifetime((composerCancellable, viewModelCancellable)) {}
     }
 
+    func testComposerDraftPresenceIncludesTextAndAttachments() {
+        XCTAssertFalse(
+            ChatComposerState.hasDraftContent(
+                replyText: "   \n",
+                hasAttachments: false
+            )
+        )
+        XCTAssertTrue(
+            ChatComposerState.hasDraftContent(
+                replyText: "Draft",
+                hasAttachments: false
+            )
+        )
+        XCTAssertTrue(
+            ChatComposerState.hasDraftContent(
+                replyText: "",
+                hasAttachments: true
+            )
+        )
+    }
+
+    func testListConversationNeverBecomesEffectivelyOneToOneAfterParticipantLoad() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("swift-evolution.swift.org")
+            .withDisplayName("Swift Evolution")
+            .visible()
+            .build(in: deps.viewContext)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+
+        viewModel.effectiveParticipantCount = 1
+
+        XCTAssertFalse(viewModel.isEffectivelyOneToOneConversation)
+    }
+
+    func testResolvedDisplayNameKeepsStoredListIdTitleAfterParticipantLoad() {
+        XCTAssertEqual(
+            ChatViewModel.resolvedDisplayName(
+                conversationType: .list,
+                storedDisplayName: "Swift Evolution",
+                participantDisplayName: "First Sender"
+            ),
+            "Swift Evolution"
+        )
+    }
+
+    func testListNavigationDisplayNameTracksLiveStoredTitle() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("swift-evolution.swift.org")
+            .withDisplayName("Old List Title")
+            .visible()
+            .build(in: deps.viewContext)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.resolvedDisplayName = "Stale Resolved Title"
+
+        XCTAssertEqual(viewModel.displayNameForNavigation, "Old List Title")
+
+        conversation.displayName = "Corrected List Title"
+
+        XCTAssertEqual(viewModel.displayNameForNavigation, "Corrected List Title")
+    }
+
+    func testMovedReplyTargetRetargetsToSameSubjectMessageInAnchoredConversation() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let context = deps.viewContext
+        let sourceConversation = ConversationBuilder()
+            .withDisplayName("Legacy Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let listConversation = ConversationBuilder()
+            .asList()
+            .withListId("list.example.com")
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let movedTarget = MessageBuilder()
+            .withId("moved-target")
+            .withSubject("Same Subject")
+            .inConversation(sourceConversation)
+            .build(in: context)
+        let replacement = MessageBuilder()
+            .withId("replacement")
+            .withSubject("Same Subject")
+            .inConversation(sourceConversation)
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: sourceConversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.replyingTo = movedTarget
+
+        movedTarget.conversation = listConversation
+        viewModel.updateReplyingToIfNewSubject(lastMessage: replacement)
+
+        XCTAssertEqual(viewModel.replyingTo, replacement)
+    }
+
+    func testOffWindowMovedReplyTargetClearsWhenAggregateCountValidationHasNoLatestMessage() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let context = deps.viewContext
+        let sourceConversation = ConversationBuilder()
+            .withDisplayName("Legacy Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let destinationConversation = ConversationBuilder()
+            .asList()
+            .withListId("list.example.com")
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let movedTarget = MessageBuilder()
+            .withId("moved-target")
+            .withSubject("Same Subject")
+            .inConversation(sourceConversation)
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: sourceConversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.replyingTo = movedTarget
+
+        movedTarget.conversation = destinationConversation
+        viewModel.updateReplyingToIfNewSubject(lastMessage: nil)
+
+        XCTAssertNil(viewModel.replyingTo)
+    }
+
     func testBackgroundReadLeavesLaterUnreadCountDurableForBlueDot() async throws {
         let stack = TestCoreDataStack(automaticallyMergesChanges: true)
         let context = stack.viewContext
@@ -439,7 +587,7 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.replyText = "Reply body"
         viewModel.replyingTo = replyTarget
 
-        let didSend = await viewModel.sendReply(with: [])
+        let didSend = await viewModel.sendReply()
 
         guard case .reply(let request)? = coordinator.lastRequest else {
             return XCTFail("Expected reply request")
@@ -509,7 +657,7 @@ final class ChatViewModelTests: XCTestCase {
         replyTarget.references = "<mutated-ref@example.com>"
         replyTarget.bodyText = "Mutated body"
 
-        let didSend = await viewModel.sendReply(with: [])
+        let didSend = await viewModel.sendReply()
 
         guard case .reply(let request)? = coordinator.lastRequest else {
             return XCTFail("Expected reply request")
@@ -543,10 +691,45 @@ final class ChatViewModelTests: XCTestCase {
         )
         viewModel.replyText = "Retryable reply"
 
-        let didSend = await viewModel.sendReply(with: [])
+        let didSend = await viewModel.sendReply()
 
         XCTAssertFalse(didSend)
         XCTAssertEqual(viewModel.replyText, "Retryable reply")
+    }
+
+    func testSendReply_drainedConversationPreservesTextAndAttachments() async {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockChatOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Moved Thread")
+            .archived()
+            .setHidden()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("draft-attachment")
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.replyText = "Keep this draft"
+        viewModel.composerState.attachments = [attachment]
+
+        let didSend = await viewModel.sendReply()
+
+        XCTAssertFalse(didSend)
+        XCTAssertNil(coordinator.lastRequest)
+        XCTAssertEqual(viewModel.replyText, "Keep this draft")
+        XCTAssertEqual(viewModel.composerState.attachments, [attachment])
+        XCTAssertNotNil(viewModel.sendErrorAlert)
     }
 
     private func waitUntil(

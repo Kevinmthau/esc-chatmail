@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23719" systemVersion="24A335" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="ListIdV2">
+    <entity name="Account" representedClassName="Account" syncable="YES">
+        <attribute name="aliases" optional="YES" attributeType="String"/>
+        <attribute name="email" attributeType="String"/>
+        <attribute name="historyId" optional="YES" attributeType="String"/>
+        <attribute name="id" attributeType="String"/>
+        <attribute name="sendAsAliasesJSON" optional="YES" attributeType="String"/>
+    </entity>
+    <entity name="Attachment" representedClassName="Attachment" syncable="YES">
+        <attribute name="byteSize" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="contentId" optional="YES" attributeType="String"/>
+        <attribute name="filename" attributeType="String"/>
+        <attribute name="height" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="id" optional="YES" attributeType="String"/>
+        <attribute name="localURL" optional="YES" attributeType="String"/>
+        <attribute name="mimeType" attributeType="String"/>
+        <attribute name="pageCount" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="previewURL" optional="YES" attributeType="String"/>
+        <attribute name="stateRaw" attributeType="String" defaultValueString="queued"/>
+        <attribute name="lastDownloadFailedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="width" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <relationship name="message" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Message" inverseName="attachments" inverseEntity="Message"/>
+    </entity>
+    <entity name="Conversation" representedClassName="Conversation" syncable="YES">
+        <attribute name="archivedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="displayName" optional="YES" attributeType="String"/>
+        <attribute name="hasInbox" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="hidden" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="inboxUnreadCount" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="keyHash" attributeType="String"/>
+        <attribute name="lastMessageDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="latestInboxDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="listId" optional="YES" attributeType="String"/>
+        <attribute name="muted" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="participantHash" optional="YES" attributeType="String"/>
+        <attribute name="pinned" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="snippet" optional="YES" attributeType="String"/>
+        <attribute name="type" attributeType="String"/>
+        <relationship name="messages" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="Message" inverseName="conversation" inverseEntity="Message"/>
+        <relationship name="participants" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="ConversationParticipant" inverseName="conversation" inverseEntity="ConversationParticipant"/>
+        <fetchIndex name="byKeyHashIndex">
+            <fetchIndexElement property="keyHash" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byLastMessageDateIndex">
+            <fetchIndexElement property="lastMessageDate" type="Binary" order="descending"/>
+        </fetchIndex>
+        <fetchIndex name="byPinnedAndDateIndex">
+            <fetchIndexElement property="pinned" type="Binary" order="descending"/>
+            <fetchIndexElement property="lastMessageDate" type="Binary" order="descending"/>
+        </fetchIndex>
+        <fetchIndex name="byHiddenIndex">
+            <fetchIndexElement property="hidden" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byArchivedAtIndex">
+            <fetchIndexElement property="archivedAt" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byParticipantHashAndArchivedIndex">
+            <fetchIndexElement property="participantHash" type="Binary" order="ascending"/>
+            <fetchIndexElement property="archivedAt" type="Binary" order="ascending"/>
+        </fetchIndex>
+    </entity>
+    <entity name="ConversationParticipant" representedClassName="ConversationParticipant" syncable="YES">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="role" attributeType="String"/>
+        <relationship name="conversation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Conversation" inverseName="participants" inverseEntity="Conversation"/>
+        <relationship name="person" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Person" inverseName="conversationParticipations" inverseEntity="Person"/>
+    </entity>
+    <entity name="Label" representedClassName="Label" syncable="YES">
+        <attribute name="id" attributeType="String"/>
+        <attribute name="name" attributeType="String"/>
+        <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="Message" inverseName="labels" inverseEntity="Message"/>
+    </entity>
+    <entity name="PendingAction" representedClassName="PendingAction" syncable="YES">
+        <attribute name="actionType" attributeType="String"/>
+        <attribute name="createdAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="messageId" optional="YES" attributeType="String"/>
+        <attribute name="conversationId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="payload" optional="YES" attributeType="String"/>
+        <attribute name="retryCount" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="lastAttempt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="status" attributeType="String" defaultValueString="pending"/>
+        <fetchIndex name="byStatusIndex">
+            <fetchIndexElement property="status" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byCreatedAtIndex">
+            <fetchIndexElement property="createdAt" type="Binary" order="ascending"/>
+        </fetchIndex>
+    </entity>
+    <entity name="OutboundSendMutationRecord" representedClassName="OutboundSendMutationRecord" syncable="YES">
+        <attribute name="archivedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="conversationId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="conversationURI" optional="YES" attributeType="String"/>
+        <attribute name="createdAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="displayName" optional="YES" attributeType="String"/>
+        <attribute name="hidden" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="id" attributeType="String"/>
+        <attribute name="lastMessageDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="newlyInsertedConversation" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="remoteCommittedMessageId" optional="YES" attributeType="String"/>
+        <attribute name="remoteCommittedThreadId" optional="YES" attributeType="String"/>
+        <attribute name="snippet" optional="YES" attributeType="String"/>
+        <fetchIndex name="byOutboundSendMessageIndex">
+            <fetchIndexElement property="id" type="Binary" order="ascending"/>
+        </fetchIndex>
+    </entity>
+    <entity name="Message" representedClassName="Message" syncable="YES">
+        <attribute name="bodyStorageURI" optional="YES" attributeType="String"/>
+        <attribute name="bodyText" optional="YES" attributeType="String"/>
+        <attribute name="chatPreviewText" optional="YES" attributeType="String"/>
+        <attribute name="cleanedSnippet" optional="YES" attributeType="String"/>
+        <attribute name="deliveredToAddress" optional="YES" attributeType="String"/>
+        <attribute name="gmThreadId" attributeType="String"/>
+        <attribute name="hasAttachments" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="id" attributeType="String"/>
+        <attribute name="internalDate" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="isFromMe" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="isNewsletter" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="isUnread" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="listId" optional="YES" attributeType="String"/>
+        <attribute name="localModifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="messageId" optional="YES" attributeType="String"/>
+        <attribute name="references" optional="YES" attributeType="String"/>
+        <attribute name="replyFromAddress" optional="YES" attributeType="String"/>
+        <attribute name="replyTo" optional="YES" attributeType="String"/>
+        <attribute name="senderEmail" optional="YES" attributeType="String"/>
+        <attribute name="senderName" optional="YES" attributeType="String"/>
+        <attribute name="snippet" optional="YES" attributeType="String"/>
+        <attribute name="subject" optional="YES" attributeType="String"/>
+        <relationship name="attachments" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="Attachment" inverseName="message" inverseEntity="Attachment"/>
+        <relationship name="conversation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Conversation" inverseName="messages" inverseEntity="Conversation"/>
+        <relationship name="labels" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="Label" inverseName="messages" inverseEntity="Label"/>
+        <relationship name="participants" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="MessageParticipant" inverseName="message" inverseEntity="MessageParticipant"/>
+        <fetchIndex name="byGmThreadIdIndex">
+            <fetchIndexElement property="gmThreadId" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byInternalDateIndex">
+            <fetchIndexElement property="internalDate" type="Binary" order="descending"/>
+        </fetchIndex>
+        <fetchIndex name="byIdIndex">
+            <fetchIndexElement property="id" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byIsUnreadIndex">
+            <fetchIndexElement property="isUnread" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byConversationAndDateIndex">
+            <fetchIndexElement property="conversation" type="Binary" order="ascending"/>
+            <fetchIndexElement property="internalDate" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="id"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+    <entity name="MessageParticipant" representedClassName="MessageParticipant" syncable="YES">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="kind" attributeType="String"/>
+        <relationship name="message" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Message" inverseName="participants" inverseEntity="Message"/>
+        <relationship name="person" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Person" inverseName="messageParticipations" inverseEntity="Person"/>
+    </entity>
+    <entity name="Person" representedClassName="Person" syncable="YES">
+        <attribute name="avatarURL" optional="YES" attributeType="String"/>
+        <attribute name="displayName" optional="YES" attributeType="String"/>
+        <attribute name="email" attributeType="String"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="conversationParticipations" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="ConversationParticipant" inverseName="person" inverseEntity="ConversationParticipant"/>
+        <relationship name="messageParticipations" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="MessageParticipant" inverseName="person" inverseEntity="MessageParticipant"/>
+        <fetchIndex name="byEmailIndex">
+            <fetchIndexElement property="email" type="Binary" order="ascending"/>
+        </fetchIndex>
+    </entity>
+    <entity name="AbandonedSyncMessage" representedClassName="AbandonedSyncMessage" syncable="YES">
+        <attribute name="abandonedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="gmailMessageId" attributeType="String"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="reason" optional="YES" attributeType="String"/>
+        <attribute name="retryCount" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <fetchIndex name="byGmailMessageIdIndex">
+            <fetchIndexElement property="gmailMessageId" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byAbandonedAtIndex">
+            <fetchIndexElement property="abandonedAt" type="Binary" order="descending"/>
+        </fetchIndex>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="gmailMessageId"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
+</model>
