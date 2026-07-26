@@ -289,11 +289,300 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
         await confirmInitialBottomAnchor(coordinator)
         XCTAssertTrue(coordinator.isReadyToShow)
+    }
+
+    func testPermanentlyOffscreenInitialAnchorStopsAfterBoundedRetriesAndReveals() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        for _ in 0..<2 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false
+            ) { step in
+                anchorSteps.append(step)
+            }
+            XCTAssertFalse(coordinator.isReadyToShow)
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
 
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: false
         ) { _ in
-            XCTFail("Initial anchor must not retry after confirmed reveal")
+            XCTFail("Exhausting initial retries must not issue a third scroll")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout retry -> bottom anchor"
+                )
+            ]
+        )
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail("Fallback reveal must not activate post-reveal following")
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("Fallback reveal must make initial anchoring terminal")
+        }
+    }
+
+    func testSynchronousVisibleGeometryDuringScrollPreservesConfirmationTimer() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var sleepCalls: [UInt64] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { nanoseconds in
+                sleepCalls.append(nanoseconds)
+            }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: true
+            ) { _ in
+                XCTFail("Reentrant visible geometry must not request another scroll")
+            }
+        }
+
+        await waitUntil {
+            sleepCalls.count == 1
+                && coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail("Stable visible geometry must not request another scroll")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            sleepCalls,
+            [UInt64(UIConfig.initialScrollDelay * 1_000_000_000)]
+        )
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testVisiblyConfirmedRevealFollowsLateOffscreenLayoutUntilUserScroll() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false
+            ) { _ in
+                XCTFail("A reentrant repeated offscreen callback must not scroll again")
+            }
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("Repeated offscreen geometry must not scroll again")
+        }
+
+        XCTAssertEqual(coordinator.initialAnchorGeometryCheckID, geometryCheckID)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                )
+            ]
+        )
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail("Returning onscreen must not request a scroll")
+        }
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("User interaction must cancel post-reveal bottom following")
+        }
+
+        XCTAssertEqual(anchorSteps.count, 1)
+    }
+
+    func testPostRevealBottomFollowExpiresAfterGracePeriod() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail("Returning onscreen must not request a scroll")
+        }
+
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("Expired post-reveal following must not override later scrolling")
+        }
+
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testPostRevealBottomFollowStopsOnDisappear() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleDisappear()
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("Disappearing must cancel post-reveal bottom following")
         }
     }
 
@@ -1867,7 +2156,11 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
     private func makeUnreadCoordinator(
         markConversationAsReadIfNeeded: @escaping () -> Void,
-        markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void
+        markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void,
+        sleep: @escaping ChatMessagesCoordinator.Sleep = { _ in },
+        now: @escaping ChatMessagesCoordinator.Now = {
+            ProcessInfo.processInfo.systemUptime
+        }
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
             loadLatestWindowIfNeeded: { _ in },
@@ -1881,7 +2174,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
             clearPersonCache: {},
-            sleep: { _ in }
+            sleep: sleep,
+            now: now
         )
     }
 

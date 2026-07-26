@@ -224,6 +224,22 @@ struct ChatMessagesView: View {
         bottomContentInset: CGFloat,
         scrollProxy: ScrollViewProxy
     ) -> some View {
+        GeometryReader { viewport in
+            messagesScrollViewContent(
+                displayedMessages: displayedMessages,
+                bottomContentInset: bottomContentInset,
+                viewportHeight: viewport.size.height,
+                scrollProxy: scrollProxy
+            )
+        }
+    }
+
+    private func messagesScrollViewContent(
+        displayedMessages: [ChatMessageRowModel],
+        bottomContentInset: CGFloat,
+        viewportHeight: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) -> some View {
         ScrollView {
             LazyVStack(spacing: 8) {
                 ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
@@ -264,10 +280,11 @@ struct ChatMessagesView: View {
             }
             .padding(.horizontal)
             .padding(.top, 8)
+            .frame(minHeight: viewportHeight, alignment: .bottom)
             .contentShape(Rectangle())
             .onTapGesture { isTextFieldFocused.wrappedValue = false }
         }
-        .defaultScrollAnchor(.bottom)
+        .defaultScrollAnchor(.top)
         .scrollDismissesKeyboard(.interactively)
         .simultaneousGesture(
             DragGesture(minimumDistance: 2)
