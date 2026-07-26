@@ -6,6 +6,21 @@ struct OutboundReplyContextBuilder {
     let viewContext: NSManagedObjectContext
     let replyMetadataBuilder: ReplyMetadataBuilder
     let replyHTMLContentLoader: HTMLContentLoader
+    private let loadUserAliases: @MainActor () async -> Set<String>
+
+    init(
+        viewContext: NSManagedObjectContext,
+        replyMetadataBuilder: ReplyMetadataBuilder,
+        replyHTMLContentLoader: HTMLContentLoader,
+        loadUserAliases: (@MainActor () async -> Set<String>)? = nil
+    ) {
+        self.viewContext = viewContext
+        self.replyMetadataBuilder = replyMetadataBuilder
+        self.replyHTMLContentLoader = replyHTMLContentLoader
+        self.loadUserAliases = loadUserAliases ?? {
+            await AliasManager.shared.getAliases(from: viewContext)
+        }
+    }
 
     func build(
         conversationObjectID: NSManagedObjectID,
@@ -21,14 +36,34 @@ struct OutboundReplyContextBuilder {
 
     func buildReplyMetadata(
         _ context: OutboundMessageRequest.ReplyContext
-    ) throws -> OutboundMessageRequest.ReplyMetadata {
-        guard let conversation = fetchConversation(objectID: context.conversationObjectID) else {
+    ) async throws -> OutboundMessageRequest.ReplyMetadata {
+        guard fetchConversation(objectID: context.conversationObjectID) != nil else {
             throw GmailSendService.SendError.conversationNotFound
         }
 
         let sendAsAliases = loadSendAsAliases()
-        let replyingTo = context.replyingToMessageObjectID.flatMap {
-            makeReplyTargetSnapshot(objectID: $0, sendAsAliases: sendAsAliases)
+        let userAliases = await loadUserAliases()
+        // Alias loading yields the MainActor. Re-resolve the anchor afterward
+        // so a conversation drained by sync during that suspension cannot
+        // supply stale recipients to the outbound request.
+        guard let conversation = fetchConversation(objectID: context.conversationObjectID),
+              conversation.managedObjectContext != nil,
+              !conversation.isDeleted,
+              !conversation.isRetainedDrainedShell else {
+            throw GmailSendService.SendError.replyTargetUnavailable
+        }
+        let replyingTo: ReplyTargetSnapshot?
+        if let replyingToMessageObjectID = context.replyingToMessageObjectID {
+            guard let snapshot = makeReplyTargetSnapshot(
+                objectID: replyingToMessageObjectID,
+                anchoredTo: conversation,
+                sendAsAliases: sendAsAliases
+            ) else {
+                throw GmailSendService.SendError.replyTargetUnavailable
+            }
+            replyingTo = snapshot
+        } else {
+            replyingTo = nil
         }
         return try replyMetadataBuilder.buildReplyMetadata(
             conversation: ReplyConversationSnapshot(
@@ -36,7 +71,8 @@ struct OutboundReplyContextBuilder {
                 sendAsAliases: sendAsAliases
             ),
             replyingTo: replyingTo,
-            sendAsAliases: sendAsAliases
+            sendAsAliases: sendAsAliases,
+            userAliases: userAliases
         )
     }
 
@@ -55,6 +91,7 @@ struct OutboundReplyContextBuilder {
 
     private func makeReplyTargetSnapshot(
         objectID: NSManagedObjectID,
+        anchoredTo conversation: Conversation,
         sendAsAliases: [SendAsAlias]
     ) -> ReplyTargetSnapshot? {
         let message: Message
@@ -70,6 +107,26 @@ struct OutboundReplyContextBuilder {
                 error: error
             )
             return nil
+        }
+
+        guard message.conversation?.objectID == conversation.objectID else {
+            Log.warning(
+                "Reply target no longer belongs to the anchored conversation",
+                category: .message
+            )
+            return nil
+        }
+
+        if conversation.conversationType == .list {
+            guard let conversationListId = conversation.listId,
+                  !conversationListId.isEmpty,
+                  message.listId == conversationListId else {
+                Log.warning(
+                    "Reply target List-Id no longer matches the anchored conversation",
+                    category: .message
+                )
+                return nil
+            }
         }
 
         return ReplyTargetSnapshot(

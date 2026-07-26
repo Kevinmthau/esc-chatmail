@@ -656,6 +656,24 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "Swift Evolution")
     }
 
+    func testUpdateDisplayNameOnly_listKeepsBareListIdFallbackTitle() throws {
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("thebrowser.substack.com")
+            .withDisplayName("thebrowser.substack.com")
+            .build(in: context)
+        addConversationParticipant(
+            email: "newsletter@thebrowser.com",
+            displayName: "The Browser Editors",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "thebrowser.substack.com")
+    }
+
     func testUpdateDisplayNameOnly_listWithoutTitleComputesSenderDerivedName() throws {
         // No List-Id phrase was available at creation: the normal participant
         // computation must fill the title in.

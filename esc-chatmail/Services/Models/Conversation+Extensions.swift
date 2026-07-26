@@ -58,4 +58,24 @@ extension Conversation {
     var isArchived: Bool {
         return archivedAt != nil
     }
+
+    /// A retained source shell left behind after every message reroutes away.
+    ///
+    /// These rows stay durable so pending actions and optimistic-send anchors
+    /// cannot be orphaned, but they are no longer valid reply destinations.
+    var isRetainedDrainedShell: Bool {
+        Self.isRetainedDrainedShell(
+            hidden: hidden,
+            archivedAt: archivedAt,
+            lastMessageDate: lastMessageDate
+        )
+    }
+
+    static func isRetainedDrainedShell(
+        hidden: Bool,
+        archivedAt: Date?,
+        lastMessageDate: Date?
+    ) -> Bool {
+        hidden && archivedAt != nil && lastMessageDate == nil
+    }
 }

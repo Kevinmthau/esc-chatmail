@@ -11,13 +11,43 @@ import Combine
 final class ChatComposerState: ObservableObject {
     @Published var replyText: String
     @Published var replyingTo: Message?
+    @Published var attachments: [Attachment]
 
     init(
         replyText: String = "",
-        replyingTo: Message? = nil
+        replyingTo: Message? = nil,
+        attachments: [Attachment] = []
     ) {
         self.replyText = replyText
         self.replyingTo = replyingTo
+        self.attachments = attachments
+    }
+
+    var hasDraftContent: Bool {
+        Self.hasDraftContent(
+            replyText: replyText,
+            hasAttachments: !attachments.isEmpty
+        )
+    }
+
+    var hasDraftContentPublisher: AnyPublisher<Bool, Never> {
+        Publishers.CombineLatest($replyText, $attachments)
+            .map { replyText, attachments in
+                Self.hasDraftContent(
+                    replyText: replyText,
+                    hasAttachments: !attachments.isEmpty
+                )
+            }
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+    }
+
+    static func hasDraftContent(
+        replyText: String,
+        hasAttachments: Bool
+    ) -> Bool {
+        !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            hasAttachments
     }
 }
 
@@ -81,11 +111,26 @@ final class ChatViewModel: ObservableObject {
     private let prefetchTaskManager = ViewModelTaskManager()
 
     var isEffectivelyOneToOneConversation: Bool {
+        if conversation.conversationType == .list {
+            return false
+        }
+
         if let effectiveParticipantCount {
             return effectiveParticipantCount <= 1
         }
 
         return conversation.conversationType == .oneToOne
+    }
+
+    var displayNameForNavigation: String? {
+        if conversation.conversationType == .list,
+           let storedDisplayName = conversation.displayName?
+               .trimmingCharacters(in: .whitespacesAndNewlines),
+           !storedDisplayName.isEmpty {
+            return storedDisplayName
+        }
+
+        return resolvedDisplayName
     }
 
     var emailReaderRoute: EmailReaderRoute? {
@@ -225,12 +270,21 @@ final class ChatViewModel: ObservableObject {
         replyingTo = lastMessage
     }
 
-    /// Updates replyingTo when a new message arrives with a different subject
+    /// Keeps the reply target anchored to this conversation as rows change.
+    ///
+    /// A legacy message can move to a List-Id conversation while this chat is
+    /// open. Replace that invalid target even when the replacement has the same
+    /// subject; otherwise outbound validation rejects the reply.
     func updateReplyingToIfNewSubject(lastMessage: Message?) {
-        guard let lastMessage = lastMessage else { return }
-
         // If user cleared replyingTo (tapped X), don't auto-update
         guard let currentReplyingTo = replyingTo else { return }
+
+        guard isValidReplyTarget(currentReplyingTo) else {
+            replyingTo = lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil }
+            return
+        }
+
+        guard let lastMessage, isValidReplyTarget(lastMessage) else { return }
 
         // If the new message has a different subject, update to it
         let currentSubject = currentReplyingTo.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -284,10 +338,22 @@ final class ChatViewModel: ObservableObject {
         destination = nil
     }
 
-    /// Sends a reply with optional attachments
-    func sendReply(with attachments: [Attachment]) async -> Bool {
+    /// Sends the current composer draft.
+    func sendReply() async -> Bool {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let attachments = composerState.attachments
         guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return false }
+
+        guard !isConversationDrained else {
+            Log.warning(
+                "Blocked reply send because the anchored conversation drained during rerouting",
+                category: .message
+            )
+            sendErrorAlert = ChatSendErrorAlert(
+                message: "This conversation moved while you were replying. Your draft and attachments are still here."
+            )
+            return false
+        }
 
         let result: OutboundMessageResult?
         do {
@@ -317,6 +383,41 @@ final class ChatViewModel: ObservableObject {
         // Clear composer immediately after optimistic insertion.
         replyText = ""
         replyingTo = nil
+        composerState.attachments = []
+        return true
+    }
+
+    static func isDrainedConversation(
+        hidden: Bool,
+        archivedAt: Date?,
+        lastMessageDate: Date?
+    ) -> Bool {
+        Conversation.isRetainedDrainedShell(
+            hidden: hidden,
+            archivedAt: archivedAt,
+            lastMessageDate: lastMessageDate
+        )
+    }
+
+    private var isConversationDrained: Bool {
+        conversation.isRetainedDrainedShell
+    }
+
+    private func isValidReplyTarget(_ message: Message) -> Bool {
+        guard message.managedObjectContext != nil,
+              !message.isDeleted,
+              message.conversation?.objectID == conversationObjectID else {
+            return false
+        }
+
+        if conversation.conversationType == .list {
+            guard let conversationListId = conversation.listId,
+                  !conversationListId.isEmpty,
+                  message.listId == conversationListId else {
+                return false
+            }
+        }
+
         return true
     }
 
@@ -374,9 +475,27 @@ final class ChatViewModel: ObservableObject {
                 )
             }
 
-            self.resolvedDisplayName = info.formattedDisplayName
+            self.resolvedDisplayName = Self.resolvedDisplayName(
+                conversationType: self.conversation.conversationType,
+                storedDisplayName: self.conversationDisplayNameHint,
+                participantDisplayName: info.formattedDisplayName
+            )
             self.effectiveParticipantCount = info.totalUniqueParticipants
         }
+    }
+
+    static func resolvedDisplayName(
+        conversationType: ConversationType,
+        storedDisplayName: String?,
+        participantDisplayName: String
+    ) -> String {
+        if conversationType == .list,
+           let storedDisplayName = storedDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !storedDisplayName.isEmpty {
+            return storedDisplayName
+        }
+
+        return participantDisplayName
     }
 
     private func makeForwardModeInput(_ message: Message) throws -> ComposeForwardModeContextBuilder.Input {

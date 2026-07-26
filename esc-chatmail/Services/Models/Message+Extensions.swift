@@ -121,6 +121,8 @@ extension Message {
     @NSManaged public var messageId: String?
     @NSManaged public var references: String?
     @NSManaged public var replyFromAddress: String?
+    /// Raw RFC Reply-To header. A single header may contain a mailbox list.
+    @NSManaged public var replyTo: String?
     @NSManaged public var localModifiedAt: Date?
     @NSManaged public var conversation: Conversation?
     @NSManaged public var labels: Set<Label>?

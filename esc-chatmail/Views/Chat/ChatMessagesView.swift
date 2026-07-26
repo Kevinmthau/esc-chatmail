@@ -93,6 +93,7 @@ struct ChatMessagesView: View {
     var body: some View {
         ScrollViewReader { proxy in
             let displayedMessages = scrollState.visibleMessages
+            let displayedMessageIDs = displayedMessages.map(\.objectID)
             let groupingMessages = senderGroupingMessages(for: displayedMessages)
             let groupingMessageIDs = groupingMessages.map(\.objectID)
             let keyboardOffset = keyboardAvoidanceOffset()
@@ -152,6 +153,9 @@ struct ChatMessagesView: View {
                     proxy: proxy
                 )
             }
+            .onChange(of: displayedMessageIDs) { _, _ in
+                validateReplyTargetAfterMessageCollectionChange()
+            }
             .onChange(of: scrollState.isInitialLoadComplete) { _, isComplete in
                 handleInitialWindowLoaded(isComplete: isComplete, proxy: proxy)
             }
@@ -177,6 +181,7 @@ struct ChatMessagesView: View {
                 )
             }
             .onChange(of: scrollState.totalMessageCount) { oldCount, newCount in
+                validateReplyTargetAfterMessageCollectionChange()
                 coordinator.handleMessageCountChange(
                     oldCount: oldCount,
                     newCount: newCount,
@@ -363,10 +368,6 @@ struct ChatMessagesView: View {
             totalMessageCount: scrollState.totalMessageCount,
             isInitialWindowLoaded: scrollState.isInitialLoadComplete
         ) { performBottomAnchor($0, proxy: proxy) }
-
-        if oldIDs.last != newIDs.last, scrollState.isShowingLatestWindow {
-            updateReplyTargetIfNewLatestMessageIsVisible()
-        }
     }
 
     private func handleInitialWindowLoaded(isComplete: Bool, proxy: ScrollViewProxy) {
@@ -387,8 +388,8 @@ struct ChatMessagesView: View {
             conversation: conversation,
             measuredHeight: $replyBarHeight,
             focusBinding: isTextFieldFocused
-        ) { attachments in
-            let didSend = await viewModel.sendReply(with: attachments)
+        ) {
+            let didSend = await viewModel.sendReply()
             if didSend {
                 coordinator.handleReplySendCompleted(
                     messageCount: totalMessageCountForCoordinator(),
@@ -503,8 +504,10 @@ struct ChatMessagesView: View {
         return viewModel.latestVisibleMessage()
     }
 
-    private func updateReplyTargetIfNewLatestMessageIsVisible() {
-        guard let latestMessage = latestMessageForCoordinator() else { return }
+    private func validateReplyTargetAfterMessageCollectionChange() {
+        let latestMessage = scrollState.isShowingLatestWindow
+            ? latestMessageForCoordinator()
+            : nil
         viewModel.updateReplyingToIfNewSubject(lastMessage: latestMessage)
     }
 
@@ -598,7 +601,7 @@ private struct ChatReplyComposerOverlay: View {
     let conversation: Conversation
     @Binding var measuredHeight: CGFloat
     var focusBinding: FocusState<Bool>.Binding
-    let onSend: ([Attachment]) async -> Bool
+    let onSend: () async -> Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -606,6 +609,7 @@ private struct ChatReplyComposerOverlay: View {
             ChatReplyBar(
                 replyText: $composerState.replyText,
                 replyingTo: $composerState.replyingTo,
+                attachments: $composerState.attachments,
                 conversation: conversation,
                 onSend: onSend,
                 focusBinding: focusBinding

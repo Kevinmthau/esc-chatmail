@@ -65,6 +65,63 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         )
     }
 
+    func testListConversationDoesNotPresentCreationSeededParticipantsAsMembership() {
+        XCTAssertFalse(
+            ChatView.allowsParticipantListPresentation(conversationType: .list)
+        )
+        XCTAssertTrue(
+            ChatView.allowsParticipantListPresentation(conversationType: .oneToOne)
+        )
+        XCTAssertTrue(
+            ChatView.allowsParticipantListPresentation(conversationType: .group)
+        )
+    }
+
+    func testChatDismissesOnlyHiddenArchivedConversationWithNoVisibleMessages() {
+        let archivedAt = Date()
+
+        XCTAssertTrue(
+            ChatView.shouldDismissDrainedConversation(
+                hidden: true,
+                archivedAt: archivedAt,
+                lastMessageDate: nil,
+                hasDraft: false
+            )
+        )
+        XCTAssertFalse(
+            ChatView.shouldDismissDrainedConversation(
+                hidden: false,
+                archivedAt: archivedAt,
+                lastMessageDate: nil,
+                hasDraft: false
+            )
+        )
+        XCTAssertFalse(
+            ChatView.shouldDismissDrainedConversation(
+                hidden: true,
+                archivedAt: nil,
+                lastMessageDate: nil,
+                hasDraft: false
+            )
+        )
+        XCTAssertFalse(
+            ChatView.shouldDismissDrainedConversation(
+                hidden: true,
+                archivedAt: archivedAt,
+                lastMessageDate: Date(),
+                hasDraft: false
+            )
+        )
+        XCTAssertFalse(
+            ChatView.shouldDismissDrainedConversation(
+                hidden: true,
+                archivedAt: archivedAt,
+                lastMessageDate: nil,
+                hasDraft: true
+            )
+        )
+    }
+
     private func storedPropertyLabels<T>(of value: T) -> Set<String> {
         Set(Mirror(reflecting: value).children.compactMap(\.label))
     }

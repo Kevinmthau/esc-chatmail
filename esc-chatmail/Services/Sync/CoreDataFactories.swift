@@ -199,13 +199,14 @@ struct ConversationFactory {
         conversation.participantHash = identity.participantHash
         conversation.conversationType = identity.type
         conversation.listId = identity.listId
-        // Seed the list title from the List-Id display phrase: the rollup
-        // display-name pass keeps a clean stored title for .list rows instead
-        // of recomputing one from the (varying) participants
-        if identity.listId != nil,
-           let listTitle = identity.listTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !listTitle.isEmpty {
-            conversation.displayName = listTitle
+        // A list title must never be derived from the first message's sender:
+        // senders vary across posts. Prefer the List-Id display phrase and use
+        // the normalized List-Id itself as a stable fallback for bare headers.
+        if let listId = identity.listId {
+            let listTitle = identity.listTitle?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            conversation.displayName = listTitle.flatMap { $0.isEmpty ? nil : $0 }
+                ?? listId
         }
         // New conversations start as active (not archived)
         conversation.archivedAt = nil

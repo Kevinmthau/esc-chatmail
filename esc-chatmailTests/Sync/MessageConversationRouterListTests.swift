@@ -102,6 +102,30 @@ final class MessageConversationRouterListTests: XCTestCase {
         XCTAssertEqual(states.first?.displayName, "Swift Weekly")
     }
 
+    func testBareListIdSeedsStableFallbackTitleOnDurableShellRow() async throws {
+        let syncContext = stack.newBackgroundContext()
+        try seedSystemLabels(in: syncContext)
+        let persister = makePersister()
+        var arrival = makeListArrival(
+            id: "msg-bare-list-id",
+            from: "First Sender <sender@example.com>",
+            date: 100
+        )
+        arrival.headers.listId = "<bare-list.example.com>"
+
+        try await persister.createNewMessage(
+            arrival,
+            labelIds: ["INBOX"],
+            myAliases: ["me@example.com"],
+            in: syncContext
+        )
+
+        // The serializer's shell save is the first row visible to the inbox.
+        // It must be list-stable before the first message rollup runs.
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.first?.displayName, "bare-list.example.com")
+    }
+
     func testArchivedListConversationReactivatesOnInboxArrival() async throws {
         let syncContext = stack.newBackgroundContext()
         try seedSystemLabels(in: syncContext)

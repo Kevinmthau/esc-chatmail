@@ -215,6 +215,98 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertTrue(context.hasChanges, "Anchored optimistic replies should stay unsaved until the background send path persists them.")
     }
 
+    func testCreateOptimisticMessage_inheritsListIdFromAnchoredConversation() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("list.example.com")
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["post@list.example.com"],
+            body: "anchored list reply",
+            subject: "Re: List topic",
+            threadId: "thread-list",
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: conversation.objectID)
+            )
+        )
+
+        let message = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(message.conversation?.objectID, conversation.objectID)
+        XCTAssertEqual(message.listId, "list.example.com")
+    }
+
+    func testCreateOptimisticMessage_rejectsRetainedDrainedConversationAnchor() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("list.example.com")
+            .withDisplayName("Moved List")
+            .archived()
+            .setHidden()
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        do {
+            _ = try await sendService.createOptimisticMessage(
+                to: ["post@list.example.com"],
+                body: "Must not send",
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+            XCTFail("Expected replyTargetUnavailable")
+        } catch {
+            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
+                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(try messageCount(in: context), 0)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+    }
+
+    func testCreateOptimisticMessage_rejectsDeletedRegisteredConversationAnchor() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Deleted reply target")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+        let reference = ConversationReference(objectID: conversation.objectID)
+
+        context.delete(conversation)
+        XCTAssertTrue(conversation.isDeleted)
+        XCTAssertTrue(
+            context.registeredObject(for: conversation.objectID) === conversation,
+            "The test must exercise the registered-object resolution path"
+        )
+
+        do {
+            _ = try await sendService.createOptimisticMessage(
+                to: ["friend@example.com"],
+                body: "Must not attach to a deleted target",
+                optimisticConversation: .existingConversation(reference)
+            )
+            XCTFail("Expected replyTargetUnavailable")
+        } catch {
+            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
+                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(try messageCount(in: context), 0)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+    }
+
     private func optimisticMutationRecordCount(in context: NSManagedObjectContext) throws -> Int {
         let request = OutboundSendMutationRecord.fetchRequest()
         request.includesPendingChanges = true

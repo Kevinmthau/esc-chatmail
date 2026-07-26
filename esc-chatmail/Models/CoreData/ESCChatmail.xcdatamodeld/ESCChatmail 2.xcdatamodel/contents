@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23719" systemVersion="24A335" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23719" systemVersion="24A335" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="ListIdV2">
     <entity name="Account" representedClassName="Account" syncable="YES">
         <attribute name="aliases" optional="YES" attributeType="String"/>
         <attribute name="email" attributeType="String"/>
@@ -33,6 +33,7 @@
         <attribute name="keyHash" attributeType="String"/>
         <attribute name="lastMessageDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="latestInboxDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="listId" optional="YES" attributeType="String"/>
         <attribute name="muted" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="participantHash" optional="YES" attributeType="String"/>
         <attribute name="pinned" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
@@ -119,10 +120,12 @@
         <attribute name="isFromMe" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="isNewsletter" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="isUnread" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="listId" optional="YES" attributeType="String"/>
         <attribute name="localModifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="messageId" optional="YES" attributeType="String"/>
         <attribute name="references" optional="YES" attributeType="String"/>
         <attribute name="replyFromAddress" optional="YES" attributeType="String"/>
+        <attribute name="replyTo" optional="YES" attributeType="String"/>
         <attribute name="senderEmail" optional="YES" attributeType="String"/>
         <attribute name="senderName" optional="YES" attributeType="String"/>
         <attribute name="snippet" optional="YES" attributeType="String"/>

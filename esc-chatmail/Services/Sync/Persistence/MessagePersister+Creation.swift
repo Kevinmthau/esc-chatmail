@@ -18,16 +18,44 @@ extension MessagePersister {
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async throws {
+        let remoteCommittedSendMutation = await remoteCommittedSendMutationResolutions(
+            for: [processedMessage.id],
+            in: context
+        )[processedMessage.id]
+        try await createNewMessage(
+            processedMessage,
+            labelIds: labelIds,
+            myAliases: myAliases,
+            modificationTransaction: modificationTransaction,
+            remoteCommittedSendMutation: remoteCommittedSendMutation,
+            in: context
+        )
+    }
+
+    func createNewMessage(
+        _ processedMessage: ProcessedMessage,
+        labelIds: Set<String>?,
+        myAliases: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction? = nil,
+        remoteCommittedSendMutation: RemoteCommittedSendMutationResolution?,
+        in context: NSManagedObjectContext
+    ) async throws {
         let saveHTML = self.saveHTML
         let canonicalHTML = processedMessage.canonicalContent?.html ?? processedMessage.htmlBody
         let savedBodyStorageURI = canonicalHTML.flatMap {
             saveHTML($0, processedMessage.id)?.absoluteString
         }
-        let conversationObjectID = try await conversationRouter.resolveConversationObjectID(
-            for: processedMessage,
-            myAliases: myAliases,
-            in: context
-        )
+        let conversationObjectID: NSManagedObjectID
+        if let anchoredListConversationObjectID =
+            remoteCommittedSendMutation?.anchoredListConversationObjectID {
+            conversationObjectID = anchoredListConversationObjectID
+        } else {
+            conversationObjectID = try await conversationRouter.resolveConversationObjectID(
+                for: processedMessage,
+                myAliases: myAliases,
+                in: context
+            )
+        }
 
         let result = try await context.perform { () throws -> MessageCreationResult in
             guard let conversation = try context.existingObject(with: conversationObjectID) as? Conversation else {
@@ -36,6 +64,16 @@ extension MessagePersister {
                         domain: "MessagePersister",
                         code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "Resolved conversation was unavailable in the sync context"]
+                    )
+                )
+            }
+            if remoteCommittedSendMutation?.anchoredListConversationObjectID != nil,
+               (conversation.isDeleted || conversation.isRetainedDrainedShell) {
+                throw CoreDataError.persistentFailure(
+                    NSError(
+                        domain: "MessagePersister",
+                        code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Anchored list conversation became unavailable before persistence"]
                     )
                 )
             }
@@ -53,13 +91,15 @@ extension MessagePersister {
             message.chatPreviewText = processedMessage.chatPreviewText
             message.deliveredToAddress = processedMessage.headers.deliveredToAddress
             message.replyFromAddress = processedMessage.headers.replyFromAddress
+            message.replyTo = processedMessage.headers.replyTo
             message.conversation = conversation
             message.internalDate = processedMessage.internalDate
             message.subject = processedMessage.headers.subject
             message.isFromMe = processedMessage.headers.isFromMe
             message.isUnread = processedMessage.isUnread
             message.isNewsletter = processedMessage.isNewsletter
-            message.listId = ParsedListId.parse(processedMessage.headers.listId)?.id
+            message.listId = remoteCommittedSendMutation?.anchoredListId
+                ?? ParsedListId.parse(processedMessage.headers.listId)?.id
             message.hasAttachments = processedMessage.hasAttachments
 
             message.setValue(processedMessage.headers.messageId, forKey: "messageId")
@@ -114,6 +154,14 @@ extension MessagePersister {
                 message,
                 in: conversation,
                 hasInboxLabel: hasInboxLabel
+            )
+            // The inserted message, its anchored list relationship/List-Id,
+            // and mutation-record deletion cross one context save together.
+            // A crash before that save leaves the durable route available for
+            // the next sync retry.
+            self.consumeRemoteCommittedSendMutation(
+                remoteCommittedSendMutation,
+                in: context
             )
 
             return MessageCreationResult(
