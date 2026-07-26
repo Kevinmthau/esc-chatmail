@@ -2289,9 +2289,30 @@ final class VirtualScrollStateTests: XCTestCase {
     func testBackgroundOffWindowReadMergeDoesNotReloadLatestWindow() async throws {
         stack = TestCoreDataStack(automaticallyMergesChanges: true)
         viewContext = stack.viewContext
-        let (conversation, messages) = try makeConversationWithMessages(count: 8)
-        messages[0].isUnread = true
-        try viewContext.save()
+        let viewContext = self.viewContext!
+        let fixture = try await viewContext.perform {
+            let conversation = ConversationBuilder()
+                .visible()
+                .recentlyActive()
+                .build(in: viewContext)
+            var messages: [Message] = []
+            for index in 0..<8 {
+                let message = MessageBuilder()
+                    .withId("virtual-scroll-\(index)")
+                    .withSubject("virtual-scroll-\(index)")
+                    .withDate(Date(timeIntervalSince1970: TimeInterval(index)))
+                    .inConversation(conversation)
+                    .build(in: viewContext)
+                messages.append(message)
+            }
+            messages[0].isUnread = true
+            try viewContext.save()
+            return (
+                conversationID: conversation.id.uuidString,
+                expectedIDs: Array(messages.suffix(3)).map(\.objectID),
+                offWindowMessageID: messages[0].objectID
+            )
+        }
 
         let configuration = VirtualScrollConfiguration(
             visibleItemCount: 3,
@@ -2310,7 +2331,7 @@ final class VirtualScrollStateTests: XCTestCase {
             )
         }
         let state = VirtualScrollState(
-            conversationId: conversation.id.uuidString,
+            conversationId: fixture.conversationID,
             configuration: configuration,
             initialWindowPosition: .end,
             viewContext: viewContext,
@@ -2319,31 +2340,36 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         defer { state.cleanup() }
 
-        let expectedIDs = Array(messages.suffix(3)).map(\.objectID)
         await waitUntil {
-            state.visibleMessages.map(\.objectID) == expectedIDs &&
+            state.visibleMessages.map(\.objectID) == fixture.expectedIDs &&
                 !state.isLoadingMore
         }
 
-        let offWindowMessageID = messages[0].objectID
         let backgroundContext = stack.newBackgroundContext()
         try await backgroundContext.perform {
             let message = try XCTUnwrap(
-                backgroundContext.existingObject(with: offWindowMessageID) as? Message
+                backgroundContext.existingObject(
+                    with: fixture.offWindowMessageID
+                ) as? Message
             )
             message.isUnread = false
             message.localModifiedAt = Date()
             try backgroundContext.save()
         }
 
-        await waitUntil {
-            messages[0].isUnread == false
+        await waitUntilInContext(viewContext) { context in
+            guard let message = try? context.existingObject(
+                with: fixture.offWindowMessageID
+            ) as? Message else {
+                return false
+            }
+            return message.isUnread == false
         }
         try? await Task.sleep(nanoseconds: 150_000_000)
 
         let nonemptyRanges = await requestedRanges.snapshot().filter { !$0.isEmpty }
         XCTAssertEqual(nonemptyRanges, [5..<8])
-        XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), fixture.expectedIDs)
         XCTAssertEqual(state.totalMessageCount, 8)
         XCTAssertEqual(state.initialLoadPhase, .loaded)
     }
@@ -2351,12 +2377,34 @@ final class VirtualScrollStateTests: XCTestCase {
     func testPostSyncReconcilesOffWindowMessageMovedOutOfConversation() async throws {
         stack = TestCoreDataStack(automaticallyMergesChanges: true)
         viewContext = stack.viewContext
-        let (conversation, messages) = try makeConversationWithMessages(count: 5)
-        let otherConversation = ConversationBuilder()
-            .visible()
-            .recentlyActive()
-            .build(in: viewContext)
-        try viewContext.save()
+        let viewContext = self.viewContext!
+        let fixture = try await viewContext.perform {
+            let conversation = ConversationBuilder()
+                .visible()
+                .recentlyActive()
+                .build(in: viewContext)
+            var messages: [Message] = []
+            for index in 0..<5 {
+                let message = MessageBuilder()
+                    .withId("virtual-scroll-\(index)")
+                    .withSubject("virtual-scroll-\(index)")
+                    .withDate(Date(timeIntervalSince1970: TimeInterval(index)))
+                    .inConversation(conversation)
+                    .build(in: viewContext)
+                messages.append(message)
+            }
+            let destination = ConversationBuilder()
+                .visible()
+                .recentlyActive()
+                .build(in: viewContext)
+            try viewContext.save()
+            return (
+                conversationID: conversation.id.uuidString,
+                expectedIDs: Array(messages.suffix(3)).map(\.objectID),
+                movedMessageID: messages[0].objectID,
+                destinationID: destination.objectID
+            )
+        }
 
         let configuration = VirtualScrollConfiguration(
             visibleItemCount: 3,
@@ -2366,7 +2414,7 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let stack = self.stack!
         let state = VirtualScrollState(
-            conversationId: conversation.id.uuidString,
+            conversationId: fixture.conversationID,
             configuration: configuration,
             initialWindowPosition: .end,
             viewContext: viewContext,
@@ -2374,33 +2422,41 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         defer { state.cleanup() }
 
-        let expectedIDs = Array(messages.suffix(3)).map(\.objectID)
         await waitUntil {
-            state.visibleMessages.map(\.objectID) == expectedIDs &&
+            state.visibleMessages.map(\.objectID) == fixture.expectedIDs &&
                 state.totalMessageCount == 5
         }
 
-        let movedMessageID = messages[0].objectID
-        let destinationID = otherConversation.objectID
         let backgroundContext = stack.newBackgroundContext()
         try await backgroundContext.perform {
             let movedMessage = try XCTUnwrap(
-                backgroundContext.existingObject(with: movedMessageID) as? Message
+                backgroundContext.existingObject(
+                    with: fixture.movedMessageID
+                ) as? Message,
+                "Expected the saved source message to materialize as Message"
             )
             let destination = try XCTUnwrap(
-                backgroundContext.existingObject(with: destinationID) as? Conversation
+                backgroundContext.existingObject(
+                    with: fixture.destinationID
+                ) as? Conversation,
+                "Expected the saved destination to materialize as Conversation"
             )
             movedMessage.conversation = destination
             try backgroundContext.save()
         }
 
-        await waitUntil {
-            messages[0].conversation?.objectID == destinationID
+        await waitUntilInContext(viewContext) { context in
+            guard let message = try? context.existingObject(
+                with: fixture.movedMessageID
+            ) as? Message else {
+                return false
+            }
+            return message.conversation?.objectID == fixture.destinationID
         }
         NotificationCenter.default.post(name: .syncCompleted, object: nil)
 
         await waitUntil {
-            state.visibleMessages.map(\.objectID) == expectedIDs &&
+            state.visibleMessages.map(\.objectID) == fixture.expectedIDs &&
                 state.totalMessageCount == 4 &&
                 state.isShowingLatestWindow &&
                 !state.isLoadingMore
@@ -3111,6 +3167,26 @@ final class VirtualScrollStateTests: XCTestCase {
         }
 
         XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+
+    private func waitUntilInContext(
+        _ context: NSManagedObjectContext,
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping (NSManagedObjectContext) -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if await context.perform({ condition(context) }) {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+
+        XCTFail("Timed out waiting for context condition", file: file, line: line)
     }
 
     private func waitUntilRecordedRangeCount(

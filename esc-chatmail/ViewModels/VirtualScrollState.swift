@@ -1936,7 +1936,13 @@ final class VirtualScrollState: ObservableObject {
             if messageConversation.objectID == conversationObjectID {
                 return true
             }
-            if messageConversation.id == conversationUUID {
+            // A sibling-context merge can publish the relationship before
+            // all required attributes on its destination are materialized.
+            // Reading the nonoptional Swift property in that window traps
+            // while bridging nil; optional KVC keeps the observer resilient.
+            if let messageConversationID =
+                messageConversation.value(forKey: "id") as? UUID,
+               messageConversationID == conversationUUID {
                 return true
             }
         }
@@ -1947,8 +1953,14 @@ final class VirtualScrollState: ObservableObject {
         if let committedConversation = message.committedValues(
             forKeys: ["conversation"]
         )["conversation"] as? Conversation {
-            return committedConversation.objectID == conversationObjectID ||
-                committedConversation.id == conversationUUID
+            if committedConversation.objectID == conversationObjectID {
+                return true
+            }
+            if let committedConversationID =
+                committedConversation.value(forKey: "id") as? UUID,
+               committedConversationID == conversationUUID {
+                return true
+            }
         }
 
         return false
