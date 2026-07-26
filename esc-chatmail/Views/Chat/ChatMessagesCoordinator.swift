@@ -10,6 +10,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         static let initialBottomAnchor = "initialBottomAnchor"
         static let initialGeometryCheck = "initialGeometryCheck"
         static let latestWindow = "latestWindow"
+        static let postRevealGeometryCheck = "postRevealGeometryCheck"
     }
 
     private enum InitialRevealState: Equatable {
@@ -28,11 +29,14 @@ final class ChatMessagesCoordinator: ObservableObject {
     private enum PostRevealBottomFollowState {
         case inactive
         case following(deadline: TimeInterval)
-        case scrolling(deadline: TimeInterval)
+        case checkingAfterScroll(deadline: TimeInterval, scrollAttempts: Int)
+        case waitingForGrowth(deadline: TimeInterval)
     }
 
     private static let maximumInitialScrollAttempts = 2
+    private static let maximumPostRevealScrollAttempts = 2
     private static let postRevealBottomFollowGracePeriod: TimeInterval = 3.0
+    private static let geometryChangeTolerance: CGFloat = 0.5
 
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
@@ -68,6 +72,9 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let taskManager = ViewModelTaskManager()
     private var initialRevealState: InitialRevealState = .waitingForRows
     private var isTrackedBottomAnchorVisible = false
+    private var trackedContentMinY: CGFloat?
+    private var trackedContentHeight: CGFloat?
+    private var trackedViewportHeight: CGFloat?
     private var postRevealBottomFollowState: PostRevealBottomFollowState = .inactive
     private var hasCapturedInitialUnreadSnapshot = false
     private var isVisible = false
@@ -324,10 +331,50 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// as a fallback after both attempts so a bad geometry signal cannot block the chat.
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
-        scrollAction: BottomAnchorAction
+        contentMinY: CGFloat? = nil,
+        contentHeight: CGFloat? = nil,
+        viewportHeight: CGFloat? = nil,
+        scrollAction: @escaping BottomAnchorAction
     ) {
-        let wasBottomAnchorVisible = isTrackedBottomAnchorVisible
+        let previousContentMinY = trackedContentMinY
+        let previousContentHeight = trackedContentHeight
+        let previousViewportHeight = trackedViewportHeight
         isTrackedBottomAnchorVisible = isBottomAnchorVisible
+        if let contentMinY {
+            trackedContentMinY = contentMinY
+        }
+        if let contentHeight {
+            trackedContentHeight = contentHeight
+        }
+        if let viewportHeight {
+            trackedViewportHeight = viewportHeight
+        }
+
+        let contentHeightIncreased: Bool
+        if let previousContentHeight, let contentHeight {
+            contentHeightIncreased =
+                contentHeight > previousContentHeight + Self.geometryChangeTolerance
+        } else {
+            contentHeightIncreased = false
+        }
+
+        // The content frame moves down when the offset moves toward older messages,
+        // while a pure height increase leaves its origin unchanged.
+        let contentMovedTowardHistory: Bool
+        if let previousContentMinY, let contentMinY {
+            contentMovedTowardHistory =
+                contentMinY > previousContentMinY + Self.geometryChangeTolerance
+        } else {
+            contentMovedTowardHistory = false
+        }
+
+        let viewportHeightDecreased: Bool
+        if let previousViewportHeight, let viewportHeight {
+            viewportHeightDecreased =
+                viewportHeight < previousViewportHeight - Self.geometryChangeTolerance
+        } else {
+            viewportHeightDecreased = false
+        }
 
         switch postRevealBottomFollowState {
         case .following(let deadline):
@@ -335,26 +382,56 @@ final class ChatMessagesCoordinator: ObservableObject {
                 postRevealBottomFollowState = .inactive
                 return
             }
-            guard wasBottomAnchorVisible,
-                  !isBottomAnchorVisible else {
+            guard !isBottomAnchorVisible else { return }
+
+            if contentMovedTowardHistory {
+                cancelPostRevealBottomFollowForNonLayoutScroll()
                 return
             }
+            guard contentHeightIncreased || viewportHeightDecreased else { return }
 
-            postRevealBottomFollowState = .scrolling(deadline: deadline)
-            scrollAction(
-                BottomAnchorStep(
-                    delay: 0,
-                    animated: false,
-                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
-                )
+            requestPostRevealBottomScroll(
+                deadline: deadline,
+                scrollAttempts: 1,
+                scrollAction: scrollAction
             )
-            if case .scrolling(let currentDeadline) = postRevealBottomFollowState {
-                postRevealBottomFollowState = .following(deadline: currentDeadline)
+            return
+        case .checkingAfterScroll(let deadline, _):
+            guard now() < deadline else {
+                postRevealBottomFollowState = .inactive
+                taskManager.cancel(TaskKey.postRevealGeometryCheck)
+                return
+            }
+            if isBottomAnchorVisible {
+                postRevealBottomFollowState = .following(deadline: deadline)
+                taskManager.cancel(TaskKey.postRevealGeometryCheck)
+                return
+            }
+            guard !contentMovedTowardHistory else {
+                cancelPostRevealBottomFollowForNonLayoutScroll()
+                return
             }
             return
-        case .scrolling(let deadline):
-            if now() >= deadline {
+        case .waitingForGrowth(let deadline):
+            guard now() < deadline else {
                 postRevealBottomFollowState = .inactive
+                return
+            }
+            if isBottomAnchorVisible {
+                postRevealBottomFollowState = .following(deadline: deadline)
+                return
+            }
+            if contentMovedTowardHistory {
+                cancelPostRevealBottomFollowForNonLayoutScroll()
+                return
+            }
+            if contentHeightIncreased || viewportHeightDecreased {
+                requestPostRevealBottomScroll(
+                    deadline: deadline,
+                    scrollAttempts: 1,
+                    scrollAction: scrollAction
+                )
+                return
             }
             return
         case .inactive:
@@ -415,13 +492,14 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleUserScrollInteraction() {
         let wasFollowingPostRevealBottom: Bool
         switch postRevealBottomFollowState {
-        case .following, .scrolling:
+        case .following, .checkingAfterScroll, .waitingForGrowth:
             wasFollowingPostRevealBottom = true
         case .inactive:
             wasFollowingPostRevealBottom = false
         }
         postRevealBottomFollowState = .inactive
         taskManager.cancel(TaskKey.initialGeometryCheck)
+        taskManager.cancel(TaskKey.postRevealGeometryCheck)
 
         guard case .pending = initialRevealState else {
             if wasFollowingPostRevealBottom {
@@ -804,6 +882,83 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
             self.initialAnchorGeometryCheckID = UUID()
         }
+    }
+
+    private func requestPostRevealBottomScroll(
+        deadline: TimeInterval,
+        scrollAttempts: Int,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        guard now() < deadline else {
+            postRevealBottomFollowState = .inactive
+            return
+        }
+
+        postRevealBottomFollowState = .checkingAfterScroll(
+            deadline: deadline,
+            scrollAttempts: scrollAttempts
+        )
+        taskManager.run(TaskKey.postRevealGeometryCheck) { [weak self, sleep] in
+            await sleep(UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
+            guard !Task.isCancelled,
+                  let self,
+                  case .checkingAfterScroll(let currentDeadline, let currentAttempts) =
+                    self.postRevealBottomFollowState,
+                  currentDeadline == deadline,
+                  currentAttempts == scrollAttempts else {
+                return
+            }
+            self.validatePostRevealBottomScroll(
+                deadline: currentDeadline,
+                scrollAttempts: currentAttempts,
+                scrollAction: scrollAction
+            )
+        }
+        scrollAction(
+            BottomAnchorStep(
+                delay: 0,
+                animated: false,
+                logMessage: scrollAttempts == 1
+                    ? "ChatView post-reveal layout scroll -> bottom anchor"
+                    : "ChatView post-reveal layout retry -> bottom anchor"
+            )
+        )
+    }
+
+    private func cancelPostRevealBottomFollowForNonLayoutScroll() {
+        postRevealBottomFollowState = .inactive
+        taskManager.cancel(TaskKey.postRevealGeometryCheck)
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "ChatView post-reveal bottom follow cancelled by non-layout scroll",
+            category: .ui
+        )
+    }
+
+    private func validatePostRevealBottomScroll(
+        deadline: TimeInterval,
+        scrollAttempts: Int,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        guard now() < deadline else {
+            postRevealBottomFollowState = .inactive
+            return
+        }
+        guard !isTrackedBottomAnchorVisible else {
+            postRevealBottomFollowState = .following(deadline: deadline)
+            return
+        }
+        guard scrollAttempts < Self.maximumPostRevealScrollAttempts else {
+            postRevealBottomFollowState = .waitingForGrowth(deadline: deadline)
+            return
+        }
+
+        requestPostRevealBottomScroll(
+            deadline: deadline,
+            scrollAttempts: scrollAttempts + 1,
+            scrollAction: scrollAction
+        )
     }
 
     private func completeInitialReveal(wasVisiblyConfirmed: Bool) {
