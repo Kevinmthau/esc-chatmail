@@ -47,6 +47,7 @@ struct ChatView: View {
             conversation: conversation,
             viewModel: viewModel,
             chatDependencies: chatDependencies,
+            isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
             isChatActiveAndUncovered: isChatActiveAndUncovered,
             isTextFieldFocused: $isTextFieldFocused,
             onOpenFullMessage: { messageObjectID, source in

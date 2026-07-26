@@ -345,10 +345,12 @@ final class IncrementalSyncOrchestrator {
                 failedIds: abandonedOutcome.failedIds
             )
 
-            NotificationCenter.default.post(name: .syncCompleted, object: nil)
             let cleanupTimer = timing.start("incrementalCleanup")
             await dataCleanupService.runIncrementalCleanup()
             timing.finish(cleanupTimer)
+            // Publish only after cleanup has finished mutating the message
+            // dataset so observers reconcile against the final sync state.
+            NotificationCenter.default.post(name: .syncCompleted, object: nil)
             timing.finishRun(
                 outcome: "success newMessages=\(fetchResult.successfulCount) labelRecords=\(historyResult.records.count) warnings=\(fetchResult.hasFailures)"
             )

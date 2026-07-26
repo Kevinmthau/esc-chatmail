@@ -1,4 +1,5 @@
 import CoreData
+import Combine
 import XCTest
 @testable import esc_chatmail
 
@@ -39,6 +40,48 @@ final class ChatViewModelTests: XCTestCase {
         participant.person = person
         participant.conversation = conversation
         return participant
+    }
+
+    func testComposerChangesPublishOnlyComposerState() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Reply Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let replyTarget = MessageBuilder()
+            .withId("reply-target")
+            .inConversation(conversation)
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        var composerChangeCount = 0
+        var viewModelChangeCount = 0
+        let composerCancellable = viewModel.composerState.objectWillChange.sink {
+            composerChangeCount += 1
+        }
+        let viewModelCancellable = viewModel.objectWillChange.sink {
+            viewModelChangeCount += 1
+        }
+
+        viewModel.replyText = "Draft reply"
+        viewModel.replyingTo = replyTarget
+
+        XCTAssertEqual(composerChangeCount, 2)
+        XCTAssertEqual(viewModelChangeCount, 0)
+        XCTAssertEqual(viewModel.composerState.replyText, "Draft reply")
+        XCTAssertEqual(viewModel.composerState.replyingTo, replyTarget)
+
+        viewModel.resolvedDisplayName = "Friend"
+
+        XCTAssertEqual(composerChangeCount, 2)
+        XCTAssertEqual(viewModelChangeCount, 1)
+        withExtendedLifetime((composerCancellable, viewModelCancellable)) {}
     }
 
     func testBackgroundReadLeavesLaterUnreadCountDurableForBlueDot() async throws {
