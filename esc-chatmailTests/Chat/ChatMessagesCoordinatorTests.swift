@@ -954,6 +954,90 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
     }
 
+    func testUserScrollDuringInitialRevealCancelsLatestWindowLoads() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com",
+            "fourth@example.com"
+        ])
+        let visibleRows = messages.prefix(3).map { ChatMessageRowModelMapper.map($0) }
+        let initialLoadStarted = expectation(description: "Initial latest-window load started")
+        let refreshLoadStarted = expectation(description: "Arrival latest-window load started")
+        let loadsCancelled = expectation(description: "Latest-window loads cancelled")
+        loadsCancelled.expectedFulfillmentCount = 2
+        var cancelledKnownCounts: [Int?] = []
+        var completedKnownCounts: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                if knownTotalCount == nil {
+                    initialLoadStarted.fulfill()
+                } else if knownTotalCount == 4 {
+                    refreshLoadStarted.fulfill()
+                }
+
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    completedKnownCounts.append(knownTotalCount)
+                } catch {
+                    guard Task.isCancelled else { return }
+                    cancelledKnownCounts.append(knownTotalCount)
+                    loadsCancelled.fulfill()
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 3,
+            lastMessage: messages[2],
+            visibleMessages: visibleRows,
+            senderGroupingMessages: visibleRows,
+            totalMessageCount: 3,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [initialLoadStarted], timeout: 1)
+
+        coordinator.handleMessageCountChange(
+            oldCount: 3,
+            newCount: 4,
+            lastMessage: messages[3],
+            visibleMessages: visibleRows,
+            totalMessageCount: 4,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [refreshLoadStarted], timeout: 1)
+
+        coordinator.handleUserScrollInteraction()
+        await fulfillment(of: [loadsCancelled], timeout: 1)
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertEqual(
+            cancelledKnownCounts.map { $0 ?? -1 }.sorted(),
+            [-1, 4]
+        )
+        XCTAssertTrue(completedKnownCounts.isEmpty)
+    }
+
     func testBottomMovingOffscreenDuringStabilizationReanchorsAndRequiresFreshConfirmation() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",

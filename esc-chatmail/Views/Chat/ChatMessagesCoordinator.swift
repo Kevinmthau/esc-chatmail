@@ -509,7 +509,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
         postRevealBottomFollowState = .inactive
         taskManager.cancel(TaskKey.bottomAnchor)
+        taskManager.cancel(TaskKey.initialBottomAnchor)
         taskManager.cancel(TaskKey.initialGeometryCheck)
+        taskManager.cancel(TaskKey.latestWindow)
         taskManager.cancel(TaskKey.postRevealGeometryCheck)
 
         guard case .pending = initialRevealState else {
