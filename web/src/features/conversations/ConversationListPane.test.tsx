@@ -275,6 +275,120 @@ describe('ConversationListPane multi-select', () => {
     expect(screen.getByText('0 Selected')).toBeTruthy()
   })
 
+  it('Escape already claimed by an overlay (defaultPrevented) keeps select mode', async () => {
+    renderPane()
+    await enterSelectMode()
+    fireEvent.click(optionNamed('Alice Chen'))
+    await screen.findByText('1 Selected')
+
+    // A Radix-style overlay dismisses on Escape from a capture-phase document
+    // listener and preventDefaults; the selection's bubble-phase listener must
+    // then leave the mode (and the selection) alone.
+    const claim = (event: KeyboardEvent): void => {
+      event.preventDefault()
+    }
+    document.addEventListener('keydown', claim, { capture: true })
+    try {
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+    } finally {
+      document.removeEventListener('keydown', claim, { capture: true })
+    }
+
+    expect(screen.getByText('1 Selected')).toBeTruthy()
+    expect(optionNamed('Alice Chen').getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('Escape defers to an open modal dialog', async () => {
+    renderPane()
+    await enterSelectMode()
+    fireEvent.click(optionNamed('Alice Chen'))
+    await screen.findByText('1 Selected')
+
+    const dialog = document.createElement('dialog')
+    dialog.setAttribute('open', '')
+    document.body.append(dialog)
+    try {
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+    } finally {
+      dialog.remove()
+    }
+
+    expect(screen.getByText('1 Selected')).toBeTruthy()
+  })
+
+  it('a batch that fails after Cancel does not resurrect the dead session', async () => {
+    let rejectArchive: ((error: Error) => void) | undefined
+    vi.mocked(archiveConversation).mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectArchive = reject
+        }),
+    )
+    renderPane()
+    await enterSelectMode()
+    fireEvent.click(optionNamed('Alice Chen'))
+    await screen.findByText('1 Selected')
+    fireEvent.click(screen.getByRole('button', { name: 'Archive 1 conversation' }))
+
+    // Cancel while the archive is still in flight…
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await screen.findByRole('button', { name: 'Select' })
+
+    // …then it fails. The stale outcome must not surface anywhere.
+    await act(async () => {
+      rejectArchive?.(new Error('offline'))
+      await Promise.resolve()
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    // A fresh session starts empty, with no phantom selection or notice.
+    await enterSelectMode()
+    expect(screen.getByText('0 Selected')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(optionNamed('Alice Chen').getAttribute('aria-selected')).toBe('false')
+  })
+
+  it('a batch that finishes after Cancel and re-entry leaves the new session alone', async () => {
+    let resolveArchive: (() => void) | undefined
+    vi.mocked(archiveConversation).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveArchive = resolve
+        }),
+    )
+    renderPane()
+    await enterSelectMode()
+    fireEvent.click(optionNamed('Alice Chen'))
+    await screen.findByText('1 Selected')
+    fireEvent.click(screen.getByRole('button', { name: 'Archive 1 conversation' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await screen.findByRole('button', { name: 'Select' })
+    await enterSelectMode()
+    fireEvent.click(optionNamed('Chloe Park'))
+    await screen.findByText('1 Selected')
+
+    // The old batch completing cleanly must not force-exit the new session or
+    // touch its selection.
+    await act(async () => {
+      resolveArchive?.()
+      await Promise.resolve()
+    })
+    expect(screen.getByText('1 Selected')).toBeTruthy()
+    expect(optionNamed('Chloe Park').getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy()
+  })
+
+  it('moves focus to the heading on entry and back to Select on exit', async () => {
+    renderPane()
+    await enterSelectMode()
+    expect(document.activeElement?.textContent).toBe('0 Selected')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    const select = await screen.findByRole('button', { name: 'Select' })
+    expect(document.activeElement).toBe(select)
+  })
+
   it('clears a failure notice when select mode is left', async () => {
     vi.mocked(archiveConversation).mockRejectedValue(new Error('offline'))
     renderPane()

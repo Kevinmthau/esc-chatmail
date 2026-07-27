@@ -86,7 +86,14 @@ export function ConversationList({ filter, demo = false }: ConversationListProps
       aria-multiselectable={selecting ? true : undefined}
       aria-label={selecting ? 'Conversations' : undefined}
     >
-      <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+      <div
+        // Like the positioning wrappers below, the sizing block must vanish
+        // from the accessibility tree so options are the listbox's only
+        // meaningful descendants.
+        role={selecting ? 'presentation' : undefined}
+        className="relative w-full"
+        style={{ height: virtualizer.getTotalSize() }}
+      >
         {items.map((item) => {
           const conversation = rows[item.index]
           if (conversation === undefined) return null

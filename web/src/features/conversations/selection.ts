@@ -124,12 +124,16 @@ export function useConversationSelectionState(): ConversationSelection {
     )
   }, [selectableIds])
 
-  // Escape leaves select mode — unless a modal dialog is open, which owns the
-  // key for itself (the reader and compose both render a native <dialog>).
+  // Escape leaves select mode — unless something else already owns the key:
+  // a modal <dialog> claims it outright (the reader and compose both render
+  // one), and dismissable overlays (the Radix menus) preventDefault from a
+  // capture-phase listener before this bubble-phase one runs, so one Escape
+  // must close the overlay without also wiping the selection.
   useEffect(() => {
     if (!selecting) return
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
+      if (event.defaultPrevented) return
       if (document.querySelector('dialog[open]') !== null) return
       exitSelectMode()
     }

@@ -1,5 +1,5 @@
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { isDemoMode } from '@/app/boot'
 import { GlassBar } from '@/components/ui/GlassBar'
 import { IconButton } from '@/components/ui/IconButton'
@@ -66,10 +66,37 @@ function ConversationListPaneContent() {
   const [runningBatch, setRunningBatch] = useState<BatchKind | null>(null)
   const [batchError, setBatchError] = useState<string | null>(null)
 
+  // Cancel and Escape stay live while a batch runs, so a batch can resolve
+  // after its select-mode session ended — possibly after a NEW session began.
+  // The counter bumps on every mode flip, during render so the flip is visible
+  // before any awaited continuation runs; the batch tail compares it and drops
+  // its outcome rather than resurrect a stale selection or exit the new one.
+  const selectSessionRef = useRef(0)
+  const prevSelectingRef = useRef(selecting)
+  if (prevSelectingRef.current !== selecting) {
+    selectSessionRef.current += 1
+    prevSelectingRef.current = selecting
+  }
+
   // Leaving select mode by any route (Cancel, Escape, a completed action)
   // clears a stale failure notice.
   useEffect(() => {
     if (!selecting) setBatchError(null)
+  }, [selecting])
+
+  // Mode transitions unmount whichever control had focus (Select ↔ Cancel, a
+  // finished batch's capsule), which would drop keyboard focus to <body>.
+  // Hand it to the heading on entry and back to Select on exit. Transition
+  // detection is separate from selectSessionRef because effects run after the
+  // render-time ref has already flipped.
+  const selectButtonRef = useRef<HTMLButtonElement>(null)
+  const selectedHeadingRef = useRef<HTMLHeadingElement>(null)
+  const focusSelectingRef = useRef(selecting)
+  useEffect(() => {
+    if (focusSelectingRef.current === selecting) return
+    focusSelectingRef.current = selecting
+    if (selecting) selectedHeadingRef.current?.focus()
+    else selectButtonRef.current?.focus()
   }, [selecting])
 
   const openCompose = () => {
@@ -86,12 +113,17 @@ function ConversationListPaneContent() {
   ): Promise<void> => {
     const ids = [...selectedIds]
     if (ids.length === 0 || runningBatch !== null) return
+    const session = selectSessionRef.current
     setRunningBatch(kind)
     setBatchError(null)
 
     const { failed } = await runBatchAction(ids, apply)
 
     setRunningBatch(null)
+    // The session this batch belonged to is over — the user cancelled while it
+    // ran, and may have started a fresh selection that this outcome must not
+    // clobber.
+    if (selectSessionRef.current !== session) return
     if (failed.length === 0) {
       exitSelectMode()
       return
@@ -132,7 +164,12 @@ function ConversationListPaneContent() {
             >
               {allSelected ? 'Deselect All' : 'Select All'}
             </button>
-            <h1 aria-live="polite" className="min-w-0 flex-1 truncate text-center font-semibold">
+            <h1
+              ref={selectedHeadingRef}
+              tabIndex={-1}
+              aria-live="polite"
+              className="min-w-0 flex-1 truncate text-center font-semibold outline-none"
+            >
               {selectedCount} Selected
             </h1>
             <button type="button" className={TEXT_BUTTON} onClick={exitSelectMode}>
@@ -151,7 +188,12 @@ function ConversationListPaneContent() {
               <span className="hidden md:inline-flex">
                 <FilterMenu filter={filter} />
               </span>
-              <button type="button" className={TEXT_BUTTON} onClick={enterSelectMode}>
+              <button
+                ref={selectButtonRef}
+                type="button"
+                className={TEXT_BUTTON}
+                onClick={enterSelectMode}
+              >
                 Select
               </button>
               <IconButton
