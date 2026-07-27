@@ -10,6 +10,7 @@ import { conversationCountLabel, runBatchAction } from './batchActions'
 import { ConversationList } from './ConversationList'
 import { FilterMenu } from './FilterMenu'
 import { ArchiveIcon, ComposeIcon, RefreshIcon, SpamIcon } from './icons'
+import { SearchField } from './SearchField'
 import {
   ConversationSelectionContext,
   useConversationSelection,
@@ -34,9 +35,11 @@ type BatchKind = 'archive' | 'spam'
 
 /**
  * The full left pane (iOS ConversationListView): header with title/status/
- * controls, virtualized list, and the bottom glass bar — the filter menu, the
- * (coming-soon) search capsule and compose on mobile, or the batch action bar
- * while the list is in multi-select mode.
+ * controls, virtualized list, and — on mobile — the bottom glass bar with the
+ * filter menu, the search capsule, and compose; desktop keeps the same capsule
+ * under the header, where the bar does not exist. In multi-select mode the
+ * header swaps to Select All / count / Cancel and the bottom bar (at every
+ * breakpoint) becomes the batch action bar.
  */
 export function ConversationListPane() {
   const selection = useConversationSelectionState()
@@ -48,7 +51,7 @@ export function ConversationListPane() {
 }
 
 function ConversationListPaneContent() {
-  const { filter } = chatsRoute.useSearch()
+  const { filter, q } = chatsRoute.useSearch()
   const navigate = useNavigate()
   const demo = isDemoMode()
   const {
@@ -83,6 +86,19 @@ function ConversationListPaneContent() {
   useEffect(() => {
     if (!selecting) setBatchError(null)
   }, [selecting])
+
+  // A committed query change (desktop capsule stays live in select mode, and
+  // ?q= can arrive via Back/Forward) reshapes the loaded window wholesale —
+  // new id set, limit and scroll reset. Carrying a selection across that
+  // would silently prune rows that still exist but no longer match, so the
+  // mode ends instead, the way iOS leaves editing on search interaction.
+  const committedQuery = q ?? ''
+  const selectQueryRef = useRef(committedQuery)
+  useEffect(() => {
+    if (selectQueryRef.current === committedQuery) return
+    selectQueryRef.current = committedQuery
+    if (selecting) exitSelectMode()
+  }, [committedQuery, selecting, exitSelectMode])
 
   // Mode transitions unmount whichever control had focus (Select ↔ Cancel, a
   // finished batch's capsule), which would drop keyboard focus to <body>.
@@ -213,10 +229,13 @@ function ConversationListPaneContent() {
           </>
         )}
       </header>
+      <div className="hidden shrink-0 px-4 pb-2 md:block">
+        <SearchField />
+      </div>
       <SyncStatusLine />
 
       <div className="min-h-0 flex-1">
-        <ConversationList filter={filter} demo={demo} />
+        <ConversationList filter={filter} query={q} demo={demo} />
       </div>
 
       {selecting ? (
@@ -233,14 +252,7 @@ function ConversationListPaneContent() {
         <GlassBar className="shrink-0 md:hidden">
           <div className="flex items-center gap-2 px-3 py-2">
             <FilterMenu filter={filter} />
-            <button
-              type="button"
-              disabled
-              title="Coming soon"
-              className="bg-bg-elev text-fg-muted flex-1 rounded-chip px-4 py-2 text-left text-sm"
-            >
-              Search
-            </button>
+            <SearchField className="min-w-0 flex-1" />
             <IconButton aria-label="New message" onClick={openCompose}>
               <ComposeIcon className="size-5" />
             </IconButton>

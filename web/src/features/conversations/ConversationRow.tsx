@@ -13,6 +13,8 @@ interface ConversationRowProps {
   conversation: ConversationRecord
   /** Active list filter, preserved when navigating into the chat. */
   filter?: 'unread'
+  /** Active search query, preserved so the list comes back searched. */
+  query?: string
   /** Multi-select mode: the row toggles selection instead of navigating. */
   selecting?: boolean
   selected?: boolean
@@ -33,6 +35,7 @@ interface ConversationRowProps {
 export function ConversationRow({
   conversation,
   filter,
+  query,
   selecting = false,
   selected = false,
   onToggleSelect,
@@ -107,7 +110,7 @@ export function ConversationRow({
           <Link
             to="/chats/$conversationId"
             params={{ conversationId: conversation.id }}
-            search={{ filter }}
+            search={{ filter, q: query === '' ? undefined : query }}
             aria-label={rowLabel}
             className="hover:bg-bg-elev focus-visible:outline-accent flex h-full items-center gap-2 px-2 focus-visible:-outline-offset-2 focus-visible:outline-2"
           >

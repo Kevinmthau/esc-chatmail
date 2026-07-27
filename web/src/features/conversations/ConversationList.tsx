@@ -6,7 +6,7 @@ import { CONVERSATION_ROW_HEIGHT } from '@/lib/constants'
 import { useConversationPage, useSyncStatus } from '@/live/hooks'
 import type { ConversationPage } from '@/live/queries'
 import { ConversationRow } from './ConversationRow'
-import { EnvelopeIcon } from './icons'
+import { EnvelopeIcon, SearchIcon } from './icons'
 import { useConversationSelection } from './selection'
 import { isFirstSyncPending, syncProgressDetail } from './syncState'
 
@@ -16,6 +16,8 @@ const LOAD_MORE_THRESHOLD_ROWS = 10
 
 interface ConversationListProps {
   filter?: 'unread'
+  /** Committed search query; undefined/'' means not searching. */
+  query?: string
   /** Demo mode seeds every fixture up front and never syncs: zero rows is empty. */
   demo?: boolean
 }
@@ -25,9 +27,22 @@ interface ConversationListProps {
  * unpinned newest-first). Scrolling near the end raises the live-query limit
  * by one page (infinite scroll).
  */
-export function ConversationList({ filter, demo = false }: ConversationListProps) {
+export function ConversationList({ filter, query = '', demo = false }: ConversationListProps) {
   const [limit, setLimit] = useState(PAGE_SIZE)
-  const page = useConversationPage(filter === 'unread', limit)
+
+  // A new query or filter starts over at one page. Carrying a limit grown by
+  // infinite scroll into a fresh search would make each committed keystroke
+  // cursor-walk for hundreds of matches nobody has scrolled to yet. The reset
+  // happens during render (React's adjust-state-on-prop-change pattern), not
+  // in an effect: an effect runs a render late, which would let exactly one
+  // full-width walk through at the old grown limit before the reset lands.
+  const [pageKey, setPageKey] = useState({ query, filter })
+  if (pageKey.query !== query || pageKey.filter !== filter) {
+    setPageKey({ query, filter })
+    setLimit(PAGE_SIZE)
+  }
+
+  const page = useConversationPage(filter === 'unread', query, limit)
   const status = useSyncStatus()
 
   // Keep the last resolved page visible while a bigger limit re-resolves, so
@@ -59,6 +74,16 @@ export function ConversationList({ filter, demo = false }: ConversationListProps
   const items = virtualizer.getVirtualItems()
   const lastVisibleIndex = items.at(-1)?.index ?? 0
   const hasMore = view?.hasMore === true
+
+  // A fresh query or filter also starts back at the top. A deep scroll offset
+  // carried across would clamp into the shorter result set — mis-positioning
+  // the new results and making the load-more effect below re-grow the limit
+  // the reset above just cleared. Declared before that effect so the reset
+  // scroll position is what it observes.
+  useEffect(() => {
+    if (parentRef.current !== null) parentRef.current.scrollTop = 0
+  }, [query, filter])
+
   useEffect(() => {
     if (hasMore && lastVisibleIndex >= rows.length - LOAD_MORE_THRESHOLD_ROWS) {
       setLimit((current) => current + PAGE_SIZE)
@@ -67,12 +92,17 @@ export function ConversationList({ filter, demo = false }: ConversationListProps
 
   if (view === undefined) return <SkeletonRows />
   if (rows.length === 0) {
-    // Zero rows is ambiguous: an initial sync fetches and persists a whole
-    // 500-message page before anything lands in Dexie, so a real inbox reads
-    // as empty for minutes. Only state that the mailbox is empty once a sync
-    // has actually delivered; until then say that mail is still on its way.
+    // Zero rows is ambiguous until the first sync delivers: an initial sync
+    // fetches and persists a whole 500-message page before anything lands in
+    // Dexie, so a real inbox reads as empty for minutes. That ambiguity covers
+    // searches too — "No results" would be as false a claim as "no
+    // conversations yet" while the mailbox has not arrived. Only once a sync
+    // has delivered does an empty result mean anything.
     if (status === undefined) return <SkeletonRows />
     if (!demo && isFirstSyncPending(status)) return <SyncingState status={status} />
+    // A search that found nothing is its own answer — never the mailbox-level
+    // "no conversations yet", which would read as data loss mid-query.
+    if (query !== '') return <NoResultsState query={query} />
     return <EmptyState filter={filter} />
   }
 
@@ -109,6 +139,7 @@ export function ConversationList({ filter, demo = false }: ConversationListProps
               <ConversationRow
                 conversation={conversation}
                 filter={filter}
+                query={query}
                 selecting={selecting}
                 selected={selectedIds.has(conversation.id)}
                 onToggleSelect={toggleSelection}
@@ -160,6 +191,21 @@ function SkeletonRows() {
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+/**
+ * Search found nothing. Deliberately distinct from EmptyState: the mailbox is
+ * fine, the query just missed — and naming the search's scope explains why a
+ * word the user remembers from deep inside a thread does not surface it.
+ */
+function NoResultsState({ query }: { query: string }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-1 px-8 text-center">
+      <SearchIcon className="text-fg-muted mb-1 size-10" />
+      <p className="font-semibold">No results for “{query}”</p>
+      <p className="text-fg-muted text-sm">Search matches chat names and message previews.</p>
     </div>
   )
 }

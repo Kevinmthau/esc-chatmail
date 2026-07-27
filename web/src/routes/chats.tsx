@@ -8,12 +8,15 @@ const ComposeDialog = lazy(() =>
 
 type ChatsSearch = {
   filter?: 'unread'
+  /** Committed conversation-search query. Absent (never '') means not searching. */
+  q?: string
   compose?: boolean
 }
 
 export const Route = createFileRoute('/chats')({
   validateSearch: (search: Record<string, unknown>): ChatsSearch => ({
     filter: search.filter === 'unread' ? 'unread' : undefined,
+    q: typeof search.q === 'string' && search.q !== '' ? search.q : undefined,
     compose: search.compose === true ? true : undefined,
   }),
   component: ChatsLayout,
