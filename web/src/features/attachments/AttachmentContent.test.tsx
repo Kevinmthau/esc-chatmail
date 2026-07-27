@@ -144,3 +144,40 @@ describe('formatByteSize', () => {
     expect(formatByteSize(3.5 * 1024 * 1024)).toBe('3.5 MB')
   })
 })
+
+describe('calendar-invite attachment filtering', () => {
+  it('hides .ics tiles when the calendar card presents the same payload', async () => {
+    await db.attachments.bulkAdd([
+      att({ id: 'a1', messageId: 'm1', filename: 'invite.ics', mimeType: 'application/ics' }),
+      att({ id: 'a2', messageId: 'm1', filename: 'deck.pdf', mimeType: 'application/pdf' }),
+    ])
+    render(<AttachmentContent messageId="m1" hideCalendarInviteAttachments />)
+
+    await screen.findByText('deck.pdf')
+    expect(screen.queryByText('invite.ics')).toBeNull()
+  })
+
+  it('renders nothing when the .ics was the only attachment', async () => {
+    await db.attachments.add(
+      att({ id: 'a1', messageId: 'm1', filename: 'invite.ics', mimeType: 'text/calendar' }),
+    )
+    // Prove the row loads before asserting the filter empties the render —
+    // an immediate empty assertion would pass vacuously pre-load.
+    const view = render(<AttachmentContent messageId="m1" />)
+    await screen.findByText('invite.ics')
+
+    view.rerender(<AttachmentContent messageId="m1" hideCalendarInviteAttachments />)
+    await waitFor(() => {
+      expect(screen.queryByText('invite.ics')).toBeNull()
+    })
+    expect(view.container.textContent).toBe('')
+  })
+
+  it('keeps .ics tiles when the card is not showing', async () => {
+    await db.attachments.add(
+      att({ id: 'a1', messageId: 'm1', filename: 'invite.ics', mimeType: 'application/ics' }),
+    )
+    render(<AttachmentContent messageId="m1" />)
+    await screen.findByText('invite.ics')
+  })
+})

@@ -307,9 +307,13 @@ export async function preparePersistPlan(
     isFromMe: isFromMe ? 1 : 0,
     isUnread: isUnread ? 1 : 0,
     isNewsletter: newsletter.isNewsletter ? 1 : 0,
+    isCalendarInvite: parsed.isLikelyCalendarInvite ? 1 : 0,
     hasAttachments: parsed.hasAttachments || attachments.length > 0 ? 1 : 0,
     labelIds: effectiveLabelIds(labelIds, ctx.knownLabelIds),
     localModifiedAt: 0,
+  }
+  if (parsed.calendarEvent !== null) {
+    message.calendarEvent = parsed.calendarEvent
   }
 
   return {
@@ -609,6 +613,25 @@ export function mergeExistingMessage(
   if (nonEmpty(incoming.subject) !== null) updated.subject = incoming.subject
   updated.isFromMe = incoming.isFromMe
   updated.isNewsletter = incoming.isNewsletter
+  // The invite verdict recomputes from content, so only a parse that actually
+  // saw content may clear it: a blind re-fetch (metadata-only payload, an
+  // oversized body whose fetch failed — both leave bodyText empty and carry no
+  // calendar part) has lost the signals, not the invite. Clearing on those
+  // would strand a stored calendarEvent behind a 0 flag, breaking the
+  // presence contract in db/types.
+  if (incoming.isCalendarInvite === 1) {
+    updated.isCalendarInvite = 1
+  } else if (nonEmpty(incoming.bodyText) !== null || incoming.calendarEvent !== undefined) {
+    updated.isCalendarInvite = 0
+    // Genuinely no longer an invite: the stored event describes something
+    // this message is not, so it goes with the flag.
+    delete updated.calendarEvent
+  }
+  // Keep the stored event when a re-fetch of the same message arrives without
+  // one (a metadata-only payload carries no text/calendar part to re-extract).
+  if (incoming.calendarEvent !== undefined) {
+    updated.calendarEvent = incoming.calendarEvent
+  }
   updated.internalDate = incoming.internalDate
   updated.deliveredToAddress = incoming.deliveredToAddress
   updated.replyFromAddress = incoming.replyFromAddress

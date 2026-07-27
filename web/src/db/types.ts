@@ -98,6 +98,8 @@ export interface MessageRow {
   isFromMe: Flag
   isUnread: Flag
   isNewsletter: Flag
+  /** Calendar-invite verdict (mime/calendarInvite.isLikelyCalendarInvite). */
+  isCalendarInvite: Flag
   hasAttachments: Flag
   /** Gmail label ids; multiEntry-indexed. */
   labelIds: string[]
@@ -108,6 +110,42 @@ export interface MessageRow {
    */
   localModifiedAt: number
   sendState?: 'pending' | 'sent' | 'failed'
+  /**
+   * Present only when isCalendarInvite is 1 AND the iCalendar part yielded a
+   * usable VEVENT. Absence is the degrade path: the message still routes to a
+   * preview card, just the generic scaled-HTML one.
+   */
+  calendarEvent?: CalendarEventData
+}
+
+/**
+ * The VEVENT behind a calendar-invite message, extracted at parse time from the
+ * `text/calendar` part (see mime/calendarInvite). Stored on the message rather
+ * than re-parsed on render: the iCalendar part is not kept anywhere else.
+ *
+ * Never indexed, so plain strings/numbers only — no Date objects.
+ */
+export interface CalendarEventData {
+  /** SUMMARY, falling back to the invite subject with its prefix stripped. */
+  title: string
+  /** Epoch ms of DTSTART. All-day events anchor to UTC midnight (see isAllDay). */
+  startMs: number
+  /** Epoch ms of DTEND; 0 when absent or not after the start. */
+  endMs: number
+  /** IANA identifier DTSTART was expressed in; '' for UTC, floating, or all-day. */
+  timeZone: string
+  /** 1 for a DATE-valued DTSTART; such events must be formatted in UTC. */
+  isAllDay: Flag
+  /** LOCATION, normalized to "Google Meet" for Meet links; '' when absent. */
+  location: string
+  /** ORGANIZER CN, else its mailto address; '' when absent. */
+  organizer: string
+  /** iCalendar METHOD (REQUEST, CANCEL, …), uppercased; '' when absent. */
+  method: string
+  /** VEVENT STATUS (CONFIRMED, CANCELLED, …), uppercased; '' when absent. */
+  status: string
+  /** Card header label: "Google Calendar" or "Calendar" (resolvedSourceLabel). */
+  source: string
 }
 
 export interface BodyRow {

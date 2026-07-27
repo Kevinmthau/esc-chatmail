@@ -519,6 +519,7 @@ function makeOptimisticMessage(
     isFromMe: 1,
     isUnread: 0,
     isNewsletter: 0,
+    isCalendarInvite: 0,
     hasAttachments: hasAttachments ? 1 : 0,
     labelIds: ['SENT'],
     localModifiedAt: 0,

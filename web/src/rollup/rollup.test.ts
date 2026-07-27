@@ -45,6 +45,7 @@ function messageRow(overrides: Partial<MessageRow>): MessageRow {
     isFromMe: 0,
     isUnread: 0,
     isNewsletter: 0,
+    isCalendarInvite: 0,
     hasAttachments: 0,
     labelIds: [],
     localModifiedAt: 0,

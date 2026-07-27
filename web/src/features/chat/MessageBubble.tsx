@@ -12,6 +12,7 @@ import { UnreadDot } from '@/components/ui/UnreadDot'
 import { retrySend } from '@/data/actions'
 import type { MessageRow } from '@/db/types'
 import { AttachmentContent } from '@/features/attachments/AttachmentContent'
+import { CalendarInvitePreviewCard } from '@/features/reader/CalendarInvitePreviewCard'
 import { HtmlPreviewCard } from '@/features/reader/HtmlPreviewCard'
 import type { RunDecoration } from '@/lib/bubbleRuns'
 import { cn } from '@/lib/cn'
@@ -45,7 +46,17 @@ export function MessageBubble({ message, decoration, isOneToOne, onReply }: Mess
     isOneToOneConversation: isOneToOne,
     subject: message.subject,
     senderEmail: message.senderEmail,
+    isLikelyCalendarInvite: message.isCalendarInvite === 1,
   })
+
+  // Mirrors BubbleContent's routing: the calendar card renders exactly when
+  // the flag is set and a usable event was extracted. iOS parity
+  // (attachmentsView(hidingCalendarInviteAttachments:)): a real Google invite
+  // ships its payload twice — the inline text/calendar part the card is built
+  // from AND a named .ics server attachment — so while the card shows, the
+  // duplicate tile must not stack above it.
+  const showsCalendarCard =
+    mode === 'previewCard' && message.isCalendarInvite === 1 && message.calendarEvent !== undefined
 
   const senderLabel =
     message.senderName.trim().length > 0 ? message.senderName : message.senderEmail
@@ -89,7 +100,12 @@ export function MessageBubble({ message, decoration, isOneToOne, onReply }: Mess
               <span className="text-fg-muted px-1 text-xs font-medium">{subject}</span>
             )}
 
-            {message.hasAttachments === 1 && <AttachmentContent messageId={message.id} />}
+            {message.hasAttachments === 1 && (
+              <AttachmentContent
+                messageId={message.id}
+                hideCalendarInviteAttachments={showsCalendarCard}
+              />
+            )}
 
             <BubbleContent message={message} mode={mode} text={text} senderLabel={senderLabel} />
 
@@ -123,9 +139,22 @@ function BubbleContent({
   const isMe = message.isFromMe === 1
 
   if (mode === 'previewCard') {
+    // A detected invite whose iCalendar part did not yield a usable event
+    // (malformed VEVENT, or an .ics that only exists as a server attachment)
+    // falls through to the generic card rather than showing an empty one.
+    const event = message.isCalendarInvite === 1 ? message.calendarEvent : undefined
     return (
       <div className="w-72 max-w-full">
-        <HtmlPreviewCard messageId={message.id} subject={message.subject} sender={senderLabel} />
+        {event !== undefined ? (
+          <CalendarInvitePreviewCard
+            messageId={message.id}
+            event={event}
+            subject={message.subject}
+            sender={senderLabel}
+          />
+        ) : (
+          <HtmlPreviewCard messageId={message.id} subject={message.subject} sender={senderLabel} />
+        )}
       </div>
     )
   }

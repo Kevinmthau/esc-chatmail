@@ -19,6 +19,15 @@ export const PREVIEW_HEIGHT_DEFAULT = 180
 export const PREVIEW_HEIGHT_MIN = 120
 export const PREVIEW_HEIGHT_MAX = 320
 
+/**
+ * Calendar-invite card height (iOS CalendarInvitePreviewCard reserves a 144pt
+ * minimum around a 92pt date rail; the extra room here covers the two-line
+ * title plus the location/organizer rows at web line heights). Fixed, like
+ * every preview card: the chat scroll engine compensates prepends against
+ * measured heights, so a card that grew after layout would jump the viewport.
+ */
+export const PREVIEW_HEIGHT_CALENDAR = 204
+
 /** Outbound attachment limits (port of ImageProcessor / AttachmentPicker). */
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 export const MAX_IMAGE_DIMENSION = 4096

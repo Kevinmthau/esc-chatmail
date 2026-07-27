@@ -44,6 +44,7 @@ const msg = (id: string, conversationId: string, internalDate: number): MessageR
   isFromMe: 0,
   isUnread: 0,
   isNewsletter: 0,
+  isCalendarInvite: 0,
   hasAttachments: 0,
   labelIds: [],
   localModifiedAt: 0,

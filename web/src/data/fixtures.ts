@@ -38,6 +38,27 @@ interface FixtureMessage {
   subject?: string
   /** Newsletter message: gets an HTML body row + isNewsletter flag. */
   html?: string
+  /** Calendar invite: gets the isCalendarInvite flag + an extracted event. */
+  invite?: FixtureInvite
+}
+
+/** Event shape for a demo invite; times are relative so the card never goes stale. */
+interface FixtureInvite {
+  title: string
+  /** Which day, relative to the seed time (positive = in the future). */
+  startOffsetMs: number
+  /** Local hour the event starts on that day; matches the invite's HTML body. */
+  startHour: number
+  durationMs: number
+  location: string
+  organizer: string
+}
+
+/** The invite's day is relative to the seed; its clock time is pinned. */
+function inviteStart(now: number, invite: FixtureInvite): number {
+  const day = new Date(now + invite.startOffsetMs)
+  day.setHours(invite.startHour, 0, 0, 0)
+  return day.getTime()
 }
 
 interface FixtureConversation {
@@ -57,6 +78,17 @@ const NEWSLETTER_HTML =
   '<h2 style="font-size:16px">2. The quiet rise of local-first apps</h2>' +
   '<p style="color:#6b7280">Why your next favorite tool might not need a backend.</p>' +
   '<a href="https://example.com/digest" style="color:#4f46e5">Read the full issue</a>' +
+  '</div></body></html>'
+
+const INVITE_HTML =
+  '<html><body style="margin:0;font-family:Arial,sans-serif">' +
+  '<div style="max-width:600px;margin:0 auto;padding:24px">' +
+  '<p style="color:#5f6368">You have been invited to the following event.</p>' +
+  '<h1 style="font-size:20px">Book club — March pick</h1>' +
+  '<p><strong>When</strong><br>Thursday, 7:00 – 8:30pm</p>' +
+  '<p><strong>Where</strong><br>Fatima&#39;s place</p>' +
+  '<p><strong>Guests</strong><br>fatima@example.com - organizer</p>' +
+  '<p style="color:#5f6368">Invitation from Google Calendar</p>' +
   '</div></body></html>'
 
 /** ~12 conversations, newest first; ages spread from minutes to weeks. */
@@ -156,6 +188,22 @@ function fixtureSpecs(): FixtureConversation[] {
           from: 'fatima@example.com',
           text: 'Reminder: book club moved to Thursday at 7.',
           ageMs: 5 * DAY,
+        },
+        {
+          from: 'fatima@example.com',
+          text: 'You have been invited to the following event.',
+          ageMs: 4 * DAY,
+          unread: true,
+          subject: 'Invitation: Book club — March pick',
+          html: INVITE_HTML,
+          invite: {
+            title: 'Book club — March pick',
+            startOffsetMs: 3 * DAY,
+            startHour: 19,
+            durationMs: 90 * MINUTE,
+            location: 'Fatima’s place',
+            organizer: 'Fatima Khan',
+          },
         },
       ],
     },
@@ -272,6 +320,7 @@ function buildFixturePlan(now: number): FixturePlan {
       const unread = msg.unread === true && !isFromMe
       const labelIds = isFromMe ? ['SENT'] : unread ? ['INBOX', 'UNREAD'] : ['INBOX']
       const internalDate = now - msg.ageMs
+      const eventStart = msg.invite === undefined ? 0 : inviteStart(now, msg.invite)
       return {
         id: `demo-m-${convoIndex + 1}-${msgIndex + 1}`,
         conversationId,
@@ -291,10 +340,27 @@ function buildFixturePlan(now: number): FixturePlan {
         replyFromAddress: DEMO_EMAIL,
         isFromMe: isFromMe ? 1 : 0,
         isUnread: unread ? 1 : 0,
-        isNewsletter: msg.html !== undefined ? 1 : 0,
+        isNewsletter: msg.html !== undefined && msg.invite === undefined ? 1 : 0,
+        isCalendarInvite: msg.invite === undefined ? 0 : 1,
         hasAttachments: 0,
         labelIds,
         localModifiedAt: 0,
+        ...(msg.invite === undefined
+          ? {}
+          : {
+              calendarEvent: {
+                title: msg.invite.title,
+                startMs: eventStart,
+                endMs: eventStart + msg.invite.durationMs,
+                timeZone: '',
+                isAllDay: 0 as const,
+                location: msg.invite.location,
+                organizer: msg.invite.organizer,
+                method: 'REQUEST',
+                status: 'CONFIRMED',
+                source: 'Google Calendar',
+              },
+            }),
       }
     })
 
