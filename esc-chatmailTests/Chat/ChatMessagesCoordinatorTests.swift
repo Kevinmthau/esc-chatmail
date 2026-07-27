@@ -2004,23 +2004,27 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
-    func testBottomPresentationIncomingMessageAfterUserScrollDoesNotFollowHiddenBottom() async throws {
+    func testBottomPresentationUserTakeoverRejectsStaleBottomUntilGeometryReconfirms() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
-            "second@example.com"
+            "second@example.com",
+            "third@example.com"
         ])
         let rows = messages.map { ChatMessageRowModelMapper.map($0) }
         let unexpectedLatestLoad = expectation(
             description: "Incoming message must not reload the latest window"
         )
         unexpectedLatestLoad.isInverted = true
-        var isAfterUserTakeover = false
+        var isRejectingLatestLoads = false
+        var latestWindowKnownCounts: [Int?] = []
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: { _ in
-                if isAfterUserTakeover {
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                if isRejectingLatestLoads {
                     unexpectedLatestLoad.fulfill()
+                } else {
+                    latestWindowKnownCounts.append(knownTotalCount)
                 }
             },
             markConversationAsReadIfNeeded: {},
@@ -2047,7 +2051,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
         await confirmInitialBottomAnchor(coordinator)
 
-        isAfterUserTakeover = true
+        latestWindowKnownCounts.removeAll()
+        isRejectingLatestLoads = true
         coordinator.handleUserScrollInteraction()
         coordinator.handleMessageCountChange(
             oldCount: 1,
@@ -2058,13 +2063,45 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             stabilizeBottomAnchor: false,
             isInitialWindowLoaded: true,
             isShowingLatestWindow: true,
-            isBottomAnchorVisible: false
+            isBottomAnchorVisible: true
         ) { step in
             anchorSteps.append(step)
         }
 
         await fulfillment(of: [unexpectedLatestLoad], timeout: 0.1)
         XCTAssertTrue(anchorSteps.isEmpty)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: true
+        ) { _ in
+            XCTFail("Active user scrolling must keep passive following disabled")
+        }
+        isRejectingLatestLoads = false
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: false
+        ) { _ in
+            XCTFail("Stable visible geometry should only re-enable passive following")
+        }
+        coordinator.handleMessageCountChange(
+            oldCount: 2,
+            newCount: 3,
+            lastMessage: messages[2],
+            visibleMessages: rows,
+            totalMessageCount: 3,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+        XCTAssertEqual(latestWindowKnownCounts, [3, 3])
     }
 
     func testHandleMessageCountChange_afterReadyAwayFromLatestDoesNotRequestBottomAnchor() async throws {

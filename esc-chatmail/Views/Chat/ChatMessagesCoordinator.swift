@@ -78,6 +78,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let taskManager = ViewModelTaskManager()
     private var initialRevealState: InitialRevealState = .waitingForRows
     private var isTrackedBottomAnchorVisible = false
+    private var hasUserScrollTakeover = false
     private var trackedContentMinY: CGFloat?
     private var trackedContentHeight: CGFloat?
     private var trackedViewportHeight: CGFloat?
@@ -222,6 +223,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleDisappear() {
         isVisible = false
         postRevealBottomFollowState = .inactive
+        hasUserScrollTakeover = false
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
         pendingAutoReadLayoutOrder.removeAll()
@@ -341,6 +343,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// as a fallback after both attempts so a bad geometry signal cannot block the chat.
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
+        isUserScrollInteractionActive: Bool = false,
         contentMinY: CGFloat? = nil,
         contentHeight: CGFloat? = nil,
         viewportHeight: CGFloat? = nil,
@@ -358,6 +361,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
         if let viewportHeight {
             trackedViewportHeight = viewportHeight
+        }
+        if isBottomAnchorVisible && !isUserScrollInteractionActive {
+            hasUserScrollTakeover = false
         }
 
         let contentHeightIncreased: Bool
@@ -500,6 +506,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// Stops initial auto-anchoring and post-reveal bottom following once the user
     /// takes control of the scroll view.
     func handleUserScrollInteraction() {
+        hasUserScrollTakeover = true
         let wasFollowingPostRevealBottom: Bool
         switch postRevealBottomFollowState {
         case .following, .checkingAfterScroll, .waitingForGrowth:
@@ -610,7 +617,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
         } else if isReadyToShow && newCount > oldCount && isShowingLatestWindow {
             updateReplyingToIfNewSubject(lastMessage)
-            if isBottomAnchorVisible {
+            if isBottomAnchorVisible && !hasUserScrollTakeover {
                 scrollToBottom(
                     messageCount: newCount,
                     delay: UIConfig.contentChangeScrollDelay,
