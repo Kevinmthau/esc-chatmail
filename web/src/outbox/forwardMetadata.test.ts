@@ -7,6 +7,7 @@ import {
   extractUserNote,
   formatForwardDate,
   FORWARD_MARKER,
+  forwardedBlockUnedited,
   plainTextToHtml,
   prefixSubjectForForward,
   type ForwardHeaderFields,
@@ -192,5 +193,23 @@ describe('buildForwardHtmlBody', () => {
       sanitizedContentHtml: content,
     })
     expect(html).not.toContain('<script')
+  })
+})
+
+describe('forwardedBlockUnedited', () => {
+  const pristine = buildForwardTextBlock(HEADER, 'original content')
+
+  it('holds for the untouched draft and for note-only edits above the marker', () => {
+    expect(forwardedBlockUnedited(pristine, pristine)).toBe(true)
+    expect(forwardedBlockUnedited(`My note.${pristine}`, pristine)).toBe(true)
+  })
+
+  it('fails once the block below the marker is edited or deleted', () => {
+    expect(forwardedBlockUnedited(pristine.replace('original content', 'redacted'), pristine)).toBe(
+      false,
+    )
+    expect(forwardedBlockUnedited(pristine.slice(0, -3), pristine)).toBe(false)
+    // The whole block deleted: only the user's own text remains.
+    expect(forwardedBlockUnedited('just my own text now', pristine)).toBe(false)
   })
 })

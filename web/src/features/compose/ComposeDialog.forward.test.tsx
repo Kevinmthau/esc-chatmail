@@ -152,6 +152,28 @@ describe('ComposeDialog forward mode', () => {
     expect(html).not.toContain('alert(1)')
   })
 
+  it('drops the html alternative once the forwarded block itself is edited', async () => {
+    await db.messages.update('m1', { hasHtmlBody: 1 })
+    await db.bodies.add({ messageId: 'm1', html: '<html><body><p>Rich body</p></body></html>' })
+    const user = userEvent.setup()
+    renderForward('m1')
+    await waitFor(() => expect(subjectInput().value).toBe('Fwd: Quarterly numbers'))
+
+    await user.type(await toInput(), 'dana@example.com{Enter}')
+    // Redact inside the forwarded block (below the marker). The html
+    // alternative is rebuilt from the pristine draft, so shipping it now
+    // would resurrect the redacted text for every html-preferring client.
+    await user.click(bodyInput())
+    await user.keyboard('{Control>}{End}{/Control}{Backspace}{Backspace}{Backspace}')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(actions.sendMessage).toHaveBeenCalledTimes(1))
+    const draft = vi.mocked(actions.sendMessage).mock.calls[0]?.[0]
+    expect(draft?.body.endsWith('Numbers are')).toBe(true)
+    expect(draft?.forward?.subject).toBe('Fwd: Quarterly numbers')
+    expect(draft?.forward?.htmlBody).toBeUndefined()
+  })
+
   it('lets the edited subject win over the prefilled one', async () => {
     const user = userEvent.setup()
     renderForward('m1')
@@ -203,11 +225,29 @@ describe('ComposeDialog forward mode', () => {
   })
 
   it('stays a usable compose when the forwarded message is gone', async () => {
+    const user = userEvent.setup()
     renderForward('missing')
 
     const send = () => screen.getByRole<HTMLButtonElement>('button', { name: 'Send' })
     await waitFor(() => expect(send().disabled).toBe(true))
     expect(bodyInput().value).toBe('')
     expect(subjectInput().value).toBe('')
+
+    // A recipient alone must not arm Send: with no draft there is no
+    // forwarded content, so a bare send would dispatch an empty
+    // '(No Subject)' shell carrying a degenerate forward payload.
+    await user.type(await toInput(), 'dana@example.com{Enter}')
+    expect(send().disabled).toBe(true)
+
+    // Typing a body turns it into a plain compose, sent WITHOUT a forward
+    // payload — no empty subject override, no threading clearance.
+    await user.click(bodyInput())
+    await user.keyboard('hello there')
+    expect(send().disabled).toBe(false)
+    await user.click(send())
+    await waitFor(() => expect(actions.sendMessage).toHaveBeenCalledTimes(1))
+    const draft = vi.mocked(actions.sendMessage).mock.calls[0]?.[0]
+    expect(draft?.body).toBe('hello there')
+    expect(draft?.forward).toBeUndefined()
   })
 })

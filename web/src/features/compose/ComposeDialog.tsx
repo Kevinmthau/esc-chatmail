@@ -7,7 +7,11 @@ import { getDB } from '@/db/schema'
 import { setDraft } from '@/features/chat/useDraft'
 // Pure copy helpers (no db/broker plumbing), so they are imported straight
 // from the outbox rather than through the data-actions facade.
-import { buildForwardHtmlBody, extractUserNote } from '@/outbox/forwardMetadata'
+import {
+  buildForwardHtmlBody,
+  extractUserNote,
+  forwardedBlockUnedited,
+} from '@/outbox/forwardMetadata'
 import { sendFailureMessage, type ForwardSendPayload } from '@/outbox/send'
 import { AliasPicker } from './AliasPicker'
 import { buildForwardDraft, skippedAttachmentWarning, type ForwardDraft } from './forwardSource'
@@ -84,14 +88,24 @@ export function ComposeDialog({
 
   const recipients = validRecipientEmails(chips)
   // Forward mode mirrors iOS canSend: the forwarded content IS the message, so
-  // an empty note does not block the send.
-  const hasContent = isForward ? !preparing : body.trim() !== ''
+  // an empty note does not block the send — but only once the forwarded draft
+  // actually loaded. When the source message is gone the dialog degrades to a
+  // plain compose (see the fetch effect), and a plain compose needs a body:
+  // without this a stale ?forward= URL could send an empty '(No Subject)'
+  // shell the moment a recipient lands.
+  const hasContent = isForward
+    ? !preparing && (forward !== null || body.trim() !== '')
+    : body.trim() !== ''
   const canSend = !sending && recipients.length > 0 && hasContent
 
   const forwardPayload = (): ForwardSendPayload | undefined => {
-    if (!isForward) return undefined
+    if (!isForward || forward === null) return undefined
+    // The html alternative is rebuilt from the pristine draft pieces, so it
+    // only ships while the block below the marker is untouched: an edited or
+    // deleted block makes the plain text the single honest copy, and most
+    // clients render html in preference to it.
     const html =
-      forward?.sanitizedContentHtml == null
+      forward.sanitizedContentHtml == null || !forwardedBlockUnedited(body, forward.body)
         ? undefined
         : buildForwardHtmlBody({
             userNote: extractUserNote(body),

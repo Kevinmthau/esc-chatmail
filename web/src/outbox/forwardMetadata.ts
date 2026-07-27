@@ -51,8 +51,10 @@ export function prefixSubjectForForward(subject: string): string {
 }
 
 /**
- * Original-message date for the header block: iOS uses a DateFormatter with
- * .medium date + .short time, whose en-US output Intl reproduces.
+ * Original-message date for the header block. iOS formats in the device
+ * locale (.medium date + .short time); here the locale is pinned to en-US so
+ * the emitted block is deterministic across environments — a deliberate
+ * divergence from iOS, not an oversight.
  */
 export function formatForwardDate(timestamp: number): string {
   return new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(
@@ -90,6 +92,28 @@ export function extractUserNote(body: string): string {
     if (index >= 0) return body.slice(0, index).trim()
   }
   return body.trim()
+}
+
+/** Everything from the forwarded marker down; null when no marker remains. */
+function forwardedBlockOf(body: string): string | null {
+  for (const marker of FORWARD_MARKERS) {
+    const index = body.indexOf(marker)
+    if (index >= 0) return body.slice(index)
+  }
+  return null
+}
+
+/**
+ * True when the compose body still carries the pristine forwarded block —
+ * everything from the marker down is byte-identical to what the draft
+ * prefilled. The html alternative is rebuilt at send time from the same
+ * pristine pieces, so it may only ship while this holds: once the user edits
+ * or deletes any of the block, the plain text is the only honest copy, and
+ * sending the pristine html would silently ship content they deleted (or
+ * hide edits they made) to every client that prefers html.
+ */
+export function forwardedBlockUnedited(body: string, pristineBody: string): boolean {
+  return forwardedBlockOf(body) === forwardedBlockOf(pristineBody)
 }
 
 // ---------------------------------------------------------------------------

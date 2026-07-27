@@ -10,6 +10,7 @@
 import type { ChatmailDB } from '@/db/schema'
 import { normalizeEmail } from '@/identity/normalizeEmail'
 import { queryMessageBody } from '@/live/queries'
+import { decodeHtmlEntities } from '@/mime/decode'
 import {
   buildForwardTextBlock,
   formatForwardDate,
@@ -53,6 +54,16 @@ function toForwardableFragment(sanitizedDocument: string): string {
   if (body === null) return ''
   for (const img of Array.from(body.querySelectorAll('img'))) {
     if (/^cid:/i.test(img.getAttribute('src') ?? '')) img.removeAttribute('src')
+  }
+  // The sanitizer's allowed-URI policy admits cid: on every URI attribute it
+  // keeps, so the other carriers need the same treatment as img[src]: a
+  // srcset candidate list or a legacy background pointing at an inline part
+  // would reach the recipient as a dangling reference.
+  for (const el of Array.from(body.querySelectorAll('[srcset]'))) {
+    if (/(^|,)\s*cid:/i.test(el.getAttribute('srcset') ?? '')) el.removeAttribute('srcset')
+  }
+  for (const el of Array.from(body.querySelectorAll('[background]'))) {
+    if (/^cid:/i.test(el.getAttribute('background') ?? '')) el.removeAttribute('background')
   }
   return body.innerHTML
 }
@@ -104,13 +115,16 @@ export async function buildForwardDraft(
     }
   }
 
-  // Content for the text part, iOS's `bodyText ?? snippet` ladder.
+  // Content for the text part, iOS's `bodyText ?? snippet` ladder. The
+  // snippet arm is the one member stored verbatim from the Gmail API, which
+  // HTML-entity-encodes it (iOS runs its whole ladder through
+  // HTMLEntityDecoder for the same reason); the other arms are already plain.
   const content =
     message.bodyText.trim() !== ''
       ? message.bodyText
       : message.chatPreviewText.trim() !== ''
         ? message.chatPreviewText
-        : message.snippet
+        : decodeHtmlEntities(message.snippet)
 
   const skippedAttachmentCount = await db.attachments.where('messageId').equals(messageId).count()
 

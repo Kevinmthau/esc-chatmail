@@ -115,6 +115,17 @@ describe('buildForwardDraft', () => {
     expect((await buildForwardDraft(db, 'm1'))?.body.endsWith('preview only')).toBe(true)
   })
 
+  it('entity-decodes the snippet fallback — the one API-encoded arm of the ladder', async () => {
+    await seedMessage({
+      id: 'm1',
+      conversationId: 'c1',
+      bodyText: '',
+      chatPreviewText: '',
+      snippet: 'Tom &amp; Jerry &#39;24',
+    })
+    expect((await buildForwardDraft(db, 'm1'))?.body.endsWith("Tom & Jerry '24")).toBe(true)
+  })
+
   // Security: the forwarded HTML is DOMPurify output, never the stored bytes.
   it('sanitizes the original HTML — script/iframe/handlers never survive', async () => {
     await seedMessage({ id: 'm1', conversationId: 'c1', hasHtmlBody: 1 })
@@ -150,6 +161,21 @@ describe('buildForwardDraft', () => {
     expect(html).not.toContain('cid:')
     expect(html).toContain('alt="Logo"')
     expect(html).toContain('https://ok.example/a.png')
+  })
+
+  it('drops cid: srcset and background carriers alongside img src', async () => {
+    await seedMessage({ id: 'm1', conversationId: 'c1', hasHtmlBody: 1 })
+    await db.bodies.add({
+      messageId: 'm1',
+      html:
+        '<html><body><img srcset="cid:one 1x, cid:two 2x" alt="hero">' +
+        '<table><tbody><tr><td background="cid:three">cell</td></tr></tbody></table>' +
+        '</body></html>',
+    })
+    const fragment = (await buildForwardDraft(db, 'm1'))?.sanitizedContentHtml ?? ''
+    expect(fragment).toContain('hero')
+    expect(fragment).toContain('cell')
+    expect(fragment).not.toContain('cid:')
   })
 
   it('counts attachments this send cannot carry', async () => {

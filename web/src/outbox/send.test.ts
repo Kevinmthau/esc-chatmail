@@ -457,7 +457,7 @@ describe('sendMessage', () => {
       await seedReplyConversation()
       const setIdentity = makeRecipientParticipantSetIdentity(['bob@example.com'], new Set([ME]))
       await db.conversations.update('c1', { participantHash: setIdentity?.participantHash })
-      respondWith('g_fwd', 't_new')
+      const { captured } = respondWith('g_fwd', 't_new')
 
       const result = await sendMessage(
         db,
@@ -470,6 +470,17 @@ describe('sendMessage', () => {
       const sent = await db.messages.get('g_fwd')
       expect(sent?.subject).toBe('Fwd: hi')
       expect(await db.conversations.count()).toBe(1)
+
+      // Landing in c1 is only half the contract: c1's reply ladder resolves a
+      // newest message with a real gmThreadId and rfcMessageId, so THIS test —
+      // not the fresh-conversation one above, whose ladder is already empty —
+      // is where deleting the forward override in send.ts would staple the
+      // forward onto the existing thread. Pin the request itself.
+      expect(captured[0]?.threadId).toBeUndefined()
+      const mime = decodeBase64Url(captured[0]?.raw ?? '')
+      expect(mime).toContain('Subject: Fwd: hi')
+      expect(mime).not.toContain('In-Reply-To:')
+      expect(mime).not.toContain('References:')
     })
   })
 })
