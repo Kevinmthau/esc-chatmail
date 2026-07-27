@@ -672,6 +672,15 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
             return
         }
+        guard !isUserScrollTakeoverActive else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView skipping keyboard bottom anchor during user scroll takeover",
+                category: .ui
+            )
+            return
+        }
 
         if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
             scrollToBottom(
@@ -697,6 +706,15 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
             return
         }
+        guard !isUserScrollTakeoverActive else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView skipping focus bottom anchor during user scroll takeover",
+                category: .ui
+            )
+            return
+        }
 
         if !isFocused {
             scrollToBottom(
@@ -713,11 +731,11 @@ final class ChatMessagesCoordinator: ObservableObject {
         isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        guard isInitialWindowLoaded else {
+        guard isVisible, isInitialWindowLoaded else {
             Log.diagnostic(
                 .chatView,
                 level: .info,
-                "ChatView deferring post-send refresh until initial window loads messages=\(messageCount) total=\(totalMessageCount)",
+                "ChatView skipping post-send refresh visible=\(isVisible) loaded=\(isInitialWindowLoaded) messages=\(messageCount) total=\(totalMessageCount)",
                 category: .ui
             )
             return
