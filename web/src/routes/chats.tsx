@@ -11,6 +11,8 @@ type ChatsSearch = {
   /** Committed conversation-search query. Absent (never '') means not searching. */
   q?: string
   compose?: boolean
+  /** Message id being forwarded; opens the compose dialog in forward mode. */
+  forward?: string
 }
 
 export const Route = createFileRoute('/chats')({
@@ -18,6 +20,8 @@ export const Route = createFileRoute('/chats')({
     filter: search.filter === 'unread' ? 'unread' : undefined,
     q: typeof search.q === 'string' && search.q !== '' ? search.q : undefined,
     compose: search.compose === true ? true : undefined,
+    forward:
+      typeof search.forward === 'string' && search.forward !== '' ? search.forward : undefined,
   }),
   component: ChatsLayout,
 })
@@ -25,11 +29,14 @@ export const Route = createFileRoute('/chats')({
 function ChatsLayout() {
   const childMatch = useMatch({ from: '/chats/$conversationId', shouldThrow: false })
   const childIsActive = childMatch !== undefined
-  const { compose } = Route.useSearch()
+  const { compose, forward } = Route.useSearch()
   const navigate = useNavigate()
   const closeCompose = (): void => {
-    // Stay on the current leaf route; only drop the ?compose param.
-    void navigate({ to: '.', search: (prev) => ({ ...prev, compose: undefined }) })
+    // Stay on the current leaf route; only drop the compose params.
+    void navigate({
+      to: '.',
+      search: (prev) => ({ ...prev, compose: undefined, forward: undefined }),
+    })
   }
   return (
     <div className="flex h-dvh">
@@ -46,9 +53,12 @@ function ChatsLayout() {
       <main className={'min-w-0 flex-1 ' + (childIsActive ? 'flex' : 'hidden md:flex')}>
         <Outlet />
       </main>
-      {compose === true && (
+      {(compose === true || forward !== undefined) && (
         <Suspense fallback={null}>
-          <ComposeDialog onClose={closeCompose} />
+          <ComposeDialog
+            onClose={closeCompose}
+            {...(forward !== undefined ? { forwardMessageId: forward } : {})}
+          />
         </Suspense>
       )}
     </div>

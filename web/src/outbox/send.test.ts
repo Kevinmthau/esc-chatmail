@@ -29,6 +29,12 @@ function decodeBase64Url(raw: string): string {
   return Buffer.from(raw.replaceAll('-', '+').replaceAll('_', '/'), 'base64').toString('utf8')
 }
 
+/** Decodes one base64 MIME part body (everything up to its closing boundary). */
+function decodeBase64Body(part: string): string {
+  const base64 = part.split(/\r\n--/u)[0]?.replaceAll('\r\n', '') ?? ''
+  return Buffer.from(base64, 'base64').toString('utf8')
+}
+
 interface CapturedSend {
   raw: string
   threadId?: string
@@ -384,6 +390,98 @@ describe('sendMessage', () => {
     const conversation = await db.conversations.get('c1')
     expect(conversation?.lastMessageDate).toBe(NOW)
     expect(conversation?.snippet).toBe('Reply body')
+  })
+
+  // A forward is a NEW message. The reply-metadata ladder always targets the
+  // conversation's newest message, so without the forward override a forward
+  // to someone you already chat with would inherit that message's 'Re: '
+  // subject, its In-Reply-To/References chain and its Gmail thread.
+  describe('forward', () => {
+    it('sends without threading headers or threadId, using the Fwd: subject', async () => {
+      await seedReplyConversation()
+      const { captured } = respondWith('g_fwd', 't_new')
+
+      await sendMessage(
+        db,
+        broker,
+        {
+          to: ['bob@example.com'],
+          body: 'FYI\n\n---------- Forwarded message ---------\nFrom: Carol\n\nOriginal text',
+          forward: { subject: 'Fwd: Quarterly numbers' },
+        },
+        { now: () => NOW },
+      )
+
+      expect(captured).toHaveLength(1)
+      // No threadId: Gmail must not staple this onto the existing thread.
+      expect(captured[0]?.threadId).toBeUndefined()
+      const mime = decodeBase64Url(captured[0]?.raw ?? '')
+      expect(mime).toContain('Subject: Fwd: Quarterly numbers\r\n')
+      expect(mime).not.toContain('In-Reply-To:')
+      expect(mime).not.toContain('References:')
+      expect(mime).toContain('Original text')
+      // Recipients and the reply-from alias still come from the ladder.
+      expect(mime).toContain('To: bob@example.com\r\n')
+      expect(mime).toContain(`From: ${ME}\r\n`)
+    })
+
+    it('sends multipart/alternative when the forward carries html', async () => {
+      await seedReplyConversation()
+      const { captured } = respondWith('g_fwd', 't_new')
+
+      await sendMessage(
+        db,
+        broker,
+        {
+          to: ['bob@example.com'],
+          body: 'text part',
+          forward: {
+            subject: 'Fwd: Quarterly numbers',
+            htmlBody: '<!DOCTYPE html>\n<html>\n<body>\n<p>html part</p>\n</body>\n</html>',
+          },
+        },
+        { now: () => NOW },
+      )
+
+      const mime = decodeBase64Url(captured[0]?.raw ?? '')
+      expect(mime).toContain('Content-Type: multipart/alternative;')
+      expect(mime).toContain('Content-Type: text/plain; charset=UTF-8')
+      expect(mime).toContain('Content-Type: text/html; charset=UTF-8')
+      const parts = mime.split(/Content-Transfer-Encoding: base64\r\n\r\n/u).slice(1)
+      const decoded = parts.map((part) => decodeBase64Body(part))
+      expect(decoded[0]).toContain('text part')
+      expect(decoded[1]).toContain('<p>html part</p>')
+    })
+
+    it('still routes into the participant-set conversation the recipients belong to', async () => {
+      await seedReplyConversation()
+      const setIdentity = makeRecipientParticipantSetIdentity(['bob@example.com'], new Set([ME]))
+      await db.conversations.update('c1', { participantHash: setIdentity?.participantHash })
+      const { captured } = respondWith('g_fwd', 't_new')
+
+      const result = await sendMessage(
+        db,
+        broker,
+        { to: ['bob@example.com'], body: 'fwd body', forward: { subject: 'Fwd: hi' } },
+        { now: () => NOW },
+      )
+
+      expect(result.conversationId).toBe('c1')
+      const sent = await db.messages.get('g_fwd')
+      expect(sent?.subject).toBe('Fwd: hi')
+      expect(await db.conversations.count()).toBe(1)
+
+      // Landing in c1 is only half the contract: c1's reply ladder resolves a
+      // newest message with a real gmThreadId and rfcMessageId, so THIS test —
+      // not the fresh-conversation one above, whose ladder is already empty —
+      // is where deleting the forward override in send.ts would staple the
+      // forward onto the existing thread. Pin the request itself.
+      expect(captured[0]?.threadId).toBeUndefined()
+      const mime = decodeBase64Url(captured[0]?.raw ?? '')
+      expect(mime).toContain('Subject: Fwd: hi')
+      expect(mime).not.toContain('In-Reply-To:')
+      expect(mime).not.toContain('References:')
+    })
   })
 })
 
