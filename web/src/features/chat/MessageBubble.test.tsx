@@ -1,16 +1,21 @@
 // Bubble content routing: displayPolicy verdict → which component renders.
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
+import { retrySend } from '@/data/actions'
 import { setDBForTests, type ChatmailDB } from '@/db/schema'
 import type { MessageRow } from '@/db/types'
 import type { RunDecoration } from '@/lib/bubbleRuns'
+import { GENERIC_SEND_ERROR } from '@/outbox/send'
 import { makeTestDb, msgRow } from '@/outbox/testSupport'
 import { MessageBubble } from './MessageBubble'
 import { clearRichContentCacheForTests } from './useRichHtmlContent'
 
 const navigate = vi.fn()
+
+vi.mock('@/data/actions', () => ({ retrySend: vi.fn() }))
 
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children }: { children?: ReactNode }) => <a data-testid="router-link">{children}</a>,
@@ -271,6 +276,27 @@ describe('MessageBubble chrome', () => {
       }),
     )
     expect(screen.getByText('Send failed')).toBeTruthy()
+  })
+
+  // A send that fails with attachments keeps its message; the bytes exist
+  // nowhere else, so the bubble has to offer the way back.
+  it('offers a retry on a failed send and reports a second failure in place', async () => {
+    vi.mocked(retrySend).mockRejectedValueOnce(new Error('still offline'))
+    renderBubble(
+      msgRow({
+        id: 'm2',
+        conversationId: 'c1',
+        isFromMe: 1,
+        sendState: 'failed',
+        hasAttachments: 1,
+        chatPreviewText: 'Out',
+      }),
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry send' }))
+
+    expect(vi.mocked(retrySend)).toHaveBeenCalledWith('m2')
+    await waitFor(() => expect(screen.getByText(GENERIC_SEND_ERROR)).toBeTruthy())
   })
 
   it('linkifies URLs in bubble text without innerHTML', () => {

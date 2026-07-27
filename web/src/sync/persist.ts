@@ -28,6 +28,7 @@ import {
   type ResolveSeed,
 } from '@/identity/routing'
 import { calculateNewsletterScore } from '@/mime/newsletter'
+import { isLocalAttachmentId, matchLocalAttachment } from '@/outbox/outboundAttachments'
 import {
   parseEmailAddresses,
   parseGmailMessage,
@@ -378,6 +379,52 @@ async function upsertPeople(
   }
 }
 
+/**
+ * Upgrades an optimistic outbound row to the server identity Gmail just handed
+ * back, moving its bytes to the new key. Nothing is re-downloaded: the local
+ * blob IS the attachment, and until this runs it is the only copy in
+ * existence.
+ *
+ * Bytes move before the row does, and the row only claims 'downloaded' if they
+ * actually landed — a quota failure mid-move must leave a re-downloadable row,
+ * not one that promises bytes it does not have.
+ */
+async function adoptLocalAttachment(
+  db: ChatmailDB,
+  local: AttachmentRow,
+  incoming: Omit<AttachmentRow, 'messageId'>,
+  messageId: string,
+  now: number,
+): Promise<void> {
+  const blobRow = await db.blobs.get(local.id)
+  let bytesMoved = false
+  if (blobRow !== undefined) {
+    try {
+      await putBlob(db, incoming.id, blobRow.blob, now)
+      bytesMoved = true
+    } catch (error) {
+      if (!(error instanceof BlobQuotaExceededError)) throw error
+    }
+    if (bytesMoved) await db.blobs.delete(local.id)
+  }
+
+  await db.attachments.delete(local.id)
+  await db.attachments.put({
+    // Pixel dimensions were measured locally at pick time; the Gmail payload
+    // carries none, so they survive the adoption.
+    ...local,
+    messageId,
+    id: incoming.id,
+    gmailAttachmentId: incoming.gmailAttachmentId,
+    contentId: incoming.contentId,
+    filename: incoming.filename,
+    mimeType: incoming.mimeType,
+    byteSize: incoming.byteSize > 0 ? incoming.byteSize : local.byteSize,
+    state: bytesMoved ? 'downloaded' : 'queued',
+    lastDownloadFailedAt: 0,
+  })
+}
+
 async function putAttachments(
   db: ChatmailDB,
   messageId: string,
@@ -389,8 +436,23 @@ async function putAttachments(
   const existingContentIds = new Set(
     existingRows.map((row) => row.contentId).filter((cid) => cid !== ''),
   )
+  const localRows = existingRows.filter((row) => isLocalAttachmentId(row.id))
+  const consumedLocalIds = new Set<string>()
 
   for (const { row, inlineData } of planned) {
+    // The sent copy of a message this device just sent: its parts are the
+    // attachments already sitting here under `local_` ids. Adopt them instead
+    // of inserting a second row per file (matchingOptimisticLocalAttachment).
+    const local = matchLocalAttachment(row, localRows, consumedLocalIds)
+    if (local !== null) {
+      consumedLocalIds.add(local.id)
+      existingIds.delete(local.id)
+      await adoptLocalAttachment(db, local, row, messageId, now)
+      existingIds.add(row.id)
+      if (row.contentId !== '') existingContentIds.add(row.contentId)
+      continue
+    }
+
     if (existingIds.has(row.id)) continue
     if (row.contentId !== '' && existingContentIds.has(row.contentId)) continue
     await db.attachments.put({ ...row, messageId })

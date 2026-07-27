@@ -12,12 +12,15 @@ import {
   extractUserNote,
   forwardedBlockUnedited,
 } from '@/outbox/forwardMetadata'
-import { sendFailureMessage, type ForwardSendPayload } from '@/outbox/send'
+import { SendFailedError, sendFailureMessage, type ForwardSendPayload } from '@/outbox/send'
 import { AliasPicker } from './AliasPicker'
+import { AttachmentPickerButton } from './AttachmentPickerButton'
+import { AttachmentStrip } from './AttachmentStrip'
 import { buildForwardDraft, skippedAttachmentWarning, type ForwardDraft } from './forwardSource'
 import { GrowingTextarea } from './GrowingTextarea'
 import { RecipientField } from './RecipientField'
 import { validRecipientEmails, type RecipientChipData } from './recipients'
+import { useAttachmentPicker } from './useAttachmentPicker'
 import { useRecipientDedup } from './useRecipientDedup'
 
 /** Stable identity so the dedup effect does not re-run every forward render. */
@@ -63,6 +66,7 @@ export function ComposeDialog({
   // resolves the participant-set conversation, so a forward to an existing
   // chat's recipients lands in that chat.
   const existingChat = useRecipientDedup(isForward ? NO_CHIPS : chips)
+  const picker = useAttachmentPicker()
 
   useEffect(() => {
     if (forwardMessageId === undefined) return
@@ -87,16 +91,17 @@ export function ComposeDialog({
   }, [forwardMessageId])
 
   const recipients = validRecipientEmails(chips)
+  const attachments = picker.attachments
   // Forward mode mirrors iOS canSend: the forwarded content IS the message, so
   // an empty note does not block the send — but only once the forwarded draft
   // actually loaded. When the source message is gone the dialog degrades to a
-  // plain compose (see the fetch effect), and a plain compose needs a body:
-  // without this a stale ?forward= URL could send an empty '(No Subject)'
-  // shell the moment a recipient lands.
+  // plain compose (see the fetch effect), and a plain compose needs a body or
+  // a staged attachment: without this a stale ?forward= URL could send an
+  // empty '(No Subject)' shell the moment a recipient lands.
   const hasContent = isForward
-    ? !preparing && (forward !== null || body.trim() !== '')
-    : body.trim() !== ''
-  const canSend = !sending && recipients.length > 0 && hasContent
+    ? !preparing && (forward !== null || body.trim() !== '' || attachments.length > 0)
+    : body.trim() !== '' || attachments.length > 0
+  const canSend = !sending && !picker.busy && recipients.length > 0 && hasContent
 
   const forwardPayload = (): ForwardSendPayload | undefined => {
     if (!isForward || forward === null) return undefined
@@ -126,6 +131,7 @@ export function ComposeDialog({
         body: body.trim(),
         ...(fromAlias !== null ? { fromAlias } : {}),
         ...(payload !== undefined ? { forward: payload } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
       })
       onClose()
       await navigate({
@@ -133,6 +139,18 @@ export function ComposeDialog({
         params: { conversationId: result.conversationId },
       })
     } catch (error) {
+      // A failure carrying attachments leaves a retryable failed bubble in the
+      // target chat; go there so the retry is reachable instead of stranding
+      // the user in a dialog whose files now live somewhere else.
+      if (error instanceof SendFailedError && error.keptFailedMessage) {
+        const conversationId = error.conversationId
+        picker.clear()
+        onClose()
+        if (conversationId !== null) {
+          await navigate({ to: '/chats/$conversationId', params: { conversationId } })
+          return
+        }
+      }
       // Address rejections name the offending addresses; everything else
       // falls back to the generic line.
       setSendError(sendFailureMessage(error))
@@ -248,17 +266,32 @@ export function ComposeDialog({
             {sendError}
           </p>
         )}
+        {picker.skippedMessage !== null && (
+          <p role="alert" className="px-4 pb-2 text-sm text-danger">
+            {picker.skippedMessage}
+          </p>
+        )}
+
+        <AttachmentStrip attachments={attachments} onRemove={picker.remove} disabled={sending} />
 
         <footer className="flex shrink-0 items-end gap-2 border-t border-border p-3">
-          {!isForward && (
+          <AttachmentPickerButton
+            onFiles={(files) => void picker.addFiles(files)}
+            disabled={sending || picker.busy}
+            className="size-8 shrink-0"
+          />
+          {!isForward ? (
             <GrowingTextarea
               value={body}
               onChange={setBody}
               onSubmit={() => void handleSend()}
               disabled={sending}
             />
+          ) : (
+            // Forward mode's body is the big textarea above; the footer keeps
+            // only the paperclip and Send.
+            <div className="min-w-0 flex-1" />
           )}
-          {isForward && <div className="min-w-0 flex-1" />}
           <IconButton
             aria-label="Send"
             disabled={!canSend}

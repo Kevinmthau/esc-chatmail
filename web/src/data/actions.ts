@@ -16,6 +16,7 @@ import * as messageActions from '@/outbox/messageActions'
 import { drainPendingActions, makeOutboxApi } from '@/outbox/pendingActions'
 import {
   replayAbandonedSends,
+  retryFailedSend as retryFailedSendOutbox,
   sendMessage as sendMessageOutbox,
   SendFailedError,
   type SendDraft,
@@ -76,6 +77,16 @@ export async function sendMessage(draft: SendDraft): Promise<SendResult> {
   const broker = currentBroker
   if (broker !== null) return sendMessageOutbox(getDB(), broker, draft)
   if (demoMode) return sendMessageOutbox(getDB(), demoStubBroker, draft, makeDemoSendApi())
+  throw new SendFailedError('Not signed in')
+}
+
+/** Re-sends a failed message from its bubble (attachments and all). */
+export async function retrySend(messageId: string): Promise<SendResult> {
+  const broker = currentBroker
+  if (broker !== null) return retryFailedSendOutbox(getDB(), broker, messageId)
+  if (demoMode) {
+    return retryFailedSendOutbox(getDB(), demoStubBroker, messageId, makeDemoSendApi())
+  }
   throw new SendFailedError('Not signed in')
 }
 

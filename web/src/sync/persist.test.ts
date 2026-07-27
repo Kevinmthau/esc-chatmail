@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatmailDB } from '@/db/schema'
+import type { AttachmentRow } from '@/db/types'
 import type { GmailMessage } from '@/gmail/types'
 import { calculateParticipantHash } from '@/identity/participantSet'
+import { convoRow, msgRow, storableBlob } from '@/outbox/testSupport'
 import {
   applyPersist,
   LOCAL_MODIFICATION_MAX_AGE_MS,
@@ -476,6 +478,129 @@ describe('applyPersist — updating existing messages', () => {
     const after = await db.conversations.toArray()
     expect(after).toEqual(before)
     expect(await db.messages.count()).toBe(1)
+  })
+})
+
+describe('adopting optimistic outbound attachments', () => {
+  const PHOTO_BYTES = new Uint8Array([1, 2, 3, 4])
+
+  /**
+   * The store as it looks right after a successful send reconcile: the message
+   * carries the Gmail id, and its attachment rows are still the local ones
+   * (`local_<uuid>`, no gmailAttachmentId) whose blobs are the ONLY copy of
+   * those bytes anywhere.
+   */
+  async function seedSentMessageWithLocalAttachment(
+    overrides: Partial<AttachmentRow> = {},
+  ): Promise<void> {
+    await db.conversations.add(convoRow({ id: 'c1' }))
+    await db.messages.add(
+      msgRow({
+        id: 'm1',
+        conversationId: 'c1',
+        senderEmail: ME,
+        isFromMe: 1,
+        labelIds: ['SENT'],
+        hasAttachments: 1,
+        sendState: 'sent',
+      }),
+    )
+    await db.attachments.put({
+      id: 'local_a1',
+      messageId: 'm1',
+      gmailAttachmentId: '',
+      contentId: '',
+      filename: 'photo.png',
+      mimeType: 'image/png',
+      byteSize: PHOTO_BYTES.length,
+      width: 100,
+      height: 50,
+      state: 'uploaded',
+      lastDownloadFailedAt: 0,
+      ...overrides,
+    })
+    await db.blobs.put({
+      key: overrides.id ?? 'local_a1',
+      blob: storableBlob([PHOTO_BYTES], { type: 'image/png' }),
+      byteSize: PHOTO_BYTES.length,
+      lastAccessAt: NOW,
+    })
+  }
+
+  /** The sent copy as Gmail hands it back, with a server-side attachment part. */
+  function syncedSentCopy(options: { filename?: string; size?: number } = {}): GmailMessage {
+    const msg = textMessage({ id: 'm1', from: ME, labelIds: ['SENT'] })
+    msg.payload = {
+      partId: '',
+      mimeType: 'multipart/mixed',
+      headers: msg.payload!.headers!,
+      parts: [
+        { partId: '0', mimeType: 'text/plain', body: { size: 4, data: b64url('body') } },
+        {
+          partId: '1',
+          mimeType: 'image/png',
+          filename: options.filename ?? 'photo.png',
+          body: { attachmentId: 'ATT1', size: options.size ?? PHOTO_BYTES.length },
+        },
+      ],
+    }
+    return msg
+  }
+
+  it('adopts the local row into the server identity instead of duplicating it', async () => {
+    await seedSentMessageWithLocalAttachment()
+
+    await persistMessages([syncedSentCopy()])
+
+    const rows = await db.attachments.where('messageId').equals('m1').toArray()
+    expect(rows).toHaveLength(1)
+    const row = rows[0]!
+    expect(row.id).toBe('m1:1')
+    expect(row.gmailAttachmentId).toBe('ATT1')
+    // The bytes are already here, so nothing needs downloading.
+    expect(row.state).toBe('downloaded')
+    // Dimensions were measured at pick time; Gmail's payload carries none.
+    expect(row.width).toBe(100)
+    expect(row.height).toBe(50)
+
+    // The blob moved with the row — the old key is gone, not orphaned.
+    expect(await db.blobs.get('local_a1')).toBeUndefined()
+    expect((await db.blobs.get('m1:1'))?.byteSize).toBe(PHOTO_BYTES.length)
+  })
+
+  it('matches on Content-ID when both sides carry one', async () => {
+    await seedSentMessageWithLocalAttachment({ contentId: 'logo@x', filename: 'renamed.png' })
+    const msg = syncedSentCopy({ filename: 'server-name.png', size: 999 })
+    msg.payload!.parts![1]!.headers = [{ name: 'Content-ID', value: '<logo@x>' }]
+
+    await persistMessages([msg])
+
+    const rows = await db.attachments.where('messageId').equals('m1').toArray()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.id).toBe('m1:1')
+    expect(rows[0]!.filename).toBe('server-name.png')
+  })
+
+  it('inserts a second row when nothing matches, keeping the local bytes', async () => {
+    await seedSentMessageWithLocalAttachment()
+
+    // A different file: same name, different size.
+    await persistMessages([syncedSentCopy({ size: 4096 })])
+
+    const rows = await db.attachments.where('messageId').equals('m1').toArray()
+    expect(rows.map((row) => row.id).sort()).toEqual(['local_a1', 'm1:1'])
+    expect(await db.blobs.get('local_a1')).toBeDefined()
+  })
+
+  it('is idempotent: a second sync of the same copy adds nothing', async () => {
+    await seedSentMessageWithLocalAttachment()
+
+    await persistMessages([syncedSentCopy()])
+    await persistMessages([syncedSentCopy()])
+
+    const rows = await db.attachments.where('messageId').equals('m1').toArray()
+    expect(rows.map((row) => row.id)).toEqual(['m1:1'])
+    expect(await db.blobs.count()).toBe(1)
   })
 })
 

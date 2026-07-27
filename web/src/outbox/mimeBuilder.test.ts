@@ -3,23 +3,74 @@ import {
   buildNew,
   buildReply,
   encodeHeaderIfNeeded,
+  encodeRawForSend,
   formatFromHeader,
   formatRfc2822Date,
   InvalidRecipientsError,
   InvalidSenderError,
   isMessageIdToken,
   isSingleAddrSpec,
+  MessageTooLargeError,
   NoValidRecipientsError,
   sanitizeHeaderValue,
+  sanitizeMimeType,
   toBase64Url,
 } from './mimeBuilder'
+
+type UuidString = `${string}-${string}-${string}-${string}-${string}`
 
 const UUID = '00000000-0000-4000-8000-000000000000'
 const BOUNDARY = `----Boundary${UUID.replaceAll('-', '')}`
 const NOW = new Date(2026, 0, 15, 12, 30, 45)
 
+// Distinct ids so each nesting level's boundary is distinguishable. The
+// builder consumes them in call order: Message-ID, then one per container it
+// opens (mixed → related → alternative).
+const MESSAGE_UUID: UuidString = '00000000-0000-4000-8000-00000000000a'
+const MIXED_UUID: UuidString = '00000000-0000-4000-8000-00000000000b'
+const RELATED_UUID: UuidString = '00000000-0000-4000-8000-00000000000c'
+const ALTERNATIVE_UUID: UuidString = '00000000-0000-4000-8000-00000000000d'
+
+function boundaryFor(uuid: string): string {
+  return `----Boundary${uuid.replaceAll('-', '')}`
+}
+
 function mockUuid(): void {
   vi.spyOn(crypto, 'randomUUID').mockReturnValue(UUID)
+}
+
+/** Hands out the given ids in order, repeating the last one afterwards. */
+function mockUuids(...uuids: UuidString[]): void {
+  const spy = vi.spyOn(crypto, 'randomUUID')
+  for (const uuid of uuids) spy.mockReturnValueOnce(uuid)
+  spy.mockReturnValue(uuids[uuids.length - 1] ?? MESSAGE_UUID)
+}
+
+function base64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('base64')
+}
+
+function bytes(text: string): Uint8Array {
+  return new TextEncoder().encode(text)
+}
+
+function utf8Base64(text: string): string {
+  return Buffer.from(text, 'utf8').toString('base64')
+}
+
+/** The raw (still line-wrapped) body of the part with this exact Content-Type. */
+function base64PayloadOfPart(mime: string, contentType: string): string {
+  const start = mime.indexOf(`Content-Type: ${contentType}\r\n`)
+  if (start < 0) throw new Error(`no part with Content-Type: ${contentType}`)
+  const bodyStart = mime.indexOf('\r\n\r\n', start) + 4
+  // base64 never contains '-', so '\r\n--' can only be the next boundary.
+  return mime.slice(bodyStart, mime.indexOf('\r\n--', bodyStart))
+}
+
+function lineLengthsOfPart(mime: string, contentType: string): number[] {
+  return base64PayloadOfPart(mime, contentType)
+    .split('\r\n')
+    .map((line) => line.length)
 }
 
 function withoutDateLine(mime: string): string {
@@ -286,6 +337,325 @@ describe('buildNew', () => {
     expect(Buffer.from((htmlPart ?? '').replaceAll('\r\n', ''), 'base64').toString('utf8')).toBe(
       htmlBody,
     )
+  })
+})
+
+describe('buildNew with attachments', () => {
+  const PDF = bytes('%PDF-1.4 fake report bytes')
+  const PNG = bytes('\x89PNG fake logo bytes')
+
+  it('builds the multipart/mixed golden message for one attachment', () => {
+    mockUuids(MESSAGE_UUID, MIXED_UUID)
+    const mixed = boundaryFor(MIXED_UUID)
+
+    const mime = buildNew(
+      {
+        from: { email: 'alice@example.com' },
+        to: ['bob@example.com'],
+        subject: 'Hello',
+        textBody: 'Hi there',
+        attachments: [{ data: PDF, filename: 'report.pdf', mimeType: 'application/pdf' }],
+      },
+      { now: NOW },
+    )
+
+    expect(withoutDateLine(mime)).toBe(
+      'From: alice@example.com\r\n' +
+        'To: bob@example.com\r\n' +
+        'Subject: Hello\r\n' +
+        `Message-ID: <${MESSAGE_UUID}@inbox-chat.web>\r\n` +
+        'MIME-Version: 1.0\r\n' +
+        `Content-Type: multipart/mixed; boundary="${mixed}"\r\n` +
+        '\r\n' +
+        `--${mixed}\r\n` +
+        'Content-Type: text/plain; charset=UTF-8\r\n' +
+        'Content-Transfer-Encoding: 8bit\r\n' +
+        '\r\n' +
+        'Hi there\r\n' +
+        `--${mixed}\r\n` +
+        'Content-Type: application/pdf; name="report.pdf"\r\n' +
+        'Content-Transfer-Encoding: base64\r\n' +
+        'Content-Disposition: attachment; filename="report.pdf"\r\n' +
+        '\r\n' +
+        `${base64(PDF)}\r\n` +
+        `--${mixed}--\r\n`,
+    )
+  })
+
+  it('builds the mixed → related → alternative golden message for an inline image + attachment', () => {
+    mockUuids(MESSAGE_UUID, MIXED_UUID, RELATED_UUID, ALTERNATIVE_UUID)
+    const mixed = boundaryFor(MIXED_UUID)
+    const related = boundaryFor(RELATED_UUID)
+    const alternative = boundaryFor(ALTERNATIVE_UUID)
+    const textBody = 'See the logo.'
+    const htmlBody = '<p>See the <img src="cid:logo@inbox-chat.web"></p>'
+
+    const mime = buildNew(
+      {
+        from: { email: 'alice@example.com' },
+        to: ['bob@example.com'],
+        subject: 'Hello',
+        textBody,
+        htmlBody,
+        attachments: [{ data: PDF, filename: 'report.pdf', mimeType: 'application/pdf' }],
+        inlineAttachments: [
+          {
+            data: PNG,
+            filename: 'logo.png',
+            mimeType: 'image/png',
+            contentId: 'logo@inbox-chat.web',
+          },
+        ],
+      },
+      { now: NOW },
+    )
+
+    expect(withoutDateLine(mime)).toBe(
+      'From: alice@example.com\r\n' +
+        'To: bob@example.com\r\n' +
+        'Subject: Hello\r\n' +
+        `Message-ID: <${MESSAGE_UUID}@inbox-chat.web>\r\n` +
+        'MIME-Version: 1.0\r\n' +
+        `Content-Type: multipart/mixed; boundary="${mixed}"\r\n` +
+        '\r\n' +
+        `--${mixed}\r\n` +
+        `Content-Type: multipart/related; boundary="${related}"\r\n` +
+        '\r\n' +
+        `--${related}\r\n` +
+        `Content-Type: multipart/alternative; boundary="${alternative}"\r\n` +
+        '\r\n' +
+        `--${alternative}\r\n` +
+        'Content-Type: text/plain; charset=UTF-8\r\n' +
+        'Content-Transfer-Encoding: base64\r\n' +
+        '\r\n' +
+        `${utf8Base64(textBody)}\r\n` +
+        `--${alternative}\r\n` +
+        'Content-Type: text/html; charset=UTF-8\r\n' +
+        'Content-Transfer-Encoding: base64\r\n' +
+        '\r\n' +
+        `${utf8Base64(htmlBody)}\r\n` +
+        `--${alternative}--\r\n` +
+        `--${related}\r\n` +
+        'Content-Type: image/png; name="logo.png"\r\n' +
+        'Content-Transfer-Encoding: base64\r\n' +
+        'Content-ID: <logo@inbox-chat.web>\r\n' +
+        'Content-Disposition: inline; filename="logo.png"\r\n' +
+        '\r\n' +
+        `${base64(PNG)}\r\n` +
+        `--${related}--\r\n` +
+        `--${mixed}\r\n` +
+        'Content-Type: application/pdf; name="report.pdf"\r\n' +
+        'Content-Transfer-Encoding: base64\r\n' +
+        'Content-Disposition: attachment; filename="report.pdf"\r\n' +
+        '\r\n' +
+        `${base64(PDF)}\r\n` +
+        `--${mixed}--\r\n`,
+    )
+  })
+
+  it('omits the multipart/related wrapper when there are no inline parts', () => {
+    mockUuids(MESSAGE_UUID, MIXED_UUID, ALTERNATIVE_UUID)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 'text',
+        htmlBody: '<p>html</p>',
+        attachments: [{ data: PDF, filename: 'report.pdf', mimeType: 'application/pdf' }],
+      },
+      { now: NOW },
+    )
+
+    expect(mime).not.toContain('multipart/related')
+    expect(mime).toContain(`Content-Type: multipart/mixed; boundary="${boundaryFor(MIXED_UUID)}"`)
+    // The alternative opens directly inside the mixed container.
+    expect(mime).toContain(
+      `--${boundaryFor(MIXED_UUID)}\r\nContent-Type: multipart/alternative; boundary="${boundaryFor(ALTERNATIVE_UUID)}"\r\n`,
+    )
+  })
+
+  it('wraps attachment base64 at 64 characters and body base64 at 76', () => {
+    mockUuids(MESSAGE_UUID, MIXED_UUID, ALTERNATIVE_UUID)
+    // 600 bytes → 800 base64 characters: many full lines at either width.
+    const big = new Uint8Array(600).map((_, i) => (i * 7) % 256)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 'plain '.repeat(80),
+        htmlBody: `<p>${'x'.repeat(400)}</p>`,
+        attachments: [{ data: big, filename: 'blob.bin', mimeType: 'application/octet-stream' }],
+      },
+      { now: NOW },
+    )
+
+    const bodyLines = lineLengthsOfPart(mime, 'text/plain; charset=UTF-8')
+    expect(Math.max(...bodyLines)).toBe(76)
+    const attachmentLines = lineLengthsOfPart(mime, 'application/octet-stream; name="blob.bin"')
+    expect(Math.max(...attachmentLines)).toBe(64)
+    // Round-trip: the wrapped payload decodes back to the original bytes.
+    const encoded = base64PayloadOfPart(mime, 'application/octet-stream; name="blob.bin"')
+    expect([...Buffer.from(encoded.replaceAll('\r\n', ''), 'base64')]).toEqual([...big])
+  })
+
+  it('escapes quotes and backslashes in filenames so a name cannot restructure the header', () => {
+    mockUuids(MESSAGE_UUID, MIXED_UUID)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 'b',
+        attachments: [
+          {
+            data: bytes('x'),
+            // A raw interpolation would close the parameter and let the rest
+            // be parsed as header syntax.
+            filename: String.raw`evil".pdf`,
+            mimeType: 'application/pdf',
+          },
+        ],
+      },
+      { now: NOW },
+    )
+
+    expect(mime).toContain(String.raw`Content-Type: application/pdf; name="evil\".pdf"`)
+    expect(mime).toContain(String.raw`Content-Disposition: attachment; filename="evil\".pdf"`)
+  })
+
+  it('keeps a non-ASCII filename as raw UTF-8 in the quoted parameters (documented choice)', () => {
+    // Strictly RFC 2045 headers are ASCII (RFC 2231 filename*= is the
+    // conformant spelling), but iOS interpolates raw UTF-8, Gmail's API
+    // accepts it and echoes the same name back on sync — which keeps
+    // matchLocalAttachment's filename fingerprint stable. Pinned so a switch
+    // to RFC 2231 has to be its own deliberate change, on both platforms.
+    mockUuids(MESSAGE_UUID, MIXED_UUID)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 'photo',
+        attachments: [{ data: bytes('x'), filename: 'Fotoğraf ✓.jpg', mimeType: 'image/jpeg' }],
+      },
+      { now: NOW },
+    )
+
+    expect(mime).toContain('Content-Type: image/jpeg; name="Fotoğraf ✓.jpg"')
+    expect(mime).toContain('Content-Disposition: attachment; filename="Fotoğraf ✓.jpg"')
+  })
+
+  it('strips CRLF from attachment metadata (header-injection defense)', () => {
+    mockUuids(MESSAGE_UUID, MIXED_UUID)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 'b',
+        attachments: [
+          {
+            data: bytes('x'),
+            filename: 'ok.pdf\r\nBcc: victim@example.com',
+            mimeType: 'application/pdf',
+          },
+        ],
+      },
+      { now: NOW },
+    )
+
+    expect(mime).not.toMatch(/^Bcc:/mu)
+    expect(mime).toContain('name="ok.pdf Bcc: victim@example.com"')
+  })
+
+  it('falls back to application/octet-stream for a media type carrying parameters', () => {
+    mockUuids(MESSAGE_UUID, MIXED_UUID)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 'b',
+        attachments: [
+          {
+            data: bytes('x'),
+            filename: 'x.png',
+            // A crafted type could otherwise add a boundary parameter and
+            // restructure the part.
+            mimeType: `image/png; boundary="${boundaryFor(MIXED_UUID)}"`,
+          },
+        ],
+      },
+      { now: NOW },
+    )
+
+    expect(mime).toContain('Content-Type: application/octet-stream; name="x.png"')
+  })
+
+  it('emits inline parts into the mixed container when there is no html body', () => {
+    // iOS's plain-text builder drops inline parts entirely; they are kept here.
+    mockUuids(MESSAGE_UUID, MIXED_UUID)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 'b',
+        inlineAttachments: [
+          { data: PNG, filename: 'logo.png', mimeType: 'image/png', contentId: 'logo@x' },
+        ],
+      },
+      { now: NOW },
+    )
+
+    expect(mime).toContain('Content-ID: <logo@x>\r\n')
+    expect(mime).toContain('Content-Disposition: inline; filename="logo.png"\r\n')
+    expect(mime).toContain(base64(PNG))
+  })
+
+  it('strips angle brackets a Content-ID brings along instead of nesting them', () => {
+    mockUuids(MESSAGE_UUID, MIXED_UUID, RELATED_UUID, ALTERNATIVE_UUID)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 't',
+        htmlBody: '<p>h</p>',
+        inlineAttachments: [
+          { data: PNG, filename: 'logo.png', mimeType: 'image/png', contentId: '<logo@x>' },
+        ],
+      },
+      { now: NOW },
+    )
+
+    expect(mime).toContain('Content-ID: <logo@x>\r\n')
+    expect(mime).not.toContain('<<')
+  })
+})
+
+describe('sanitizeMimeType', () => {
+  it('keeps well-formed types and rejects everything else', () => {
+    expect(sanitizeMimeType('image/PNG')).toBe('image/png')
+    expect(sanitizeMimeType('application/vnd.ms-excel')).toBe('application/vnd.ms-excel')
+    for (const bad of ['', 'image', '/png', 'image/', 'image/png; charset=x', 'a b/c']) {
+      expect(sanitizeMimeType(bad), bad).toBe('application/octet-stream')
+    }
+  })
+})
+
+describe('encodeRawForSend', () => {
+  it('returns the base64url payload when it fits', () => {
+    expect(encodeRawForSend('Subject: hi\r\n\r\nbody\r\n')).toBe(
+      toBase64Url('Subject: hi\r\n\r\nbody\r\n'),
+    )
+  })
+
+  it('refuses a payload past the endpoint ceiling, naming both sizes', () => {
+    // 100 ASCII characters → 136 base64url characters, over a 100-byte limit.
+    let thrown: unknown
+    try {
+      encodeRawForSend('x'.repeat(100), 100)
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(MessageTooLargeError)
+    expect((thrown as MessageTooLargeError).limitBytes).toBe(100)
+    expect((thrown as MessageTooLargeError).rawBytes).toBeGreaterThan(100)
   })
 })
 
