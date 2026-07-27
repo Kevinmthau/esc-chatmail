@@ -128,6 +128,90 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertNil(state.initialLoadFailureReason)
     }
 
+    func testInitialLoadFromBeginning_publishesOldestMessagesChronologically() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 25)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 8,
+            bufferSize: 2,
+            pageSize: 8,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let expectedMessages = Array(messages.prefix(8))
+        await waitUntil {
+            state.initialLoadPhase == .loaded &&
+                state.visibleMessages.map(\.objectID) == expectedMessages.map(\.objectID) &&
+                !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 0)
+        XCTAssertEqual(state.totalMessageCount, messages.count)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.id),
+            expectedMessages.map(\.id)
+        )
+        XCTAssertFalse(state.isShowingLatestWindow)
+    }
+
+    func testTailInsertionPreservesBeginningWindowWhenLatestFollowingIsDisabled() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 8,
+            bufferSize: 2,
+            pageSize: 8,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        state.setFollowsLatestInsertions(false)
+        defer { state.cleanup() }
+
+        let initialMessageIDs = messages.map(\.objectID)
+        await waitUntil {
+            state.initialLoadPhase == .loaded &&
+                state.visibleMessages.map(\.objectID) == initialMessageIDs &&
+                !state.isLoadingMore
+        }
+        XCTAssertTrue(state.isShowingLatestWindow)
+
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-top-presented-tail-insert",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+
+        await waitUntil {
+            state.totalMessageCount == 9 &&
+                state.visibleMessages.map(\.objectID) == initialMessageIDs &&
+                !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 0)
+        XCTAssertFalse(state.isShowingLatestWindow)
+
+        state.setFollowsLatestInsertions(true)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialMessageIDs + [pendingMessage.objectID] &&
+                state.isShowingLatestWindow &&
+                !state.isLoadingMore
+        }
+    }
+
     func testResumeRestartsAnInterruptedInitialLoad() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 3)
         let stack = self.stack!
@@ -239,6 +323,122 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedVisibleIDs)
         XCTAssertFalse(state.isShowingLatestWindow)
         XCTAssertEqual(state.scrollPosition, 0)
+    }
+
+    func testResumeLatestWindowDoesNotPublishAfterFollowingIsDisabled() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 4)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 4,
+            preloadThreshold: 1
+        )
+        let pause = RequestNumberPause(targetRequest: 3)
+        let stack = self.stack!
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            await pause.waitIfNeeded()
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        let initialMessageIDs = messages.map(\.objectID)
+        await waitUntil {
+            state.initialLoadPhase == .loaded &&
+                state.visibleMessages.map(\.objectID) == initialMessageIDs
+        }
+        state.cleanup()
+
+        _ = makeMessage(
+            id: "virtual-scroll-inactive-follow-intent-tail",
+            date: 10,
+            conversation: conversation
+        )
+        try viewContext.save()
+
+        state.resume()
+        await pause.waitUntilPaused()
+        state.setFollowsLatestInsertions(false)
+        await pause.release()
+
+        await waitUntil {
+            state.totalMessageCount == 5 &&
+                state.visibleMessages.map(\.objectID) == initialMessageIDs &&
+                !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 0)
+        XCTAssertFalse(state.isShowingLatestWindow)
+    }
+
+    func testExplicitLatestWindowLoadPublishesAfterFollowingIsDisabled() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 4)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 4,
+            preloadThreshold: 1
+        )
+        let pause = RequestNumberPause(targetRequest: 3)
+        let stack = self.stack!
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            await pause.waitIfNeeded()
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.initialLoadPhase == .loaded &&
+                state.visibleMessages.map(\.objectID) == messages.map(\.objectID)
+        }
+        state.cleanup()
+
+        let pendingMessage = makeMessage(
+            id: "virtual-scroll-explicit-latest-tail",
+            date: 10,
+            conversation: conversation
+        )
+        try viewContext.save()
+
+        let latestLoad = Task {
+            await state.loadLatestWindow()
+        }
+        await pause.waitUntilPaused()
+        state.setFollowsLatestInsertions(false)
+        await pause.release()
+
+        let didLoadLatest = await latestLoad.value
+        XCTAssertTrue(didLoadLatest)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages.dropFirst()).map(\.objectID) + [pendingMessage.objectID]
+        )
+        XCTAssertEqual(state.totalMessageCount, 5)
+        XCTAssertEqual(state.visibleRangeStartIndex, 1)
+        XCTAssertTrue(state.isShowingLatestWindow)
     }
 
     func testResumeClampsHistoricalWindowAfterLargeInactiveDeletion() async throws {
