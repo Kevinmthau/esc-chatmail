@@ -60,6 +60,32 @@ test('newsletter renders as preview card and opens the sandboxed reader', async 
   await expect(page.locator('dialog[open]')).toHaveCount(0)
 })
 
+test('multi-select archives two conversations in one batch', async ({ page }) => {
+  await openChats(page)
+
+  // The group fixture is named "Alice Chen, Ben Ortiz", so match rows by an
+  // exact name text node to pick the one-to-one chats.
+  const optionFor = (name: string) =>
+    page.getByRole('option').filter({ has: page.getByText(name, { exact: true }) })
+
+  await page.getByRole('button', { name: 'Select', exact: true }).click()
+  await optionFor('Alice Chen').click()
+  await optionFor('Fatima Khan').click()
+
+  await expect(page.getByText('2 Selected')).toBeVisible()
+  await expect(optionFor('Alice Chen')).toHaveAttribute('aria-selected', 'true')
+
+  await page.getByRole('button', { name: 'Archive 2 conversations', exact: true }).click()
+
+  // Completing the batch leaves select mode, and both conversations drop out
+  // of the active list (archive is local-first, so it lands with no network).
+  await expect(page.getByRole('button', { name: 'Select', exact: true })).toBeVisible()
+  await expect(page.getByRole('option')).toHaveCount(0)
+  await expect(page.getByText('Alice Chen', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Fatima Khan', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('The Daily Digest', { exact: true }).first()).toBeVisible()
+})
+
 test('compose dialog opens and dedups to an existing chat', async ({ page }) => {
   await openChats(page)
   await page.getByRole('button', { name: /new message|compose/i }).click()

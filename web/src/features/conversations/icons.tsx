@@ -55,6 +55,34 @@ export function MarkUnreadIcon({ className }: IconProps) {
   )
 }
 
+export function SpamIcon({ className }: IconProps) {
+  return (
+    <svg {...iconProps(className, 'spam')}>
+      <path d="M10.3 3.9 2.5 17.4a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+    </svg>
+  )
+}
+
+/** Unselected row affordance in multi-select mode. */
+export function CircleIcon({ className }: IconProps) {
+  return (
+    <svg {...iconProps(className, 'circle')}>
+      <circle cx="12" cy="12" r="9" />
+    </svg>
+  )
+}
+
+/** Selected row affordance in multi-select mode. */
+export function CheckCircleIcon({ className }: IconProps) {
+  return (
+    <svg {...iconProps(className, 'check-circle')} fill="currentColor" strokeWidth={0}>
+      <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm5.2 7.4-6.5 6.5a1 1 0 0 1-1.4 0l-3-3a1 1 0 1 1 1.4-1.4l2.3 2.3 5.8-5.8a1 1 0 0 1 1.4 1.4z" />
+    </svg>
+  )
+}
+
 export function RefreshIcon({ className }: IconProps) {
   return (
     <svg {...iconProps(className, 'refresh')}>

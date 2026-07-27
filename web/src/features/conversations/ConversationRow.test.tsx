@@ -112,3 +112,58 @@ describe('ConversationRow', () => {
     expect(vi.mocked(reportSpam)).toHaveBeenCalledWith('c1')
   })
 })
+
+describe('ConversationRow in select mode', () => {
+  afterEach(cleanup)
+
+  it('renders an unselected option that toggles instead of navigating', async () => {
+    const onToggleSelect = vi.fn()
+    const { container } = renderWithRouter(
+      <ConversationRow conversation={record()} selecting onToggleSelect={onToggleSelect} />,
+    )
+
+    const option = await screen.findByRole('option', { name: 'Alice Chen, 2 unread' })
+    expect(option.getAttribute('aria-selected')).toBe('false')
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(container.querySelector('svg[data-icon="circle"]')).not.toBeNull()
+    expect(container.querySelector('svg[data-icon="check-circle"]')).toBeNull()
+
+    fireEvent.click(option)
+    expect(onToggleSelect).toHaveBeenCalledWith('c1')
+  })
+
+  it('renders a filled checkmark and aria-selected when selected', async () => {
+    const { container } = renderWithRouter(
+      <ConversationRow conversation={record()} selecting selected />,
+    )
+
+    const option = await screen.findByRole('option', { name: 'Alice Chen, 2 unread' })
+    expect(option.getAttribute('aria-selected')).toBe('true')
+    expect(container.querySelector('svg[data-icon="check-circle"]')).not.toBeNull()
+    expect(container.querySelector('svg[data-icon="circle"]')).toBeNull()
+  })
+
+  it('toggles on Space and Enter, and ignores other keys', async () => {
+    const onToggleSelect = vi.fn()
+    renderWithRouter(
+      <ConversationRow conversation={record()} selecting onToggleSelect={onToggleSelect} />,
+    )
+
+    const option = await screen.findByRole('option', { name: 'Alice Chen, 2 unread' })
+    expect(option.getAttribute('tabindex')).toBe('0')
+
+    fireEvent.keyDown(option, { key: ' ' })
+    fireEvent.keyDown(option, { key: 'Enter' })
+    fireEvent.keyDown(option, { key: 'a' })
+    expect(onToggleSelect).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops the hover quick actions so the row is a single hit target', async () => {
+    const { container } = renderWithRouter(<ConversationRow conversation={record()} selecting />)
+
+    await screen.findByRole('option', { name: 'Alice Chen, 2 unread' })
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    // Same 88px box either way: the row still fills its virtualized slot.
+    expect(container.querySelector('[role="option"]')?.className).toContain('h-full')
+  })
+})

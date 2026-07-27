@@ -7,6 +7,7 @@ import { useConversationPage, useSyncStatus } from '@/live/hooks'
 import type { ConversationPage } from '@/live/queries'
 import { ConversationRow } from './ConversationRow'
 import { EnvelopeIcon } from './icons'
+import { useConversationSelection } from './selection'
 import { isFirstSyncPending, syncProgressDetail } from './syncState'
 
 const PAGE_SIZE = 50
@@ -36,6 +37,15 @@ export function ConversationList({ filter, demo = false }: ConversationListProps
   const view = page ?? lastPageRef.current
 
   const rows = useMemo(() => (view ? [...view.pinned, ...view.unpinned] : []), [view])
+
+  // Publish the loaded window to the selection context: Select All covers
+  // exactly these rows, and rows that leave the list drop out of the selection.
+  const { selecting, selectedIds, toggleSelection, registerSelectableIds } =
+    useConversationSelection()
+  const rowIds = useMemo(() => rows.map((row) => row.id), [rows])
+  useEffect(() => {
+    registerSelectableIds(rowIds)
+  }, [rowIds, registerSelectableIds])
 
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
@@ -67,18 +77,42 @@ export function ConversationList({ filter, demo = false }: ConversationListProps
   }
 
   return (
-    <div ref={parentRef} className="h-full overflow-y-auto">
-      <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+    <div
+      ref={parentRef}
+      className="h-full overflow-y-auto"
+      // Listbox semantics only in select mode: outside it the rows are links,
+      // which are not options.
+      role={selecting ? 'listbox' : undefined}
+      aria-multiselectable={selecting ? true : undefined}
+      aria-label={selecting ? 'Conversations' : undefined}
+    >
+      <div
+        // Like the positioning wrappers below, the sizing block must vanish
+        // from the accessibility tree so options are the listbox's only
+        // meaningful descendants.
+        role={selecting ? 'presentation' : undefined}
+        className="relative w-full"
+        style={{ height: virtualizer.getTotalSize() }}
+      >
         {items.map((item) => {
           const conversation = rows[item.index]
           if (conversation === undefined) return null
           return (
             <div
               key={conversation.id}
+              // The virtualizer's positioning wrapper must not sit between the
+              // listbox and its options in the accessibility tree.
+              role={selecting ? 'presentation' : undefined}
               className="absolute inset-x-0 top-0"
               style={{ height: item.size, transform: `translateY(${item.start}px)` }}
             >
-              <ConversationRow conversation={conversation} filter={filter} />
+              <ConversationRow
+                conversation={conversation}
+                filter={filter}
+                selecting={selecting}
+                selected={selectedIds.has(conversation.id)}
+                onToggleSelect={toggleSelection}
+              />
             </div>
           )
         })}
