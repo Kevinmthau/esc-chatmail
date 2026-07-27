@@ -19,18 +19,17 @@ private final class ChatMessagesSession: ObservableObject {
     ) {
         let scrollState = VirtualScrollState(
             conversationId: conversation.id.uuidString,
-            initialWindowPosition: .beginning,
+            initialWindowPosition: .end,
             viewContext: chatDependencies.storage.viewContext,
             makeBackgroundContext: chatDependencies.storage.makeBackgroundContext
         )
-        scrollState.setFollowsLatestInsertions(false)
         self.scrollState = scrollState
         self.messageBubbleLoader = chatDependencies.content.makeMessageBubbleLoader()
         self.coordinator = ChatMessagesCoordinator(
             scrollState: scrollState,
             viewModel: viewModel,
             chatDependencies: chatDependencies,
-            initialPresentationAnchor: .top
+            initialPresentationAnchor: .bottom
         )
 
         scrollState.objectWillChange
