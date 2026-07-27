@@ -70,7 +70,7 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private enum WindowLoadIntent {
-        case latest
+        case latest(requiredFollowIntentRevision: UInt?)
         case range(Range<Int>)
     }
 
@@ -156,6 +156,8 @@ final class VirtualScrollState: ObservableObject {
     private var syncCompletedCancellable: AnyCancellable?
     private var cachedConversationObjectID: NSManagedObjectID?
     private var pendingInsertedMessageEvents: [VirtualScrollInsertedMessageEvent] = []
+    private var followsLatestInsertions = true
+    private var followIntentRevision: UInt = 0
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
@@ -231,6 +233,53 @@ final class VirtualScrollState: ObservableObject {
         guard let messageWindow else { return false }
         return messageWindow.endIndex >= totalMessageCount ||
             !pendingInsertedMessageEvents.isEmpty
+    }
+
+    func setFollowsLatestInsertions(_ followsLatestInsertions: Bool) {
+        guard self.followsLatestInsertions != followsLatestInsertions else { return }
+        self.followsLatestInsertions = followsLatestInsertions
+        followIntentRevision &+= 1
+
+        if followsLatestInsertions {
+            preloadNext()
+        }
+    }
+
+    private func shouldFollowLatestWindow(_ window: MessageWindow) -> Bool {
+        followsLatestInsertions &&
+            (window.endIndex >= totalMessageCount ||
+                !pendingInsertedMessageEvents.isEmpty)
+    }
+
+    private func isCurrentFollowIntent(_ requiredRevision: UInt?) -> Bool {
+        guard let requiredRevision else { return true }
+        return followsLatestInsertions && followIntentRevision == requiredRevision
+    }
+
+    private func isCurrentWindow(_ window: MessageWindow) -> Bool {
+        guard let currentWindow = messageWindow else { return false }
+        return currentWindow.startIndex == window.startIndex &&
+            currentWindow.endIndex == window.endIndex &&
+            currentWindow.messageIDs == window.messageIDs
+    }
+
+    private func canRestoreCapturedWindow(_ window: MessageWindow) -> Bool {
+        guard !isLoadingMore else { return false }
+        guard case nil = currentWindowLoadIntent else { return false }
+        return isCurrentWindow(window)
+    }
+
+    private func canStartAutomaticReconciliation(_ window: MessageWindow) -> Bool {
+        guard isCurrentWindow(window) else { return false }
+        guard isLoadingMore else {
+            guard case nil = currentWindowLoadIntent else { return false }
+            return true
+        }
+
+        if case .latest(let requiredFollowIntentRevision) = currentWindowLoadIntent {
+            return requiredFollowIntentRevision != nil
+        }
+        return false
     }
 
     private var hasPendingInsertedMessagesInConversation: Bool {
@@ -566,8 +615,12 @@ final class VirtualScrollState: ObservableObject {
     @discardableResult
     func loadLatestWindow(
         forceViewContext: Bool = false,
-        datasetRetryAttemptsRemaining: Int = 1
+        datasetRetryAttemptsRemaining: Int = 1,
+        requiredFollowIntentRevision: UInt? = nil
     ) async -> Bool {
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            return false
+        }
         if visibleMessages.isEmpty &&
             (initialLoadPhase == .empty || initialLoadPhase == .failed) {
             initialLoadFailureReason = nil
@@ -575,7 +628,11 @@ final class VirtualScrollState: ObservableObject {
         }
         let preferPendingConversationMessages =
             forceViewContext || hasPendingInsertedMessagesInConversation
-        let loadGeneration = beginWindowLoad(intent: .latest)
+        let loadGeneration = beginWindowLoad(
+            intent: .latest(
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+        )
         let expectedDatasetGeneration = messageDatasetGeneration
         Log.diagnostic(
             .chatView,
@@ -587,6 +644,10 @@ final class VirtualScrollState: ObservableObject {
             preferPendingConversationMessages: preferPendingConversationMessages
         )
         guard !Task.isCancelled else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return false
+        }
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
             finishCancelledWindowLoad(generation: loadGeneration)
             return false
         }
@@ -607,7 +668,8 @@ final class VirtualScrollState: ObservableObject {
             )
             return await loadLatestWindow(
                 forceViewContext: forceViewContext,
-                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining - 1
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining - 1,
+                requiredFollowIntentRevision: requiredFollowIntentRevision
             )
         }
         guard let totalCount = loadedTotalCount else {
@@ -625,15 +687,18 @@ final class VirtualScrollState: ObservableObject {
             latestRebaseAttemptsRemaining: 2,
             generation: loadGeneration,
             datasetGeneration: expectedDatasetGeneration,
-            datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining
+            datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+            requiredFollowIntentRevision: requiredFollowIntentRevision
         ) else {
             return false
         }
         guard loadedBounds.generation == windowLoadGeneration else { return false }
-        scrollPosition = max(
-            loadedBounds.startIndex,
-            loadedBounds.totalCount - 1
-        )
+        if isCurrentFollowIntent(requiredFollowIntentRevision) {
+            scrollPosition = max(
+                loadedBounds.startIndex,
+                loadedBounds.totalCount - 1
+            )
+        }
         Log.diagnostic(
             .chatView,
             level: .info,
@@ -651,6 +716,7 @@ final class VirtualScrollState: ObservableObject {
         rangeClampAttemptsRemaining: Int,
         generation: UInt,
         datasetRetryAttemptsRemaining: Int,
+        requiredFollowIntentRevision: UInt?,
         operation: String
     ) async -> LoadedWindowBounds? {
         guard datasetRetryAttemptsRemaining > 0 else {
@@ -675,7 +741,8 @@ final class VirtualScrollState: ObservableObject {
             latestRebaseAttemptsRemaining: latestRebaseAttemptsRemaining,
             rangeClampAttemptsRemaining: rangeClampAttemptsRemaining,
             generation: generation,
-            datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining - 1
+            datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining - 1,
+            requiredFollowIntentRevision: requiredFollowIntentRevision
         )
     }
 
@@ -712,9 +779,16 @@ final class VirtualScrollState: ObservableObject {
         rangeClampAttemptsRemaining: Int = 1,
         generation: UInt? = nil,
         datasetGeneration: UInt? = nil,
-        datasetRetryAttemptsRemaining: Int = 1
+        datasetRetryAttemptsRemaining: Int = 1,
+        requiredFollowIntentRevision: UInt? = nil
     ) async -> LoadedWindowBounds? {
         guard startIndex >= 0, endIndex >= startIndex else {
+            return nil
+        }
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            if let generation {
+                finishCancelledWindowLoad(generation: generation)
+            }
             return nil
         }
 
@@ -737,6 +811,10 @@ final class VirtualScrollState: ObservableObject {
             finishCancelledWindowLoad(generation: loadGeneration)
             return nil
         }
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return nil
+        }
         guard loadGeneration == windowLoadGeneration else {
             return nil
         }
@@ -749,6 +827,7 @@ final class VirtualScrollState: ObservableObject {
                 rangeClampAttemptsRemaining: rangeClampAttemptsRemaining,
                 generation: loadGeneration,
                 datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+                requiredFollowIntentRevision: requiredFollowIntentRevision,
                 operation: "window"
             )
         }
@@ -787,7 +866,8 @@ final class VirtualScrollState: ObservableObject {
                 rangeClampAttemptsRemaining: rangeClampAttemptsRemaining,
                 generation: loadGeneration,
                 datasetGeneration: expectedDatasetGeneration,
-                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+                requiredFollowIntentRevision: requiredFollowIntentRevision
             )
         }
 
@@ -816,7 +896,8 @@ final class VirtualScrollState: ObservableObject {
                 rangeClampAttemptsRemaining: rangeClampAttemptsRemaining - 1,
                 generation: loadGeneration,
                 datasetGeneration: expectedDatasetGeneration,
-                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+                requiredFollowIntentRevision: requiredFollowIntentRevision
             )
         }
 
@@ -866,6 +947,7 @@ final class VirtualScrollState: ObservableObject {
                 rangeClampAttemptsRemaining: rangeClampAttemptsRemaining,
                 generation: loadGeneration,
                 datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+                requiredFollowIntentRevision: requiredFollowIntentRevision,
                 operation: "window row resolution"
             )
         }
@@ -874,6 +956,10 @@ final class VirtualScrollState: ObservableObject {
                 operation: "window row resolution",
                 description: "resolved \(messages.count) of \(page.messageIDs.count) rows"
             )
+            return nil
+        }
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            finishCancelledWindowLoad(generation: loadGeneration)
             return nil
         }
 
@@ -1254,11 +1340,22 @@ final class VirtualScrollState: ObservableObject {
             await loadLatestWindow()
             return
         }
-        guard !isShowingLatestWindow, let messageWindow else {
+        guard let messageWindow else {
             _ = await loadLatestWindow()
             return
         }
+        guard canRestoreCapturedWindow(messageWindow) else { return }
+        if shouldFollowLatestWindow(messageWindow) {
+            let requiredFollowIntentRevision = followIntentRevision
+            let didLoadLatest = await loadLatestWindow(
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+            if didLoadLatest || isCurrentFollowIntent(requiredFollowIntentRevision) {
+                return
+            }
+        }
 
+        guard canRestoreCapturedWindow(messageWindow) else { return }
         await reloadHistoricalWindowClamped(
             messageWindow,
             preferPendingConversationMessages: hasPendingInsertedMessagesInConversation
@@ -1345,11 +1442,9 @@ final class VirtualScrollState: ObservableObject {
         }
         guard let window = messageWindow else { return }
 
-        let wasShowingLatestWindow =
-            window.endIndex >= totalMessageCount ||
-            !pendingInsertedMessageEvents.isEmpty
+        let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
         let canPreserveHistoricalWindowForTailInsertion =
-            !wasShowingLatestWindow &&
+            !shouldFollowLatestWindow &&
             hasVisibleInsertion &&
             !hasCurrentConversationDeletion &&
             !hasDeletedWindowMessage &&
@@ -1368,7 +1463,7 @@ final class VirtualScrollState: ObservableObject {
                 messageIDs: insertedMessageIDs
             )
             insertedVisibleMessageEvents.send(event)
-            if wasShowingLatestWindow {
+            if shouldFollowLatestWindow {
                 let autoReadMessageIDs = newestVisibleInsertedMessageIDsForCurrentConversation(
                     in: notification
                 )
@@ -1414,14 +1509,14 @@ final class VirtualScrollState: ObservableObject {
                 Log.diagnostic(
                     .chatView,
                     level: .info,
-                    "VirtualScroll dataset reconciliation requested conv=\(conversationId) latest=\(wasShowingLatestWindow) knownTotal=\(knownTotalCount)",
+                    "VirtualScroll dataset reconciliation requested conv=\(conversationId) followsLatest=\(shouldFollowLatestWindow) knownTotal=\(knownTotalCount)",
                     category: .ui
                 )
                 taskManager.run(datasetReconcileTaskKey) { [weak self] in
                     guard let self else { return }
                     await self.reconcileWindowAfterDatasetMutation(
                         window: window,
-                        wasShowingLatestWindow: wasShowingLatestWindow
+                        shouldFollowLatestWindow: shouldFollowLatestWindow
                     )
                 }
             } else {
@@ -1443,12 +1538,24 @@ final class VirtualScrollState: ObservableObject {
     @discardableResult
     private func reconcileWindowAfterDatasetMutation(
         window: MessageWindow,
-        wasShowingLatestWindow: Bool
+        shouldFollowLatestWindow: Bool
     ) async -> Bool {
-        if wasShowingLatestWindow {
-            return await loadLatestWindow(forceViewContext: true)
+        guard canStartAutomaticReconciliation(window) else { return false }
+        if shouldFollowLatestWindow && self.shouldFollowLatestWindow(window) {
+            let requiredFollowIntentRevision = followIntentRevision
+            let didLoadLatest = await loadLatestWindow(
+                forceViewContext: true,
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+            if didLoadLatest {
+                return true
+            }
+            guard !isCurrentFollowIntent(requiredFollowIntentRevision) else {
+                return false
+            }
         }
 
+        guard canRestoreCapturedWindow(window) else { return false }
         return await reloadHistoricalWindowClamped(
             window,
             preferPendingConversationMessages: true
@@ -1464,14 +1571,24 @@ final class VirtualScrollState: ObservableObject {
         needsDatasetReconciliationAfterCurrentLoad = false
         let loadIntent = currentWindowLoadIntent
         currentWindowLoadIntent = nil
-        let wasShowingLatestWindow =
-            window.endIndex >= totalMessageCount ||
-            !pendingInsertedMessageEvents.isEmpty
+        let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
         taskManager.run(datasetReconcileTaskKey) { [weak self] in
             guard let self else { return }
+            guard self.canRestoreCapturedWindow(window) else { return }
             switch loadIntent {
-            case .latest:
-                _ = await self.loadLatestWindow(forceViewContext: true)
+            case .latest(let requiredFollowIntentRevision):
+                let didLoadLatest = await self.loadLatestWindow(
+                    forceViewContext: true,
+                    requiredFollowIntentRevision: requiredFollowIntentRevision
+                )
+                if !didLoadLatest,
+                   !self.isCurrentFollowIntent(requiredFollowIntentRevision),
+                   self.canRestoreCapturedWindow(window) {
+                    _ = await self.reloadHistoricalWindowClamped(
+                        window,
+                        preferPendingConversationMessages: true
+                    )
+                }
             case .range(let range):
                 _ = await self.loadWindow(
                     startIndex: range.lowerBound,
@@ -1481,7 +1598,7 @@ final class VirtualScrollState: ObservableObject {
             case nil:
                 await self.reconcileWindowAfterDatasetMutation(
                     window: window,
-                    wasShowingLatestWindow: wasShowingLatestWindow
+                    shouldFollowLatestWindow: shouldFollowLatestWindow
                 )
             }
         }
@@ -1517,7 +1634,7 @@ final class VirtualScrollState: ObservableObject {
 
         messageDatasetGeneration &+= 1
         guard let window = messageWindow else { return }
-        let wasShowingLatestWindow = isShowingLatestWindow
+        let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
 
         if isLoadingMore {
             needsDatasetReconciliationAfterCurrentLoad = true
@@ -1526,7 +1643,7 @@ final class VirtualScrollState: ObservableObject {
 
         await reconcileWindowAfterDatasetMutation(
             window: window,
-            wasShowingLatestWindow: wasShowingLatestWindow
+            shouldFollowLatestWindow: shouldFollowLatestWindow
         )
     }
 
@@ -1545,7 +1662,7 @@ final class VirtualScrollState: ObservableObject {
         }
 
         needsPostSyncDatasetReconciliation = false
-        let wasShowingLatestWindow = isShowingLatestWindow
+        let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
         taskManager.run(postSyncValidationTaskKey) { [weak self] in
             do {
                 try await Task.sleep(nanoseconds: 50_000_000)
@@ -1555,14 +1672,14 @@ final class VirtualScrollState: ObservableObject {
             guard let self else { return }
             await self.validateWindowAfterSync(
                 window: window,
-                wasShowingLatestWindow: wasShowingLatestWindow
+                shouldFollowLatestWindow: shouldFollowLatestWindow
             )
         }
     }
 
     private func validateWindowAfterSync(
         window: MessageWindow,
-        wasShowingLatestWindow: Bool
+        shouldFollowLatestWindow: Bool
     ) async {
         let page = await loadPage(
             window.startIndex..<window.endIndex,
@@ -1607,7 +1724,7 @@ final class VirtualScrollState: ObservableObject {
 
         let didReconcile = await reconcileWindowAfterDatasetMutation(
             window: window,
-            wasShowingLatestWindow: wasShowingLatestWindow
+            shouldFollowLatestWindow: shouldFollowLatestWindow
         )
         guard !Task.isCancelled else { return }
         guard !didReconcile else {

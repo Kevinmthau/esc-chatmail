@@ -19,16 +19,18 @@ private final class ChatMessagesSession: ObservableObject {
     ) {
         let scrollState = VirtualScrollState(
             conversationId: conversation.id.uuidString,
-            initialWindowPosition: .end,
+            initialWindowPosition: .beginning,
             viewContext: chatDependencies.storage.viewContext,
             makeBackgroundContext: chatDependencies.storage.makeBackgroundContext
         )
+        scrollState.setFollowsLatestInsertions(false)
         self.scrollState = scrollState
         self.messageBubbleLoader = chatDependencies.content.makeMessageBubbleLoader()
         self.coordinator = ChatMessagesCoordinator(
             scrollState: scrollState,
             viewModel: viewModel,
-            chatDependencies: chatDependencies
+            chatDependencies: chatDependencies,
+            initialPresentationAnchor: .top
         )
 
         scrollState.objectWillChange
@@ -190,7 +192,8 @@ struct ChatMessagesView: View {
                     totalMessageCount: newCount,
                     stabilizeBottomAnchor: keyboard.currentHeight > 0 || isTextFieldFocused.wrappedValue,
                     isInitialWindowLoaded: scrollState.isInitialLoadComplete,
-                    isShowingLatestWindow: scrollState.isShowingLatestWindow
+                    isShowingLatestWindow: scrollState.isShowingLatestWindow,
+                    isBottomAnchorVisible: isBottomAnchorVisible
                 ) { performBottomAnchor($0, proxy: proxy) }
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
@@ -280,7 +283,7 @@ struct ChatMessagesView: View {
             }
             .padding(.horizontal)
             .padding(.top, 8)
-            .frame(minHeight: viewportHeight, alignment: .bottom)
+            .frame(minHeight: viewportHeight, alignment: .top)
             .transformAnchorPreference(
                 key: ChatScrollGeometryPreferenceKey.self,
                 value: .bounds
@@ -471,21 +474,12 @@ struct ChatMessagesView: View {
         scrollProxy: ScrollViewProxy
     ) {
         let frame = geometry.bottomAnchorFrame
-        let isVisible = isBottomAnchorVisible(
+        let rawIsVisible = isBottomAnchorVisible(
             frame: frame,
             viewportSize: geometry.viewportSize
         )
-        let becameVisible = !isBottomAnchorVisible && isVisible
-        if isBottomAnchorVisible != isVisible {
-            isBottomAnchorVisible = isVisible
-        }
-        if becameVisible, scrollState.initialLoadPhase == .loaded {
-            ChatViewPerformanceSignposts.bottomAnchorVisible(
-                conversationID: conversation.id.uuidString
-            )
-        }
         coordinator.handleBottomAnchorGeometryUpdate(
-            isBottomAnchorVisible: isVisible,
+            isBottomAnchorVisible: rawIsVisible,
             contentMinY: geometry.contentFrame.isNull
                 ? nil
                 : geometry.contentFrame.minY,
@@ -494,6 +488,21 @@ struct ChatMessagesView: View {
                 : geometry.contentFrame.height,
             viewportHeight: geometry.viewportSize.height
         ) { performBottomAnchor($0, proxy: scrollProxy) }
+
+        let isVisible =
+            scrollState.initialLoadPhase == .loaded &&
+            coordinator.isReadyToShow &&
+            rawIsVisible
+        let becameVisible = !isBottomAnchorVisible && isVisible
+        if isBottomAnchorVisible != isVisible {
+            isBottomAnchorVisible = isVisible
+        }
+        scrollState.setFollowsLatestInsertions(isVisible)
+        if becameVisible, scrollState.initialLoadPhase == .loaded {
+            ChatViewPerformanceSignposts.bottomAnchorVisible(
+                conversationID: conversation.id.uuidString
+            )
+        }
         coordinator.handleLatestWindowLayout(
             layoutID: layoutID,
             isChatActiveAndUncovered: isChatActiveAndUncovered,
@@ -520,7 +529,8 @@ struct ChatMessagesView: View {
     }
 
     private func latestMessageForCoordinator() -> Message? {
-        if let latestVisibleMessage = resolvedMessage(for: scrollState.visibleMessages.last) {
+        if scrollState.isShowingLatestWindow,
+           let latestVisibleMessage = resolvedMessage(for: scrollState.visibleMessages.last) {
             return latestVisibleMessage
         }
 

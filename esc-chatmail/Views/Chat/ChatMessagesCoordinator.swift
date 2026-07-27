@@ -5,6 +5,11 @@ import Combine
 
 @MainActor
 final class ChatMessagesCoordinator: ObservableObject {
+    enum InitialPresentationAnchor: Equatable {
+        case top
+        case bottom
+    }
+
     private enum TaskKey {
         static let bottomAnchor = "bottomAnchor"
         static let initialBottomAnchor = "initialBottomAnchor"
@@ -69,6 +74,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let clearPersonCache: AsyncAction
     private let sleep: Sleep
     private let now: Now
+    private let initialPresentationAnchor: InitialPresentationAnchor
     private let taskManager = ViewModelTaskManager()
     private var initialRevealState: InitialRevealState = .waitingForRows
     private var isTrackedBottomAnchorVisible = false
@@ -86,6 +92,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         scrollState: VirtualScrollState,
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
+        initialPresentationAnchor: InitialPresentationAnchor,
         sleep: @escaping Sleep = { nanoseconds in
             try? await Task.sleep(nanoseconds: nanoseconds)
         },
@@ -122,9 +129,11 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.clearPersonCache = chatDependencies.contacts.clearPersonCache
         self.sleep = sleep
         self.now = now
+        self.initialPresentationAnchor = initialPresentationAnchor
     }
 
     init(
+        initialPresentationAnchor: InitialPresentationAnchor = .bottom,
         loadLatestWindowIfNeeded: @escaping LatestWindowLoader,
         markConversationAsReadIfNeeded: @escaping () -> Void,
         markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void = { _ in },
@@ -152,6 +161,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.clearPersonCache = clearPersonCache
         self.sleep = sleep
         self.now = now
+        self.initialPresentationAnchor = initialPresentationAnchor
     }
 
     func handleAppear(
@@ -498,6 +508,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             wasFollowingPostRevealBottom = false
         }
         postRevealBottomFollowState = .inactive
+        taskManager.cancel(TaskKey.bottomAnchor)
         taskManager.cancel(TaskKey.initialGeometryCheck)
         taskManager.cancel(TaskKey.postRevealGeometryCheck)
 
@@ -532,24 +543,25 @@ final class ChatMessagesCoordinator: ObservableObject {
         stabilizeBottomAnchor: Bool,
         isInitialWindowLoaded: Bool,
         isShowingLatestWindow: Bool,
+        isBottomAnchorVisible: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
         if oldCount == 0 && newCount > 0 {
             updateReplyingToIfNewSubject(lastMessage)
             if hasStartedInitialAnchor && !initialAnchorWasForEmptyConversation {
-                if isInitialWindowLoaded {
+                if initialPresentationAnchor == .bottom && isInitialWindowLoaded {
                     requestLatestWindowIfNeeded(knownTotalCount: newCount)
                 }
                 Log.diagnostic(
                     .chatView,
                     level: .info,
-                    "ChatView empty-to-loaded count change refreshes latest window because initial anchoring already started messages=\(newCount)",
+                    "ChatView empty-to-loaded count change handled after initial presentation started messages=\(newCount)",
                     category: .ui
                 )
             } else {
                 isReadyToShow = false
                 initialRevealState = .waitingForRows
-                if isInitialWindowLoaded {
+                if initialPresentationAnchor == .bottom && isInitialWindowLoaded {
                     requestLatestWindowIfNeeded(knownTotalCount: newCount)
                 }
                 startInitialAnchorIfPossible(
@@ -572,12 +584,12 @@ final class ChatMessagesCoordinator: ObservableObject {
                 Log.diagnostic(
                     .chatView,
                     level: .info,
-                    "ChatView deferring message-count bottom anchor until initial window loads old=\(oldCount) new=\(newCount)",
+                    "ChatView deferring message-count presentation until initial window loads old=\(oldCount) new=\(newCount)",
                     category: .ui
                 )
             }
         } else if !isReadyToShow && newCount > 0 {
-            if newCount > oldCount {
+            if initialPresentationAnchor == .bottom && newCount > oldCount {
                 requestLatestWindowIfNeeded(knownTotalCount: newCount)
             }
             startInitialAnchorIfPossible(
@@ -596,13 +608,15 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
         } else if isReadyToShow && newCount > oldCount && isShowingLatestWindow {
             updateReplyingToIfNewSubject(lastMessage)
-            scrollToBottom(
-                messageCount: newCount,
-                delay: UIConfig.contentChangeScrollDelay,
-                includeStabilizationStep: stabilizeBottomAnchor,
-                knownTotalCount: newCount,
-                scrollAction: scrollAction
-            )
+            if initialPresentationAnchor == .bottom || isBottomAnchorVisible {
+                scrollToBottom(
+                    messageCount: newCount,
+                    delay: UIConfig.contentChangeScrollDelay,
+                    includeStabilizationStep: stabilizeBottomAnchor,
+                    knownTotalCount: newCount,
+                    scrollAction: scrollAction
+                )
+            }
         }
 
         loadResolvedDisplayName()
@@ -813,6 +827,18 @@ final class ChatMessagesCoordinator: ObservableObject {
                 .chatView,
                 level: .info,
                 "ChatView initial anchor waiting for visible rows reason=\(reason) messages=\(messageCount) total=\(totalMessageCount)",
+                category: .ui
+            )
+            return
+        }
+
+        if initialPresentationAnchor == .top {
+            initialRevealState = .ready(wasEmptyConversation: false)
+            isReadyToShow = true
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView initial rows revealed at top reason=\(reason) messages=\(anchorMessageCount)",
                 category: .ui
             )
             return
@@ -1033,6 +1059,10 @@ final class ChatMessagesCoordinator: ObservableObject {
                 if step.delay > 0 {
                     await sleep(UInt64(step.delay * 1_000_000_000))
                 }
+                guard !Task.isCancelled else { return }
+                await loadLatestWindowIfNeeded(knownTotalCount)
+                guard !Task.isCancelled else { return }
+                await Task.yield()
                 guard !Task.isCancelled else { return }
 
                 scrollAction(step)
