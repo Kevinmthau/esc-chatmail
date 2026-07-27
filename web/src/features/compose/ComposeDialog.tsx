@@ -4,13 +4,16 @@ import { IconButton } from '@/components/ui/IconButton'
 import { Modal } from '@/components/ui/Modal'
 import { sendMessage } from '@/data/actions'
 import { setDraft } from '@/features/chat/useDraft'
-// Pure copy helper (no db/broker plumbing), so it is imported straight from
-// the outbox rather than through the data-actions facade.
-import { sendFailureMessage } from '@/outbox/send'
+// Pure copy helpers (no db/broker plumbing), so they are imported straight
+// from the outbox rather than through the data-actions facade.
+import { SendFailedError, sendFailureMessage } from '@/outbox/send'
 import { AliasPicker } from './AliasPicker'
+import { AttachmentPickerButton } from './AttachmentPickerButton'
+import { AttachmentStrip } from './AttachmentStrip'
 import { GrowingTextarea } from './GrowingTextarea'
 import { RecipientField } from './RecipientField'
 import { validRecipientEmails, type RecipientChipData } from './recipients'
+import { useAttachmentPicker } from './useAttachmentPicker'
 import { useRecipientDedup } from './useRecipientDedup'
 
 /**
@@ -28,9 +31,15 @@ export function ComposeDialog({ onClose }: { onClose: () => void }) {
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const existingChat = useRecipientDedup(chips)
+  const picker = useAttachmentPicker()
 
   const recipients = validRecipientEmails(chips)
-  const canSend = !sending && recipients.length > 0 && body.trim() !== ''
+  const attachments = picker.attachments
+  const canSend =
+    !sending &&
+    !picker.busy &&
+    recipients.length > 0 &&
+    (body.trim() !== '' || attachments.length > 0)
 
   const handleSend = async (): Promise<void> => {
     if (!canSend) return
@@ -41,6 +50,7 @@ export function ComposeDialog({ onClose }: { onClose: () => void }) {
         to: recipients,
         body: body.trim(),
         ...(fromAlias !== null ? { fromAlias } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
       })
       onClose()
       await navigate({
@@ -48,6 +58,18 @@ export function ComposeDialog({ onClose }: { onClose: () => void }) {
         params: { conversationId: result.conversationId },
       })
     } catch (error) {
+      // A failure carrying attachments leaves a retryable failed bubble in the
+      // target chat; go there so the retry is reachable instead of stranding
+      // the user in a dialog whose files now live somewhere else.
+      if (error instanceof SendFailedError && error.keptFailedMessage) {
+        const conversationId = error.conversationId
+        picker.clear()
+        onClose()
+        if (conversationId !== null) {
+          await navigate({ to: '/chats/$conversationId', params: { conversationId } })
+          return
+        }
+      }
       // Address rejections name the offending addresses; everything else
       // falls back to the generic line.
       setSendError(sendFailureMessage(error))
@@ -124,8 +146,20 @@ export function ComposeDialog({ onClose }: { onClose: () => void }) {
             {sendError}
           </p>
         )}
+        {picker.skippedMessage !== null && (
+          <p role="alert" className="px-4 pb-2 text-sm text-danger">
+            {picker.skippedMessage}
+          </p>
+        )}
+
+        <AttachmentStrip attachments={attachments} onRemove={picker.remove} disabled={sending} />
 
         <footer className="flex shrink-0 items-end gap-2 border-t border-border p-3">
+          <AttachmentPickerButton
+            onFiles={(files) => void picker.addFiles(files)}
+            disabled={sending || picker.busy}
+            className="size-8 shrink-0"
+          />
           <GrowingTextarea
             value={body}
             onChange={setBody}

@@ -1,12 +1,33 @@
-// RFC-2822 MIME builder for outbound sends. Port of
-// Services/Compose/MimeBuilder/{MimeBuilder,+Headers,+SimpleMessage,+Alternative}.swift.
+// RFC-2822 MIME builder for outbound sends. Port of Services/Compose/
+// MimeBuilder/{MimeBuilder,+Headers,+SimpleMessage,+Alternative,
+// +MultipartMessage}.swift.
 //
-// Scope (MVP): text/plain simple messages and multipart/alternative
-// (text + html). Outbound attachments are OUT of scope — the iOS builder's
-// multipart/mixed → multipart/related nesting (regular + inline CID
-// attachments around the alternative part) is deliberately NOT implemented
-// yet. TODO(attachments): port MimeBuilder+MultipartMessage.swift's
-// multipart/mixed wrapper when outbound attachments land.
+// Structures produced (iOS MimeBuilder+Alternative's doc comment verbatim):
+//
+//   text only, no attachments          text/plain (8bit)
+//   text only, attachments             multipart/mixed
+//                                      ├── text/plain (8bit)
+//                                      └── attachments
+//   text+html, no attachments          multipart/alternative
+//                                      ├── text/plain (base64)
+//                                      └── text/html  (base64)
+//   text+html, attachments             multipart/mixed
+//                                      ├── multipart/alternative
+//                                      └── attachments
+//   text+html, inline images           multipart/mixed
+//                                      ├── multipart/related
+//                                      │   ├── multipart/alternative
+//                                      │   └── inline parts (Content-ID)
+//                                      └── attachments
+//
+// Body parts wrap base64 at 76 characters, attachment parts at 64 — matching
+// iOS's .lineLength76Characters / .lineLength64Characters exactly.
+//
+// Deviation from iOS: iOS's plain-text builder (buildMultipartMessage) has no
+// multipart/related branch, so inline parts passed without an htmlBody are
+// silently dropped. Here they are emitted into the multipart/mixed container
+// as inline (Content-ID-carrying) parts instead — nothing a caller attached is
+// ever discarded without a signal.
 //
 // Every header value passes through sanitizeHeaderValue (CRLF-injection
 // defense) before being emitted. Line endings are \r\n throughout.
@@ -30,6 +51,19 @@ export interface MimeFrom {
   name?: string
 }
 
+/** A file attached to an outbound message (iOS AttachmentData). */
+export interface MimeAttachment {
+  data: Uint8Array
+  filename: string
+  mimeType: string
+}
+
+/** An attachment referenced from the HTML body as `cid:<contentId>`. */
+export interface MimeInlineAttachment extends MimeAttachment {
+  /** Content-ID WITHOUT angle brackets; the builder adds them. */
+  contentId: string
+}
+
 export interface BuildNewInput {
   from: MimeFrom
   to: readonly string[]
@@ -37,6 +71,10 @@ export interface BuildNewInput {
   textBody: string
   /** When present the message is multipart/alternative (text + html). */
   htmlBody?: string
+  /** Regular attachments (Content-Disposition: attachment). */
+  attachments?: readonly MimeAttachment[]
+  /** Inline parts (Content-ID + Content-Disposition: inline). */
+  inlineAttachments?: readonly MimeInlineAttachment[]
 }
 
 export interface BuildReplyInput extends BuildNewInput {
@@ -53,6 +91,34 @@ export interface MimeBuildOptions {
 
 /** Base64 line length for encoded body parts (iOS .lineLength76Characters). */
 export const BASE64_LINE_LENGTH = 76
+
+/** Base64 line length for attachment parts (iOS .lineLength64Characters). */
+export const ATTACHMENT_BASE64_LINE_LENGTH = 64
+
+/**
+ * Ceiling on the base64url `raw` payload Gmail's simple `messages/send`
+ * endpoint accepts (the resumable-upload endpoint is what lifts it, and is not
+ * implemented here). Documented as 35 MB; enforced before the request so an
+ * oversized send fails locally with a typed error instead of burning an upload
+ * and coming back as an opaque 4xx.
+ */
+export const MAX_SEND_RAW_BYTES = 35 * 1024 * 1024
+
+/**
+ * Thrown when the encoded message exceeds MAX_SEND_RAW_BYTES. Carries both
+ * numbers so the compose UI can say how far over the limit the message is.
+ */
+export class MessageTooLargeError extends Error {
+  readonly rawBytes: number
+  readonly limitBytes: number
+
+  constructor(rawBytes: number, limitBytes: number) {
+    super(`Encoded message is ${rawBytes} bytes; the send limit is ${limitBytes}`)
+    this.name = 'MessageTooLargeError'
+    this.rawBytes = rawBytes
+    this.limitBytes = limitBytes
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Address validation (recipient-smuggling defense)
@@ -223,19 +289,145 @@ function encodeUtf8Base64(text: string): string {
   return bytesToBase64(new TextEncoder().encode(text))
 }
 
-/** Base64 body encoding wrapped at 76 characters per line, \r\n separated. */
-function encodeBodyBase64(text: string): string {
-  const base64 = encodeUtf8Base64(text)
+/** Wraps a base64 string at `lineLength` characters per line, \r\n separated. */
+function wrapBase64(base64: string, lineLength: number): string {
   const lines: string[] = []
-  for (let i = 0; i < base64.length; i += BASE64_LINE_LENGTH) {
-    lines.push(base64.slice(i, i + BASE64_LINE_LENGTH))
+  for (let i = 0; i < base64.length; i += lineLength) {
+    lines.push(base64.slice(i, i + lineLength))
   }
   return lines.join('\r\n')
+}
+
+/** Base64 body encoding wrapped at 76 characters per line, \r\n separated. */
+function encodeBodyBase64(text: string): string {
+  return wrapBase64(encodeUtf8Base64(text), BASE64_LINE_LENGTH)
 }
 
 /** base64url-encodes a MIME string (unicode-safe) for Gmail's `raw` field. */
 export function toBase64Url(mime: string): string {
   return encodeUtf8Base64(mime).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')
+}
+
+/**
+ * base64url-encodes a built MIME message for `messages/send`, refusing
+ * anything past MAX_SEND_RAW_BYTES. Callers run this BEFORE the optimistic
+ * insert so an over-limit message fails with nothing to roll back — retrying
+ * it would fail identically, so keeping a retryable failed bubble would be a
+ * lie.
+ */
+export function encodeRawForSend(mime: string, limitBytes: number = MAX_SEND_RAW_BYTES): string {
+  const raw = toBase64Url(mime)
+  // base64url output is ASCII, so string length is byte length.
+  if (raw.length > limitBytes) throw new MessageTooLargeError(raw.length, limitBytes)
+  return raw
+}
+
+// ---------------------------------------------------------------------------
+// Attachment part helpers
+// ---------------------------------------------------------------------------
+
+/** RFC 2045 token character class (used for the type/subtype shape check). */
+const MIME_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u
+
+/**
+ * Narrows a caller-supplied media type to `type/subtype` of RFC 2045 tokens,
+ * falling back to application/octet-stream. Without this a crafted type
+ * (`image/png; boundary="…"`) could add parameters to — or restructure — the
+ * part header it is interpolated into.
+ */
+export function sanitizeMimeType(mimeType: string): string {
+  const sanitized = sanitizeHeaderValue(mimeType).toLowerCase()
+  const slash = sanitized.indexOf('/')
+  if (slash < 1) return 'application/octet-stream'
+  const type = sanitized.slice(0, slash)
+  const subtype = sanitized.slice(slash + 1)
+  if (!MIME_TOKEN.test(type) || !MIME_TOKEN.test(subtype)) return 'application/octet-stream'
+  return `${type}/${subtype}`
+}
+
+/**
+ * Escapes a value for an RFC 2045 quoted-string parameter (`filename="…"`):
+ * backslashes first, then quotes. Deviation from iOS, which interpolates the
+ * filename raw — a name containing `"` would otherwise close the parameter
+ * early and let the rest of the name be parsed as header syntax.
+ */
+function quoteParameterValue(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
+}
+
+/** CRLF-stripped filename, never empty (an unnamed part is undownloadable). */
+function sanitizeFilename(filename: string): string {
+  const sanitized = sanitizeHeaderValue(filename)
+  return sanitized === '' ? 'attachment' : sanitized
+}
+
+/**
+ * Content-ID body with angle brackets and whitespace removed — the builder
+ * supplies the brackets, and a value carrying its own would nest them.
+ * Returns '' when nothing usable remains (the part is then emitted inline
+ * without a Content-ID rather than with a malformed one).
+ */
+function sanitizeContentId(contentId: string): string {
+  return sanitizeHeaderValue(contentId).replaceAll(/[<>\s]/gu, '')
+}
+
+/**
+ * One attachment part. `contentId` null → Content-Disposition: attachment;
+ * non-null → Content-ID + Content-Disposition: inline (iOS emits both headers
+ * for inline parts, in that order).
+ */
+function attachmentPart(
+  boundary: string,
+  attachment: MimeAttachment,
+  contentId: string | null,
+): string {
+  const filename = quoteParameterValue(sanitizeFilename(attachment.filename))
+  const mimeType = sanitizeMimeType(attachment.mimeType)
+
+  let part = `--${boundary}\r\n`
+  part += `Content-Type: ${mimeType}; name="${filename}"\r\n`
+  part += 'Content-Transfer-Encoding: base64\r\n'
+  if (contentId !== null && contentId !== '') part += `Content-ID: <${contentId}>\r\n`
+  part += `Content-Disposition: ${contentId === null ? 'attachment' : 'inline'}; filename="${filename}"\r\n`
+  part += '\r\n'
+  part += wrapBase64(bytesToBase64(attachment.data), ATTACHMENT_BASE64_LINE_LENGTH)
+  part += '\r\n'
+  return part
+}
+
+function attachmentParts(
+  boundary: string,
+  attachments: readonly MimeAttachment[],
+  inline: readonly MimeInlineAttachment[],
+): string {
+  let parts = ''
+  for (const part of inline)
+    parts += attachmentPart(boundary, part, sanitizeContentId(part.contentId))
+  for (const part of attachments) parts += attachmentPart(boundary, part, null)
+  return parts
+}
+
+/** The complete multipart/alternative section: header, both parts, terminator. */
+function alternativeSection(boundary: string, textBody: string, htmlBody: string): string {
+  let section = `Content-Type: multipart/alternative; boundary="${boundary}"\r\n`
+  section += '\r\n'
+
+  section += `--${boundary}\r\n`
+  section += 'Content-Type: text/plain; charset=UTF-8\r\n'
+  section += 'Content-Transfer-Encoding: base64\r\n'
+  section += '\r\n'
+  section += encodeBodyBase64(textBody)
+  section += '\r\n'
+
+  section += `--${boundary}\r\n`
+  section += 'Content-Type: text/html; charset=UTF-8\r\n'
+  section += 'Content-Transfer-Encoding: base64\r\n'
+  section += '\r\n'
+  section += encodeBodyBase64(htmlBody)
+  section += '\r\n'
+
+  section += `--${boundary}--\r\n`
+  return section
 }
 
 // ---------------------------------------------------------------------------
@@ -296,36 +488,68 @@ function buildMime(
 
   mime += 'MIME-Version: 1.0\r\n'
 
+  const attachments = input.attachments ?? []
+  const inlineAttachments = input.inlineAttachments ?? []
+  const hasParts = attachments.length > 0 || inlineAttachments.length > 0
+
   if (input.htmlBody === undefined) {
-    // Plain text only (MimeBuilder+SimpleMessage.swift).
+    if (!hasParts) {
+      // Plain text only (MimeBuilder+SimpleMessage.swift).
+      mime += 'Content-Type: text/plain; charset=UTF-8\r\n'
+      mime += 'Content-Transfer-Encoding: 8bit\r\n'
+      mime += '\r\n'
+      mime += input.textBody
+      if (!input.textBody.endsWith('\r\n')) mime += '\r\n'
+      return mime
+    }
+
+    // multipart/mixed around an 8bit text part (MimeBuilder+MultipartMessage).
+    const mixedBoundary = generateBoundary()
+    mime += `Content-Type: multipart/mixed; boundary="${mixedBoundary}"\r\n`
+    mime += '\r\n'
+
+    mime += `--${mixedBoundary}\r\n`
     mime += 'Content-Type: text/plain; charset=UTF-8\r\n'
     mime += 'Content-Transfer-Encoding: 8bit\r\n'
     mime += '\r\n'
     mime += input.textBody
-    if (!input.textBody.endsWith('\r\n')) mime += '\r\n'
+    mime += '\r\n'
+
+    mime += attachmentParts(mixedBoundary, attachments, inlineAttachments)
+    mime += `--${mixedBoundary}--\r\n`
     return mime
   }
 
-  // multipart/alternative: text + html, both base64 (MimeBuilder+Alternative.swift).
-  const boundary = generateBoundary()
-  mime += `Content-Type: multipart/alternative; boundary="${boundary}"\r\n`
-  mime += '\r\n'
+  // multipart/alternative: text + html, both base64 (MimeBuilder+Alternative).
+  if (!hasParts) {
+    mime += alternativeSection(generateBoundary(), input.textBody, input.htmlBody)
+    return mime
+  }
 
-  mime += `--${boundary}\r\n`
-  mime += 'Content-Type: text/plain; charset=UTF-8\r\n'
-  mime += 'Content-Transfer-Encoding: base64\r\n'
+  // multipart/mixed → [multipart/related →] multipart/alternative. Boundaries
+  // are generated in the order the containers open (mixed, related,
+  // alternative), matching iOS.
+  const mixedBoundary = generateBoundary()
+  mime += `Content-Type: multipart/mixed; boundary="${mixedBoundary}"\r\n`
   mime += '\r\n'
-  mime += encodeBodyBase64(input.textBody)
-  mime += '\r\n'
+  mime += `--${mixedBoundary}\r\n`
 
-  mime += `--${boundary}\r\n`
-  mime += 'Content-Type: text/html; charset=UTF-8\r\n'
-  mime += 'Content-Transfer-Encoding: base64\r\n'
-  mime += '\r\n'
-  mime += encodeBodyBase64(input.htmlBody)
-  mime += '\r\n'
+  const relatedBoundary = inlineAttachments.length > 0 ? generateBoundary() : null
+  if (relatedBoundary !== null) {
+    mime += `Content-Type: multipart/related; boundary="${relatedBoundary}"\r\n`
+    mime += '\r\n'
+    mime += `--${relatedBoundary}\r\n`
+  }
 
-  mime += `--${boundary}--\r\n`
+  mime += alternativeSection(generateBoundary(), input.textBody, input.htmlBody)
+
+  if (relatedBoundary !== null) {
+    mime += attachmentParts(relatedBoundary, [], inlineAttachments)
+    mime += `--${relatedBoundary}--\r\n`
+  }
+
+  mime += attachmentParts(mixedBoundary, attachments, [])
+  mime += `--${mixedBoundary}--\r\n`
   return mime
 }
 

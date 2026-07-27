@@ -161,9 +161,100 @@ describe('ReplyBar', () => {
     expect(alert.textContent).toBe(GENERIC_SEND_ERROR)
   })
 
-  it('keeps the attachment button disabled (outbound attachments are post-MVP)', () => {
-    render(<ReplyBar conversationId="c1" onSent={() => undefined} />)
-    const attach = screen.getByRole<HTMLButtonElement>('button', { name: 'Add attachment' })
-    expect(attach.disabled).toBe(true)
+  describe('attachments', () => {
+    function fileInput(): HTMLInputElement {
+      return screen.getByLabelText<HTMLInputElement>('Attach files')
+    }
+
+    function pngFile(name = 'photo.png', size?: number): File {
+      const file = new File([new Uint8Array([1, 2, 3, 4])], name, { type: 'image/png' })
+      if (size !== undefined) vi.spyOn(file, 'size', 'get').mockReturnValue(size)
+      return file
+    }
+
+    it('stages a picked file and lets an empty draft be sent', async () => {
+      render(<ReplyBar conversationId="c1" onSent={() => undefined} />)
+      expect(
+        screen.getByRole<HTMLButtonElement>('button', { name: 'Add attachment' }).disabled,
+      ).toBe(false)
+      // An attachment alone is a message; iOS allows a bodiless photo send.
+      expect(sendButton().disabled).toBe(true)
+
+      await userEvent.upload(fileInput(), pngFile())
+
+      expect(await screen.findByAltText('photo.png')).toBeTruthy()
+      await waitFor(() => expect(sendButton().disabled).toBe(false))
+    })
+
+    it('passes the staged files to sendMessage and clears the strip', async () => {
+      render(<ReplyBar conversationId="c1" onSent={() => undefined} />)
+      await userEvent.upload(fileInput(), pngFile())
+      await screen.findByAltText('photo.png')
+
+      await userEvent.click(sendButton())
+
+      expect(mockedSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationId: 'c1',
+          body: '',
+          attachments: [expect.objectContaining({ filename: 'photo.png', mimeType: 'image/png' })],
+        }),
+      )
+      await waitFor(() => expect(screen.queryByAltText('photo.png')).toBeNull())
+    })
+
+    it('refuses an oversize file and says which one (iOS skipped it silently)', async () => {
+      render(<ReplyBar conversationId="c1" onSent={() => undefined} />)
+
+      await userEvent.upload(fileInput(), pngFile('huge.png', 26 * 1024 * 1024))
+
+      const alert = await screen.findByRole('alert')
+      expect(alert.textContent).toContain('huge.png')
+      expect(screen.queryByAltText('huge.png')).toBeNull()
+      expect(sendButton().disabled).toBe(true)
+    })
+
+    it('removes a staged file', async () => {
+      render(<ReplyBar conversationId="c1" onSent={() => undefined} />)
+      await userEvent.upload(fileInput(), pngFile())
+      await screen.findByAltText('photo.png')
+
+      await userEvent.click(screen.getByRole('button', { name: 'Remove photo.png' }))
+
+      expect(screen.queryByAltText('photo.png')).toBeNull()
+      expect(sendButton().disabled).toBe(true)
+    })
+
+    it('restores the draft and the files when the send failed with nothing kept', async () => {
+      mockedSend.mockRejectedValueOnce(new SendFailedError('nope'))
+      render(<ReplyBar conversationId="c1" onSent={() => undefined} />)
+      await userEvent.upload(fileInput(), pngFile())
+      await screen.findByAltText('photo.png')
+      await userEvent.type(textarea(), 'here you go')
+
+      await userEvent.click(sendButton())
+
+      await waitFor(() => expect(textarea().value).toBe('here you go'))
+      expect(screen.getByAltText('photo.png')).toBeTruthy()
+    })
+
+    // Regression guard: a failed send that KEEPS the message leaves the body
+    // and the files in a retryable bubble. Putting them back in the composer
+    // too would send the whole thing twice the moment the retry succeeds.
+    it('does not restore the draft or the files when the failure kept a bubble', async () => {
+      mockedSend.mockRejectedValueOnce(
+        new SendFailedError('boom', { keptFailedMessage: true, conversationId: 'c1' }),
+      )
+      render(<ReplyBar conversationId="c1" onSent={() => undefined} />)
+      await userEvent.upload(fileInput(), pngFile())
+      await screen.findByAltText('photo.png')
+      await userEvent.type(textarea(), 'here you go')
+
+      await userEvent.click(sendButton())
+
+      await waitFor(() => expect(screen.getAllByRole('alert').length).toBeGreaterThan(0))
+      expect(textarea().value).toBe('')
+      expect(screen.queryByAltText('photo.png')).toBeNull()
+    })
   })
 })

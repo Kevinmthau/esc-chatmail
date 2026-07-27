@@ -36,6 +36,30 @@ test('open chat, bubbles render, optimistic send commits', async ({ page }) => {
   await expect(input).toHaveValue('')
 })
 
+// A real 1×1 PNG (so the browser's own decoder runs) well inside the 4096px
+// cap, which means the picker attaches it untouched under its own name.
+// Relative to the runner's cwd, which is `web/`.
+const PIXEL_PNG = 'e2e/fixtures/pixel.png'
+
+test('attaches a file, sends it, and renders it in the bubble', async ({ page }) => {
+  await openChats(page)
+  await page.getByText('Alice Chen', { exact: true }).first().click()
+
+  await page.locator('input[type="file"]').setInputFiles(PIXEL_PNG)
+
+  // Staged in the strip above the composer, with a working thumbnail.
+  const strip = page.getByRole('list', { name: 'Attachments' })
+  await expect(strip.getByAltText('pixel.png')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Send' }).click()
+
+  // The bytes are local, so the sent bubble shows the image itself — never a
+  // download control pointing at an attachment the server has not seen.
+  const scroller = page.getByTestId('chat-scroller')
+  await expect(scroller.getByRole('button', { name: 'View pixel.png' })).toBeVisible()
+  await expect(strip).toHaveCount(0)
+})
+
 test('newsletter renders as preview card and opens the sandboxed reader', async ({ page }) => {
   await openChats(page)
   await page.getByText('The Daily Digest', { exact: true }).first().click()

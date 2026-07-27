@@ -118,6 +118,34 @@ describe('compose integration wiring', () => {
     )
   })
 
+  it('sends staged attachments and allows a bodiless attachment-only message', async () => {
+    await seedAccount(db)
+    vi.mocked(actions.sendMessage).mockResolvedValue({ messageId: 'm1', conversationId: 'c1' })
+    const user = userEvent.setup()
+    renderDialog(vi.fn())
+
+    await user.type(await toInput(), 'bob@example.com{Enter}')
+    // No body typed at all — the attachment is the message.
+    await user.upload(
+      screen.getByLabelText<HTMLInputElement>('Attach files'),
+      new File([new Uint8Array([1, 2, 3])], 'report.pdf', { type: 'application/pdf' }),
+    )
+    await screen.findByText('report.pdf')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() =>
+      expect(actions.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: ['bob@example.com'],
+          body: '',
+          attachments: [
+            expect.objectContaining({ filename: 'report.pdf', mimeType: 'application/pdf' }),
+          ],
+        }),
+      ),
+    )
+  })
+
   it('carries the typed body into the existing chat draft on "Open chat"', async () => {
     await seedAccount(db)
     await db.conversations.put(convoRow({ id: 'c9', displayName: 'Bob' }))

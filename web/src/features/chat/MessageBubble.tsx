@@ -5,9 +5,11 @@
 // mail — and the timestamp/unread/send-state meta line.
 
 import { Link, useNavigate } from '@tanstack/react-router'
+import { useState } from 'react'
 import { Avatar } from '@/components/ui/Avatar'
 import { ContextMenu, ContextMenuItem } from '@/components/ui/ContextMenu'
 import { UnreadDot } from '@/components/ui/UnreadDot'
+import { retrySend } from '@/data/actions'
 import type { MessageRow } from '@/db/types'
 import { AttachmentContent } from '@/features/attachments/AttachmentContent'
 import { HtmlPreviewCard } from '@/features/reader/HtmlPreviewCard'
@@ -16,6 +18,7 @@ import { cn } from '@/lib/cn'
 import { messageDisplayMode } from '@/lib/displayPolicy'
 import { formatTimestamp } from '@/lib/formatTimestamp'
 import { isForwardedSubject } from '@/mime/preview'
+import { sendFailureMessage } from '@/outbox/send'
 import { useRichHtmlContent } from './useRichHtmlContent'
 
 // --- Row ---------------------------------------------------------------------
@@ -215,9 +218,44 @@ function BubbleMeta({ message }: { message: MessageRow }) {
           Sending…
         </span>
       )}
-      {message.sendState === 'failed' && (
-        <span className="text-danger text-[11px] font-medium">Send failed</span>
-      )}
+      {message.sendState === 'failed' && <RetrySend message={message} />}
     </div>
+  )
+}
+
+/**
+ * Retry control for a send that failed while carrying attachments (the only
+ * failure that keeps its message — see outbox/send failSend). The files exist
+ * nowhere but this device, so "pick them again" is not an available answer.
+ */
+function RetrySend({ message }: { message: MessageRow }) {
+  const [retrying, setRetrying] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const retry = async (): Promise<void> => {
+    setRetrying(true)
+    setError(null)
+    try {
+      await retrySend(message.id)
+      // On success the row is replaced by the sent copy and this unmounts.
+    } catch (thrown) {
+      setError(sendFailureMessage(thrown))
+      setRetrying(false)
+    }
+  }
+
+  return (
+    <>
+      <span className="text-danger text-[11px] font-medium">{error ?? 'Send failed'}</span>
+      <button
+        type="button"
+        aria-label="Retry send"
+        disabled={retrying}
+        onClick={() => void retry()}
+        className="rounded-chip border border-danger/40 px-1.5 text-[11px] font-medium text-danger active:opacity-70 disabled:opacity-40"
+      >
+        {retrying ? 'Retrying…' : 'Retry'}
+      </button>
+    </>
   )
 }

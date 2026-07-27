@@ -11,16 +11,22 @@
 //    BEFORE local reconciliation, so a crash between the two is recoverable
 //    at startup (replayAbandonedSends);
 // 4. reconcile swaps the optimistic UUID PK to the Gmail id (delete+add in
-//    one tx, body row moved), or deletes the optimistic row when sync
-//    already delivered the sent copy;
-// 5. failure deletes the optimistic row, recomputes the conversation rollup
-//    from the messages that remain (never a blind snapshot restore, which
-//    would clobber concurrent sync updates), and deletes a
-//    newly-minted-and-now-empty conversation.
+//    one tx, body row moved, attachment rows re-parented and marked
+//    'uploaded'), or deletes the optimistic row when sync already delivered
+//    the sent copy;
+// 5. failure WITHOUT attachments deletes the optimistic row, recomputes the
+//    conversation rollup from the messages that remain (never a blind
+//    snapshot restore, which would clobber concurrent sync updates), and
+//    deletes a newly-minted-and-now-empty conversation;
+// 6. failure WITH attachments KEEPS the message and marks it (and its
+//    attachment rows) failed, so the user can retry from the bubble instead
+//    of re-picking files whose bytes only exist on this device
+//    (GmailSendService+OptimisticUpdates.handleFailedOptimisticMessage).
 
 import Dexie from 'dexie'
+import { BlobQuotaExceededError, putBlob } from '@/db/blobs'
 import type { ChatmailDB } from '@/db/schema'
-import type { MessageRow, OutboundSendRow } from '@/db/types'
+import type { AttachmentRow, MessageRow, OutboundSendRow } from '@/db/types'
 import {
   sendMessage as sendMessageEndpoint,
   type EndpointOptions,
@@ -41,12 +47,20 @@ import { isAcceptedForSending, normalizedAliasAddress } from '@/sync/aliases'
 import {
   buildNew,
   buildReply,
+  encodeRawForSend,
   InvalidRecipientsError,
   InvalidSenderError,
+  MessageTooLargeError,
   NoValidRecipientsError,
-  toBase64Url,
   type BuildNewInput,
+  type MimeAttachment,
 } from './mimeBuilder'
+import {
+  localAttachmentRow,
+  MAX_ATTACHMENT_LABEL,
+  newLocalAttachmentId,
+  type PendingAttachment,
+} from './outboundAttachments'
 import { buildReplyMetadata, type ReplyMetadata } from './replyMetadata'
 
 /** Pending journals older than this with no optimistic row are swept at boot. */
@@ -60,10 +74,31 @@ export class SendFailedError extends Error {
    */
   readonly userMessage: string | null
 
-  constructor(message: string, options?: { cause?: unknown; userMessage?: string }) {
+  /**
+   * True when the failed send left a retryable message bubble behind (the
+   * attachment path). The composer must NOT restore the draft or the picked
+   * files in that case — they now live in the bubble, and putting them back
+   * would double the message the moment the retry succeeds.
+   */
+  readonly keptFailedMessage: boolean
+
+  /** Conversation the retryable bubble lives in; null when nothing was kept. */
+  readonly conversationId: string | null
+
+  constructor(
+    message: string,
+    options?: {
+      cause?: unknown
+      userMessage?: string
+      keptFailedMessage?: boolean
+      conversationId?: string
+    },
+  ) {
     super(message, options)
     this.name = 'SendFailedError'
     this.userMessage = options?.userMessage ?? null
+    this.keptFailedMessage = options?.keptFailedMessage ?? false
+    this.conversationId = options?.conversationId ?? null
   }
 }
 
@@ -109,6 +144,18 @@ function asSendFailure(error: unknown): SendFailedError {
       userMessage: 'Your send-from address is not a valid email address.',
     })
   }
+  if (error instanceof MessageTooLargeError) {
+    return new SendFailedError(error.message, {
+      cause: error,
+      userMessage: `This message is too large to send. Remove an attachment and try again (each file may be up to ${MAX_ATTACHMENT_LABEL}).`,
+    })
+  }
+  if (error instanceof BlobQuotaExceededError) {
+    return new SendFailedError(error.message, {
+      cause: error,
+      userMessage: 'There is not enough storage on this device to attach these files.',
+    })
+  }
   return new SendFailedError('Send failed', { cause: error })
 }
 
@@ -133,6 +180,8 @@ export interface SendDraft {
    * ladder's choice stands (never fails a send over a stale picker value).
    */
   fromAlias?: string
+  /** Files staged by the picker (outbox/outboundAttachments.prepareAttachments). */
+  attachments?: readonly PendingAttachment[]
 }
 
 export interface SendOptions {
@@ -197,8 +246,9 @@ export async function sendMessage(
   // roll back — building it after the optimistic insert (as this used to)
   // escaped the try that owns rollbackFailedSend and left a permanently
   // "Sending…" bubble plus an orphaned 'pending' journal.
+  const attachments = draft.attachments ?? []
   let metadata: ReplyMetadata
-  let mime: string
+  let raw: string
   try {
     metadata = await buildReplyMetadata(db, conversationId, myAliases)
     if (metadata.recipients.length === 0) {
@@ -217,7 +267,11 @@ export async function sendMessage(
       )
       if (chosen !== undefined) metadata = { ...metadata, replyFrom: chosen }
     }
-    mime = buildOutboundMime(metadata, draft.body)
+    // Attachment bytes are read (and the payload-size ceiling enforced) here,
+    // in the same pre-optimistic step as address validation: a message Gmail's
+    // simple send endpoint would refuse for size fails identically on every
+    // retry, so leaving a retryable bubble behind would be a lie.
+    raw = encodeRawForSend(buildOutboundMime(metadata, draft.body, await toMimeParts(attachments)))
   } catch (error) {
     // The compose path already minted the conversation in (a); drop it again
     // so a rejected address cannot leave a phantom empty chat in the list
@@ -236,48 +290,74 @@ export async function sendMessage(
     draft.body,
     metadata,
     sentAt,
+    attachments.length > 0,
   )
-  await db.transaction('rw', [db.conversations, db.messages, db.outboundSends], async () => {
-    const conversation = await db.conversations.get(conversationId)
-    if (conversation === undefined) throw new SendFailedError('Conversation not found')
-    const journal: OutboundSendRow = {
-      id: optimisticId,
-      conversationId,
-      newlyInsertedConversation: newlyInserted ? 1 : 0,
-      createdAt: sentAt,
-      status: 'pending',
-      conversationSnapshot: {
-        archivedAt: conversation.archivedAt,
-        isArchived: conversation.isArchived,
-        displayName: conversation.displayName,
-        lastMessageDate: conversation.lastMessageDate,
-        snippet: conversation.snippet,
+  try {
+    await db.transaction(
+      'rw',
+      [db.conversations, db.messages, db.attachments, db.blobs, db.outboundSends],
+      async () => {
+        const conversation = await db.conversations.get(conversationId)
+        if (conversation === undefined) throw new SendFailedError('Conversation not found')
+        const journal: OutboundSendRow = {
+          id: optimisticId,
+          conversationId,
+          newlyInsertedConversation: newlyInserted ? 1 : 0,
+          createdAt: sentAt,
+          status: 'pending',
+          conversationSnapshot: {
+            archivedAt: conversation.archivedAt,
+            isArchived: conversation.isArchived,
+            displayName: conversation.displayName,
+            lastMessageDate: conversation.lastMessageDate,
+            snippet: conversation.snippet,
+          },
+          remoteCommittedMessageId: '',
+          remoteCommittedThreadId: '',
+        }
+        await db.messages.add(optimistic)
+        // Rows and bytes commit together: a row whose blob is missing renders
+        // a download control that can never resolve (nothing on the server has
+        // these bytes yet), and an orphan blob is prunable garbage.
+        for (const attachment of attachments) {
+          await db.attachments.put(localAttachmentRow(attachment, optimisticId))
+          await putBlob(db, attachment.id, attachment.blob, sentAt)
+        }
+        const preview = conversationPreview(optimistic)
+        await db.conversations.put({
+          ...conversation,
+          lastMessageDate: sentAt,
+          snippet: preview !== '' ? preview : conversation.snippet,
+        })
+        await db.outboundSends.add(journal)
       },
-      remoteCommittedMessageId: '',
-      remoteCommittedThreadId: '',
-    }
-    await db.messages.add(optimistic)
-    const preview = conversationPreview(optimistic)
-    await db.conversations.put({
-      ...conversation,
-      lastMessageDate: sentAt,
-      snippet: preview !== '' ? preview : conversation.snippet,
-    })
-    await db.outboundSends.add(journal)
-  })
+    )
+  } catch (error) {
+    // Nothing was committed (the transaction aborted whole), so this is still
+    // the pre-optimistic world: drop a conversation minted in (a) and report.
+    if (newlyInserted) await deleteEmptyConversation(db, conversationId)
+    throw asSendFailure(error)
+  }
 
   // (d) Send. The endpoint never retransmits — an ambiguous failure must not
   // risk a duplicate email.
+  if (attachments.length > 0) await markAttachmentState(db, optimisticId, 'uploading')
+
   let response: SendMessageResponse
   try {
     response = await api.send({
-      raw: toBase64Url(mime),
+      raw,
       ...(metadata.threadId !== '' ? { threadId: metadata.threadId } : {}),
     })
   } catch (error) {
-    // (f) Failure: roll back the optimistic graph.
-    await rollbackFailedSend(db, optimisticId, now())
-    throw new SendFailedError('Send failed', { cause: error })
+    // (f) Failure: roll the optimistic graph back, or keep it as a retryable
+    // failed bubble when it carries attachments.
+    const kept = await failSend(db, optimisticId, now())
+    throw new SendFailedError('Send failed', {
+      cause: error,
+      keptFailedMessage: kept,
+      conversationId,
+    })
   }
 
   // (e) Success: journal 'committed' + remote ids FIRST (crash-safe), then
@@ -292,8 +372,23 @@ export async function sendMessage(
   return { messageId: response.id, conversationId }
 }
 
+/** Reads the staged blobs into the byte form the MIME builder consumes. */
+async function toMimeParts(attachments: readonly PendingAttachment[]): Promise<MimeAttachment[]> {
+  return Promise.all(
+    attachments.map(async (attachment) => ({
+      data: new Uint8Array(await attachment.blob.arrayBuffer()),
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+    })),
+  )
+}
+
 /** Renders the outbound MIME; throws the builder's address-validation errors. */
-function buildOutboundMime(metadata: ReplyMetadata, body: string): string {
+function buildOutboundMime(
+  metadata: ReplyMetadata,
+  body: string,
+  attachments: readonly MimeAttachment[],
+): string {
   const mimeInput: BuildNewInput = {
     from: {
       email: metadata.replyFrom.email,
@@ -302,10 +397,20 @@ function buildOutboundMime(metadata: ReplyMetadata, body: string): string {
     to: metadata.recipients,
     textBody: body,
     ...(metadata.subject !== '' ? { subject: metadata.subject } : {}),
+    ...(attachments.length > 0 ? { attachments } : {}),
   }
   return metadata.inReplyTo !== ''
     ? buildReply({ ...mimeInput, inReplyTo: metadata.inReplyTo, references: metadata.references })
     : buildNew(mimeInput)
+}
+
+/** Bulk state write for one message's local attachment rows. */
+async function markAttachmentState(
+  db: ChatmailDB,
+  messageId: string,
+  state: AttachmentRow['state'],
+): Promise<void> {
+  await db.attachments.where('messageId').equals(messageId).modify({ state })
 }
 
 /**
@@ -331,6 +436,7 @@ function makeOptimisticMessage(
   body: string,
   metadata: ReplyMetadata,
   sentAt: number,
+  hasAttachments: boolean,
 ): MessageRow {
   const trimmedBody = body.trim()
   return {
@@ -353,7 +459,7 @@ function makeOptimisticMessage(
     isFromMe: 1,
     isUnread: 0,
     isNewsletter: 0,
-    hasAttachments: 0,
+    hasAttachments: hasAttachments ? 1 : 0,
     labelIds: ['SENT'],
     localModifiedAt: 0,
     sendState: 'pending',
@@ -366,9 +472,16 @@ function makeOptimisticMessage(
 
 /**
  * Finalizes a journal whose remote send committed: if sync already delivered
- * the sent copy, the optimistic row (and body) is deleted; otherwise the
- * optimistic row's PK is swapped to the Gmail id (delete+add in one tx, body
- * moved) and marked sent. Idempotent; safe to re-run at startup.
+ * the sent copy, the optimistic row (and body, and attachments) is deleted;
+ * otherwise the optimistic row's PK is swapped to the Gmail id (delete+add in
+ * one tx, body moved, attachment rows re-parented and marked 'uploaded') and
+ * marked sent. Idempotent; safe to re-run at startup.
+ *
+ * The swap deliberately keeps the attachment rows' `local_` ids: they are also
+ * the blob keys, so renaming them would mean copying every attachment's bytes.
+ * Sync adopts them into the server identity later — see
+ * outboundAttachments.matchLocalAttachment, applied in sync/persist's
+ * putAttachments when the sent copy comes back down.
  */
 export async function reconcileCommittedSend(
   db: ChatmailDB,
@@ -380,35 +493,94 @@ export async function reconcileCommittedSend(
   const remoteId = journal.remoteCommittedMessageId
   if (remoteId === '') return
 
-  await db.transaction('rw', [db.messages, db.bodies, db.outboundSends], async () => {
-    const syncedCopy = await db.messages.get(remoteId)
-    const optimistic = await db.messages.get(journalId)
+  await db.transaction(
+    'rw',
+    [db.messages, db.bodies, db.attachments, db.blobs, db.outboundSends],
+    async () => {
+      const syncedCopy = await db.messages.get(remoteId)
+      const optimistic = await db.messages.get(journalId)
 
-    if (syncedCopy !== undefined) {
-      // Duplicate delivery: sync won the race; drop the optimistic row.
-      if (optimistic !== undefined) {
+      if (syncedCopy !== undefined) {
+        // Duplicate delivery: sync won the race; drop the optimistic row. Its
+        // attachment rows go with it — the synced copy carries the server's
+        // own rows, whose bytes are re-fetchable from Gmail, so keeping both
+        // would show every attachment twice.
+        if (optimistic !== undefined) {
+          await deleteMessageAttachments(db, journalId)
+          await db.messages.delete(journalId)
+          await db.bodies.delete(journalId)
+        }
+      } else if (optimistic !== undefined) {
         await db.messages.delete(journalId)
-        await db.bodies.delete(journalId)
+        await db.messages.add({
+          ...optimistic,
+          id: remoteId,
+          gmThreadId: journal.remoteCommittedThreadId,
+          sendState: 'sent',
+        })
+        const body = await db.bodies.get(journalId)
+        if (body !== undefined) {
+          await db.bodies.delete(journalId)
+          await db.bodies.add({ messageId: remoteId, html: body.html })
+        }
+        await db.attachments
+          .where('messageId')
+          .equals(journalId)
+          .modify({ messageId: remoteId, state: 'uploaded' })
       }
-    } else if (optimistic !== undefined) {
-      await db.messages.delete(journalId)
-      await db.messages.add({
-        ...optimistic,
-        id: remoteId,
-        gmThreadId: journal.remoteCommittedThreadId,
-        sendState: 'sent',
-      })
-      const body = await db.bodies.get(journalId)
-      if (body !== undefined) {
-        await db.bodies.delete(journalId)
-        await db.bodies.add({ messageId: remoteId, html: body.html })
-      }
-    }
 
-    await db.outboundSends.update(journalId, { status: 'finalized' })
-  })
+      await db.outboundSends.update(journalId, { status: 'finalized' })
+    },
+  )
 
   await rollupConversation(db, journal.conversationId, now)
+}
+
+/** Deletes a message's attachment rows and their blobs (Dexie-only). */
+async function deleteMessageAttachments(db: ChatmailDB, messageId: string): Promise<void> {
+  const ids = await db.attachments.where('messageId').equals(messageId).primaryKeys()
+  if (ids.length === 0) return
+  await db.attachments.bulkDelete(ids)
+  await db.blobs.bulkDelete(ids)
+}
+
+/**
+ * Resolves a failed send. Returns true when the optimistic message was KEPT as
+ * a retryable failed bubble.
+ *
+ * Port of handleFailedOptimisticMessage: a message carrying local attachments
+ * survives (marked failed, attachments marked failed) because its bytes exist
+ * nowhere else — deleting it would silently destroy the files the user picked.
+ * A text-only message is removed, so nothing that was never sent can look
+ * delivered.
+ */
+async function failSend(db: ChatmailDB, journalId: string, now: number): Promise<boolean> {
+  const journal = await db.outboundSends.get(journalId)
+  if (journal === undefined) return false
+
+  const optimistic = await db.messages.get(journalId)
+  const attachmentCount =
+    optimistic === undefined ? 0 : await db.attachments.where('messageId').equals(journalId).count()
+
+  if (optimistic === undefined || attachmentCount === 0) {
+    await rollbackFailedSend(db, journalId, now)
+    return false
+  }
+
+  await db.transaction(
+    'rw',
+    [db.messages, db.attachments, db.conversations, db.outboundSends],
+    async () => {
+      await db.messages.put({ ...optimistic, sendState: 'failed' })
+      await db.attachments.where('messageId').equals(journalId).modify({ state: 'failed' })
+      // The message stays, so the conversation's derived fields are recomputed
+      // (not snapshot-restored) from the set that still includes it — the
+      // failed bubble is genuinely the newest thing in this chat.
+      await rollupConversation(db, journal.conversationId, now)
+      await db.outboundSends.update(journalId, { status: 'failed' })
+    },
+  )
+  return true
 }
 
 /**
@@ -427,8 +599,17 @@ async function rollbackFailedSend(db: ChatmailDB, journalId: string, now: number
 
   await db.transaction(
     'rw',
-    [db.messages, db.bodies, db.conversations, db.convoParticipants, db.outboundSends],
+    [
+      db.messages,
+      db.bodies,
+      db.attachments,
+      db.blobs,
+      db.conversations,
+      db.convoParticipants,
+      db.outboundSends,
+    ],
     async () => {
+      await deleteMessageAttachments(db, journalId)
       await db.messages.delete(journalId)
       await db.bodies.delete(journalId)
 
@@ -465,12 +646,13 @@ export interface ReplayOptions {
  *   re-run the reconcile;
  * - 'pending' journals older than 10 minutes are abandoned sends (a crash
  *   mid-send): when the optimistic row is gone the journal is stale debris
- *   and deleted; when the row still exists it is rolled back like a failed
- *   send — iOS reconcileAbandonedOptimisticSendMutations routes journals with
- *   no remote-committed result through handleFailedOptimisticMessage, which
- *   deletes the optimistic message (no local attachments exist on web yet)
- *   and restores the conversation — otherwise the bubble would show
- *   "Sending…" forever with no code path ever resolving it.
+ *   and deleted; when the row still exists it goes through the same failure
+ *   path as a live send — iOS reconcileAbandonedOptimisticSendMutations routes
+ *   journals with no remote-committed result through
+ *   handleFailedOptimisticMessage, so a text-only message is deleted and the
+ *   conversation restored, while one carrying attachments is kept as a
+ *   retryable failed bubble. Otherwise the bubble would show "Sending…"
+ *   forever with no code path ever resolving it.
  */
 export async function replayAbandonedSends(
   db: ChatmailDB,
@@ -497,7 +679,63 @@ export async function replayAbandonedSends(
     if (optimistic === undefined) {
       await db.outboundSends.delete(journal.id)
     } else {
-      await rollbackFailedSend(db, journal.id, now())
+      await failSend(db, journal.id, now())
     }
   }
+}
+
+/**
+ * Re-sends a message left behind by a failed send (the attachment path). The
+ * failed graph — message, body, attachment rows and their blobs, journal — is
+ * dropped in one transaction and the staged files are handed back to
+ * sendMessage, so a success leaves exactly one bubble and a second failure
+ * leaves exactly one failed bubble again.
+ *
+ * The blobs are read into memory FIRST: they are the only copy of those bytes
+ * anywhere, so they must survive the delete that clears the way for the retry.
+ */
+export async function retryFailedSend(
+  db: ChatmailDB,
+  broker: TokenBroker,
+  messageId: string,
+  opts: SendOptions = {},
+): Promise<SendResult> {
+  const message = await db.messages.get(messageId)
+  if (message === undefined) throw new SendFailedError('No message to retry')
+  if (message.sendState !== 'failed') throw new SendFailedError('Message did not fail to send')
+
+  const rows = await db.attachments.where('messageId').equals(messageId).toArray()
+  const attachments: PendingAttachment[] = []
+  for (const row of rows) {
+    const blobRow = await db.blobs.get(row.id)
+    if (blobRow === undefined) continue
+    attachments.push({
+      // A fresh id: the old row is about to be deleted along with its blob.
+      id: newLocalAttachmentId(),
+      filename: row.filename,
+      mimeType: row.mimeType,
+      blob: blobRow.blob,
+      byteSize: blobRow.blob.size,
+      width: row.width,
+      height: row.height,
+    })
+  }
+
+  await db.transaction(
+    'rw',
+    [db.messages, db.bodies, db.attachments, db.blobs, db.outboundSends],
+    async () => {
+      await deleteMessageAttachments(db, messageId)
+      await db.messages.delete(messageId)
+      await db.bodies.delete(messageId)
+      await db.outboundSends.delete(messageId)
+    },
+  )
+
+  return sendMessage(
+    db,
+    broker,
+    { conversationId: message.conversationId, body: message.bodyText, attachments },
+    opts,
+  )
 }

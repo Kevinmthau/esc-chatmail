@@ -2,19 +2,37 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { ChatmailDB } from '@/db/schema'
-import type { OutboundSendRow } from '@/db/types'
+import type { AttachmentState, OutboundSendRow } from '@/db/types'
 import type { TokenBroker } from '@/gmail/gmailFetch'
 import { makeRecipientParticipantSetIdentity } from '@/identity/participantSet'
+import { MAX_SEND_RAW_BYTES } from './mimeBuilder'
+import type { PendingAttachment } from './outboundAttachments'
 import {
   GENERIC_SEND_ERROR,
   replayAbandonedSends,
+  retryFailedSend,
   sendFailureMessage,
   sendMessage,
   SendFailedError,
   STALE_PENDING_SEND_MS,
   type SendApi,
 } from './send'
-import { convoRow, makeTestDb, ME, msgRow, NOW, seedAccount } from './testSupport'
+import { convoRow, makeTestDb, ME, msgRow, NOW, seedAccount, storableBlob } from './testSupport'
+
+function pendingAttachment(
+  overrides: Partial<PendingAttachment> & Pick<PendingAttachment, 'id'>,
+): PendingAttachment {
+  const blob = overrides.blob ?? storableBlob([new Uint8Array([1, 2, 3, 4])], { type: 'image/png' })
+  return {
+    filename: 'photo.png',
+    mimeType: 'image/png',
+    byteSize: blob.size,
+    width: 100,
+    height: 50,
+    ...overrides,
+    blob,
+  }
+}
 
 const SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send'
 
@@ -361,6 +379,252 @@ describe('sendMessage', () => {
     })
   })
 
+  describe('attachments', () => {
+    it('drives queued → uploading → uploaded and re-parents the rows onto the sent copy', async () => {
+      await seedReplyConversation()
+      const attachment = pendingAttachment({ id: 'local_a1', filename: 'photo.png' })
+
+      // Observed from inside the network call: the rows must already say
+      // 'uploading' by the time the request is in flight.
+      let stateDuringSend: AttachmentState | undefined
+      const api: SendApi = {
+        send: async () => {
+          stateDuringSend = (await db.attachments.get('local_a1'))?.state
+          return { id: 'g_new', threadId: 't1', labelIds: ['SENT'] }
+        },
+      }
+
+      await sendMessage(
+        db,
+        broker,
+        { conversationId: 'c1', body: 'with a photo', attachments: [attachment] },
+        { now: () => NOW, api },
+      )
+
+      expect(stateDuringSend).toBe('uploading')
+
+      const rows = await db.attachments.where('messageId').equals('g_new').toArray()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.id).toBe('local_a1')
+      expect(rows[0]?.state).toBe('uploaded')
+      expect(rows[0]?.gmailAttachmentId).toBe('')
+      // The row id is also the blob key, so the bytes did not have to move.
+      expect((await db.blobs.get('local_a1'))?.blob.size).toBe(4)
+      expect((await db.messages.get('g_new'))?.hasAttachments).toBe(1)
+      // Nothing is left parented to the optimistic id.
+      expect(await db.attachments.where('messageId').equals('c1').count()).toBe(0)
+    })
+
+    it('encodes the attachment into a multipart/mixed MIME payload', async () => {
+      await seedReplyConversation()
+      const { captured } = respondWith('g_new', 't1')
+
+      await sendMessage(
+        db,
+        broker,
+        {
+          conversationId: 'c1',
+          body: 'see attached',
+          attachments: [
+            pendingAttachment({
+              id: 'local_a1',
+              filename: 'report.pdf',
+              mimeType: 'application/pdf',
+              blob: storableBlob(['%PDF-1.4'], { type: 'application/pdf' }),
+            }),
+          ],
+        },
+        { now: () => NOW },
+      )
+
+      const mime = decodeBase64Url(captured[0]?.raw ?? '')
+      expect(mime).toContain('Content-Type: multipart/mixed; boundary="----Boundary')
+      expect(mime).toContain('Content-Type: application/pdf; name="report.pdf"\r\n')
+      expect(mime).toContain('Content-Disposition: attachment; filename="report.pdf"\r\n')
+      expect(mime).toContain(Buffer.from('%PDF-1.4').toString('base64'))
+      expect(mime).toContain('see attached')
+    })
+
+    it('KEEPS the message and marks it failed when a send with attachments fails', async () => {
+      await seedReplyConversation()
+      respondWithError(400)
+
+      const error = await sendMessage(
+        db,
+        broker,
+        {
+          conversationId: 'c1',
+          body: 'doomed but retryable',
+          attachments: [pendingAttachment({ id: 'local_a1' })],
+        },
+        { now: () => NOW },
+      ).catch((thrown: unknown) => thrown)
+
+      expect(error).toBeInstanceOf(SendFailedError)
+      // The composer must not restore the draft/files: the bubble owns them.
+      expect((error as SendFailedError).keptFailedMessage).toBe(true)
+      expect((error as SendFailedError).conversationId).toBe('c1')
+
+      // The optimistic message survives, flagged failed, with its bytes.
+      const kept = (await db.messages.where('conversationId').equals('c1').toArray()).find(
+        (message) => message.sendState === 'failed',
+      )
+      expect(kept?.bodyText).toBe('doomed but retryable')
+      expect(kept?.hasAttachments).toBe(1)
+      const rows = await db.attachments.where('messageId').equals(kept!.id).toArray()
+      expect(rows.map((row) => row.state)).toEqual(['failed'])
+      expect((await db.blobs.get('local_a1'))?.blob.size).toBe(4)
+      expect((await db.outboundSends.get(kept!.id))?.status).toBe('failed')
+
+      // The conversation still points at the failed bubble — it IS the newest
+      // thing in this chat, so no snapshot restore may drag it backwards.
+      const conversation = await db.conversations.get('c1')
+      expect(conversation?.lastMessageDate).toBe(NOW)
+      expect(conversation?.snippet).toBe('doomed but retryable')
+    })
+
+    it('still deletes a text-only failed message (nothing unsent may look delivered)', async () => {
+      await seedReplyConversation()
+      respondWithError(400)
+
+      const error = await sendMessage(
+        db,
+        broker,
+        { conversationId: 'c1', body: 'text only' },
+        { now: () => NOW },
+      ).catch((thrown: unknown) => thrown)
+
+      expect((error as SendFailedError).keptFailedMessage).toBe(false)
+      expect(await db.messages.count()).toBe(1)
+    })
+
+    it('deletes the failed graph on retry, so success leaves exactly one bubble', async () => {
+      await seedReplyConversation()
+      respondWithError(400)
+      const failed = await sendMessage(
+        db,
+        broker,
+        {
+          conversationId: 'c1',
+          body: 'retry me',
+          attachments: [pendingAttachment({ id: 'local_a1' })],
+        },
+        { now: () => NOW },
+      ).catch(() => undefined)
+      expect(failed).toBeUndefined()
+
+      const failedMessage = (await db.messages.where('conversationId').equals('c1').toArray()).find(
+        (message) => message.sendState === 'failed',
+      )!
+      server.resetHandlers()
+      respondWith('g_retry', 't1')
+
+      const result = await retryFailedSend(db, broker, failedMessage.id, { now: () => NOW })
+
+      expect(result.messageId).toBe('g_retry')
+      const messages = await db.messages.where('conversationId').equals('c1').toArray()
+      expect(messages.map((message) => message.id).sort()).toEqual(['g_orig', 'g_retry'])
+      const rows = await db.attachments.toArray()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.messageId).toBe('g_retry')
+      expect(rows[0]?.state).toBe('uploaded')
+      // The bytes moved to the new local id; no orphan blob is left behind.
+      expect(await db.blobs.count()).toBe(1)
+      expect((await db.blobs.toArray())[0]?.key).toBe(rows[0]?.id)
+    })
+
+    it('refuses a payload past the send endpoint ceiling before touching the network', async () => {
+      await seedReplyConversation()
+      let calls = 0
+      const api: SendApi = {
+        send: () => {
+          calls += 1
+          return Promise.reject(new Error('should not transmit'))
+        },
+      }
+      // Base64 inflates by 4/3, so this clears MAX_SEND_RAW_BYTES on its own.
+      const huge = storableBlob([new Uint8Array(MAX_SEND_RAW_BYTES)], { type: 'application/pdf' })
+
+      const error = await sendMessage(
+        db,
+        broker,
+        {
+          conversationId: 'c1',
+          body: 'too big',
+          attachments: [
+            pendingAttachment({
+              id: 'local_a1',
+              filename: 'huge.pdf',
+              mimeType: 'application/pdf',
+              blob: huge,
+            }),
+          ],
+        },
+        { now: () => NOW, api },
+      ).catch((thrown: unknown) => thrown)
+
+      expect(error).toBeInstanceOf(SendFailedError)
+      expect(sendFailureMessage(error)).toContain('too large')
+      // Retrying is hopeless, so nothing retryable is left behind.
+      expect((error as SendFailedError).keptFailedMessage).toBe(false)
+      expect(calls).toBe(0)
+      expect(await db.messages.count()).toBe(1)
+      expect(await db.attachments.count()).toBe(0)
+      expect(await db.blobs.count()).toBe(0)
+      expect(await db.outboundSends.count()).toBe(0)
+    })
+
+    it('drops the optimistic attachment rows when sync already delivered the sent copy', async () => {
+      await seedReplyConversation()
+      // Sync wins the race: the server copy (with its own re-downloadable
+      // attachment rows) lands before reconcile runs.
+      const api: SendApi = {
+        send: async () => {
+          await db.messages.add(
+            msgRow({
+              id: 'g_new',
+              conversationId: 'c1',
+              isFromMe: 1,
+              labelIds: ['SENT'],
+              hasAttachments: 1,
+              internalDate: NOW,
+            }),
+          )
+          await db.attachments.put({
+            id: 'g_new:2',
+            messageId: 'g_new',
+            gmailAttachmentId: 'ATT1',
+            contentId: '',
+            filename: 'photo.png',
+            mimeType: 'image/png',
+            byteSize: 4,
+            width: 0,
+            height: 0,
+            state: 'queued',
+            lastDownloadFailedAt: 0,
+          })
+          return { id: 'g_new', threadId: 't1', labelIds: ['SENT'] }
+        },
+      }
+
+      await sendMessage(
+        db,
+        broker,
+        {
+          conversationId: 'c1',
+          body: 'raced',
+          attachments: [pendingAttachment({ id: 'local_a1' })],
+        },
+        { now: () => NOW, api },
+      )
+
+      // Exactly one row per file — never the local row plus the server row.
+      const rows = await db.attachments.toArray()
+      expect(rows.map((row) => row.id)).toEqual(['g_new:2'])
+      expect(await db.blobs.get('local_a1')).toBeUndefined()
+    })
+  })
+
   it('reconcile-time rollup overwrites conversation state mutated during the network call', async () => {
     await seedReplyConversation()
     // Corrupt the derived fields mid-send: only the rollup that runs inside
@@ -495,6 +759,49 @@ describe('replayAbandonedSends', () => {
     // remote-committed result through the failed-send path: the optimistic
     // row is deleted and the journal marked failed.
     expect(await db.messages.get('u1')).toBeUndefined()
+    expect((await db.outboundSends.get('u1'))?.status).toBe('failed')
+  })
+
+  it('keeps a crashed send that carried attachments as a retryable failed bubble', async () => {
+    await db.messages.add(
+      msgRow({
+        id: 'u1',
+        conversationId: 'c1',
+        isFromMe: 1,
+        sendState: 'pending',
+        labelIds: ['SENT'],
+        hasAttachments: 1,
+      }),
+    )
+    await db.attachments.put({
+      id: 'local_a1',
+      messageId: 'u1',
+      gmailAttachmentId: '',
+      contentId: '',
+      filename: 'photo.png',
+      mimeType: 'image/png',
+      byteSize: 4,
+      width: 0,
+      height: 0,
+      state: 'uploading',
+      lastDownloadFailedAt: 0,
+    })
+    await db.blobs.put({
+      key: 'local_a1',
+      blob: storableBlob([new Uint8Array(4)]),
+      byteSize: 4,
+      lastAccessAt: NOW,
+    })
+    await db.outboundSends.add(
+      makeJournal({ id: 'u1', createdAt: NOW - STALE_PENDING_SEND_MS - 60_000 }),
+    )
+
+    await replayAbandonedSends(db, { now: () => NOW })
+
+    // Deleting it would destroy the only copy of those bytes.
+    expect((await db.messages.get('u1'))?.sendState).toBe('failed')
+    expect((await db.attachments.get('local_a1'))?.state).toBe('failed')
+    expect(await db.blobs.get('local_a1')).toBeDefined()
     expect((await db.outboundSends.get('u1'))?.status).toBe('failed')
   })
 

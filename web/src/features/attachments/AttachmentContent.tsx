@@ -2,12 +2,20 @@
 // column. One image → single rounded image; several → 2-col grid (max 4 tiles,
 // '+N' overlay on the 4th); non-images → filename/size cards. Every
 // not-yet-downloaded item shows a download/spinner/retry overlay.
+//
+// Presence of the BYTES — not the row's state — decides whether a tile renders
+// its content: an outbound attachment this device staged is 'queued' /
+// 'uploading' / 'uploaded', never 'downloaded', yet its blob has been local
+// since the moment it was picked. Gating on state alone showed the user a
+// download button over their own photo, pointing at bytes Gmail does not have
+// yet.
 
 import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { getDB } from '@/db/schema'
 import type { AttachmentRow } from '@/db/types'
 import { cn } from '@/lib/cn'
+import { isLocalAttachmentId } from '@/outbox/outboundAttachments'
 import { Lightbox } from './Lightbox'
 import { formatByteSize } from './formatByteSize'
 import { downloadAttachment, isAttachmentDownloadInFlight } from './download'
@@ -80,7 +88,7 @@ function ImageAttachment({
   square?: boolean
   overflowCount?: number
 }) {
-  const url = useAttachmentUrl(attachment.state === 'downloaded' ? attachment.id : null)
+  const url = useAttachmentUrl(attachment.id)
   const name = attachment.filename.trim().length > 0 ? attachment.filename : 'Image'
   const aspectRatio =
     !square && attachment.width > 0 && attachment.height > 0
@@ -137,7 +145,7 @@ function ImageAttachment({
 // ---------------------------------------------------------------------------
 
 function FileCard({ attachment }: { attachment: AttachmentRow }) {
-  const url = useAttachmentUrl(attachment.state === 'downloaded' ? attachment.id : null)
+  const url = useAttachmentUrl(attachment.id)
   const name = attachment.filename.trim().length > 0 ? attachment.filename : 'Attachment'
 
   return (
@@ -188,6 +196,21 @@ function DownloadOverlay({
   }
 
   const sizeClass = compact ? 'size-9' : 'size-11'
+
+  // An outbound row with no bytes has nothing to download — the server has
+  // never seen this file. (Reaching this at all means the blob write lost a
+  // race with eviction; the message-level retry is the way out.)
+  if (isLocalAttachmentId(attachment.id)) {
+    return (
+      <span
+        role="status"
+        aria-label={attachment.state === 'failed' ? `${name} was not sent` : `Sending ${name}`}
+        className={cn('flex items-center justify-center', sizeClass, 'text-fg-muted')}
+      >
+        {attachment.state === 'failed' ? <RetryIcon /> : <SpinnerIcon />}
+      </span>
+    )
+  }
 
   if (busy) {
     return (

@@ -68,7 +68,9 @@ src/
 ├── mime/        Gmail payload parsing, quote-stripping, newsletter scoring
 ├── rollup/      derived conversation state (snippet, unread counts, archive)
 ├── sync/        initial backfill + incremental history sync + reconciliation
-├── outbox/      durable pending-action queue + optimistic send journal
+├── outbox/      durable pending-action queue, optimistic send journal, the
+│                RFC-2822 MIME builder, and outbound attachment staging
+│                (downscale → 25 MB cap → local rows + blobs)
 ├── live/        Dexie liveQuery layer consumed by the UI
 ├── features/    conversations · chat · compose · reader · attachments · auth
 ├── components/  UI primitives (Avatar, Modal, Menu, …)
