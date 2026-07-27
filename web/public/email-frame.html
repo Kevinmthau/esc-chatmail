@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Isolated email viewer document. Loaded into a sandboxed iframe WITHOUT
+      allow-same-origin, so it runs in an opaque origin. This CSP is baked in
+      at parse time and cannot be removed by any later DOM replacement.
+      Note there is no cid: source here: the frame script rewrites every cid:
+      image to a locally minted blob: URL before insertion.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src https: http: data: blob:; style-src 'unsafe-inline'; script-src 'self'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <title>Email content</title>
+  </head>
+  <body>
+    <script src="/email-frame.js"></script>
+  </body>
+</html>
