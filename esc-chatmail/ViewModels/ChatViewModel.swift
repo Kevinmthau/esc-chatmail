@@ -274,7 +274,8 @@ final class ChatViewModel: ObservableObject {
     ///
     /// A legacy message can move to a List-Id conversation while this chat is
     /// open. Replace that invalid target even when the replacement has the same
-    /// subject; otherwise outbound validation rejects the reply.
+    /// subject; otherwise outbound validation rejects the reply. List chats also
+    /// advance across Gmail threads whose subjects happen to match.
     func updateReplyingToIfNewSubject(lastMessage: Message?) {
         // If user cleared replyingTo (tapped X), don't auto-update
         guard let currentReplyingTo = replyingTo else { return }
@@ -286,11 +287,17 @@ final class ChatViewModel: ObservableObject {
 
         guard let lastMessage, isValidReplyTarget(lastMessage) else { return }
 
-        // If the new message has a different subject, update to it
+        // List conversations can combine multiple Gmail threads that happen to
+        // share a subject. Follow the newest thread so reply metadata and quoted
+        // content do not stay anchored to an older list post.
         let currentSubject = currentReplyingTo.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let newSubject = lastMessage.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let listThreadChanged =
+            conversation.conversationType == .list &&
+            !lastMessage.gmThreadId.isEmpty &&
+            currentReplyingTo.gmThreadId != lastMessage.gmThreadId
 
-        if currentSubject != newSubject {
+        if currentSubject != newSubject || listThreadChanged {
             replyingTo = lastMessage
         }
     }

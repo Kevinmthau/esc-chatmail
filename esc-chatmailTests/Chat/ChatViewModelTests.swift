@@ -198,6 +198,161 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.replyingTo, replacement)
     }
 
+    func testListReplyTargetRetargetsWhenSameSubjectMovesToNewGmailThread() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let context = deps.viewContext
+        let listId = "list.example.com"
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId(listId)
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let originalTarget = MessageBuilder()
+            .withId("original-target")
+            .withThreadId("thread-a")
+            .withSubject("Same Subject")
+            .withListId(listId)
+            .inConversation(conversation)
+            .build(in: context)
+        let latestMessage = MessageBuilder()
+            .withId("latest-message")
+            .withThreadId("thread-b")
+            .withSubject("Same Subject")
+            .withListId(listId)
+            .inConversation(conversation)
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.replyingTo = originalTarget
+
+        viewModel.updateReplyingToIfNewSubject(lastMessage: latestMessage)
+
+        XCTAssertEqual(viewModel.replyingTo, latestMessage)
+    }
+
+    func testListReplyTargetStaysWhenLatestGmailThreadIsMissing() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let context = deps.viewContext
+        let listId = "list.example.com"
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId(listId)
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let originalTarget = MessageBuilder()
+            .withId("original-target")
+            .withThreadId("thread-a")
+            .withSubject("Same Subject")
+            .withListId(listId)
+            .inConversation(conversation)
+            .build(in: context)
+        let latestMessage = MessageBuilder()
+            .withId("latest-message")
+            .withThreadId("")
+            .withSubject("Same Subject")
+            .withListId(listId)
+            .inConversation(conversation)
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.replyingTo = originalTarget
+
+        viewModel.updateReplyingToIfNewSubject(lastMessage: latestMessage)
+
+        XCTAssertEqual(viewModel.replyingTo, originalTarget)
+    }
+
+    func testNonListReplyTargetStaysWhenOnlyGmailThreadChanges() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let context = deps.viewContext
+
+        for conversationType in [ConversationType.oneToOne, .group] {
+            let conversation = ConversationBuilder()
+                .withDisplayName("Non-list Chat")
+                .visible()
+                .recentlyActive()
+                .build(in: context)
+            conversation.conversationType = conversationType
+            let originalTarget = MessageBuilder()
+                .withId("original-\(conversationType.rawValue)")
+                .withThreadId("thread-a")
+                .withSubject("Same Subject")
+                .inConversation(conversation)
+                .build(in: context)
+            let latestMessage = MessageBuilder()
+                .withId("latest-\(conversationType.rawValue)")
+                .withThreadId("thread-b")
+                .withSubject("Same Subject")
+                .inConversation(conversation)
+                .build(in: context)
+            let viewModel = ChatViewModel(
+                conversation: conversation,
+                chatDependencies: deps.makeChatDependencies()
+            )
+            viewModel.replyingTo = originalTarget
+
+            viewModel.updateReplyingToIfNewSubject(lastMessage: latestMessage)
+
+            XCTAssertEqual(
+                viewModel.replyingTo,
+                originalTarget,
+                "\(conversationType.rawValue) should preserve its same-subject reply target"
+            )
+        }
+    }
+
+    func testListReplyTargetStaysWhenSubjectAndGmailThreadMatch() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let context = deps.viewContext
+        let listId = "list.example.com"
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId(listId)
+            .withDisplayName("Example List")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let originalTarget = MessageBuilder()
+            .withId("original-target")
+            .withThreadId("thread-a")
+            .withSubject("Same Subject")
+            .withListId(listId)
+            .inConversation(conversation)
+            .build(in: context)
+        let latestMessage = MessageBuilder()
+            .withId("latest-message")
+            .withThreadId("thread-a")
+            .withSubject("Same Subject")
+            .withListId(listId)
+            .inConversation(conversation)
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.replyingTo = originalTarget
+
+        viewModel.updateReplyingToIfNewSubject(lastMessage: latestMessage)
+
+        XCTAssertEqual(viewModel.replyingTo, originalTarget)
+    }
+
     func testOffWindowMovedReplyTargetClearsWhenAggregateCountValidationHasNoLatestMessage() {
         let deps = makeDependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com")
