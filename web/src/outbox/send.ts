@@ -187,6 +187,15 @@ export interface SendDraft {
 export interface SendOptions {
   api?: SendApi
   now?: () => number
+  /**
+   * A failed message this send replaces (retryFailedSend). Its whole graph —
+   * message, attachment rows, blobs, journal — is deleted INSIDE the new
+   * send's optimistic transaction, never before it: those blobs are the only
+   * copy of the user's files anywhere, so a retry that dies pre-flight
+   * (invalid recipients, missing conversation, quota) must abort the delete
+   * with everything else and leave the failed bubble in custody of the bytes.
+   */
+  replacesFailedMessageId?: string
 }
 
 export interface SendResult {
@@ -295,10 +304,19 @@ export async function sendMessage(
   try {
     await db.transaction(
       'rw',
-      [db.conversations, db.messages, db.attachments, db.blobs, db.outboundSends],
+      [db.conversations, db.messages, db.bodies, db.attachments, db.blobs, db.outboundSends],
       async () => {
         const conversation = await db.conversations.get(conversationId)
         if (conversation === undefined) throw new SendFailedError('Conversation not found')
+        // A retry hands over the failed predecessor here, in the same
+        // transaction as the replacement's insert: abort one, abort both.
+        const replaces = opts.replacesFailedMessageId
+        if (replaces !== undefined) {
+          await deleteMessageAttachments(db, replaces)
+          await db.messages.delete(replaces)
+          await db.bodies.delete(replaces)
+          await db.outboundSends.delete(replaces)
+        }
         const journal: OutboundSendRow = {
           id: optimisticId,
           conversationId,
@@ -686,13 +704,13 @@ export async function replayAbandonedSends(
 
 /**
  * Re-sends a message left behind by a failed send (the attachment path). The
- * failed graph — message, body, attachment rows and their blobs, journal — is
- * dropped in one transaction and the staged files are handed back to
- * sendMessage, so a success leaves exactly one bubble and a second failure
- * leaves exactly one failed bubble again.
- *
- * The blobs are read into memory FIRST: they are the only copy of those bytes
- * anywhere, so they must survive the delete that clears the way for the retry.
+ * staged files are read back into memory and handed to sendMessage, which
+ * deletes the failed graph — message, body, attachment rows and their blobs,
+ * journal — inside its own optimistic transaction (replacesFailedMessageId).
+ * A success therefore leaves exactly one bubble, a post-optimistic failure
+ * leaves exactly one NEW failed bubble, and a pre-flight failure aborts the
+ * delete along with the insert, leaving the ORIGINAL failed bubble — and the
+ * only copy of the bytes — untouched and still retryable.
  */
 export async function retryFailedSend(
   db: ChatmailDB,
@@ -710,7 +728,8 @@ export async function retryFailedSend(
     const blobRow = await db.blobs.get(row.id)
     if (blobRow === undefined) continue
     attachments.push({
-      // A fresh id: the old row is about to be deleted along with its blob.
+      // A fresh id: the old row is deleted (inside the replacement's
+      // optimistic transaction) along with its blob.
       id: newLocalAttachmentId(),
       filename: row.filename,
       mimeType: row.mimeType,
@@ -721,21 +740,15 @@ export async function retryFailedSend(
     })
   }
 
-  await db.transaction(
-    'rw',
-    [db.messages, db.bodies, db.attachments, db.blobs, db.outboundSends],
-    async () => {
-      await deleteMessageAttachments(db, messageId)
-      await db.messages.delete(messageId)
-      await db.bodies.delete(messageId)
-      await db.outboundSends.delete(messageId)
-    },
-  )
-
+  // The failed graph is NOT deleted here. sendMessage deletes it inside its
+  // optimistic transaction (replacesFailedMessageId), so a retry that fails
+  // before that commit — invalid recipients, a conversation that vanished,
+  // storage quota — leaves the failed bubble (and the only copy of the
+  // attachment bytes) exactly where it was, still retryable.
   return sendMessage(
     db,
     broker,
     { conversationId: message.conversationId, body: message.bodyText, attachments },
-    opts,
+    { ...opts, replacesFailedMessageId: messageId },
   )
 }

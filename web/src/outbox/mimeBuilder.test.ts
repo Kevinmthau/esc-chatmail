@@ -522,6 +522,27 @@ describe('buildNew with attachments', () => {
     expect(mime).toContain(String.raw`Content-Disposition: attachment; filename="evil\".pdf"`)
   })
 
+  it('keeps a non-ASCII filename as raw UTF-8 in the quoted parameters (documented choice)', () => {
+    // Strictly RFC 2045 headers are ASCII (RFC 2231 filename*= is the
+    // conformant spelling), but iOS interpolates raw UTF-8, Gmail's API
+    // accepts it and echoes the same name back on sync — which keeps
+    // matchLocalAttachment's filename fingerprint stable. Pinned so a switch
+    // to RFC 2231 has to be its own deliberate change, on both platforms.
+    mockUuids(MESSAGE_UUID, MIXED_UUID)
+    const mime = buildNew(
+      {
+        from: { email: 'a@b.com' },
+        to: ['x@y.com'],
+        textBody: 'photo',
+        attachments: [{ data: bytes('x'), filename: 'Fotoğraf ✓.jpg', mimeType: 'image/jpeg' }],
+      },
+      { now: NOW },
+    )
+
+    expect(mime).toContain('Content-Type: image/jpeg; name="Fotoğraf ✓.jpg"')
+    expect(mime).toContain('Content-Disposition: attachment; filename="Fotoğraf ✓.jpg"')
+  })
+
   it('strips CRLF from attachment metadata (header-injection defense)', () => {
     mockUuids(MESSAGE_UUID, MIXED_UUID)
     const mime = buildNew(

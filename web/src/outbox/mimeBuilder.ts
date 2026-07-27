@@ -350,6 +350,13 @@ export function sanitizeMimeType(mimeType: string): string {
  * backslashes first, then quotes. Deviation from iOS, which interpolates the
  * filename raw — a name containing `"` would otherwise close the parameter
  * early and let the rest of the name be parsed as header syntax.
+ *
+ * Non-ASCII stays raw UTF-8 inside the quoted string, matching iOS: strictly
+ * RFC 2045 headers are ASCII (RFC 2231 `filename*=` is the conformant spell),
+ * but Gmail's API accepts the 8-bit form and hands the same name back on
+ * sync, which keeps matchLocalAttachment's filename fingerprint stable. If a
+ * receiving client mangles such a name, RFC 2231 is the fix — as its own
+ * change, on both platforms.
  */
 function quoteParameterValue(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')

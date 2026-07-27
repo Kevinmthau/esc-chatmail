@@ -73,7 +73,9 @@ export const ReplyBar = forwardRef<ReplyBarApi, ReplyBarProps>(function ReplyBar
 
   const send = async (): Promise<void> => {
     const body = draft.trim()
-    if ((body.length === 0 && attachments.length === 0) || sending) return
+    // picker.busy matches the Send button's canSend: Enter must not race a
+    // file still downscaling out of the message it was staged for.
+    if ((body.length === 0 && attachments.length === 0) || sending || picker.busy) return
     const staged = attachments
     setDraft('')
     picker.clear()

@@ -6,6 +6,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { sendMessage } from '@/data/actions'
+import { prepareAttachments } from '@/outbox/outboundAttachments'
 import { GENERIC_SEND_ERROR, SendFailedError } from '@/outbox/send'
 import { ReplyBar } from './ReplyBar'
 import { clearDraftsForTests } from './useDraft'
@@ -13,6 +14,13 @@ import { clearDraftsForTests } from './useDraft'
 vi.mock('@/data/actions', () => ({
   sendMessage: vi.fn(),
 }))
+
+// Passthrough by default; individual tests swap in a hanging implementation
+// to hold the picker in its busy state.
+vi.mock('@/outbox/outboundAttachments', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/outbox/outboundAttachments')>()
+  return { ...actual, prepareAttachments: vi.fn(actual.prepareAttachments) }
+})
 
 const mockedSend = vi.mocked(sendMessage)
 
@@ -171,6 +179,21 @@ describe('ReplyBar', () => {
       if (size !== undefined) vi.spyOn(file, 'size', 'get').mockReturnValue(size)
       return file
     }
+
+    it('Enter does not send while a picked file is still processing', async () => {
+      // The Send button already disables on picker.busy; the Enter path must
+      // honor the same guard, or the text goes out without the file it was
+      // typed alongside.
+      vi.mocked(prepareAttachments).mockImplementationOnce(() => new Promise(() => {}))
+      render(<ReplyBar conversationId="c1" onSent={() => undefined} />)
+
+      await userEvent.type(textarea(), 'photo incoming')
+      await userEvent.upload(fileInput(), pngFile())
+      await userEvent.type(textarea(), '{Enter}')
+
+      expect(mockedSend).not.toHaveBeenCalled()
+      expect(textarea().value).toBe('photo incoming')
+    })
 
     it('stages a picked file and lets an empty draft be sent', async () => {
       render(<ReplyBar conversationId="c1" onSent={() => undefined} />)

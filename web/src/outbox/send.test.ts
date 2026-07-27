@@ -533,6 +533,41 @@ describe('sendMessage', () => {
       expect((await db.blobs.toArray())[0]?.key).toBe(rows[0]?.id)
     })
 
+    it('a retry that fails pre-flight keeps the failed bubble and its bytes', async () => {
+      await seedReplyConversation()
+      respondWithError(400)
+      await sendMessage(
+        db,
+        broker,
+        {
+          conversationId: 'c1',
+          body: 'retry me',
+          attachments: [pendingAttachment({ id: 'local_a1' })],
+        },
+        { now: () => NOW },
+      ).catch(() => undefined)
+      const failedMessage = (await db.messages.where('conversationId').equals('c1').toArray()).find(
+        (message) => message.sendState === 'failed',
+      )!
+
+      // The conversation vanishes before the retry (another tab, a pruning
+      // sync): the re-entered send now dies before its optimistic commit.
+      await db.conversations.delete('c1')
+      const error = await retryFailedSend(db, broker, failedMessage.id, { now: () => NOW }).catch(
+        (thrown: unknown) => thrown,
+      )
+      expect(error).toBeInstanceOf(SendFailedError)
+
+      // The failed graph — the only copy of those bytes anywhere — must be
+      // untouched and still retryable. The old delete-first ordering
+      // destroyed it on exactly this path.
+      expect((await db.messages.get(failedMessage.id))?.sendState).toBe('failed')
+      const rows = await db.attachments.where('messageId').equals(failedMessage.id).toArray()
+      expect(rows).toHaveLength(1)
+      expect((await db.blobs.get(rows[0]!.id))?.blob.size).toBe(4)
+      expect((await db.outboundSends.get(failedMessage.id))?.status).toBe('failed')
+    })
+
     it('refuses a payload past the send endpoint ceiling before touching the network', async () => {
       await seedReplyConversation()
       let calls = 0
