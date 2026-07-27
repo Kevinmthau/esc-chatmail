@@ -16,6 +16,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         static let initialGeometryCheck = "initialGeometryCheck"
         static let latestWindow = "latestWindow"
         static let postRevealGeometryCheck = "postRevealGeometryCheck"
+        static let scrollTakeoverRelease = "scrollTakeoverRelease"
     }
 
     private enum InitialRevealState: Equatable {
@@ -60,6 +61,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     @Published private(set) var contactRefreshToken = 0
     @Published private(set) var senderGroupingKeysByEmail: [String: String] = [:]
     @Published private(set) var initialAnchorGeometryCheckID = UUID()
+    @Published private(set) var isUserScrollTakeoverActive = false
 
     private let loadLatestWindowIfNeeded: LatestWindowLoader
     private let markConversationAsReadIfNeeded: () -> Void
@@ -222,6 +224,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleDisappear() {
         isVisible = false
         postRevealBottomFollowState = .inactive
+        isUserScrollTakeoverActive = false
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
         pendingAutoReadLayoutOrder.removeAll()
@@ -341,6 +344,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// as a fallback after both attempts so a bad geometry signal cannot block the chat.
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
+        isUserScrollInteractionActive: Bool = false,
         contentMinY: CGFloat? = nil,
         contentHeight: CGFloat? = nil,
         viewportHeight: CGFloat? = nil,
@@ -359,6 +363,10 @@ final class ChatMessagesCoordinator: ObservableObject {
         if let viewportHeight {
             trackedViewportHeight = viewportHeight
         }
+        updateUserScrollTakeoverRelease(
+            isBottomAnchorVisible: isBottomAnchorVisible,
+            isUserScrollInteractionActive: isUserScrollInteractionActive
+        )
 
         let contentHeightIncreased: Bool
         if let previousContentHeight, let contentHeight {
@@ -500,6 +508,8 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// Stops initial auto-anchoring and post-reveal bottom following once the user
     /// takes control of the scroll view.
     func handleUserScrollInteraction() {
+        isUserScrollTakeoverActive = true
+        taskManager.cancel(TaskKey.scrollTakeoverRelease)
         let wasFollowingPostRevealBottom: Bool
         switch postRevealBottomFollowState {
         case .following, .checkingAfterScroll, .waitingForGrowth:
@@ -509,7 +519,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
         postRevealBottomFollowState = .inactive
         taskManager.cancel(TaskKey.bottomAnchor)
+        taskManager.cancel(TaskKey.initialBottomAnchor)
         taskManager.cancel(TaskKey.initialGeometryCheck)
+        taskManager.cancel(TaskKey.latestWindow)
         taskManager.cancel(TaskKey.postRevealGeometryCheck)
 
         guard case .pending = initialRevealState else {
@@ -608,7 +620,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
         } else if isReadyToShow && newCount > oldCount && isShowingLatestWindow {
             updateReplyingToIfNewSubject(lastMessage)
-            if initialPresentationAnchor == .bottom || isBottomAnchorVisible {
+            if isBottomAnchorVisible && !isUserScrollTakeoverActive {
                 scrollToBottom(
                     messageCount: newCount,
                     delay: UIConfig.contentChangeScrollDelay,
@@ -620,6 +632,28 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
 
         loadResolvedDisplayName()
+    }
+
+    private func updateUserScrollTakeoverRelease(
+        isBottomAnchorVisible: Bool,
+        isUserScrollInteractionActive: Bool
+    ) {
+        guard isUserScrollTakeoverActive else { return }
+        guard isBottomAnchorVisible && !isUserScrollInteractionActive else {
+            taskManager.cancel(TaskKey.scrollTakeoverRelease)
+            return
+        }
+
+        taskManager.run(TaskKey.scrollTakeoverRelease) { [weak self, sleep] in
+            await sleep(UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
+            guard !Task.isCancelled,
+                  let self,
+                  self.isUserScrollTakeoverActive,
+                  self.isTrackedBottomAnchorVisible else {
+                return
+            }
+            self.isUserScrollTakeoverActive = false
+        }
     }
 
     func handleKeyboardHeightChange(
@@ -634,6 +668,15 @@ final class ChatMessagesCoordinator: ObservableObject {
                 .chatView,
                 level: .info,
                 "ChatView skipping keyboard bottom anchor before initial reveal loaded=\(isInitialWindowLoaded) ready=\(isReadyToShow)",
+                category: .ui
+            )
+            return
+        }
+        guard !isUserScrollTakeoverActive else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView skipping keyboard bottom anchor during user scroll takeover",
                 category: .ui
             )
             return
@@ -663,6 +706,15 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
             return
         }
+        guard !isUserScrollTakeoverActive else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView skipping focus bottom anchor during user scroll takeover",
+                category: .ui
+            )
+            return
+        }
 
         if !isFocused {
             scrollToBottom(
@@ -679,11 +731,11 @@ final class ChatMessagesCoordinator: ObservableObject {
         isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        guard isInitialWindowLoaded else {
+        guard isVisible, isInitialWindowLoaded else {
             Log.diagnostic(
                 .chatView,
                 level: .info,
-                "ChatView deferring post-send refresh until initial window loads messages=\(messageCount) total=\(totalMessageCount)",
+                "ChatView skipping post-send refresh visible=\(isVisible) loaded=\(isInitialWindowLoaded) messages=\(messageCount) total=\(totalMessageCount)",
                 category: .ui
             )
             return

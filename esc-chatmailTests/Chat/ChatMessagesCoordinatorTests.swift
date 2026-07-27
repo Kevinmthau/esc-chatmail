@@ -954,6 +954,115 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
     }
 
+    func testUserScrollDuringInitialRevealCancelsLatestWindowLoads() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com",
+            "fourth@example.com"
+        ])
+        let visibleRows = messages.prefix(3).map { ChatMessageRowModelMapper.map($0) }
+        let initialLoadStarted = expectation(description: "Initial latest-window load started")
+        let refreshLoadStarted = expectation(description: "Arrival latest-window load started")
+        let loadsCancelled = expectation(description: "Latest-window loads cancelled")
+        loadsCancelled.expectedFulfillmentCount = 2
+        let unexpectedRestart = expectation(
+            description: "User takeover must prevent a later latest-window restart"
+        )
+        unexpectedRestart.isInverted = true
+        var hasUserTakenOver = false
+        var cancelledKnownCounts: [Int?] = []
+        var completedKnownCounts: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                if hasUserTakenOver {
+                    unexpectedRestart.fulfill()
+                    return
+                }
+                if knownTotalCount == nil {
+                    initialLoadStarted.fulfill()
+                } else if knownTotalCount == 4 {
+                    refreshLoadStarted.fulfill()
+                }
+
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    completedKnownCounts.append(knownTotalCount)
+                } catch {
+                    guard Task.isCancelled else { return }
+                    cancelledKnownCounts.append(knownTotalCount)
+                    loadsCancelled.fulfill()
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 3,
+            lastMessage: messages[2],
+            visibleMessages: visibleRows,
+            senderGroupingMessages: visibleRows,
+            totalMessageCount: 3,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [initialLoadStarted], timeout: 1)
+
+        coordinator.handleMessageCountChange(
+            oldCount: 3,
+            newCount: 4,
+            lastMessage: messages[3],
+            visibleMessages: visibleRows,
+            totalMessageCount: 4,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [refreshLoadStarted], timeout: 1)
+
+        coordinator.handleUserScrollInteraction()
+        await fulfillment(of: [loadsCancelled], timeout: 1)
+
+        hasUserTakenOver = true
+        coordinator.handleMessageCountChange(
+            oldCount: 3,
+            newCount: 4,
+            lastMessage: messages[3],
+            visibleMessages: visibleRows,
+            totalMessageCount: 4,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [unexpectedRestart], timeout: 0.1)
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertEqual(
+            cancelledKnownCounts.map { $0 ?? -1 }.sorted(),
+            [-1, 4]
+        )
+        XCTAssertTrue(completedKnownCounts.isEmpty)
+    }
+
     func testBottomMovingOffscreenDuringStabilizationReanchorsAndRequiresFreshConfirmation() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
@@ -1895,6 +2004,179 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testBottomPresentationUserTakeoverRejectsStaleBottomUntilGeometryReconfirms() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let unexpectedLatestLoad = expectation(
+            description: "Incoming message must not reload the latest window"
+        )
+        unexpectedLatestLoad.isInverted = true
+        let firstTakeoverReleaseSleepStarted = expectation(
+            description: "First takeover release settle delay started"
+        )
+        let firstTakeoverReleaseSleepCancelled = expectation(
+            description: "Continued visible scrolling cancelled first release delay"
+        )
+        let replacementTakeoverReleaseSleepStarted = expectation(
+            description: "Replacement takeover release settle delay started"
+        )
+        let replacementTakeoverReleaseSleepCancelled = expectation(
+            description: "Further visible scrolling cancelled replacement release delay"
+        )
+        var isRejectingLatestLoads = false
+        var isTrackingTakeoverReleaseSleeps = false
+        var takeoverReleaseSleepDelays: [UInt64] = []
+        var latestWindowKnownCounts: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                if isRejectingLatestLoads {
+                    unexpectedLatestLoad.fulfill()
+                } else {
+                    latestWindowKnownCounts.append(knownTotalCount)
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { delay in
+                guard isTrackingTakeoverReleaseSleeps else { return }
+                takeoverReleaseSleepDelays.append(delay)
+                let invocation = takeoverReleaseSleepDelays.count
+                guard invocation <= 2 else { return }
+                if invocation == 1 {
+                    firstTakeoverReleaseSleepStarted.fulfill()
+                } else {
+                    replacementTakeoverReleaseSleepStarted.fulfill()
+                }
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                } catch {
+                    guard Task.isCancelled else { return }
+                    if invocation == 1 {
+                        firstTakeoverReleaseSleepCancelled.fulfill()
+                    } else {
+                        replacementTakeoverReleaseSleepCancelled.fulfill()
+                    }
+                }
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 1,
+            lastMessage: messages[0],
+            visibleMessages: [rows[0]],
+            senderGroupingMessages: [rows[0]],
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        latestWindowKnownCounts.removeAll()
+        isRejectingLatestLoads = true
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleMessageCountChange(
+            oldCount: 1,
+            newCount: 2,
+            lastMessage: messages[1],
+            visibleMessages: rows,
+            totalMessageCount: 2,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [unexpectedLatestLoad], timeout: 0.1)
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: true
+        ) { _ in
+            XCTFail("Active user scrolling must keep passive following disabled")
+        }
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        isTrackingTakeoverReleaseSleeps = true
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: false
+        ) { _ in
+            XCTFail("Bottom reconfirmation should wait for geometry to settle")
+        }
+        await fulfillment(of: [firstTakeoverReleaseSleepStarted], timeout: 1)
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: false
+        ) { _ in
+            XCTFail("Continued visible geometry should restart the settle delay")
+        }
+        await fulfillment(
+            of: [
+                firstTakeoverReleaseSleepCancelled,
+                replacementTakeoverReleaseSleepStarted
+            ],
+            timeout: 1
+        )
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        isRejectingLatestLoads = false
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: false
+        ) { _ in
+            XCTFail("Settled visible geometry should only re-enable passive following")
+        }
+        await fulfillment(of: [replacementTakeoverReleaseSleepCancelled], timeout: 1)
+        await waitUntil {
+            !coordinator.isUserScrollTakeoverActive
+        }
+        XCTAssertEqual(
+            takeoverReleaseSleepDelays,
+            Array(
+                repeating: UInt64(UIConfig.initialScrollDelay * 1_000_000_000),
+                count: 3
+            )
+        )
+        coordinator.handleMessageCountChange(
+            oldCount: 2,
+            newCount: 3,
+            lastMessage: messages[2],
+            visibleMessages: rows,
+            totalMessageCount: 3,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+        XCTAssertEqual(latestWindowKnownCounts, [3, 3])
+    }
+
     func testHandleMessageCountChange_afterReadyAwayFromLatestDoesNotRequestBottomAnchor() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
@@ -2103,6 +2385,153 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                 )
             ]
         )
+    }
+
+    func testUserScrollTakeoverSuppressesKeyboardAndFocusAnchorsButNotSend() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let unexpectedPassiveLatestLoad = expectation(
+            description: "Keyboard and focus changes must not reload after user takeover"
+        )
+        unexpectedPassiveLatestLoad.isInverted = true
+        var isRejectingPassiveLatestLoads = false
+        var latestWindowKnownCounts: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                if isRejectingPassiveLatestLoads {
+                    unexpectedPassiveLatestLoad.fulfill()
+                } else {
+                    latestWindowKnownCounts.append(knownTotalCount)
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        latestWindowKnownCounts.removeAll()
+        isRejectingPassiveLatestLoads = true
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 0,
+            newHeight: 240,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 240,
+            newHeight: 0,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleTextFieldFocusChange(
+            isFocused: false,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [unexpectedPassiveLatestLoad], timeout: 0.1)
+        XCTAssertTrue(latestWindowKnownCounts.isEmpty)
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        isRejectingPassiveLatestLoads = false
+        coordinator.handleReplySendCompleted(
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+        XCTAssertEqual(
+            latestWindowKnownCounts,
+            Array(repeating: messages.count + 1, count: 3).map(Optional.some)
+        )
+    }
+
+    func testReplySendCompletionAfterDisappearDoesNotRestartAnchorWork() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let unexpectedPostDisappearLatestLoad = expectation(
+            description: "Late send completion must not reload after disappear"
+        )
+        unexpectedPostDisappearLatestLoad.isInverted = true
+        var isRejectingPostDisappearLoads = false
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in
+                if isRejectingPostDisappearLoads {
+                    unexpectedPostDisappearLatestLoad.fulfill()
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        isRejectingPostDisappearLoads = true
+        coordinator.handleDisappear()
+        coordinator.handleReplySendCompleted(
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [unexpectedPostDisappearLatestLoad], timeout: 0.1)
+
+        XCTAssertTrue(anchorSteps.isEmpty)
     }
 
     func testKeyboardAndFocusChanges_requestExpectedBottomAnchors() async {

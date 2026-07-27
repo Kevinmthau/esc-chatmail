@@ -19,18 +19,17 @@ private final class ChatMessagesSession: ObservableObject {
     ) {
         let scrollState = VirtualScrollState(
             conversationId: conversation.id.uuidString,
-            initialWindowPosition: .beginning,
+            initialWindowPosition: .end,
             viewContext: chatDependencies.storage.viewContext,
             makeBackgroundContext: chatDependencies.storage.makeBackgroundContext
         )
-        scrollState.setFollowsLatestInsertions(false)
         self.scrollState = scrollState
         self.messageBubbleLoader = chatDependencies.content.makeMessageBubbleLoader()
         self.coordinator = ChatMessagesCoordinator(
             scrollState: scrollState,
             viewModel: viewModel,
             chatDependencies: chatDependencies,
-            initialPresentationAnchor: .top
+            initialPresentationAnchor: .bottom
         )
 
         scrollState.objectWillChange
@@ -54,6 +53,7 @@ struct ChatMessagesView: View {
     @StateObject private var session: ChatMessagesSession
     @State private var replyBarHeight: CGFloat = 0
     @State private var isBottomAnchorVisible = false
+    @GestureState private var isScrollGestureActive = false
     @ObservedObject private var keyboard = KeyboardResponder.shared
     @Namespace private var bottomID
 
@@ -297,7 +297,10 @@ struct ChatMessagesView: View {
         .scrollDismissesKeyboard(.interactively)
         .simultaneousGesture(
             DragGesture(minimumDistance: 2)
-                .onChanged { _ in coordinator.handleUserScrollInteraction() }
+                .updating($isScrollGestureActive) { _, isActive, _ in
+                    isActive = true
+                }
+                .onChanged { _ in handleUserScrollInteraction() }
         )
         .overlayPreferenceValue(ChatScrollGeometryPreferenceKey.self) { preference in
             GeometryReader { geometryProxy in
@@ -327,6 +330,20 @@ struct ChatMessagesView: View {
                         )
                     }
                     .onChange(of: coordinator.initialAnchorGeometryCheckID) { _, _ in
+                        handleBottomAnchorGeometryUpdate(
+                            geometry: geometry,
+                            layoutID: scrollState.latestWindowLayoutID,
+                            scrollProxy: scrollProxy
+                        )
+                    }
+                    .onChange(of: isScrollGestureActive) { _, _ in
+                        handleBottomAnchorGeometryUpdate(
+                            geometry: geometry,
+                            layoutID: scrollState.latestWindowLayoutID,
+                            scrollProxy: scrollProxy
+                        )
+                    }
+                    .onChange(of: coordinator.isUserScrollTakeoverActive) { _, _ in
                         handleBottomAnchorGeometryUpdate(
                             geometry: geometry,
                             layoutID: scrollState.latestWindowLayoutID,
@@ -480,6 +497,7 @@ struct ChatMessagesView: View {
         )
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: rawIsVisible,
+            isUserScrollInteractionActive: isScrollGestureActive,
             contentMinY: geometry.contentFrame.isNull
                 ? nil
                 : geometry.contentFrame.minY,
@@ -492,6 +510,8 @@ struct ChatMessagesView: View {
         let isVisible =
             scrollState.initialLoadPhase == .loaded &&
             coordinator.isReadyToShow &&
+            !isScrollGestureActive &&
+            !coordinator.isUserScrollTakeoverActive &&
             rawIsVisible
         let becameVisible = !isBottomAnchorVisible && isVisible
         if isBottomAnchorVisible != isVisible {
@@ -509,6 +529,14 @@ struct ChatMessagesView: View {
             isShowingLatestWindow: scrollState.isShowingLatestWindow,
             isBottomAnchorVisible: isVisible
         )
+    }
+
+    private func handleUserScrollInteraction() {
+        if isBottomAnchorVisible {
+            isBottomAnchorVisible = false
+        }
+        scrollState.setFollowsLatestInsertions(false)
+        coordinator.handleUserScrollInteraction()
     }
 
     private func isBottomAnchorVisible(frame: CGRect, viewportSize: CGSize) -> Bool {
