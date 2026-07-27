@@ -6,7 +6,7 @@ import { CONVERSATION_ROW_HEIGHT } from '@/lib/constants'
 import { useConversationPage, useSyncStatus } from '@/live/hooks'
 import type { ConversationPage } from '@/live/queries'
 import { ConversationRow } from './ConversationRow'
-import { EnvelopeIcon } from './icons'
+import { EnvelopeIcon, SearchIcon } from './icons'
 import { isFirstSyncPending, syncProgressDetail } from './syncState'
 
 const PAGE_SIZE = 50
@@ -15,6 +15,8 @@ const LOAD_MORE_THRESHOLD_ROWS = 10
 
 interface ConversationListProps {
   filter?: 'unread'
+  /** Committed search query; undefined/'' means not searching. */
+  query?: string
   /** Demo mode seeds every fixture up front and never syncs: zero rows is empty. */
   demo?: boolean
 }
@@ -24,10 +26,17 @@ interface ConversationListProps {
  * unpinned newest-first). Scrolling near the end raises the live-query limit
  * by one page (infinite scroll).
  */
-export function ConversationList({ filter, demo = false }: ConversationListProps) {
+export function ConversationList({ filter, query = '', demo = false }: ConversationListProps) {
   const [limit, setLimit] = useState(PAGE_SIZE)
-  const page = useConversationPage(filter === 'unread', limit)
+  const page = useConversationPage(filter === 'unread', query, limit)
   const status = useSyncStatus()
+
+  // A new query or filter starts over at one page. Carrying a limit grown by
+  // infinite scroll into a fresh search would make each committed keystroke
+  // cursor-walk for hundreds of matches nobody has scrolled to yet.
+  useEffect(() => {
+    setLimit(PAGE_SIZE)
+  }, [query, filter])
 
   // Keep the last resolved page visible while a bigger limit re-resolves, so
   // load-more never flashes the skeletons.
@@ -57,10 +66,13 @@ export function ConversationList({ filter, demo = false }: ConversationListProps
 
   if (view === undefined) return <SkeletonRows />
   if (rows.length === 0) {
-    // Zero rows is ambiguous: an initial sync fetches and persists a whole
-    // 500-message page before anything lands in Dexie, so a real inbox reads
-    // as empty for minutes. Only state that the mailbox is empty once a sync
-    // has actually delivered; until then say that mail is still on its way.
+    // A search that found nothing is its own answer — never the mailbox-level
+    // "no conversations yet", which would read as data loss mid-query.
+    if (query !== '') return <NoResultsState query={query} />
+    // Zero rows is otherwise ambiguous: an initial sync fetches and persists a
+    // whole 500-message page before anything lands in Dexie, so a real inbox
+    // reads as empty for minutes. Only state that the mailbox is empty once a
+    // sync has actually delivered; until then say mail is still on its way.
     if (status === undefined) return <SkeletonRows />
     if (!demo && isFirstSyncPending(status)) return <SyncingState status={status} />
     return <EmptyState filter={filter} />
@@ -78,7 +90,7 @@ export function ConversationList({ filter, demo = false }: ConversationListProps
               className="absolute inset-x-0 top-0"
               style={{ height: item.size, transform: `translateY(${item.start}px)` }}
             >
-              <ConversationRow conversation={conversation} filter={filter} />
+              <ConversationRow conversation={conversation} filter={filter} query={query} />
             </div>
           )
         })}
@@ -126,6 +138,21 @@ function SkeletonRows() {
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+/**
+ * Search found nothing. Deliberately distinct from EmptyState: the mailbox is
+ * fine, the query just missed — and naming the search's scope explains why a
+ * word the user remembers from deep inside a thread does not surface it.
+ */
+function NoResultsState({ query }: { query: string }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-1 px-8 text-center">
+      <SearchIcon className="text-fg-muted mb-1 size-10" />
+      <p className="font-semibold">No results for “{query}”</p>
+      <p className="text-fg-muted text-sm">Search matches chat names and message previews.</p>
     </div>
   )
 }

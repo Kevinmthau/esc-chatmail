@@ -18,13 +18,15 @@ import {
 // including writes from other tabs (storagemutated propagates cross-context),
 // which is the web equivalent of the iOS didSaveObjectIDs channel.
 
+/** `query` is the committed (debounced) search text; '' means "not searching". */
 export function useConversationPage(
   unreadOnly: boolean,
+  query: string,
   limit: number,
 ): ConversationPage | undefined {
   return useLiveQuery(
-    () => queryConversationList(getDB(), { unreadOnly, limit }),
-    [unreadOnly, limit],
+    () => queryConversationList(getDB(), { unreadOnly, query, limit }),
+    [unreadOnly, query, limit],
   )
 }
 

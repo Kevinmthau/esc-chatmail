@@ -12,7 +12,7 @@ import {
 import { render, type RenderResult } from '@testing-library/react'
 import type { ReactNode } from 'react'
 
-export function renderWithRouter(ui: ReactNode, initialPath = '/chats'): RenderResult {
+function buildRouter(ui: ReactNode, initialPath: string) {
   const rootRoute = createRootRoute()
   const chatsRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -25,9 +25,18 @@ export function renderWithRouter(ui: ReactNode, initialPath = '/chats'): RenderR
     component: () => null,
   })
   const routeTree = rootRoute.addChildren([chatsRoute.addChildren([conversationRoute])])
-  const router = createRouter({
+  return createRouter({
     routeTree,
     history: createMemoryHistory({ initialEntries: [initialPath] }),
   })
-  return render(<RouterProvider router={router} />)
+}
+
+/** The RenderResult plus the router itself, for asserting on search params. */
+export type RenderWithRouterResult = RenderResult & {
+  router: ReturnType<typeof buildRouter>
+}
+
+export function renderWithRouter(ui: ReactNode, initialPath = '/chats'): RenderWithRouterResult {
+  const router = buildRouter(ui, initialPath)
+  return { ...render(<RouterProvider router={router} />), router }
 }

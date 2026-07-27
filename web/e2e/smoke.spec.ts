@@ -74,6 +74,59 @@ test('compose dialog opens and dedups to an existing chat', async ({ page }) => 
   await expect(page.getByText(/already have a chat/i)).toBeVisible()
 })
 
+/** The capsule is rendered for both layouts; only one is ever on screen. */
+function searchBox(page: Page) {
+  return page.getByRole('searchbox', { name: 'Search conversations' }).filter({ visible: true })
+}
+
+test('search filters the list by name, survives reload, and clears', async ({ page }) => {
+  await openChats(page)
+  const search = searchBox(page)
+
+  await search.fill('fatima')
+  await expect(page.getByText('Fatima Khan').first()).toBeVisible()
+  await expect(page.getByText('Alice Chen', { exact: true })).toBeHidden()
+  await expect(page).toHaveURL(/[?&]q=fatima/)
+
+  // A reload re-applies the query from ?q= and refills the field.
+  await page.reload()
+  await expect(search).toHaveValue('fatima')
+  await expect(page.getByText('Fatima Khan').first()).toBeVisible()
+  await expect(page.getByText('Alice Chen', { exact: true })).toBeHidden()
+
+  // A miss gets the search-specific empty state, never "No conversations yet".
+  await search.fill('zzzzz')
+  await expect(page.getByText('No results for “zzzzz”')).toBeVisible()
+  await expect(page.getByText('No conversations yet')).toBeHidden()
+
+  await page.getByRole('button', { name: 'Clear search' }).filter({ visible: true }).click()
+  await expect(page.getByText('Alice Chen', { exact: true }).first()).toBeVisible()
+  await expect(page).not.toHaveURL(/[?&]q=/)
+})
+
+test('search matches the snippet, and composes with the unread filter', async ({ page }) => {
+  await openChats(page)
+  const search = searchBox(page)
+
+  // "book club" appears only in Fatima's preview text, not in any name.
+  await search.fill('book club')
+  await expect(page.getByText('Fatima Khan').first()).toBeVisible()
+  await expect(page.getByText('Alice Chen', { exact: true })).toBeHidden()
+
+  // Fatima's chat is read, so layering Unread on top empties the results —
+  // the filter still applies rather than being replaced by the search.
+  await page.getByRole('button', { name: 'All' }).filter({ visible: true }).click()
+  await page.getByRole('menuitem', { name: 'Unread' }).click()
+  await expect(page).toHaveURL(/[?&]filter=unread/)
+  await expect(page).toHaveURL(/[?&]q=book\+club/)
+  await expect(page.getByText('No results for “book club”')).toBeVisible()
+
+  // Widening the query inside the Unread filter shows unread rows only.
+  await search.fill('a')
+  await expect(page.getByRole('link', { name: /, \d+ unread$/ }).first()).toBeVisible()
+  await expect(page.getByRole('link', { name: /, read$/ })).toHaveCount(0)
+})
+
 test('mobile: stacked navigation with working back', async ({ page, isMobile }) => {
   test.skip(!isMobile, 'mobile project only')
   await openChats(page)

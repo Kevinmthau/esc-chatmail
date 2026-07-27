@@ -8,6 +8,7 @@ import { useSyncStatus } from '@/live/hooks'
 import { ConversationList } from './ConversationList'
 import { FilterMenu } from './FilterMenu'
 import { ComposeIcon, RefreshIcon } from './icons'
+import { SearchField } from './SearchField'
 import { SettingsMenu } from './SettingsMenu'
 import { syncProgressDetail } from './syncState'
 
@@ -16,10 +17,11 @@ const chatsRoute = getRouteApi('/chats')
 /**
  * The full left pane (iOS ConversationListView): header with title/status/
  * controls, virtualized list, and — on mobile — the bottom glass bar with the
- * filter menu, the (coming-soon) search capsule, and compose.
+ * filter menu, the search capsule, and compose. Desktop keeps the same capsule
+ * under the header, where the bar does not exist.
  */
 export function ConversationListPane() {
-  const { filter } = chatsRoute.useSearch()
+  const { filter, q } = chatsRoute.useSearch()
   const navigate = useNavigate()
   const demo = isDemoMode()
 
@@ -54,23 +56,19 @@ export function ConversationListPane() {
           <SettingsMenu />
         </div>
       </header>
+      <div className="hidden shrink-0 px-4 pb-2 md:block">
+        <SearchField />
+      </div>
       <SyncStatusLine />
 
       <div className="min-h-0 flex-1">
-        <ConversationList filter={filter} demo={demo} />
+        <ConversationList filter={filter} query={q} demo={demo} />
       </div>
 
       <GlassBar className="shrink-0 md:hidden">
         <div className="flex items-center gap-2 px-3 py-2">
           <FilterMenu filter={filter} />
-          <button
-            type="button"
-            disabled
-            title="Coming soon"
-            className="bg-bg-elev text-fg-muted flex-1 rounded-chip px-4 py-2 text-left text-sm"
-          >
-            Search
-          </button>
+          <SearchField className="min-w-0 flex-1" />
           <IconButton aria-label="New message" onClick={openCompose}>
             <ComposeIcon className="size-5" />
           </IconButton>

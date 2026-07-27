@@ -12,6 +12,8 @@ interface ConversationRowProps {
   conversation: ConversationRecord
   /** Active list filter, preserved when navigating into the chat. */
   filter?: 'unread'
+  /** Active search query, preserved so the list comes back searched. */
+  query?: string
 }
 
 /**
@@ -20,7 +22,7 @@ interface ConversationRowProps {
  * timestamp, 2-line snippet. Hover reveals quick actions; right-click opens
  * the row context menu.
  */
-export function ConversationRow({ conversation, filter }: ConversationRowProps) {
+export function ConversationRow({ conversation, filter, query }: ConversationRowProps) {
   const unread = conversation.inboxUnreadCount > 0
   const names = conversation.displayName
     .split(',')
@@ -37,7 +39,7 @@ export function ConversationRow({ conversation, filter }: ConversationRowProps) 
           <Link
             to="/chats/$conversationId"
             params={{ conversationId: conversation.id }}
-            search={{ filter }}
+            search={{ filter, q: query === '' ? undefined : query }}
             aria-label={`${conversation.displayName}, ${unreadLabel}`}
             className="hover:bg-bg-elev focus-visible:outline-accent flex h-full items-center gap-2 px-2 focus-visible:-outline-offset-2 focus-visible:outline-2"
           >

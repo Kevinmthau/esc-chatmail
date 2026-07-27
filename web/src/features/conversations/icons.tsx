@@ -90,6 +90,23 @@ export function ChevronDownIcon({ className }: IconProps) {
   )
 }
 
+export function SearchIcon({ className }: IconProps) {
+  return (
+    <svg {...iconProps(className, 'search')}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-3.9-3.9" />
+    </svg>
+  )
+}
+
+export function ClearIcon({ className }: IconProps) {
+  return (
+    <svg {...iconProps(className, 'clear')} fill="currentColor" strokeWidth={0}>
+      <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm3.5 12.1a1 1 0 0 1-1.4 1.4L12 13.4l-2.1 2.1a1 1 0 0 1-1.4-1.4l2.1-2.1-2.1-2.1a1 1 0 0 1 1.4-1.4l2.1 2.1 2.1-2.1a1 1 0 0 1 1.4 1.4L13.4 12z" />
+    </svg>
+  )
+}
+
 export function EnvelopeIcon({ className }: IconProps) {
   return (
     <svg {...iconProps(className, 'envelope')}>
