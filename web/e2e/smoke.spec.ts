@@ -60,6 +60,29 @@ test('newsletter renders as preview card and opens the sandboxed reader', async 
   await expect(page.locator('dialog[open]')).toHaveCount(0)
 })
 
+test('calendar invite renders the event card and opens the reader', async ({ page }) => {
+  await openChats(page)
+  await page.getByText('Fatima Khan', { exact: true }).first().click()
+
+  const card = page.getByTestId('calendar-invite-card')
+  await expect(card).toBeVisible()
+  await expect(card.getByText('Book club — March pick')).toBeVisible()
+  await expect(card.getByText('Hosted by Fatima Khan')).toBeVisible()
+  await expect(card.getByText('Fatima’s place')).toBeVisible()
+
+  // The card reserves a fixed height, and nothing inside it overflows: the chat
+  // scroll engine compensates against measured row heights.
+  const box = await card.boundingBox()
+  expect(box?.height).toBe(204)
+  const overflows = await card.evaluate((el) => el.scrollHeight > el.clientHeight)
+  expect(overflows).toBe(false)
+
+  // frameLocator (not page.frames()) so the assertion waits for the viewer
+  // document to navigate and paint instead of racing it.
+  await page.getByRole('link', { name: /open calendar invite/i }).click()
+  await expect(page.frameLocator('dialog iframe').getByText('You have been invited')).toBeVisible()
+})
+
 test('compose dialog opens and dedups to an existing chat', async ({ page }) => {
   await openChats(page)
   await page.getByRole('button', { name: /new message|compose/i }).click()

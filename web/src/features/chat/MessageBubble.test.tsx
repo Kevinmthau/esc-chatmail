@@ -4,7 +4,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
 import { setDBForTests, type ChatmailDB } from '@/db/schema'
-import type { MessageRow } from '@/db/types'
+import type { CalendarEventData, MessageRow } from '@/db/types'
 import type { RunDecoration } from '@/lib/bubbleRuns'
 import { makeTestDb, msgRow } from '@/outbox/testSupport'
 import { MessageBubble } from './MessageBubble'
@@ -26,6 +26,19 @@ vi.mock('@/features/attachments/AttachmentContent', () => ({
     <div data-testid="attachment-content" data-message-id={messageId} />
   ),
 }))
+
+const CALENDAR_EVENT: CalendarEventData = {
+  title: 'Design sync',
+  startMs: Date.UTC(2026, 2, 18, 18, 0, 0),
+  endMs: Date.UTC(2026, 2, 18, 19, 0, 0),
+  timeZone: 'America/New_York',
+  isAllDay: 0,
+  location: 'Conference Room B',
+  organizer: 'Alice Smith',
+  method: 'REQUEST',
+  status: 'CONFIRMED',
+  source: 'Google Calendar',
+}
 
 const DECORATION: RunDecoration = {
   isFirstOfRun: true,
@@ -187,6 +200,58 @@ describe('MessageBubble content routing', () => {
   it('falls back to No preview available when the message is empty', () => {
     renderBubble(msgRow({ id: 'm1', conversationId: 'c1', chatPreviewText: '', bodyText: '' }))
     expect(screen.getByText('No preview available')).toBeTruthy()
+  })
+})
+
+describe('MessageBubble calendar invites', () => {
+  const invite = (overrides: Partial<MessageRow> = {}): MessageRow =>
+    msgRow({
+      id: 'm1',
+      conversationId: 'c1',
+      hasHtmlBody: 1,
+      isCalendarInvite: 1,
+      calendarEvent: CALENDAR_EVENT,
+      subject: 'Invitation: Design sync',
+      senderEmail: 'alice@example.com',
+      senderName: 'Alice Smith',
+      chatPreviewText: 'You have been invited to the following event.',
+      ...overrides,
+    })
+
+  it('routes a detected invite to the calendar card, not the generic one', () => {
+    renderBubble(invite())
+    expect(screen.getByTestId('calendar-invite-card')).toBeTruthy()
+    expect(screen.queryByTestId('preview-card')).toBeNull()
+    expect(screen.getByText('Design sync')).toBeTruthy()
+  })
+
+  it('falls back to the generic card when the invite yielded no event', () => {
+    const row = invite()
+    delete row.calendarEvent
+    renderBubble(row)
+    expect(screen.getByTestId('preview-card')).toBeTruthy()
+    expect(screen.queryByTestId('calendar-invite-card')).toBeNull()
+  })
+
+  it('leaves an ordinary message on its existing route', () => {
+    renderBubble(
+      msgRow({
+        id: 'm1',
+        conversationId: 'c1',
+        hasHtmlBody: 1,
+        subject: 'Design sync',
+        chatPreviewText: 'See you at 3',
+      }),
+    )
+    expect(screen.queryByTestId('calendar-invite-card')).toBeNull()
+    expect(screen.getByText('See you at 3')).toBeTruthy()
+  })
+
+  it('keeps an invite the policy sends to a bubble out of the calendar card', () => {
+    // Own messages in a one-to-one never get a preview card, invite or not.
+    renderBubble(invite({ isFromMe: 1 }))
+    expect(screen.queryByTestId('calendar-invite-card')).toBeNull()
+    expect(screen.getByText('You have been invited to the following event.')).toBeTruthy()
   })
 })
 

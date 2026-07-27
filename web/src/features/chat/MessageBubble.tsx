@@ -10,6 +10,7 @@ import { ContextMenu, ContextMenuItem } from '@/components/ui/ContextMenu'
 import { UnreadDot } from '@/components/ui/UnreadDot'
 import type { MessageRow } from '@/db/types'
 import { AttachmentContent } from '@/features/attachments/AttachmentContent'
+import { CalendarInvitePreviewCard } from '@/features/reader/CalendarInvitePreviewCard'
 import { HtmlPreviewCard } from '@/features/reader/HtmlPreviewCard'
 import type { RunDecoration } from '@/lib/bubbleRuns'
 import { cn } from '@/lib/cn'
@@ -42,6 +43,7 @@ export function MessageBubble({ message, decoration, isOneToOne, onReply }: Mess
     isOneToOneConversation: isOneToOne,
     subject: message.subject,
     senderEmail: message.senderEmail,
+    isLikelyCalendarInvite: message.isCalendarInvite === 1,
   })
 
   const senderLabel =
@@ -113,9 +115,22 @@ function BubbleContent({
   const isMe = message.isFromMe === 1
 
   if (mode === 'previewCard') {
+    // A detected invite whose iCalendar part did not yield a usable event
+    // (malformed VEVENT, or an .ics that only exists as a server attachment)
+    // falls through to the generic card rather than showing an empty one.
+    const event = message.isCalendarInvite === 1 ? message.calendarEvent : undefined
     return (
       <div className="w-72 max-w-full">
-        <HtmlPreviewCard messageId={message.id} subject={message.subject} sender={senderLabel} />
+        {event !== undefined ? (
+          <CalendarInvitePreviewCard
+            messageId={message.id}
+            event={event}
+            subject={message.subject}
+            sender={senderLabel}
+          />
+        ) : (
+          <HtmlPreviewCard messageId={message.id} subject={message.subject} sender={senderLabel} />
+        )}
       </div>
     )
   }

@@ -479,6 +479,107 @@ describe('applyPersist — updating existing messages', () => {
   })
 })
 
+describe('calendar invites', () => {
+  const ICS = [
+    'BEGIN:VCALENDAR',
+    'PRODID:-//Google Inc//Google Calendar 70.9054//EN',
+    'METHOD:REQUEST',
+    'BEGIN:VEVENT',
+    'DTSTART:20260318T180000Z',
+    'DTEND:20260318T190000Z',
+    'ORGANIZER;CN=Alice Smith:mailto:alice@example.com',
+    'SUMMARY:Design sync',
+    'LOCATION:Conference Room B',
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n')
+
+  const INVITE_BODY = 'Design sync\nWhen\nWed Mar 18, 2026 2:00pm\nWhere\nRoom B\n'
+
+  function inviteMessage(id: string, ics = ICS): GmailMessage {
+    return {
+      id,
+      threadId: `thread_${id}`,
+      labelIds: ['INBOX', 'UNREAD'],
+      internalDate: String(NOW - 60 * 60 * 1000),
+      snippet: 'You have been invited to the following event.',
+      payload: {
+        partId: '',
+        mimeType: 'multipart/alternative',
+        headers: [
+          { name: 'From', value: 'Alice Smith <alice@example.com>' },
+          { name: 'To', value: ME },
+          { name: 'Subject', value: 'Invitation: Design sync' },
+          { name: 'Message-ID', value: `<${id}@mail.example.com>` },
+        ],
+        parts: [
+          {
+            partId: '0',
+            mimeType: 'text/plain',
+            body: { data: b64url(INVITE_BODY) },
+          },
+          {
+            partId: '1',
+            mimeType: 'text/calendar; charset="UTF-8"; method=REQUEST',
+            body: { data: b64url(ics) },
+          },
+        ],
+      },
+    }
+  }
+
+  it('persists the flag and the extracted event', async () => {
+    await persistMessages([inviteMessage('m1')])
+    const stored = await db.messages.get('m1')
+    expect(stored?.isCalendarInvite).toBe(1)
+    expect(stored?.calendarEvent?.title).toBe('Design sync')
+    expect(stored?.calendarEvent?.startMs).toBe(Date.UTC(2026, 2, 18, 18, 0, 0))
+    expect(stored?.calendarEvent?.organizer).toBe('Alice Smith')
+    expect(stored?.calendarEvent?.source).toBe('Google Calendar')
+  })
+
+  it('leaves ordinary mail unflagged and event-less', async () => {
+    await persistMessages([textMessage({ id: 'm1', body: 'Lunch at noon?' })])
+    const stored = await db.messages.get('m1')
+    expect(stored?.isCalendarInvite).toBe(0)
+    expect(stored?.calendarEvent).toBeUndefined()
+  })
+
+  it('keeps the stored event when a re-fetch carries no calendar part', async () => {
+    await persistMessages([inviteMessage('m1')])
+    // Re-fetched with the .ics only reachable as a server attachment: still an
+    // invite by the text signals, but nothing inline to re-extract from.
+    await persistMessages([
+      textMessage({ id: 'm1', subject: 'Invitation: Design sync', body: INVITE_BODY }),
+    ])
+    const stored = await db.messages.get('m1')
+    expect(stored?.isCalendarInvite).toBe(1)
+    expect(stored?.calendarEvent?.title).toBe('Design sync')
+  })
+
+  it('replaces the stored event when the organizer updates the invite', async () => {
+    await persistMessages([inviteMessage('m1')])
+    await persistMessages([
+      inviteMessage(
+        'm1',
+        ICS.replace('SUMMARY:Design sync', 'SUMMARY:Design sync (moved)').replace(
+          'DTSTART:20260318T180000Z',
+          'DTSTART:20260319T180000Z',
+        ),
+      ),
+    ])
+    const stored = await db.messages.get('m1')
+    expect(stored?.calendarEvent?.title).toBe('Design sync (moved)')
+    expect(stored?.calendarEvent?.startMs).toBe(Date.UTC(2026, 2, 19, 18, 0, 0))
+  })
+
+  it('clears the flag when the message stops looking like an invite', async () => {
+    await persistMessages([inviteMessage('m1')])
+    await persistMessages([textMessage({ id: 'm1', subject: 'Lunch?', body: 'Free at noon?' })])
+    expect((await db.messages.get('m1'))?.isCalendarInvite).toBe(0)
+  })
+})
+
 describe('mergeExistingMessage guard window', () => {
   it('uses the 30-minute boundary exactly', async () => {
     const plan = (await preparePersistPlan(

@@ -56,6 +56,22 @@ export class ChatmailDB extends Dexie {
       outboundSends: 'id, status',
       abandonedMessages: 'gmailMessageId, retryCount',
     })
+
+    // v2 adds MessageRow.isCalendarInvite. Purely additive — no index changes,
+    // so the store declaration is unchanged and the upgrade only backfills the
+    // flag to 0 on rows written before the column existed. Nothing is
+    // recomputed here: detection needs the MIME payload, which is not stored,
+    // so pre-v2 invites light up on their next sync instead.
+    this.version(2)
+      .stores({})
+      .upgrade((tx) =>
+        tx
+          .table<MessageRow>('messages')
+          .toCollection()
+          .modify((message) => {
+            message.isCalendarInvite = 0
+          }),
+      )
   }
 }
 

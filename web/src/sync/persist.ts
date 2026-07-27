@@ -306,9 +306,13 @@ export async function preparePersistPlan(
     isFromMe: isFromMe ? 1 : 0,
     isUnread: isUnread ? 1 : 0,
     isNewsletter: newsletter.isNewsletter ? 1 : 0,
+    isCalendarInvite: parsed.isLikelyCalendarInvite ? 1 : 0,
     hasAttachments: parsed.hasAttachments || attachments.length > 0 ? 1 : 0,
     labelIds: effectiveLabelIds(labelIds, ctx.knownLabelIds),
     localModifiedAt: 0,
+  }
+  if (parsed.calendarEvent !== null) {
+    message.calendarEvent = parsed.calendarEvent
   }
 
   return {
@@ -547,6 +551,12 @@ export function mergeExistingMessage(
   if (nonEmpty(incoming.subject) !== null) updated.subject = incoming.subject
   updated.isFromMe = incoming.isFromMe
   updated.isNewsletter = incoming.isNewsletter
+  updated.isCalendarInvite = incoming.isCalendarInvite
+  // Keep the stored event when a re-fetch of the same message arrives without
+  // one (a metadata-only payload carries no text/calendar part to re-extract).
+  if (incoming.calendarEvent !== undefined) {
+    updated.calendarEvent = incoming.calendarEvent
+  }
   updated.internalDate = incoming.internalDate
   updated.deliveredToAddress = incoming.deliveredToAddress
   updated.replyFromAddress = incoming.replyFromAddress

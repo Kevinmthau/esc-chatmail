@@ -65,7 +65,8 @@ src/
 ├── db/          Dexie schema — one database per account
 ├── identity/    participant-set conversation keying (the product's core:
 │                chats are keyed by WHO, not by Gmail thread)
-├── mime/        Gmail payload parsing, quote-stripping, newsletter scoring
+├── mime/        Gmail payload parsing, quote-stripping, newsletter scoring,
+│                calendar-invite detection + iCalendar extraction
 ├── rollup/      derived conversation state (snippet, unread counts, archive)
 ├── sync/        initial backfill + incremental history sync + reconciliation
 ├── outbox/      durable pending-action queue + optimistic send journal
