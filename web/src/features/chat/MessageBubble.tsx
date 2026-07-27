@@ -46,6 +46,15 @@ export function MessageBubble({ message, decoration, isOneToOne, onReply }: Mess
     isLikelyCalendarInvite: message.isCalendarInvite === 1,
   })
 
+  // Mirrors BubbleContent's routing: the calendar card renders exactly when
+  // the flag is set and a usable event was extracted. iOS parity
+  // (attachmentsView(hidingCalendarInviteAttachments:)): a real Google invite
+  // ships its payload twice — the inline text/calendar part the card is built
+  // from AND a named .ics server attachment — so while the card shows, the
+  // duplicate tile must not stack above it.
+  const showsCalendarCard =
+    mode === 'previewCard' && message.isCalendarInvite === 1 && message.calendarEvent !== undefined
+
   const senderLabel =
     message.senderName.trim().length > 0 ? message.senderName : message.senderEmail
   const text = (
@@ -82,7 +91,12 @@ export function MessageBubble({ message, decoration, isOneToOne, onReply }: Mess
               <span className="text-fg-muted px-1 text-xs font-medium">{subject}</span>
             )}
 
-            {message.hasAttachments === 1 && <AttachmentContent messageId={message.id} />}
+            {message.hasAttachments === 1 && (
+              <AttachmentContent
+                messageId={message.id}
+                hideCalendarInviteAttachments={showsCalendarCard}
+              />
+            )}
 
             <BubbleContent message={message} mode={mode} text={text} senderLabel={senderLabel} />
 

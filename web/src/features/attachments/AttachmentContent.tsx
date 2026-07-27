@@ -8,6 +8,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { getDB } from '@/db/schema'
 import type { AttachmentRow } from '@/db/types'
 import { cn } from '@/lib/cn'
+import { isCalendarInviteAttachment } from '@/mime/calendarInvite'
 import { Lightbox } from './Lightbox'
 import { formatByteSize } from './formatByteSize'
 import { downloadAttachment, isAttachmentDownloadInFlight } from './download'
@@ -15,14 +16,29 @@ import { useAttachmentUrl } from './useAttachmentUrl'
 
 const GRID_MAX_TILES = 4
 
-export function AttachmentContent({ messageId }: { messageId: string }) {
-  const attachments = useLiveQuery(
+export function AttachmentContent({
+  messageId,
+  hideCalendarInviteAttachments = false,
+}: {
+  messageId: string
+  /**
+   * Set while the bubble's calendar card presents this message: the card is
+   * built from the same payload the .ics attachment carries, so its tile is
+   * pure duplication (iOS hidingCalendarInviteAttachments).
+   */
+  hideCalendarInviteAttachments?: boolean
+}) {
+  const rows = useLiveQuery(
     () => getDB().attachments.where('messageId').equals(messageId).toArray(),
     [messageId],
   )
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
 
-  if (attachments === undefined || attachments.length === 0) return null
+  if (rows === undefined) return null
+  const attachments = hideCalendarInviteAttachments
+    ? rows.filter((row) => !isCalendarInviteAttachment(row.mimeType, row.filename))
+    : rows
+  if (attachments.length === 0) return null
 
   const images = attachments.filter((a) => a.mimeType.startsWith('image/'))
   const files = attachments.filter((a) => !a.mimeType.startsWith('image/'))

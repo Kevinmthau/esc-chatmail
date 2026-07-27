@@ -22,8 +22,18 @@ vi.mock('@/features/reader/HtmlPreviewCard', () => ({
 }))
 
 vi.mock('@/features/attachments/AttachmentContent', () => ({
-  AttachmentContent: ({ messageId }: { messageId: string }) => (
-    <div data-testid="attachment-content" data-message-id={messageId} />
+  AttachmentContent: ({
+    messageId,
+    hideCalendarInviteAttachments,
+  }: {
+    messageId: string
+    hideCalendarInviteAttachments?: boolean
+  }) => (
+    <div
+      data-testid="attachment-content"
+      data-message-id={messageId}
+      data-hide-calendar={hideCalendarInviteAttachments === true ? 'true' : 'false'}
+    />
   ),
 }))
 
@@ -231,6 +241,24 @@ describe('MessageBubble calendar invites', () => {
     renderBubble(row)
     expect(screen.getByTestId('preview-card')).toBeTruthy()
     expect(screen.queryByTestId('calendar-invite-card')).toBeNull()
+  })
+
+  it('hides the duplicate .ics attachment tile while the calendar card shows', () => {
+    // A real Google invite carries the payload twice: the inline
+    // text/calendar part the card renders AND a named .ics server attachment.
+    // iOS filters the tile (hidingCalendarInviteAttachments); so must we.
+    renderBubble(invite({ hasAttachments: 1 }))
+    expect(screen.getByTestId('calendar-invite-card')).toBeTruthy()
+    expect(screen.getByTestId('attachment-content').getAttribute('data-hide-calendar')).toBe('true')
+  })
+
+  it('keeps attachment tiles for the generic-card fallback', () => {
+    const row = invite({ hasAttachments: 1 })
+    delete row.calendarEvent
+    renderBubble(row)
+    expect(screen.getByTestId('attachment-content').getAttribute('data-hide-calendar')).toBe(
+      'false',
+    )
   })
 
   it('leaves an ordinary message on its existing route', () => {

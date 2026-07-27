@@ -48,8 +48,21 @@ const STRUCTURAL_TEXT_MARKERS = [
 const GOOGLE_CALENDAR_SOURCE = 'Google Calendar'
 const GENERIC_CALENDAR_SOURCE = 'Calendar'
 
+/**
+ * Cap on the text fed to the signal scan. Detection runs inside sync's
+ * persist step on the main thread, and fetchLargeBody supports multi-megabyte
+ * bodies; a real invite's signals live in the first few KB, while an
+ * unbounded scan makes body length a sync-stall lever (the pattern below is
+ * quadratic against text that keeps almost-matching).
+ */
+const SIGNAL_TEXT_CAP = 16 * 1024
+
+// The gap between the weekday/month token and the time is bounded ({0,80}):
+// semantically, a weekday forty lines away from a time is not a date-time
+// signal, and an unbounded gap makes the scan O(n²) on 24-hour-clock text
+// where the trailing am/pm never matches.
 const DATE_TIME_PATTERN =
-  /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b[\w\s,.:()\-–•]*\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i
+  /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b[\w\s,.:()\-–•]{0,80}\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i
 
 export function containsGoogleCalendarMarker(lowercasedText: string): boolean {
   return GOOGLE_CALENDAR_MARKERS.some((marker) => lowercasedText.includes(marker))
@@ -89,7 +102,8 @@ function combinedSignalText(input: CalendarInviteSignalInput): string {
   return [
     normalizedSignalText(input.subject).toLowerCase(),
     normalizedSignalText(input.snippet).toLowerCase(),
-    normalizedSignalText(input.bodyText).toLowerCase(),
+    // Only the head of the body: see SIGNAL_TEXT_CAP.
+    normalizedSignalText(input.bodyText?.slice(0, SIGNAL_TEXT_CAP)).toLowerCase(),
   ]
     .filter((part) => part.length > 0)
     .join('\n')
@@ -119,18 +133,26 @@ export function isLikelyCalendarInvite(input: CalendarInviteSignalInput): boolea
 
 // MARK: - Calendar MIME parts
 
+/**
+ * Attachment.isCalendarInviteAttachment on (mimeType, filename) — shared by
+ * raw-part detection here and by the chat bubble, which hides matching
+ * attachment tiles whenever the calendar card presents the same payload.
+ */
+export function isCalendarInviteAttachment(mimeType: string, filename: string): boolean {
+  const mime = mimeType.trim().toLowerCase()
+  const name = filename.trim().toLowerCase()
+  return (
+    mime.startsWith('text/calendar') ||
+    mime === 'application/ics' ||
+    mime === 'application/ical' ||
+    mime === 'application/x-ical' ||
+    name.endsWith('.ics')
+  )
+}
+
 /** Attachment.isCalendarInviteAttachment, applied to a raw MIME part. */
 function isCalendarPart(part: GmailPart): boolean {
-  const mimeType = (part.mimeType ?? '').trim().toLowerCase()
-  const filename = (part.filename ?? '').trim().toLowerCase()
-
-  return (
-    mimeType.startsWith('text/calendar') ||
-    mimeType === 'application/ics' ||
-    mimeType === 'application/ical' ||
-    mimeType === 'application/x-ical' ||
-    filename.endsWith('.ics')
-  )
+  return isCalendarInviteAttachment(part.mimeType ?? '', part.filename ?? '')
 }
 
 /** `method=REQUEST` off a `text/calendar; method=REQUEST` mime type. */
@@ -221,12 +243,36 @@ function splitOutsideQuotes(text: string, delimiter: string): string[] {
 }
 
 function unescapeValue(value: string): string {
+  // One pass, not chained replaces: RFC 5545 escapes must tokenize left to
+  // right, or the second backslash of an escaped backslash (`\\`) followed by
+  // an n would be re-read as `\n` and turn `C:\\nightly` into a newline.
   return value
-    .replace(/\\[nN]/g, '\n')
-    .replace(/\\,/g, ',')
-    .replace(/\\;/g, ';')
-    .replace(/\\\\/g, '\\')
+    .replace(/\\([nN,;\\])/g, (_, escaped: string) =>
+      escaped === 'n' || escaped === 'N' ? '\n' : escaped,
+    )
     .trim()
+}
+
+/**
+ * RFC 5545 DURATION (§3.3.6) → milliseconds; null when unparseable or zero.
+ * Outlook commonly emits DTSTART+DURATION instead of DTEND (§3.6.1 allows
+ * either), so without this an Outlook invite shows a start with no range.
+ */
+function parseICalDuration(value: string): number | null {
+  const match = /^([+-]?)P(?:(\d+)W|(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)$/.exec(
+    value.trim(),
+  )
+  if (match === null) return null
+  const [, sign, weeks, days, hours, minutes, seconds] = match
+  const num = (part: string | undefined): number => (part === undefined ? 0 : Number(part))
+  const ms =
+    num(weeks) * 604_800_000 +
+    num(days) * 86_400_000 +
+    num(hours) * 3_600_000 +
+    num(minutes) * 60_000 +
+    num(seconds) * 1_000
+  if (ms === 0) return null
+  return sign === '-' ? -ms : ms
 }
 
 function parseProperty(line: string): ICalProperty | null {
@@ -419,27 +465,33 @@ export function parseICalendarEvent(document: string): CalendarEventData | null 
   let status = ''
   let start: ParsedDateTime | null = null
   let end: ParsedDateTime | null = null
-  let inEvent = false
+  let durationMs: number | null = null
+  // Component stack, not a boolean: VEVENTs nest sub-components (VALARM most
+  // commonly), and an email-alert alarm carries its own RFC-legal SUMMARY that
+  // must not overwrite the event's title. Event properties are read only while
+  // the VEVENT itself is the innermost open component.
+  const componentStack: string[] = []
   let sawEvent = false
 
   for (const line of unfold(document)) {
     const property = parseProperty(line)
     if (property === null) continue
 
-    if (property.name === 'BEGIN' && property.value.trim().toUpperCase() === 'VEVENT') {
-      // Only the first VEVENT is described; later ones are recurrence overrides
-      // or additional events the card has no room for.
-      if (sawEvent) break
-      inEvent = true
-      sawEvent = true
+    if (property.name === 'BEGIN') {
+      const component = property.value.trim().toUpperCase()
+      // Only the first VEVENT is described; later ones are recurrence
+      // overrides or additional events the card has no room for.
+      if (component === 'VEVENT' && sawEvent) break
+      if (component === 'VEVENT') sawEvent = true
+      componentStack.push(component)
       continue
     }
-    if (property.name === 'END' && property.value.trim().toUpperCase() === 'VEVENT') {
-      inEvent = false
+    if (property.name === 'END') {
+      componentStack.pop()
       continue
     }
 
-    if (!inEvent) {
+    if (componentStack.at(-1) !== 'VEVENT') {
       if (property.name === 'METHOD') method = property.value.trim().toUpperCase()
       if (property.name === 'PRODID') prodId = property.value.toLowerCase()
       continue
@@ -464,6 +516,9 @@ export function parseICalendarEvent(document: string): CalendarEventData | null 
       case 'DTEND':
         end = parseICalDateTime(property)
         break
+      case 'DURATION':
+        durationMs = parseICalDuration(property.value)
+        break
       default:
         break
     }
@@ -471,10 +526,15 @@ export function parseICalendarEvent(document: string): CalendarEventData | null 
 
   if (start === null) return null
 
+  // DTEND wins when both are present (RFC 5545 forbids the combination);
+  // DTSTART+DURATION is Outlook's common spelling of the same range.
+  const endMs =
+    end !== null ? end.ms : durationMs !== null && durationMs > 0 ? start.ms + durationMs : 0
+
   return {
     title,
     startMs: start.ms,
-    endMs: end !== null && end.ms > start.ms ? end.ms : 0,
+    endMs: endMs > start.ms ? endMs : 0,
     timeZone: start.timeZone,
     isAllDay: start.isAllDay ? 1 : 0,
     location,

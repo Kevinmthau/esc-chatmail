@@ -578,6 +578,27 @@ describe('calendar invites', () => {
     await persistMessages([textMessage({ id: 'm1', subject: 'Lunch?', body: 'Free at noon?' })])
     expect((await db.messages.get('m1'))?.isCalendarInvite).toBe(0)
   })
+
+  it('drops the stored event when the flag genuinely clears', async () => {
+    // calendarEvent is only meaningful while the flag is set (db/types); a
+    // real content transition takes both away together.
+    await persistMessages([inviteMessage('m1')])
+    await persistMessages([textMessage({ id: 'm1', subject: 'Lunch?', body: 'Free at noon?' })])
+    const stored = await db.messages.get('m1')
+    expect(stored?.isCalendarInvite).toBe(0)
+    expect(stored?.calendarEvent).toBeUndefined()
+  })
+
+  it('keeps the flag and event across a blind re-fetch that saw no content', async () => {
+    await persistMessages([inviteMessage('m1')])
+    // Metadata-only payload / an oversized body whose fetch failed: empty
+    // body, no calendar part. The parse has lost the signals, not the invite —
+    // clearing here would strand or destroy a real stored event.
+    await persistMessages([textMessage({ id: 'm1', subject: 'Design sync', body: '' })])
+    const stored = await db.messages.get('m1')
+    expect(stored?.isCalendarInvite).toBe(1)
+    expect(stored?.calendarEvent?.title).toBe('Design sync')
+  })
 })
 
 describe('mergeExistingMessage guard window', () => {

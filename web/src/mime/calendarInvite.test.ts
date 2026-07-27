@@ -232,6 +232,38 @@ describe('calendar invite detection', () => {
       }),
     ).toEqual({ isLikelyCalendarInvite: false, event: null })
   })
+
+  it('caps the body text fed to the signal scan (poison-length defense)', () => {
+    // Detection runs inside sync's persist step; the cap keeps a multi-MB
+    // body from turning the weekday/time scan into a sync stall. A signal
+    // sitting beyond the cap therefore must NOT detect…
+    const filler = 'operations report without temporal language here. '.repeat(400)
+    const beyondCap = {
+      subject: 'Ops report',
+      snippet: '',
+      bodyText: `${filler}team meeting monday at 3:00 pm`,
+      hasCalendarPart: true,
+    }
+    expect(isLikelyCalendarInvite(beyondCap)).toBe(false)
+    // …while the same signal inside the cap still does.
+    expect(
+      isLikelyCalendarInvite({ ...beyondCap, bodyText: 'team meeting monday at 3:00 pm' }),
+    ).toBe(true)
+  })
+
+  it('requires the weekday token and the time to sit near each other', () => {
+    // The bounded gap is both the O(n²) fix and better semantics: a weekday
+    // three paragraphs away from a clock reading is not a date-time signal.
+    const farApart = `monday ${'filler '.repeat(20)}3:00 pm`
+    expect(
+      isLikelyCalendarInvite({
+        subject: '',
+        snippet: '',
+        bodyText: farApart,
+        hasCalendarPart: true,
+      }),
+    ).toBe(false)
+  })
 })
 
 // --- Extraction --------------------------------------------------------------
@@ -284,6 +316,59 @@ describe('iCalendar extraction', () => {
     expect(event?.startMs).toBe(Date.UTC(2026, 6, 4))
     expect(event?.endMs).toBe(Date.UTC(2026, 6, 6))
     expect(event?.timeZone).toBe('')
+  })
+
+  it('ignores properties of nested sub-components (a VALARM summary is not the title)', () => {
+    const event = parseICalendarEvent(
+      [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'DTSTART:20260318T180000Z',
+        'SUMMARY:Design sync',
+        'BEGIN:VALARM',
+        'ACTION:EMAIL',
+        'TRIGGER:-PT30M',
+        'SUMMARY:Reminder: leave for the sync',
+        'DESCRIPTION:Alarm body',
+        'END:VALARM',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n'),
+    )
+    expect(event?.title).toBe('Design sync')
+  })
+
+  it('derives the end from an Outlook-style DURATION when DTEND is absent', () => {
+    const event = parseICalendarEvent(
+      [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'DTSTART:20260318T180000Z',
+        'DURATION:PT1H30M',
+        'SUMMARY:Budget review',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n'),
+    )
+    expect(event?.startMs).toBe(Date.UTC(2026, 2, 18, 18, 0, 0))
+    expect(event?.endMs).toBe(Date.UTC(2026, 2, 18, 19, 30, 0))
+  })
+
+  it('unescapes an escaped backslash before n as backslash-n, never a newline', () => {
+    // Raw value `Deploy \\\\srv\\nightly` is the RFC 5545 escape of the UNC
+    // path `\\srv\nightly`; a chained (non-single-pass) unescape reads the
+    // second backslash + n as \n and injects a newline into the title.
+    const event = parseICalendarEvent(
+      [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'DTSTART:20260318T180000Z',
+        'SUMMARY:Deploy \\\\\\\\srv\\\\nightly',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n'),
+    )
+    expect(event?.title).toBe('Deploy \\\\srv\\nightly')
   })
 
   it('unfolds folded lines and unescapes text values', () => {
