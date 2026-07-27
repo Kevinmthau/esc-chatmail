@@ -16,6 +16,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         static let initialGeometryCheck = "initialGeometryCheck"
         static let latestWindow = "latestWindow"
         static let postRevealGeometryCheck = "postRevealGeometryCheck"
+        static let scrollTakeoverRelease = "scrollTakeoverRelease"
     }
 
     private enum InitialRevealState: Equatable {
@@ -60,6 +61,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     @Published private(set) var contactRefreshToken = 0
     @Published private(set) var senderGroupingKeysByEmail: [String: String] = [:]
     @Published private(set) var initialAnchorGeometryCheckID = UUID()
+    @Published private(set) var isUserScrollTakeoverActive = false
 
     private let loadLatestWindowIfNeeded: LatestWindowLoader
     private let markConversationAsReadIfNeeded: () -> Void
@@ -78,7 +80,6 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let taskManager = ViewModelTaskManager()
     private var initialRevealState: InitialRevealState = .waitingForRows
     private var isTrackedBottomAnchorVisible = false
-    private var hasUserScrollTakeover = false
     private var trackedContentMinY: CGFloat?
     private var trackedContentHeight: CGFloat?
     private var trackedViewportHeight: CGFloat?
@@ -223,7 +224,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleDisappear() {
         isVisible = false
         postRevealBottomFollowState = .inactive
-        hasUserScrollTakeover = false
+        isUserScrollTakeoverActive = false
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
         pendingAutoReadLayoutOrder.removeAll()
@@ -362,9 +363,10 @@ final class ChatMessagesCoordinator: ObservableObject {
         if let viewportHeight {
             trackedViewportHeight = viewportHeight
         }
-        if isBottomAnchorVisible && !isUserScrollInteractionActive {
-            hasUserScrollTakeover = false
-        }
+        updateUserScrollTakeoverRelease(
+            isBottomAnchorVisible: isBottomAnchorVisible,
+            isUserScrollInteractionActive: isUserScrollInteractionActive
+        )
 
         let contentHeightIncreased: Bool
         if let previousContentHeight, let contentHeight {
@@ -506,7 +508,8 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// Stops initial auto-anchoring and post-reveal bottom following once the user
     /// takes control of the scroll view.
     func handleUserScrollInteraction() {
-        hasUserScrollTakeover = true
+        isUserScrollTakeoverActive = true
+        taskManager.cancel(TaskKey.scrollTakeoverRelease)
         let wasFollowingPostRevealBottom: Bool
         switch postRevealBottomFollowState {
         case .following, .checkingAfterScroll, .waitingForGrowth:
@@ -617,7 +620,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
         } else if isReadyToShow && newCount > oldCount && isShowingLatestWindow {
             updateReplyingToIfNewSubject(lastMessage)
-            if isBottomAnchorVisible && !hasUserScrollTakeover {
+            if isBottomAnchorVisible && !isUserScrollTakeoverActive {
                 scrollToBottom(
                     messageCount: newCount,
                     delay: UIConfig.contentChangeScrollDelay,
@@ -629,6 +632,28 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
 
         loadResolvedDisplayName()
+    }
+
+    private func updateUserScrollTakeoverRelease(
+        isBottomAnchorVisible: Bool,
+        isUserScrollInteractionActive: Bool
+    ) {
+        guard isUserScrollTakeoverActive else { return }
+        guard isBottomAnchorVisible && !isUserScrollInteractionActive else {
+            taskManager.cancel(TaskKey.scrollTakeoverRelease)
+            return
+        }
+
+        taskManager.run(TaskKey.scrollTakeoverRelease) { [weak self, sleep] in
+            await sleep(UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
+            guard !Task.isCancelled,
+                  let self,
+                  self.isUserScrollTakeoverActive,
+                  self.isTrackedBottomAnchorVisible else {
+                return
+            }
+            self.isUserScrollTakeoverActive = false
+        }
     }
 
     func handleKeyboardHeightChange(

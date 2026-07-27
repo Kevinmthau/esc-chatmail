@@ -343,6 +343,13 @@ struct ChatMessagesView: View {
                             scrollProxy: scrollProxy
                         )
                     }
+                    .onChange(of: coordinator.isUserScrollTakeoverActive) { _, _ in
+                        handleBottomAnchorGeometryUpdate(
+                            geometry: geometry,
+                            layoutID: scrollState.latestWindowLayoutID,
+                            scrollProxy: scrollProxy
+                        )
+                    }
             }
             .allowsHitTesting(false)
         }
@@ -504,6 +511,7 @@ struct ChatMessagesView: View {
             scrollState.initialLoadPhase == .loaded &&
             coordinator.isReadyToShow &&
             !isScrollGestureActive &&
+            !coordinator.isUserScrollTakeoverActive &&
             rawIsVisible
         let becameVisible = !isBottomAnchorVisible && isVisible
         if isBottomAnchorVisible != isVisible {

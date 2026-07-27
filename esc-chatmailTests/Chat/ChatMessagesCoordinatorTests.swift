@@ -2015,7 +2015,14 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             description: "Incoming message must not reload the latest window"
         )
         unexpectedLatestLoad.isInverted = true
+        let takeoverReleaseSleepStarted = expectation(
+            description: "Takeover release settle delay started"
+        )
+        let takeoverReleaseSleepCancelled = expectation(
+            description: "Continued scrolling cancelled takeover release"
+        )
         var isRejectingLatestLoads = false
+        var shouldHoldTakeoverRelease = false
         var latestWindowKnownCounts: [Int?] = []
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
@@ -2036,7 +2043,16 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
             clearPersonCache: {},
-            sleep: { _ in }
+            sleep: { _ in
+                guard shouldHoldTakeoverRelease else { return }
+                takeoverReleaseSleepStarted.fulfill()
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                } catch {
+                    guard Task.isCancelled else { return }
+                    takeoverReleaseSleepCancelled.fulfill()
+                }
+            }
         )
 
         coordinator.handleAppear(
@@ -2070,6 +2086,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         await fulfillment(of: [unexpectedLatestLoad], timeout: 0.1)
         XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
 
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: true,
@@ -2077,12 +2094,35 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in
             XCTFail("Active user scrolling must keep passive following disabled")
         }
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        shouldHoldTakeoverRelease = true
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: false
+        ) { _ in
+            XCTFail("Bottom reconfirmation should wait for geometry to settle")
+        }
+        await fulfillment(of: [takeoverReleaseSleepStarted], timeout: 1)
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            isUserScrollInteractionActive: false
+        ) { _ in }
+        await fulfillment(of: [takeoverReleaseSleepCancelled], timeout: 1)
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        shouldHoldTakeoverRelease = false
         isRejectingLatestLoads = false
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: true,
             isUserScrollInteractionActive: false
         ) { _ in
-            XCTFail("Stable visible geometry should only re-enable passive following")
+            XCTFail("Settled visible geometry should only re-enable passive following")
+        }
+        await waitUntil {
+            !coordinator.isUserScrollTakeoverActive
         }
         coordinator.handleMessageCountChange(
             oldCount: 2,
