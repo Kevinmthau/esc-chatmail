@@ -966,12 +966,21 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         let refreshLoadStarted = expectation(description: "Arrival latest-window load started")
         let loadsCancelled = expectation(description: "Latest-window loads cancelled")
         loadsCancelled.expectedFulfillmentCount = 2
+        let unexpectedRestart = expectation(
+            description: "User takeover must prevent a later latest-window restart"
+        )
+        unexpectedRestart.isInverted = true
+        var hasUserTakenOver = false
         var cancelledKnownCounts: [Int?] = []
         var completedKnownCounts: [Int?] = []
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
             loadLatestWindowIfNeeded: { knownTotalCount in
+                if hasUserTakenOver {
+                    unexpectedRestart.fulfill()
+                    return
+                }
                 if knownTotalCount == nil {
                     initialLoadStarted.fulfill()
                 } else if knownTotalCount == 4 {
@@ -1028,6 +1037,22 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         coordinator.handleUserScrollInteraction()
         await fulfillment(of: [loadsCancelled], timeout: 1)
+
+        hasUserTakenOver = true
+        coordinator.handleMessageCountChange(
+            oldCount: 3,
+            newCount: 4,
+            lastMessage: messages[3],
+            visibleMessages: visibleRows,
+            totalMessageCount: 4,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [unexpectedRestart], timeout: 0.1)
 
         XCTAssertTrue(coordinator.isReadyToShow)
         XCTAssertTrue(anchorSteps.isEmpty)
@@ -1977,6 +2002,69 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                 )
             ]
         )
+    }
+
+    func testBottomPresentationIncomingMessageAfterUserScrollDoesNotFollowHiddenBottom() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let unexpectedLatestLoad = expectation(
+            description: "Incoming message must not reload the latest window"
+        )
+        unexpectedLatestLoad.isInverted = true
+        var isAfterUserTakeover = false
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in
+                if isAfterUserTakeover {
+                    unexpectedLatestLoad.fulfill()
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 1,
+            lastMessage: messages[0],
+            visibleMessages: [rows[0]],
+            senderGroupingMessages: [rows[0]],
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        isAfterUserTakeover = true
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleMessageCountChange(
+            oldCount: 1,
+            newCount: 2,
+            lastMessage: messages[1],
+            visibleMessages: rows,
+            totalMessageCount: 2,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [unexpectedLatestLoad], timeout: 0.1)
+        XCTAssertTrue(anchorSteps.isEmpty)
     }
 
     func testHandleMessageCountChange_afterReadyAwayFromLatestDoesNotRequestBottomAnchor() async throws {

@@ -610,7 +610,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
         } else if isReadyToShow && newCount > oldCount && isShowingLatestWindow {
             updateReplyingToIfNewSubject(lastMessage)
-            if initialPresentationAnchor == .bottom || isBottomAnchorVisible {
+            if isBottomAnchorVisible {
                 scrollToBottom(
                     messageCount: newCount,
                     delay: UIConfig.contentChangeScrollDelay,
