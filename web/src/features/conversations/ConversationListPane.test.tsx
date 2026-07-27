@@ -482,6 +482,300 @@ describe('ConversationListPane multi-select', () => {
   })
 })
 
+describe('ConversationListPane listbox keyboard navigation', () => {
+  /**
+   * happy-dom has no layout: scrollHeight/clientHeight are 0 (so the
+   * virtualizer clamps every programmatic scroll to 0) and scrollTo fires no
+   * scroll event (so it would never observe one anyway). Give the scroller a
+   * real geometry and a browser-like scrollTo: set scrollTop, then dispatch
+   * the event scrollToIndex is waiting on. (restoreMocks undoes this per
+   * test.)
+   */
+  function installBrowserlikeScrolling(contentHeight: number): void {
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(800)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(contentHeight)
+    vi.spyOn(HTMLElement.prototype, 'scrollTo').mockImplementation(function (
+      this: HTMLElement,
+      options?: ScrollToOptions | number,
+    ) {
+      if (typeof options !== 'object') return
+      this.scrollTop = options.top ?? 0
+      // Browsers deliver the scroll event in its own task, never inside the
+      // handler that called scrollTo. The focus hand-off must survive that
+      // two-commit gap, so the shim must not collapse it into one commit.
+      setTimeout(() => {
+        this.dispatchEvent(new Event('scroll'))
+      }, 0)
+    })
+  }
+
+  /** Flushes the virtualizer's isScrolling debounce inside act. */
+  async function drainScrollDebounce(): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
+  }
+
+  const manyRows = (count: number): ConversationPage['unpinned'] =>
+    Array.from({ length: count }, (_, i) =>
+      convoRow({ id: `p${String(i).padStart(2, '0')}`, displayName: `Person ${i}` }),
+    )
+
+  it('exposes one tab stop and sizes every option to the loaded window', async () => {
+    renderPane()
+    const options = await enterSelectMode()
+
+    expect(options.map((option) => option.getAttribute('tabindex'))).toEqual(['0', '-1', '-1'])
+    expect(options.map((option) => option.getAttribute('aria-posinset'))).toEqual(['1', '2', '3'])
+    for (const option of options) {
+      expect(option.getAttribute('aria-setsize')).toBe('3')
+    }
+  })
+
+  it('ArrowDown/ArrowUp move focus and the tab stop, clamped at the ends', async () => {
+    renderPane()
+    await enterSelectMode()
+
+    const first = optionNamed('Alice Chen')
+    act(() => {
+      first.focus()
+    })
+    // fireEvent returns false when preventDefault fired — the scroller's
+    // native keyboard scrolling must not double-move the viewport.
+    expect(fireEvent.keyDown(first, { key: 'ArrowDown' })).toBe(false)
+
+    const second = optionNamed('Ben Ortiz')
+    expect(document.activeElement).toBe(second)
+    expect(second.getAttribute('tabindex')).toBe('0')
+    expect(first.getAttribute('tabindex')).toBe('-1')
+
+    fireEvent.keyDown(second, { key: 'ArrowDown' })
+    const third = optionNamed('Chloe Park')
+    expect(document.activeElement).toBe(third)
+
+    // The ends clamp rather than wrap.
+    fireEvent.keyDown(third, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(third)
+    expect(third.getAttribute('tabindex')).toBe('0')
+
+    fireEvent.keyDown(third, { key: 'ArrowUp' })
+    fireEvent.keyDown(second, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(first)
+    fireEvent.keyDown(first, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(first)
+    expect(first.getAttribute('tabindex')).toBe('0')
+
+    // The arrow flow ends in the listbox idiom: Space toggles where you are.
+    fireEvent.keyDown(first, { key: ' ' })
+    await screen.findByText('1 Selected')
+    expect(first.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('Home and End jump to the first and last loaded options', async () => {
+    renderPane()
+    await enterSelectMode()
+    const first = optionNamed('Alice Chen')
+    act(() => {
+      first.focus()
+    })
+
+    expect(fireEvent.keyDown(first, { key: 'End' })).toBe(false)
+    expect(document.activeElement).toBe(optionNamed('Chloe Park'))
+
+    expect(fireEvent.keyDown(optionNamed('Chloe Park'), { key: 'Home' })).toBe(false)
+    expect(document.activeElement).toBe(first)
+    expect(first.getAttribute('tabindex')).toBe('0')
+  })
+
+  it('leaves modified presses to the browser (no range or jump implemented)', async () => {
+    renderPane()
+    await enterSelectMode()
+    const first = optionNamed('Alice Chen')
+    act(() => {
+      first.focus()
+    })
+
+    // Shift+Arrow is the APG range extension and Cmd/Ctrl combos are
+    // platform scroll shortcuts — neither is implemented, so neither may be
+    // swallowed as a plain single-row move (fireEvent returns true: no
+    // preventDefault).
+    expect(fireEvent.keyDown(first, { key: 'ArrowDown', shiftKey: true })).toBe(true)
+    expect(fireEvent.keyDown(first, { key: 'ArrowDown', metaKey: true })).toBe(true)
+    expect(fireEvent.keyDown(first, { key: 'End', ctrlKey: true })).toBe(true)
+    expect(document.activeElement).toBe(first)
+    expect(first.getAttribute('tabindex')).toBe('0')
+  })
+
+  it('keeps the tab stop with its conversation when new mail reorders the list', async () => {
+    renderPane()
+    await enterSelectMode()
+    const ben = optionNamed('Ben Ortiz')
+    act(() => {
+      ben.focus()
+    })
+    expect(ben.getAttribute('tabindex')).toBe('0')
+
+    // A sync bumps a new conversation to the top of the newest-first list;
+    // Ben's row (with DOM focus still on it) shifts from index 1 to index 2.
+    setPage(page([convoRow({ id: 'new', displayName: 'Nadia Petrov' }), ...THREE_ROWS.unpinned]))
+    await screen.findByRole('option', { name: /^Nadia Petrov,/ })
+    expect(ben.getAttribute('tabindex')).toBe('0')
+
+    // Arrows continue from Ben, not from the stale index.
+    fireEvent.keyDown(ben, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(optionNamed('Chloe Park'))
+  })
+
+  it('reports an unknown set size (-1) while more pages exist', async () => {
+    renderPane(page(THREE_ROWS.unpinned, true))
+    await enterSelectMode()
+    for (const option of screen.getAllByRole('option')) {
+      expect(option.getAttribute('aria-setsize')).toBe('-1')
+    }
+
+    // Once the last page is in, the loaded count is the true total.
+    setPage(page(THREE_ROWS.unpinned))
+    await waitFor(() => {
+      expect(optionNamed('Alice Chen').getAttribute('aria-setsize')).toBe('3')
+    })
+  })
+
+  it('focus landing on an option re-anchors the tab stop there', async () => {
+    renderPane()
+    await enterSelectMode()
+
+    const second = optionNamed('Ben Ortiz')
+    act(() => {
+      second.focus()
+    })
+
+    expect(second.getAttribute('tabindex')).toBe('0')
+    expect(optionNamed('Alice Chen').getAttribute('tabindex')).toBe('-1')
+
+    // Arrows continue from the re-anchored option.
+    fireEvent.keyDown(second, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(optionNamed('Chloe Park'))
+  })
+
+  it('re-entering select mode restarts the tab stop at the first option', async () => {
+    renderPane()
+    await enterSelectMode()
+    const first = optionNamed('Alice Chen')
+    act(() => {
+      first.focus()
+    })
+    fireEvent.keyDown(first, { key: 'ArrowDown' })
+    expect(optionNamed('Ben Ortiz').getAttribute('tabindex')).toBe('0')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await screen.findByRole('button', { name: 'Select' })
+    const options = await enterSelectMode()
+    expect(options.map((option) => option.getAttribute('tabindex'))).toEqual(['0', '-1', '-1'])
+  })
+
+  it('clamps the tab stop when the rows under it leave the list', async () => {
+    renderPane()
+    await enterSelectMode()
+    const first = optionNamed('Alice Chen')
+    act(() => {
+      first.focus()
+    })
+    fireEvent.keyDown(first, { key: 'End' })
+    expect(optionNamed('Chloe Park').getAttribute('tabindex')).toBe('0')
+
+    // A sync archives the active row: the tab stop clamps to the new end
+    // instead of pointing past the list.
+    setPage(page(THREE_ROWS.unpinned.filter((row) => row.id !== 'c3')))
+    await waitFor(() => {
+      expect(optionNamed('Ben Ortiz').getAttribute('tabindex')).toBe('0')
+    })
+    const options = screen.queryAllByRole('option')
+    expect(options.map((option) => option.getAttribute('tabindex'))).toEqual(['-1', '0'])
+  })
+
+  it('End scrolls a virtualized-out option into the window and focuses it', async () => {
+    installBrowserlikeScrolling(60 * 88)
+    renderPane(page(manyRows(60)))
+    await enterSelectMode()
+
+    // The far end is not rendered — the window holds a fraction of 60 rows.
+    expect(screen.queryByRole('option', { name: /^Person 59,/ })).toBeNull()
+
+    const first = optionNamed('Person 0')
+    act(() => {
+      first.focus()
+    })
+    fireEvent.keyDown(first, { key: 'End' })
+
+    const last = await screen.findByRole('option', { name: /^Person 59,/ })
+    expect(document.activeElement).toBe(last)
+    expect(last.getAttribute('tabindex')).toBe('0')
+    // setsize/posinset describe the loaded window, not the rendered slice.
+    expect(last.getAttribute('aria-posinset')).toBe('60')
+    expect(last.getAttribute('aria-setsize')).toBe('60')
+
+    await drainScrollDebounce()
+  })
+
+  it('keeps exactly one rendered tab stop when the active option scrolls out', async () => {
+    installBrowserlikeScrolling(60 * 88)
+    renderPane(page(manyRows(60)))
+    await enterSelectMode()
+
+    // Mouse-scroll far from the active (first) option: it unmounts entirely.
+    const scroller = document.querySelector<HTMLElement>('[role="listbox"]')!
+    scroller.scrollTop = 3000
+    fireEvent.scroll(scroller)
+    await waitFor(() => {
+      expect(screen.queryByRole('option', { name: /^Person 0,/ })).toBeNull()
+    })
+
+    // The first rendered option stands in, so the listbox stays tabbable.
+    const options = screen.getAllByRole('option')
+    const tabStops = options.filter((option) => option.getAttribute('tabindex') === '0')
+    expect(tabStops).toHaveLength(1)
+    expect(tabStops[0]).toBe(options[0])
+
+    // Tabbing onto the stand-in re-anchors the rove: arrows move on from it.
+    act(() => {
+      options[0]!.focus()
+    })
+    fireEvent.keyDown(options[0]!, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(options[1])
+    expect(options[1]!.getAttribute('tabindex')).toBe('0')
+    expect(options[0]!.getAttribute('tabindex')).toBe('-1')
+
+    await drainScrollDebounce()
+  })
+
+  it('abandons a pending focus move when select mode exits first', async () => {
+    installBrowserlikeScrolling(60 * 88)
+    renderPane(page(manyRows(60)))
+    await enterSelectMode()
+    const first = optionNamed('Person 0')
+    act(() => {
+      first.focus()
+    })
+    fireEvent.keyDown(first, { key: 'End' })
+
+    // Cancel lands before the scroll delivers the target option: the queued
+    // focus move dies with the mode.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await screen.findByRole('button', { name: 'Select' })
+    await drainScrollDebounce()
+
+    // Nor may it replay in the next session: re-enter and force a render (a
+    // selection click) — a stale pending move would yank focus to the old
+    // End target.
+    await enterSelectMode()
+    fireEvent.click(screen.getAllByRole('option')[1]!)
+    await screen.findByText('1 Selected')
+    expect(document.activeElement?.getAttribute('aria-label') ?? '').not.toMatch(/^Person 59/)
+
+    await drainScrollDebounce()
+  })
+})
+
 describe('conversation search in the list pane', () => {
   it('filters rows as you type and restores them when cleared', async () => {
     const user = userEvent.setup()
