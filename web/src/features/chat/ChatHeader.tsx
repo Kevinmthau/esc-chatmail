@@ -1,6 +1,6 @@
-// Chat header: mobile back link (filter-preserving), avatar + resolved display
-// name, group participant-count subtitle, and the ellipsis menu with
-// Archive / Report Spam (both navigate back to the list).
+// Chat header: mobile back link (filter- and search-preserving), avatar +
+// resolved display name, group participant-count subtitle, and the ellipsis
+// menu with Archive / Report Spam (both navigate back to the list).
 
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { useLiveQuery } from 'dexie-react-hooks'
@@ -20,7 +20,10 @@ export function ChatHeader({ conversationId }: { conversationId: string }) {
   )
   const search = useSearch({ strict: false })
   const navigate = useNavigate()
-  const listSearch = { filter: search.filter }
+  // Carry the list's state back out: the row link carried ?q= (and ?filter=)
+  // into the chat so the list returns searched and filtered, and every exit
+  // path here — the back link, Archive, Report Spam — must round-trip both.
+  const listSearch = { filter: search.filter, q: search.q }
 
   const goBackToList = (): void => {
     void navigate({ to: '/chats', search: listSearch })

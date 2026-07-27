@@ -29,7 +29,14 @@ const CONVERSATIONS: ConversationRecord[] = [
 
 const seen: { unreadOnly: boolean; query: string; limit: number }[] = []
 
-vi.mock('@/app/boot', () => ({ isDemoMode: () => true, getAccountEmail: () => null }))
+// Mutable knobs (reset in beforeEach) so individual tests can drive demo mode,
+// the sync state, and the fixture set. The mock factories only close over
+// them, so vi.mock hoisting is safe.
+let demoMode = true
+let syncStatus: SyncProgress | undefined = SYNCED
+let conversations: ConversationRecord[] = CONVERSATIONS
+
+vi.mock('@/app/boot', () => ({ isDemoMode: () => demoMode, getAccountEmail: () => null }))
 vi.mock('@/data/actions', () => ({
   requestSync: vi.fn(async () => {}),
   archiveConversation: vi.fn(async () => {}),
@@ -37,10 +44,10 @@ vi.mock('@/data/actions', () => ({
   reportSpam: vi.fn(async () => {}),
 }))
 vi.mock('@/live/hooks', () => ({
-  useSyncStatus: () => SYNCED,
+  useSyncStatus: () => syncStatus,
   useConversationPage: (unreadOnly: boolean, query: string, limit: number): ConversationPage => {
     seen.push({ unreadOnly, query, limit })
-    const rows = CONVERSATIONS.filter(
+    const rows = conversations.filter(
       (c) => (!unreadOnly || c.inboxUnreadCount > 0) && matchesConversationSearch(c, query),
     )
     return { pinned: [], unpinned: rows.slice(0, limit), hasMore: rows.length > limit }
@@ -55,6 +62,9 @@ const valueOf = (el: HTMLElement | undefined) => (el as HTMLInputElement | undef
 
 beforeEach(() => {
   seen.length = 0
+  demoMode = true
+  syncStatus = SYNCED
+  conversations = CONVERSATIONS
   // happy-dom has no layout; TanStack Virtual needs a non-zero outer size.
   vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(800)
   vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(380)
@@ -206,6 +216,56 @@ describe('conversation search in the list pane', () => {
     await waitFor(() => {
       expect(valueOf(boxes[1])).toBe('ortiz')
     })
+  })
+
+  it('resets a scroll-grown page limit (and the scroll) when the query changes', async () => {
+    // Enough rows that the first page leaves hasMore true, and a viewport tall
+    // enough that the load-more effect raises the limit without real scrolling.
+    conversations = Array.from({ length: 60 }, (_, i) =>
+      convoRow({
+        id: `c${String(i).padStart(3, '0')}`,
+        displayName: `Person ${i}`,
+        snippet: i < 10 ? 'moon landing' : 'hello there',
+      }),
+    )
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(8000)
+
+    const user = userEvent.setup()
+    renderWithRouter(<ConversationListPane />)
+    await screen.findByText('Person 0')
+    await waitFor(() => {
+      expect(seen.some((call) => call.limit > 50)).toBe(true)
+    })
+
+    // A committed keystroke must start over at one page and from the top —
+    // not cursor-walk at the grown limit into a stale scroll offset.
+    const scroller = document.querySelector<HTMLElement>('.overflow-y-auto')!
+    scroller.scrollTop = 2000
+    await user.type(searchBoxes()[0]!, 'moon')
+    await waitFor(() => {
+      expect(seen.at(-1)).toMatchObject({ query: 'moon', limit: 50 })
+    })
+    expect(scroller.scrollTop).toBe(0)
+  })
+
+  it('shows the syncing state, not "No results", while the first sync is pending', async () => {
+    // Zero rows during the initial sync means "mail has not arrived yet" — a
+    // definitive "No results" for a query would be as false a claim as the
+    // mailbox-level empty state.
+    demoMode = false
+    syncStatus = { phase: 'initial' }
+    conversations = []
+
+    const user = userEvent.setup()
+    renderWithRouter(<ConversationListPane />)
+    await screen.findByText('Syncing your mail…')
+
+    await user.type(searchBoxes()[0]!, 'zzz')
+    await waitFor(() => {
+      expect(seen.at(-1)).toMatchObject({ query: 'zzz' })
+    })
+    expect(screen.getByText('Syncing your mail…')).toBeTruthy()
+    expect(screen.queryByText('No results for “zzz”')).toBeNull()
   })
 
   it('leaves the list unsearched when no query is present', async () => {

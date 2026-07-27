@@ -133,6 +133,27 @@ describe('useSearchDraft (iOS ConversationSearchService)', () => {
     expect(result.current.draft).toBe('alice')
   })
 
+  it('adopting an external change cancels a pending keystroke commit', () => {
+    // With ?q=ali committed, the user types a keystroke (timer armed) and then
+    // navigates Back/Forward before it fires. The field adopts the external
+    // value; the stale keystroke must not rewrite the URL underneath it.
+    const { result, commit, rerender } = renderDraft('ali')
+
+    act(() => {
+      result.current.setDraft('x')
+    })
+    act(() => {
+      rerender({ committed: 'book' })
+    })
+    expect(result.current.draft).toBe('book')
+
+    act(() => {
+      vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS * 2)
+    })
+    expect(commit).not.toHaveBeenCalled()
+    expect(result.current.draft).toBe('book')
+  })
+
   it('drops a pending commit on unmount (iOS cleanup())', () => {
     const { result, commit, unmount } = renderDraft()
 

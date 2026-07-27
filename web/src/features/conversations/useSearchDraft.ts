@@ -35,11 +35,15 @@ export function useSearchDraft(committed: string, commit: (next: string) => void
   // a router navigation, so `committed` arriving at a value we sent is our own
   // echo — adopting it would clobber keystrokes typed during the round trip.
   // Any other change (back/forward, a link that drops ?q=) is external, and the
-  // field follows it.
+  // field follows it — including cancelling any pending keystroke commit, which
+  // would otherwise fire after the adoption and rewrite the URL to the stale
+  // keystroke while the field shows the adopted value.
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const sentRef = useRef(committed)
   useEffect(() => {
     if (committed === sentRef.current) return
     sentRef.current = committed
+    clearTimeout(timerRef.current)
     setDraft(committed)
   }, [committed])
 
@@ -50,7 +54,6 @@ export function useSearchDraft(committed: string, commit: (next: string) => void
     commitRef.current = commit
   })
 
-  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const publish = useCallback((next: string) => {
     sentRef.current = next
     commitRef.current(next)
