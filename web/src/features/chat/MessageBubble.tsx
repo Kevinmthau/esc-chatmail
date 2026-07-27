@@ -57,6 +57,12 @@ export function MessageBubble({ message, decoration, isOneToOne, onReply }: Mess
     void navigate({ to: '.', search: (prev) => ({ ...prev, reader: message.id }) })
   }
 
+  // Forward opens the compose dialog (mounted by the /chats layout) in forward
+  // mode; the message id travels in the search param, like `reader`.
+  const openForward = (): void => {
+    void navigate({ to: '.', search: (prev) => ({ ...prev, forward: message.id }) })
+  }
+
   return (
     <ContextMenu
       trigger={
@@ -90,6 +96,7 @@ export function MessageBubble({ message, decoration, isOneToOne, onReply }: Mess
       }
     >
       <ContextMenuItem onSelect={onReply}>Reply</ContextMenuItem>
+      <ContextMenuItem onSelect={openForward}>Forward</ContextMenuItem>
       {message.hasHtmlBody === 1 && (
         <ContextMenuItem onSelect={openReader}>View original</ContextMenuItem>
       )}

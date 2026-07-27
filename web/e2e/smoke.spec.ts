@@ -74,6 +74,37 @@ test('compose dialog opens and dedups to an existing chat', async ({ page }) => 
   await expect(page.getByText(/already have a chat/i)).toBeVisible()
 })
 
+test('forward a message to a typed address', async ({ page }) => {
+  await openChats(page)
+  await page.getByText('The Daily Digest', { exact: true }).first().click()
+
+  // Right-click (long-press on touch) the bubble to open the message menu.
+  await page
+    .getByRole('link', { name: /open email/i })
+    .first()
+    .click({ button: 'right' })
+  await page.getByRole('menuitem', { name: 'Forward' }).click()
+
+  // Forward mode: 'Fwd: '-prefixed subject, the forwarded block prefilled into
+  // the body, and empty recipients.
+  const dialog = page.locator('dialog[open]')
+  await expect(dialog.getByRole('heading', { name: 'Forward' })).toBeVisible()
+  await expect(dialog.getByLabel('Subject:')).toHaveValue('Fwd: The Daily Digest — Tuesday edition')
+  await expect(dialog.getByLabel('Message body')).toHaveValue(
+    /---------- Forwarded message ---------[\s\S]*From: The Daily Digest/,
+  )
+  const to = dialog.getByRole('combobox', { name: /to/i })
+  await expect(to).toHaveValue('')
+
+  await to.fill('forwardee@example.com')
+  await to.press('Enter')
+  await dialog.getByRole('button', { name: 'Send' }).click()
+
+  // The forward commits through the optimistic pipeline into its own chat.
+  await expect(page.getByTestId('chat-scroller').getByText('Forwarded message')).toBeVisible()
+  await expect(page.locator('dialog[open]')).toHaveCount(0)
+})
+
 test('mobile: stacked navigation with working back', async ({ page, isMobile }) => {
   test.skip(!isMobile, 'mobile project only')
   await openChats(page)

@@ -121,6 +121,14 @@ export function makeSendApi(broker: TokenBroker, options?: EndpointOptions): Sen
   return { send: (params) => sendMessageEndpoint(broker, params, options) }
 }
 
+/** Forward-specific overrides carried by a compose-mode forward. */
+export interface ForwardSendPayload {
+  /** 'Fwd: '-prefixed subject; '' sends as '(No Subject)'. */
+  subject: string
+  /** Complete html alternative; absent sends text/plain only. */
+  htmlBody?: string
+}
+
 export interface SendDraft {
   /** Reply into an existing conversation. */
   conversationId?: string
@@ -133,6 +141,13 @@ export interface SendDraft {
    * ladder's choice stands (never fails a send over a stale picker value).
    */
   fromAlias?: string
+  /**
+   * Present when this send is a forward. A forward is a NEW message (iOS
+   * composes fresh in .forward mode): it keeps the resolved conversation and
+   * its reply-from alias, but carries its own subject and NO threading
+   * headers — see the override in sendMessage.
+   */
+  forward?: ForwardSendPayload
 }
 
 export interface SendOptions {
@@ -217,7 +232,23 @@ export async function sendMessage(
       )
       if (chosen !== undefined) metadata = { ...metadata, replyFrom: chosen }
     }
-    mime = buildOutboundMime(metadata, draft.body)
+    if (draft.forward !== undefined) {
+      // A forward is not a reply. buildReplyMetadata always targets the
+      // conversation's newest message, so forwarding to someone you already
+      // chat with would otherwise inherit that message's subject ('Re: …'),
+      // its In-Reply-To/References chain and its Gmail thread — stitching an
+      // unrelated message into their thread. Recipients and the reply-from
+      // alias still come from the ladder; everything threading-related is
+      // dropped so this goes out as a new message.
+      metadata = {
+        ...metadata,
+        subject: draft.forward.subject,
+        threadId: '',
+        inReplyTo: '',
+        references: [],
+      }
+    }
+    mime = buildOutboundMime(metadata, draft.body, draft.forward?.htmlBody)
   } catch (error) {
     // The compose path already minted the conversation in (a); drop it again
     // so a rejected address cannot leave a phantom empty chat in the list
@@ -293,7 +324,7 @@ export async function sendMessage(
 }
 
 /** Renders the outbound MIME; throws the builder's address-validation errors. */
-function buildOutboundMime(metadata: ReplyMetadata, body: string): string {
+function buildOutboundMime(metadata: ReplyMetadata, body: string, htmlBody?: string): string {
   const mimeInput: BuildNewInput = {
     from: {
       email: metadata.replyFrom.email,
@@ -302,6 +333,7 @@ function buildOutboundMime(metadata: ReplyMetadata, body: string): string {
     to: metadata.recipients,
     textBody: body,
     ...(metadata.subject !== '' ? { subject: metadata.subject } : {}),
+    ...(htmlBody !== undefined ? { htmlBody } : {}),
   }
   return metadata.inReplyTo !== ''
     ? buildReply({ ...mimeInput, inReplyTo: metadata.inReplyTo, references: metadata.references })

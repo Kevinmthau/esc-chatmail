@@ -1,6 +1,6 @@
 // Bubble content routing: displayPolicy verdict → which component renders.
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
 import { setDBForTests, type ChatmailDB } from '@/db/schema'
@@ -10,9 +10,11 @@ import { makeTestDb, msgRow } from '@/outbox/testSupport'
 import { MessageBubble } from './MessageBubble'
 import { clearRichContentCacheForTests } from './useRichHtmlContent'
 
+const navigate = vi.fn()
+
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children }: { children?: ReactNode }) => <a data-testid="router-link">{children}</a>,
-  useNavigate: () => () => undefined,
+  useNavigate: () => navigate,
 }))
 
 vi.mock('@/features/reader/HtmlPreviewCard', () => ({
@@ -282,5 +284,55 @@ describe('MessageBubble chrome', () => {
     const anchor = screen.getByRole('link', { name: 'https://example.com/x' })
     expect(anchor.getAttribute('href')).toBe('https://example.com/x')
     expect(anchor.getAttribute('rel')).toContain('noopener')
+  })
+})
+
+describe('MessageBubble context menu', () => {
+  /** Long-press/right-click on the bubble row and wait for the Radix content. */
+  async function openMenu(): Promise<void> {
+    fireEvent.contextMenu(screen.getByText('Sounds good'))
+    await screen.findByRole('menuitem', { name: 'Reply' })
+  }
+
+  it('offers Reply, Forward and View original', async () => {
+    renderBubble(
+      msgRow({ id: 'm1', conversationId: 'c1', chatPreviewText: 'Sounds good', hasHtmlBody: 1 }),
+    )
+    await openMenu()
+
+    expect(screen.getByRole('menuitem', { name: 'Forward' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'View original' })).toBeTruthy()
+  })
+
+  it('Forward opens the compose dialog in forward mode for this message', async () => {
+    renderBubble(msgRow({ id: 'm7', conversationId: 'c1', chatPreviewText: 'Sounds good' }))
+    await openMenu()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Forward' }))
+
+    await waitFor(() => expect(navigate).toHaveBeenCalled())
+    const options = navigate.mock.calls.at(-1)?.[0] as {
+      to: string
+      search: (prev: Record<string, unknown>) => Record<string, unknown>
+    }
+    expect(options.to).toBe('.')
+    // Carried alongside whatever search params the chat route already holds.
+    expect(options.search({ filter: 'unread' })).toEqual({ filter: 'unread', forward: 'm7' })
+  })
+
+  it('Reply focuses the reply bar instead of navigating', async () => {
+    const onReply = vi.fn()
+    render(
+      <MessageBubble
+        message={msgRow({ id: 'm1', conversationId: 'c1', chatPreviewText: 'Sounds good' })}
+        decoration={DECORATION}
+        isOneToOne
+        onReply={onReply}
+      />,
+    )
+    await openMenu()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Reply' }))
+    await waitFor(() => expect(onReply).toHaveBeenCalledTimes(1))
   })
 })

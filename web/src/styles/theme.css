@@ -16,6 +16,7 @@
   --c-glass: rgb(255 255 255 / 0.72);
   --c-border: rgb(0 0 0 / 0.08);
   --c-danger: #ff3b30;
+  --c-warning: #c2660a;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -29,6 +30,7 @@
     --c-bubble-in-fg: #f2f2f7;
     --c-glass: rgb(28 28 30 / 0.72);
     --c-border: rgb(255 255 255 / 0.1);
+    --c-warning: #ff9f0a;
   }
 }
 
@@ -47,6 +49,7 @@
   --color-glass: var(--c-glass);
   --color-border: var(--c-border);
   --color-danger: var(--c-danger);
+  --color-warning: var(--c-warning);
   --radius-bubble: 16px;
   --radius-card: 16px;
   --radius-chip: 999px;
