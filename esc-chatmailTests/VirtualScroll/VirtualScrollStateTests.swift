@@ -441,6 +441,129 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(state.isShowingLatestWindow)
     }
 
+    func testEnsureVisibleMessagePublishesPendingTargetWhenFollowingIsDisabled() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 4,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialMessageIDs = Array(messages.prefix(4)).map(\.objectID)
+        await waitUntil {
+            state.initialLoadPhase == .loaded &&
+                state.visibleMessages.map(\.objectID) == initialMessageIDs
+        }
+        state.setFollowsLatestInsertions(false)
+
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-ensure-visible-pending",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+        await waitUntil {
+            state.totalMessageCount == 9 &&
+                state.visibleMessages.map(\.objectID) == initialMessageIDs
+        }
+
+        let didEnsureTarget = await state.ensureVisibleMessage(
+            pendingMessage.objectID
+        )
+
+        XCTAssertTrue(didEnsureTarget)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        )
+        XCTAssertEqual(state.totalMessageCount, 9)
+        XCTAssertTrue(state.isShowingLatestWindow)
+    }
+
+    func testEnsureVisibleMessageAlreadyPublishedDoesNotReloadWindow() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 4)
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.initialLoadPhase == .loaded &&
+                state.visibleMessages.map(\.objectID) == messages.map(\.objectID)
+        }
+
+        var publishCount = 0
+        let cancellable = state.$visibleMessages.dropFirst().sink { _ in
+            publishCount += 1
+        }
+        defer { cancellable.cancel() }
+
+        let didEnsureTarget = await state.ensureVisibleMessage(
+            messages.last!.objectID
+        )
+
+        XCTAssertTrue(didEnsureTarget)
+        XCTAssertEqual(publishCount, 0)
+    }
+
+    func testEnsureVisibleMessageStopsAfterSingleRetryWhenTargetIsAbsent() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 4)
+        let unrelatedConversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let unrelatedMessage = makeMessage(
+            id: "virtual-scroll-unrelated-ensure-target",
+            date: 10,
+            conversation: unrelatedConversation
+        )
+        try viewContext.save()
+
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.initialLoadPhase == .loaded &&
+                state.visibleMessages.map(\.objectID) == messages.map(\.objectID)
+        }
+
+        var publishCount = 0
+        let cancellable = state.$visibleMessages.dropFirst().sink { _ in
+            publishCount += 1
+        }
+        defer { cancellable.cancel() }
+
+        let didEnsureTarget = await state.ensureVisibleMessage(
+            unrelatedMessage.objectID
+        )
+
+        XCTAssertFalse(didEnsureTarget)
+        XCTAssertEqual(publishCount, 2)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            messages.map(\.objectID)
+        )
+    }
+
     func testResumeClampsHistoricalWindowAfterLargeInactiveDeletion() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 12)
         let configuration = VirtualScrollConfiguration(

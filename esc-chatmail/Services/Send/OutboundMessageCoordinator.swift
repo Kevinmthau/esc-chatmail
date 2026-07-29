@@ -90,6 +90,7 @@ enum OutboundMessageRequest {
 
 struct OutboundMessageResult {
     let optimisticMessageID: String
+    let optimisticMessageObjectID: NSManagedObjectID
     let conversationReference: ConversationReference?
 }
 
@@ -244,6 +245,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
 
         return OutboundMessageResult(
             optimisticMessageID: optimisticMessageID,
+            optimisticMessageObjectID: optimisticSendHandle.optimisticMessageObjectID,
             conversationReference: optimisticSendHandle.conversationReference
         )
     }

@@ -118,14 +118,24 @@ extension GmailSendService {
         // Keep the optimistic graph unsaved so chat navigation is not blocked by a
         // main-thread Core Data save, especially for image attachments. Stabilize the
         // objectIDs up front so SwiftUI navigation can still target the new thread.
-        assignPermanentObjectIDsIfNeeded(
-            for: optimisticGraphObjects(
-                conversation: conversation,
-                message: message,
-                attachments: attachmentObjects
-            ),
-            in: viewContext
+        let preassignmentRollbackSnapshot = OptimisticSendMutationSnapshot(
+            optimisticMessageID: messageId,
+            conversation: conversation
         )
+        do {
+            try assignPermanentObjectIDsIfNeeded(
+                for: optimisticGraphObjects(
+                    conversation: conversation,
+                    message: message,
+                    attachments: attachmentObjects
+                ),
+                in: viewContext
+            )
+        } catch {
+            Log.error("Failed to obtain permanent IDs for optimistic send", category: .message, error: error)
+            rollbackOptimisticCreation(message, snapshot: preassignmentRollbackSnapshot)
+            throw SendError.optimisticCreationFailed
+        }
         let rollbackSnapshot = OptimisticSendMutationSnapshot(
             optimisticMessageID: messageId,
             conversation: conversation
@@ -141,6 +151,7 @@ extension GmailSendService {
 
         return OptimisticSendHandle(
             optimisticMessageID: message.id,
+            optimisticMessageObjectID: message.objectID,
             conversationReference: ConversationReference(objectID: conversation.objectID)
         )
     }
@@ -564,15 +575,11 @@ extension GmailSendService {
     private func assignPermanentObjectIDsIfNeeded(
         for objects: [NSManagedObject],
         in context: NSManagedObjectContext
-    ) {
+    ) throws {
         let temporaryObjects = objects.filter { $0.objectID.isTemporaryID }
         guard !temporaryObjects.isEmpty else { return }
 
-        do {
-            try context.obtainPermanentIDs(for: temporaryObjects)
-        } catch {
-            Log.error("Failed to obtain permanent IDs for optimistic send", category: .message, error: error)
-        }
+        try context.obtainPermanentIDs(for: temporaryObjects)
     }
 
     private func makeOptimisticParticipantHash(from recipients: [String], myAliases: Set<String>) -> String {

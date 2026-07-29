@@ -425,15 +425,17 @@ struct ChatMessagesView: View {
             measuredHeight: $replyBarHeight,
             focusBinding: isTextFieldFocused
         ) {
-            let didSend = await viewModel.sendReply()
-            if didSend {
-                coordinator.handleReplySendCompleted(
-                    messageCount: totalMessageCountForCoordinator(),
-                    totalMessageCount: scrollState.totalMessageCount,
-                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
-                ) { performBottomAnchor($0, proxy: proxy) }
-            }
-            return didSend
+            let anchorIntent = coordinator.capturePostSendAnchorIntent()
+            guard let result = await viewModel.sendReply() else { return false }
+
+            coordinator.handleReplySendCompleted(
+                targetMessageID: result.optimisticMessageObjectID,
+                anchorIntent: anchorIntent,
+                messageCount: totalMessageCountForCoordinator(),
+                totalMessageCount: scrollState.totalMessageCount,
+                isInitialWindowLoaded: scrollState.isInitialLoadComplete
+            ) { performBottomAnchor($0, proxy: proxy) }
+            return true
         }
     }
 

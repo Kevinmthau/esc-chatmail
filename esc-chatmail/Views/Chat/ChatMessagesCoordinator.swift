@@ -15,6 +15,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         static let initialBottomAnchor = "initialBottomAnchor"
         static let initialGeometryCheck = "initialGeometryCheck"
         static let latestWindow = "latestWindow"
+        static func postSendPublication(_ messageObjectID: NSManagedObjectID) -> String {
+            "postSendPublication.\(messageObjectID.uriRepresentation().absoluteString)"
+        }
         static let postRevealGeometryCheck = "postRevealGeometryCheck"
         static let scrollTakeoverRelease = "scrollTakeoverRelease"
     }
@@ -50,10 +53,15 @@ final class ChatMessagesCoordinator: ObservableObject {
         let logMessage: String
     }
 
+    struct PostSendAnchorIntent: Equatable {
+        fileprivate let userScrollInteractionRevision: UInt
+    }
+
     typealias BottomAnchorAction = @MainActor (BottomAnchorStep) -> Void
     typealias SenderGroupingLoader = ([String]) async -> [String: String]
     typealias AsyncAction = () async -> Void
     typealias LatestWindowLoader = (Int?) async -> Void
+    typealias MessageVisibilityEnsurer = (NSManagedObjectID) async -> Bool
     typealias Sleep = (UInt64) async -> Void
     typealias Now = () -> TimeInterval
 
@@ -64,6 +72,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     @Published private(set) var isUserScrollTakeoverActive = false
 
     private let loadLatestWindowIfNeeded: LatestWindowLoader
+    private let ensureVisibleMessage: MessageVisibilityEnsurer
     private let markConversationAsReadIfNeeded: () -> Void
     private let markUnreadInboxMessagesAsReadIfNeeded: ([NSManagedObjectID]) -> Void
     private let initializeReplyingTo: (Message?) -> Void
@@ -86,6 +95,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var postRevealBottomFollowState: PostRevealBottomFollowState = .inactive
     private var hasCapturedInitialUnreadSnapshot = false
     private var isVisible = false
+    private var userScrollInteractionRevision: UInt = 0
     private var pendingAutoReadMessageIDsByEventID: [UUID: [NSManagedObjectID]] = [:]
     private var pendingAutoReadMessageIDsByLayoutID: [UUID: [NSManagedObjectID]] = [:]
     private var pendingAutoReadLayoutOrder: [UUID] = []
@@ -102,6 +112,9 @@ final class ChatMessagesCoordinator: ObservableObject {
     ) {
         self.loadLatestWindowIfNeeded = { knownTotalCount in
             await scrollState.loadLatestWindowIfNeeded(knownTotalCount: knownTotalCount)
+        }
+        self.ensureVisibleMessage = { messageObjectID in
+            await scrollState.ensureVisibleMessage(messageObjectID)
         }
         self.markConversationAsReadIfNeeded = {
             viewModel.markConversationAsReadIfNeeded()
@@ -148,9 +161,11 @@ final class ChatMessagesCoordinator: ObservableObject {
         invalidateContactsCache: @escaping AsyncAction,
         clearPersonCache: @escaping AsyncAction,
         sleep: @escaping Sleep,
-        now: @escaping Now = { ProcessInfo.processInfo.systemUptime }
+        now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
+        ensureVisibleMessage: @escaping MessageVisibilityEnsurer = { _ in true }
     ) {
         self.loadLatestWindowIfNeeded = loadLatestWindowIfNeeded
+        self.ensureVisibleMessage = ensureVisibleMessage
         self.markConversationAsReadIfNeeded = markConversationAsReadIfNeeded
         self.markUnreadInboxMessagesAsReadIfNeeded = markUnreadInboxMessagesAsReadIfNeeded
         self.initializeReplyingTo = initializeReplyingTo
@@ -508,6 +523,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// Stops initial auto-anchoring and post-reveal bottom following once the user
     /// takes control of the scroll view.
     func handleUserScrollInteraction() {
+        userScrollInteractionRevision &+= 1
         isUserScrollTakeoverActive = true
         taskManager.cancel(TaskKey.scrollTakeoverRelease)
         let wasFollowingPostRevealBottom: Bool
@@ -725,38 +741,87 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
+    /// Captures which user-scroll interactions predate an explicit local send.
+    ///
+    /// Existing takeover must not suppress presenting the user's own reply. A
+    /// newer interaction suppresses only the optional bottom anchor while the
+    /// exact-row publication still completes.
+    func capturePostSendAnchorIntent() -> PostSendAnchorIntent {
+        PostSendAnchorIntent(
+            userScrollInteractionRevision: userScrollInteractionRevision
+        )
+    }
+
     func handleReplySendCompleted(
+        targetMessageID: NSManagedObjectID,
+        anchorIntent: PostSendAnchorIntent,
         messageCount: Int,
         totalMessageCount: Int,
         isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        guard isVisible, isInitialWindowLoaded else {
+        guard isVisible else {
             Log.diagnostic(
                 .chatView,
                 level: .info,
-                "ChatView skipping post-send refresh visible=\(isVisible) loaded=\(isInitialWindowLoaded) messages=\(messageCount) total=\(totalMessageCount)",
+                "ChatView skipping post-send publication visible=\(isVisible) loaded=\(isInitialWindowLoaded) messages=\(messageCount) total=\(totalMessageCount)",
                 category: .ui
             )
             return
         }
 
-        let anchorMessageCount = max(messageCount, totalMessageCount)
-        guard anchorMessageCount > 0 else { return }
-
         Log.diagnostic(
             .chatView,
             level: .info,
-            "ChatView post-send refresh requested messages=\(messageCount) total=\(totalMessageCount)",
+            "ChatView post-send publication requested messages=\(messageCount) total=\(totalMessageCount)",
             category: .ui
         )
-        scrollToBottom(
-            messageCount: anchorMessageCount,
-            delay: UIConfig.contentChangeScrollDelay,
-            includeStabilizationStep: true,
-            knownTotalCount: anchorMessageCount,
-            scrollAction: scrollAction
-        )
+        taskManager.run(
+            TaskKey.postSendPublication(targetMessageID)
+        ) { [weak self, ensureVisibleMessage] in
+            let didPublishTarget = await ensureVisibleMessage(targetMessageID)
+            guard !Task.isCancelled,
+                  let self,
+                  self.isVisible else {
+                return
+            }
+            guard didPublishTarget else {
+                Log.diagnostic(
+                    .chatView,
+                    level: .warning,
+                    "ChatView post-send target was not published; skipping bottom anchor",
+                    category: .ui
+                )
+                return
+            }
+            guard isInitialWindowLoaded else {
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView post-send target published before initial window completed; skipping bottom anchor",
+                    category: .ui
+                )
+                return
+            }
+            guard self.userScrollInteractionRevision ==
+                    anchorIntent.userScrollInteractionRevision else {
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView post-send target published after newer user scroll; preserving takeover",
+                    category: .ui
+                )
+                return
+            }
+
+            self.scrollToBottom(
+                messageCount: max(1, max(messageCount, totalMessageCount)),
+                delay: UIConfig.contentChangeScrollDelay,
+                includeStabilizationStep: true,
+                reloadLatestWindow: false,
+                scrollAction: scrollAction
+            )
+        }
     }
 
     func handleContactStoreDidChange(senderGroupingMessages: [ChatMessageRowModel]) {
@@ -1068,6 +1133,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         delay: TimeInterval,
         includeStabilizationStep: Bool = false,
         knownTotalCount: Int? = nil,
+        reloadLatestWindow: Bool = true,
         scrollAction: @escaping BottomAnchorAction
     ) {
         guard messageCount > 0 else { return }
@@ -1093,6 +1159,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         scheduleBottomAnchor(
             taskKey: TaskKey.bottomAnchor,
             knownTotalCount: knownTotalCount,
+            reloadLatestWindow: reloadLatestWindow,
             steps: steps,
             scrollAction: scrollAction
         )
@@ -1101,19 +1168,25 @@ final class ChatMessagesCoordinator: ObservableObject {
     private func scheduleBottomAnchor(
         taskKey: String,
         knownTotalCount: Int? = nil,
+        reloadLatestWindow: Bool = true,
         steps: [BottomAnchorStep],
         scrollAction: @escaping BottomAnchorAction
     ) {
         taskManager.run(taskKey) { [loadLatestWindowIfNeeded, sleep] in
-            await loadLatestWindowIfNeeded(knownTotalCount)
+            if reloadLatestWindow {
+                await loadLatestWindowIfNeeded(knownTotalCount)
+            }
+            guard !Task.isCancelled else { return }
 
             for step in steps {
                 if step.delay > 0 {
                     await sleep(UInt64(step.delay * 1_000_000_000))
                 }
                 guard !Task.isCancelled else { return }
-                await loadLatestWindowIfNeeded(knownTotalCount)
-                guard !Task.isCancelled else { return }
+                if reloadLatestWindow {
+                    await loadLatestWindowIfNeeded(knownTotalCount)
+                    guard !Task.isCancelled else { return }
+                }
                 await Task.yield()
                 guard !Task.isCancelled else { return }
 

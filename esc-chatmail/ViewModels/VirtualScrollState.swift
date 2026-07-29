@@ -166,6 +166,7 @@ final class VirtualScrollState: ObservableObject {
     private let unclassifiedRefreshCountTaskKey = "reconcileUnclassifiedRefreshCount"
     private let maximumAutomaticInitialLoadRetryCount = 1
     private let maximumAutomaticPostSyncValidationRetryCount = 1
+    private let maximumExplicitMessageVisibilityRetryCount = 1
     private let initialLoadRetryDelayNanoseconds: UInt64 = 100_000_000
     private var initialLoadSignpostInterval: ChatViewPerformanceSignposts.Interval?
     private var windowLoadGeneration: UInt = 0
@@ -610,6 +611,51 @@ final class VirtualScrollState: ObservableObject {
         }
 
         return await loadLatestWindow()
+    }
+
+    /// Ensures a specific, permanently identified message is published in the
+    /// latest visible window before a caller performs message-targeted work such
+    /// as post-send anchoring.
+    @discardableResult
+    func ensureVisibleMessage(_ objectID: NSManagedObjectID) async -> Bool {
+        guard !objectID.isTemporaryID else { return false }
+
+        return await ensureVisibleMessage(
+            objectID,
+            retryAttemptsRemaining: maximumExplicitMessageVisibilityRetryCount
+        )
+    }
+
+    private func ensureVisibleMessage(
+        _ objectID: NSManagedObjectID,
+        retryAttemptsRemaining: Int
+    ) async -> Bool {
+        if visibleMessages.contains(where: { $0.objectID == objectID }) {
+            return true
+        }
+
+        // This is an explicit local-send reconciliation, so it intentionally
+        // carries no follow-intent revision. User scroll takeover may suppress
+        // automatic latest following, but must not suppress publishing the
+        // optimistic row itself. Force the view-context path so unsaved pending
+        // inserts are included.
+        _ = await loadLatestWindow(forceViewContext: true)
+
+        if visibleMessages.contains(where: { $0.objectID == objectID }) {
+            return true
+        }
+
+        guard !Task.isCancelled, retryAttemptsRemaining > 0 else {
+            return false
+        }
+
+        // A competing dataset reconciliation can supersede a window generation.
+        // Yield once before the single bounded retry so that work can publish.
+        await Task.yield()
+        return await ensureVisibleMessage(
+            objectID,
+            retryAttemptsRemaining: retryAttemptsRemaining - 1
+        )
     }
 
     @discardableResult
