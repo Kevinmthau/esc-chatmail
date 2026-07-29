@@ -932,6 +932,13 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(saved.cleanedSnippet, "Can we please see alts for:")
     }
 
+    // @MainActor: these two tests call ConversationRollupUpdater's
+    // synchronous updateDisplayNameOnly, which writes managed-object
+    // properties directly and so must run on the viewContext's queue. As a
+    // nonisolated async test it ran on the cooperative pool and raced the
+    // display-info notification handlers from neighboring tests — an
+    // intermittent SIGSEGV in CI (_setLastSnapshot__ under setvfk).
+    @MainActor
     func testUpdateExistingMessage_enrichesParticipantDisplayNameFromRefreshedFromHeader() async throws {
         let senderEmail = "info@bonbonwhims.com"
         let conversation = ConversationBuilder()
@@ -987,6 +994,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "BONBONWHIMS")
     }
 
+    @MainActor
     func testUpdateExistingMessage_replacesAddressDerivedParticipantDisplayName() async throws {
         let senderEmail = "bonbonwhims@example.com"
         let conversation = ConversationBuilder()
