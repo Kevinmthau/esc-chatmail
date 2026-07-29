@@ -2319,7 +2319,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
-    func testHandleReplySendCompletedRequestsLatestWindowAndStabilizedBottomAnchor() async throws {
+    func testHandleReplySendCompletedPublishesTargetBeforeStabilizedBottomAnchor() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
             "second@example.com"
@@ -2327,6 +2327,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
         var latestWindowKnownCounts: [Int?] = []
+        var ensuredMessageIDs: [NSManagedObjectID] = []
+        var presentationEvents: [String] = []
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
@@ -2342,7 +2344,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
             clearPersonCache: {},
-            sleep: { _ in }
+            sleep: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                ensuredMessageIDs.append(messageObjectID)
+                presentationEvents.append("target-published")
+                return true
+            }
         )
 
         coordinator.handleAppear(
@@ -2356,12 +2363,18 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         await confirmInitialBottomAnchor(coordinator)
         XCTAssertTrue(coordinator.isReadyToShow)
+        latestWindowKnownCounts.removeAll()
 
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
         coordinator.handleReplySendCompleted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
             messageCount: messages.count,
             totalMessageCount: messages.count + 1,
             isInitialWindowLoaded: true
         ) { step in
+            presentationEvents.append("anchor")
             anchorSteps.append(step)
         }
 
@@ -2369,7 +2382,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 2
         }
 
-        XCTAssertEqual(latestWindowKnownCounts.last, messages.count + 1)
+        XCTAssertEqual(ensuredMessageIDs, [targetMessageID])
+        XCTAssertTrue(latestWindowKnownCounts.isEmpty)
+        XCTAssertEqual(
+            presentationEvents,
+            ["target-published", "anchor", "anchor"]
+        )
         XCTAssertEqual(
             anchorSteps,
             [
@@ -2384,6 +2402,321 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                     logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
                 )
             ]
+        )
+    }
+
+    func testHandleReplySendCompletedWaitsForExactTargetPublicationBeforeAnchoring() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsureStarted = expectation(
+            description: "Exact-message publication started"
+        )
+        var mayPublishTarget = false
+        var didPublishTarget = false
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityEnsureStarted.fulfill()
+                while !mayPublishTarget && !Task.isCancelled {
+                    await Task.yield()
+                }
+                guard !Task.isCancelled else { return false }
+                didPublishTarget = true
+                return true
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            XCTAssertTrue(
+                didPublishTarget,
+                "The exact target must publish before any anchor callback"
+            )
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [visibilityEnsureStarted], timeout: 1)
+        XCTAssertFalse(didPublishTarget)
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        mayPublishTarget = true
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+        XCTAssertTrue(didPublishTarget)
+    }
+
+    func testNewUserTakeoverDuringPostSendPublicationSuppressesOnlyAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsureStarted = expectation(
+            description: "Exact-message publication started"
+        )
+        let visibilityEnsureCompleted = expectation(
+            description: "Exact-message publication completed"
+        )
+        let unexpectedAnchor = expectation(
+            description: "A newer user interaction must suppress post-send anchoring"
+        )
+        unexpectedAnchor.isInverted = true
+        var mayPublishTarget = false
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityEnsureStarted.fulfill()
+                while !mayPublishTarget && !Task.isCancelled {
+                    await Task.yield()
+                }
+                guard !Task.isCancelled else { return false }
+                visibilityEnsureCompleted.fulfill()
+                return true
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            unexpectedAnchor.fulfill()
+        }
+
+        await fulfillment(of: [visibilityEnsureStarted], timeout: 1)
+        coordinator.handleUserScrollInteraction()
+        mayPublishTarget = true
+
+        await fulfillment(
+            of: [visibilityEnsureCompleted, unexpectedAnchor],
+            timeout: 0.1
+        )
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+    }
+
+    func testRapidReplyCompletionsKeepBothMandatoryPublicationTasks() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsuresStarted = expectation(
+            description: "Both exact-message publications started"
+        )
+        visibilityEnsuresStarted.expectedFulfillmentCount = 2
+        let visibilityEnsuresCompleted = expectation(
+            description: "Both exact-message publications completed"
+        )
+        visibilityEnsuresCompleted.expectedFulfillmentCount = 2
+        let unexpectedAnchor = expectation(
+            description: "Newer takeover must suppress both optional anchors"
+        )
+        unexpectedAnchor.isInverted = true
+        var mayPublishTargets = false
+        var publishedMessageIDs: [NSManagedObjectID] = []
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                visibilityEnsuresStarted.fulfill()
+                while !mayPublishTargets && !Task.isCancelled {
+                    await Task.yield()
+                }
+                guard !Task.isCancelled else { return false }
+                publishedMessageIDs.append(messageObjectID)
+                visibilityEnsuresCompleted.fulfill()
+                return true
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        for message in messages {
+            coordinator.handleReplySendCompleted(
+                targetMessageID: message.objectID,
+                anchorIntent: anchorIntent,
+                messageCount: messages.count,
+                totalMessageCount: messages.count,
+                isInitialWindowLoaded: true
+            ) { _ in
+                unexpectedAnchor.fulfill()
+            }
+        }
+
+        await fulfillment(of: [visibilityEnsuresStarted], timeout: 1)
+        coordinator.handleUserScrollInteraction()
+        mayPublishTargets = true
+
+        await fulfillment(
+            of: [visibilityEnsuresCompleted, unexpectedAnchor],
+            timeout: 0.1
+        )
+        XCTAssertEqual(Set(publishedMessageIDs), Set(messages.map(\.objectID)))
+    }
+
+    func testFailedPostSendTargetPublicationDoesNotAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsureCompleted = expectation(
+            description: "Exact-message publication was attempted"
+        )
+        let unexpectedAnchor = expectation(
+            description: "An absent target must not be reported as anchored"
+        )
+        unexpectedAnchor.isInverted = true
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityEnsureCompleted.fulfill()
+                return false
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            unexpectedAnchor.fulfill()
+        }
+
+        await fulfillment(
+            of: [visibilityEnsureCompleted, unexpectedAnchor],
+            timeout: 0.1
+        )
+    }
+
+    func testUserTakeoverAfterPostSendPublicationCancelsOptionalAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsureCompleted = expectation(
+            description: "Exact-message publication completed"
+        )
+        let anchorDelayStarted = expectation(
+            description: "Optional post-send anchor delay started"
+        )
+        let anchorDelayCancelled = expectation(
+            description: "Optional post-send anchor delay was cancelled"
+        )
+        let unexpectedAnchor = expectation(
+            description: "Cancelled optional anchor must not run"
+        )
+        unexpectedAnchor.isInverted = true
+        var shouldBlockAnchorDelay = false
+        var mayFinishAnchorDelay = false
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in
+                guard shouldBlockAnchorDelay else { return }
+                anchorDelayStarted.fulfill()
+                while !mayFinishAnchorDelay && !Task.isCancelled {
+                    await Task.yield()
+                }
+                if Task.isCancelled {
+                    anchorDelayCancelled.fulfill()
+                }
+            },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityEnsureCompleted.fulfill()
+                return true
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        shouldBlockAnchorDelay = true
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            unexpectedAnchor.fulfill()
+        }
+
+        await fulfillment(
+            of: [visibilityEnsureCompleted, anchorDelayStarted],
+            timeout: 1
+        )
+        coordinator.handleUserScrollInteraction()
+        mayFinishAnchorDelay = true
+
+        await fulfillment(
+            of: [anchorDelayCancelled, unexpectedAnchor],
+            timeout: 0.1
         )
     }
 
@@ -2463,7 +2796,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertTrue(anchorSteps.isEmpty)
 
         isRejectingPassiveLatestLoads = false
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
         coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: anchorIntent,
             messageCount: messages.count,
             totalMessageCount: messages.count + 1,
             isInitialWindowLoaded: true
@@ -2474,10 +2810,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         await waitUntil {
             anchorSteps.count == 2
         }
-        XCTAssertEqual(
-            latestWindowKnownCounts,
-            Array(repeating: messages.count + 1, count: 3).map(Optional.some)
-        )
+        XCTAssertTrue(latestWindowKnownCounts.isEmpty)
     }
 
     func testReplySendCompletionAfterDisappearDoesNotRestartAnchorWork() async throws {
@@ -2489,6 +2822,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             description: "Late send completion must not reload after disappear"
         )
         unexpectedPostDisappearLatestLoad.isInverted = true
+        let unexpectedPostDisappearEnsure = expectation(
+            description: "Late send completion must not publish after disappear"
+        )
+        unexpectedPostDisappearEnsure.isInverted = true
         var isRejectingPostDisappearLoads = false
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
@@ -2507,7 +2844,11 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
             clearPersonCache: {},
-            sleep: { _ in }
+            sleep: { _ in },
+            ensureVisibleMessage: { _ in
+                unexpectedPostDisappearEnsure.fulfill()
+                return true
+            }
         )
 
         coordinator.handleAppear(
@@ -2520,16 +2861,22 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in }
         await confirmInitialBottomAnchor(coordinator)
 
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
         isRejectingPostDisappearLoads = true
         coordinator.handleDisappear()
         coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: anchorIntent,
             messageCount: messages.count,
             totalMessageCount: messages.count + 1,
             isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
-        await fulfillment(of: [unexpectedPostDisappearLatestLoad], timeout: 0.1)
+        await fulfillment(
+            of: [unexpectedPostDisappearLatestLoad, unexpectedPostDisappearEnsure],
+            timeout: 0.1
+        )
 
         XCTAssertTrue(anchorSteps.isEmpty)
     }
@@ -2925,6 +3272,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         sleep: @escaping ChatMessagesCoordinator.Sleep = { _ in },
         now: @escaping ChatMessagesCoordinator.Now = {
             ProcessInfo.processInfo.systemUptime
+        },
+        ensureVisibleMessage: @escaping ChatMessagesCoordinator.MessageVisibilityEnsurer = {
+            _ in true
         }
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
@@ -2940,7 +3290,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             invalidateContactsCache: {},
             clearPersonCache: {},
             sleep: sleep,
-            now: now
+            now: now,
+            ensureVisibleMessage: ensureVisibleMessage
         )
     }
 

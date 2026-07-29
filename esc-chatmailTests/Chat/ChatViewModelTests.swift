@@ -742,12 +742,17 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.replyText = "Reply body"
         viewModel.replyingTo = replyTarget
 
-        let didSend = await viewModel.sendReply()
+        let result = await viewModel.sendReply()
 
         guard case .reply(let request)? = coordinator.lastRequest else {
             return XCTFail("Expected reply request")
         }
-        XCTAssertTrue(didSend)
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.optimisticMessageID, "optimistic-1")
+        XCTAssertEqual(
+            result?.optimisticMessageObjectID,
+            coordinator.sendResult?.optimisticMessageObjectID
+        )
         XCTAssertEqual(request.context.conversationObjectID, conversation.objectID)
         XCTAssertEqual(request.context.replyingToMessageObjectID, replyTarget.objectID)
         XCTAssertEqual(
@@ -812,12 +817,12 @@ final class ChatViewModelTests: XCTestCase {
         replyTarget.references = "<mutated-ref@example.com>"
         replyTarget.bodyText = "Mutated body"
 
-        let didSend = await viewModel.sendReply()
+        let result = await viewModel.sendReply()
 
         guard case .reply(let request)? = coordinator.lastRequest else {
             return XCTFail("Expected reply request")
         }
-        XCTAssertTrue(didSend)
+        XCTAssertNotNil(result)
         XCTAssertEqual(request.context.conversationObjectID, conversation.objectID)
         XCTAssertEqual(request.context.replyingToMessageObjectID, replyTarget.objectID)
     }
@@ -846,9 +851,9 @@ final class ChatViewModelTests: XCTestCase {
         )
         viewModel.replyText = "Retryable reply"
 
-        let didSend = await viewModel.sendReply()
+        let result = await viewModel.sendReply()
 
-        XCTAssertFalse(didSend)
+        XCTAssertNil(result)
         XCTAssertEqual(viewModel.replyText, "Retryable reply")
     }
 
@@ -878,9 +883,9 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.replyText = "Keep this draft"
         viewModel.composerState.attachments = [attachment]
 
-        let didSend = await viewModel.sendReply()
+        let result = await viewModel.sendReply()
 
-        XCTAssertFalse(didSend)
+        XCTAssertNil(result)
         XCTAssertNil(coordinator.lastRequest)
         XCTAssertEqual(viewModel.replyText, "Keep this draft")
         XCTAssertEqual(viewModel.composerState.attachments, [attachment])
@@ -909,14 +914,25 @@ final class ChatViewModelTests: XCTestCase {
 
 @MainActor
 private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinating {
+    private let coreDataStack: TestCoreDataStack
     private(set) var lastRequest: OutboundMessageRequest?
     var sendError: Error?
-    var sendResult: OutboundMessageResult? = .init(
-        optimisticMessageID: "optimistic-1",
-        conversationReference: ConversationReference(
-            persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+    var sendResult: OutboundMessageResult?
+
+    init() {
+        let coreDataStack = TestCoreDataStack()
+        self.coreDataStack = coreDataStack
+        let message = coreDataStack.viewContext.insertTestObject(Message.self)
+        message.id = "optimistic-1"
+        try! coreDataStack.viewContext.obtainPermanentIDs(for: [message])
+        self.sendResult = .init(
+            optimisticMessageID: message.id,
+            optimisticMessageObjectID: message.objectID,
+            conversationReference: ConversationReference(
+                persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+            )
         )
-    )
+    }
 
     func send(
         _ request: OutboundMessageRequest,

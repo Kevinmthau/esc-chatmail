@@ -1,4 +1,5 @@
 import XCTest
+import CoreData
 import Combine
 @testable import esc_chatmail
 
@@ -215,15 +216,24 @@ final class ComposeViewModelTests: XCTestCase {
 
 @MainActor
 private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating {
+    private let coreDataStack: TestCoreDataStack
     private(set) var lastRequest: OutboundMessageRequest?
+
+    init() {
+        coreDataStack = TestCoreDataStack()
+    }
 
     func send(
         _ request: OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks
     ) async throws -> OutboundMessageResult? {
         lastRequest = request
+        let message = coreDataStack.viewContext.insertTestObject(Message.self)
+        message.id = "optimistic-1"
+        try coreDataStack.viewContext.obtainPermanentIDs(for: [message])
         return .init(
-            optimisticMessageID: "optimistic-1",
+            optimisticMessageID: message.id,
+            optimisticMessageObjectID: message.objectID,
             conversationReference: ConversationReference(
                 persistentStoreURI: URL(string: "x-coredata://conversation/123")!
             )

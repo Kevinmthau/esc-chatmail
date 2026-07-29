@@ -345,11 +345,14 @@ final class ChatViewModel: ObservableObject {
         destination = nil
     }
 
-    /// Sends the current composer draft.
-    func sendReply() async -> Bool {
+    /// Creates the optimistic reply and returns its stable local identity.
+    ///
+    /// The caller uses this identity to make the exact row visible before
+    /// requesting any optional post-send scrolling.
+    func sendReply() async -> OutboundMessageResult? {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachments = composerState.attachments
-        guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return false }
+        guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return nil }
 
         guard !isConversationDrained else {
             Log.warning(
@@ -359,7 +362,7 @@ final class ChatViewModel: ObservableObject {
             sendErrorAlert = ChatSendErrorAlert(
                 message: "This conversation moved while you were replying. Your draft and attachments are still here."
             )
-            return false
+            return nil
         }
 
         let result: OutboundMessageResult?
@@ -383,15 +386,15 @@ final class ChatViewModel: ObservableObject {
         } catch {
             Log.error("Failed to create optimistic message for reply", category: .message, error: error)
             sendErrorAlert = ChatSendErrorAlert(message: error.localizedDescription)
-            return false
+            return nil
         }
-        guard result != nil else { return false }
+        guard let result else { return nil }
 
         // Clear composer immediately after optimistic insertion.
         replyText = ""
         replyingTo = nil
         composerState.attachments = []
-        return true
+        return result
     }
 
     static func isDrainedConversation(

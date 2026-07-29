@@ -44,6 +44,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertTrue(context.hasChanges, "Optimistic creation should defer persistence so send navigation is not blocked.")
         let fetched = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         XCTAssertFalse(fetched.objectID.isTemporaryID)
+        XCTAssertEqual(handle.optimisticMessageObjectID, fetched.objectID)
 
         let conversation = try XCTUnwrap(fetched.conversation)
         XCTAssertFalse(conversation.objectID.isTemporaryID)
