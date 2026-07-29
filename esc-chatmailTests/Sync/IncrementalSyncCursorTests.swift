@@ -137,6 +137,83 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertNil(lastSuccess)
     }
 
+    /// A message deleted server-side between the history record and the fetch
+    /// has a terminal outcome (gone) — it must not freeze the cursor the way
+    /// a real fetch failure does.
+    @MainActor
+    func testGoneMessageDoesNotFreezeCursor() async throws {
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-gone"))],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        apiClient.getMessageErrors["m-gone"] = APIError.notFound("m-gone")
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000", "A 404'd message is resolved, not a blocking failure")
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 0)
+    }
+
+    /// A deterministically malformed payload (no payload/headers) can never
+    /// succeed on retry; treating it as a failure would freeze the cursor
+    /// forever, so it must be recorded as unprocessable and released.
+    @MainActor
+    func testUnprocessableMessageDoesNotFreezeCursor() async throws {
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-raw"))],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        // Fetch succeeds but the payload is malformed (no payload/headers).
+        apiClient.getMessageResponses["m-raw"] = makeHistoryStub(id: "m-raw")
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000", "Retrying a deterministically malformed payload can never succeed")
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 0)
+    }
+
     @MainActor
     func testTruncatedHistoryFreezesCursorWithoutConsultingFailureTracker() async throws {
         apiClient.setHistoryResponsesByPageToken(makeOverflowingHistoryPages(pageCount: 50))

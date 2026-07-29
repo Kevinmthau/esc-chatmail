@@ -111,26 +111,29 @@ final class GmailAPIClientRetryBudgetTests: XCTestCase {
         let fetcher = MessageFetcher(apiClient: client)
 
         let recorder = FetchRecorder()
-        let failedIds = try await fetcher.fetchBatch(["m1"]) { messages in
+        let outcome = try await fetcher.fetchBatch(["m1"]) { messages in
             await recorder.record(messages.map(\.id))
+            return .empty
         }
 
-        XCTAssertTrue(failedIds.isEmpty)
+        XCTAssertTrue(outcome.blockingFailureIds.isEmpty)
         let persisted = await recorder.snapshot()
         XCTAssertEqual(persisted, [["m1"]])
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "one attempt per fetcher pass — no stacked client retries")
     }
 
-    func testFetchBatch_notFound_isPermanentWithoutRetry() async throws {
+    func testFetchBatch_notFound_isGoneWithoutRetry() async throws {
         StubURLProtocol.script = [.status(404)]
         let fetcher = MessageFetcher(apiClient: client)
 
         let recorder = FetchRecorder()
-        let failedIds = try await fetcher.fetchBatch(["gone"]) { messages in
+        let outcome = try await fetcher.fetchBatch(["gone"]) { messages in
             await recorder.record(messages.map(\.id))
+            return .empty
         }
 
-        XCTAssertEqual(failedIds, ["gone"])
+        XCTAssertEqual(outcome.goneIds, ["gone"], "A 404 is a terminal outcome (gone), not a blocking failure")
+        XCTAssertTrue(outcome.fetchFailedIds.isEmpty)
         XCTAssertEqual(StubURLProtocol.requestCount, 1, "404 must not burn retry passes")
     }
 }

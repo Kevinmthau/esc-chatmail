@@ -19,16 +19,16 @@ actor HistoryProcessor {
         in context: NSManagedObjectContext,
         syncStartTime: Date? = nil,
         modificationTransaction: ModificationTracker.Transaction?
-    ) async {
+    ) async throws {
         // Handle message deletions - always apply, deletions are authoritative
-        await processMessageDeletions(
+        try await processMessageDeletions(
             record.messagesDeleted,
             modificationTransaction: modificationTransaction,
             in: context
         )
 
         // Handle label additions with conflict resolution
-        await processLabelAdditions(
+        try await processLabelAdditions(
             record.labelsAdded,
             in: context,
             syncStartTime: syncStartTime,
@@ -36,7 +36,7 @@ actor HistoryProcessor {
         )
 
         // Handle label removals with conflict resolution
-        await processLabelRemovals(
+        try await processLabelRemovals(
             record.labelsRemoved,
             in: context,
             syncStartTime: syncStartTime,

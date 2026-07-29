@@ -610,7 +610,7 @@ final class LabelOperationProcessorTests: XCTestCase {
 
         try stack.saveViewContext()
 
-        let modifiedIDs = await LabelOperationProcessor.process(
+        let modifiedIDs = try await LabelOperationProcessor.process(
             items: [
                 HistoryLabelRemoved(
                     message: MessageListItem(id: "message-1", threadId: nil),
@@ -647,7 +647,7 @@ final class LabelOperationProcessorTests: XCTestCase {
         _ = LabelBuilder().trash().build(in: context)
         try stack.saveViewContext()
 
-        let modifiedIDs = await LabelOperationProcessor.process(
+        let modifiedIDs = try await LabelOperationProcessor.process(
             items: [
                 HistoryLabelAdded(
                     message: MessageListItem(id: "message-trash-1", threadId: nil),
@@ -701,7 +701,7 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
         labelIds: Set<String>?,
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
-    ) async {
+    ) async throws -> MessagePersistDisposition {
         recordSavedMessage(context: context)
 
         await context.perform {
@@ -716,6 +716,7 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
                 .inConversation(conversation)
                 .build(in: context)
         }
+        return .persisted
     }
 
     private func recordSavedMessage(context: NSManagedObjectContext) {
@@ -775,7 +776,7 @@ private final class PreparedStaleMessageCoordinator: @unchecked Sendable, Backgr
         labelIds: Set<String>?,
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
-    ) async {
+    ) async throws -> MessagePersistDisposition {
         await context.perform {
             guard let message = try? context.existingObject(with: self.messageID) as? Message else {
                 return
@@ -789,6 +790,7 @@ private final class PreparedStaleMessageCoordinator: @unchecked Sendable, Backgr
         )
         await preparedMessage.open()
         await allowSave.wait()
+        return .persisted
     }
 
     func updateConversationRollups(

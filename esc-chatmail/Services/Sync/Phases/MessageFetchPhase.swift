@@ -42,7 +42,7 @@ struct MessageFetchPhase: SyncPhase {
                 context.reportProgress(progress, status: "Processing messages... \(processed)/\(total)", phase: self)
             }
         } messageHandler: { [messagePersister] messages in
-            await messagePersister.saveMessages(
+            try await messagePersister.saveMessages(
                 messages,
                 labelIds: context.labelIds,
                 myAliases: context.myAliases,
@@ -59,8 +59,10 @@ struct MessageFetchPhase: SyncPhase {
         }
 
         if result.hasFailures {
-            log.warning("\(result.failedIds.count) messages failed to fetch")
-            await context.failureTracker.recordFailure(failedIds: result.failedIds)
+            log.warning(
+                "\(result.failedIds.count) messages failed to fetch, \(result.persistence.failedIds.count) failed to persist"
+            )
+            await context.failureTracker.recordFailure(failedIds: result.blockingFailureIds)
         }
 
         return result

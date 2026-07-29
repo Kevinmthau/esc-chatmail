@@ -163,6 +163,7 @@ actor MessagePersister {
     ///   - labelIds: Pre-fetched label IDs (Sendable) used to scope label fetches inside `context.perform`.
     ///   - myAliases: Set of user's email aliases
     ///   - context: The Core Data context to save in
+    @discardableResult
     func saveMessage(
         _ gmailMessage: GmailMessage,
         labelIds: Set<String>? = nil,
@@ -170,7 +171,7 @@ actor MessagePersister {
         sendAsAliases: [SendAsAlias] = [],
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
-    ) async {
+    ) async throws -> MessagePersistDisposition {
         let prepared = await prepareMessage(
             gmailMessage,
             myAliases: myAliases,
@@ -185,7 +186,7 @@ actor MessagePersister {
         } else {
             remoteCommittedSendMutation = nil
         }
-        await persist(
+        return try await persist(
             prepared,
             labelIds: labelIds,
             myAliases: myAliases,
@@ -203,6 +204,11 @@ actor MessagePersister {
     /// conversation creation, inbox seeding, and rollup ordering remain
     /// deterministic. Callers should pass messages already sorted into the
     /// desired persistence order (typically chronological).
+    /// - Returns: the per-ID persistence report; every message in
+    ///   `gmailMessages` lands in exactly one bucket. Throws only on
+    ///   run-fatal conditions (schema/model failures) that would fail every
+    ///   message identically.
+    @discardableResult
     func saveMessages(
         _ gmailMessages: [GmailMessage],
         labelIds: Set<String>? = nil,
@@ -210,8 +216,8 @@ actor MessagePersister {
         sendAsAliases: [SendAsAlias] = [],
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
-    ) async {
-        guard !gmailMessages.isEmpty else { return }
+    ) async throws -> MessagePersistenceReport {
+        guard !gmailMessages.isEmpty else { return .empty }
 
         let prepared = await prepareMessagesConcurrently(
             gmailMessages,
@@ -242,8 +248,9 @@ actor MessagePersister {
         )
         defer { reroutedSourceRollupBuffer.stopObserving() }
 
+        var report = MessagePersistenceReport()
         for outcome in prepared {
-            await persist(
+            let disposition = try await persist(
                 outcome,
                 labelIds: labelIds,
                 myAliases: myAliases,
@@ -257,6 +264,7 @@ actor MessagePersister {
                 }(),
                 in: context
             )
+            report.record(Self.messageId(of: outcome), disposition)
         }
 
         // Take pending IDs only after entering the context queue. Otherwise an
@@ -264,6 +272,15 @@ actor MessagePersister {
         // final repair reaches the queue.
         await context.perform {
             reroutedSourceRollupBuffer.drainAndApply(in: context)
+        }
+        return report
+    }
+
+    private nonisolated static func messageId(of prepared: PreparedMessage) -> String {
+        switch prepared {
+        case .excludedMailbox(let id, _): return id
+        case .unprocessable(let id): return id
+        case .processed(let processedMessage): return processedMessage.id
         }
     }
 
@@ -374,42 +391,45 @@ actor MessagePersister {
         reroutedSourceRollupBuffer: MessagePersisterReroutedSourceRollupBuffer? = nil,
         remoteCommittedSendMutation: RemoteCommittedSendMutationResolution?,
         in context: NSManagedObjectContext
-    ) async {
+    ) async throws -> MessagePersistDisposition {
         switch prepared {
         case .excludedMailbox(let id, let label):
-            await deleteExistingMessageIfPresent(
+            let removedCleanly = await deleteExistingMessageIfPresent(
                 id: id,
                 modificationTransaction: modificationTransaction,
                 in: context
             )
+            guard removedCleanly else {
+                // A stale local row may remain; the cursor must not treat
+                // this as a clean exclusion.
+                return .failed
+            }
             Log.debug("Skipping \(label.lowercased()) message: \(id)", category: .sync)
+            return .excluded
 
         case .unprocessable(let id):
             Log.warning("Failed to process message: \(id)", category: .sync)
+            return .unprocessable
 
         case .processed(let processedMessage):
             // Check for existing message and update if needed
-            if let reroutedSourceRollupBuffer {
-                if await updateExistingMessageDeferringSourceRollup(
-                    processedMessage,
-                    labelIds: labelIds,
-                    myAliases: myAliases,
-                    modificationTransaction: modificationTransaction,
-                    reroutedSourceRollupBuffer: reroutedSourceRollupBuffer,
-                    remoteCommittedSendMutation: remoteCommittedSendMutation,
-                    in: context
-                ) {
-                    return
-                }
-            } else if await updateExistingMessage(
+            switch await updateExistingMessageOutcome(
                 processedMessage,
                 labelIds: labelIds,
                 myAliases: myAliases,
                 modificationTransaction: modificationTransaction,
+                reroutedSourceRollupBuffer: reroutedSourceRollupBuffer,
                 remoteCommittedSendMutation: remoteCommittedSendMutation,
                 in: context
             ) {
-                return
+            case .updated:
+                return .persisted
+            case .lookupFailed:
+                // Creating here could insert a duplicate of a row that
+                // exists but could not be read.
+                return .failed
+            case .notPresent:
+                break
             }
 
             // Create new message
@@ -422,8 +442,14 @@ actor MessagePersister {
                     remoteCommittedSendMutation: remoteCommittedSendMutation,
                     in: context
                 )
+                return .persisted
+            } catch CoreDataError.entityCreationFailed(let entity) {
+                // Model/schema mismatch: every message in the run fails the
+                // same way, so this is run-fatal, not a per-message verdict.
+                throw CoreDataError.entityCreationFailed(entity)
             } catch {
                 Log.error("Failed to create message \(processedMessage.id): \(error)", category: .sync)
+                return .failed
             }
         }
     }

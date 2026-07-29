@@ -37,17 +37,15 @@ actor SyncFailureTracker {
         let consecutiveFailures = defaults.integer(forKey: SyncConfig.consecutiveFailuresKey) + 1
         defaults.set(consecutiveFailures, forKey: SyncConfig.consecutiveFailuresKey)
 
-        // Track persistent failed IDs
+        // Track persistent failed IDs. Never truncate: dropped IDs would be
+        // silently lost when the escape hatch advances the cursor past them.
+        // Growth is bounded in practice by batch size × the 3-run escape
+        // threshold, and the abandoned-message drain is bounded per run
+        // (maxAbandonedMessagesPerSync), which is the correct place to bound.
         var persistentIds = defaults.stringArray(forKey: SyncConfig.persistentFailedIdsKey) ?? []
         let existingSet = Set(persistentIds)
         let newIds = failedIds.filter { !existingSet.contains($0) }
         persistentIds.append(contentsOf: newIds)
-
-        // Limit size to prevent unbounded growth
-        let maxSize = SyncConfig.maxFailedMessagesBeforeAdvance * 2
-        if persistentIds.count > maxSize {
-            persistentIds = Array(persistentIds.suffix(SyncConfig.maxFailedMessagesBeforeAdvance))
-        }
 
         defaults.set(persistentIds, forKey: SyncConfig.persistentFailedIdsKey)
 
@@ -78,10 +76,19 @@ actor SyncFailureTracker {
         if consecutiveFailures >= SyncConfig.maxConsecutiveSyncFailures {
             log.warning("Maximum consecutive failures (\(consecutiveFailures)) reached - advancing historyId to prevent deadlock")
 
-            // Persist abandoned messages to Core Data and notify UI
+            // Persist abandoned messages to Core Data and notify UI. If the
+            // ledger save fails, the cursor must NOT advance — advancing would
+            // discard the only durable record of the skipped IDs.
             if let persistentFailedIds = defaults.stringArray(forKey: SyncConfig.persistentFailedIdsKey), !persistentFailedIds.isEmpty {
                 log.warning("Abandoning \(persistentFailedIds.count) unfetchable messages: \(persistentFailedIds.prefix(10))...")
-                await persistAbandonedMessages(messageIds: persistentFailedIds, reason: "Max sync failures reached")
+                let ledgerPersisted = await persistAbandonedMessages(
+                    messageIds: persistentFailedIds,
+                    reason: "Max sync failures reached"
+                )
+                guard ledgerPersisted else {
+                    log.error("Abandoned-message ledger save failed - keeping cursor frozen for retry")
+                    return false
+                }
             }
 
             // Reset tracking since we're moving forward
@@ -93,11 +100,13 @@ actor SyncFailureTracker {
         return false
     }
 
-    /// Persists abandoned message IDs to Core Data for later retry
-    private func persistAbandonedMessages(messageIds: [String], reason: String) async {
+    /// Persists abandoned message IDs to Core Data for later retry.
+    /// - Returns: false when the ledger save failed — the caller must not
+    ///   advance the cursor past IDs that were never durably recorded.
+    private func persistAbandonedMessages(messageIds: [String], reason: String) async -> Bool {
         let context = coreDataStack.newBackgroundContext()
 
-        await context.perform {
+        let saved: Bool = await context.perform {
             let abandonedAt = Date()
 
             // Batch fetch all existing abandoned messages in a single query (eliminates N+1)
@@ -135,10 +144,14 @@ actor SyncFailureTracker {
             do {
                 try context.save()
                 Log.info("Persisted \(messageIds.count) abandoned message IDs to Core Data", category: .sync)
+                return true
             } catch {
                 Log.error("Failed to persist abandoned messages", category: .sync, error: error)
+                return false
             }
         }
+
+        guard saved else { return false }
 
         // New records start with retryCount 0, so the drain has work again.
         mayHaveRetryableAbandonedMessages = true
@@ -151,6 +164,7 @@ actor SyncFailureTracker {
                 userInfo: ["count": messageIds.count]
             )
         }
+        return true
     }
 
     // MARK: - Query Methods

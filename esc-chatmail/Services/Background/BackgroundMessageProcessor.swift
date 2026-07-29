@@ -3,12 +3,13 @@ import CoreData
 
 protocol BackgroundSyncMessageCoordinating: AnyObject, Sendable {
     func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String>
+    @discardableResult
     func saveMessage(
         _ gmailMessage: GmailMessage,
         labelIds: Set<String>?,
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
-    ) async
+    ) async throws -> MessagePersistDisposition
     func updateConversationRollups(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
@@ -257,13 +258,26 @@ final class BackgroundMessageProcessor {
                 for await (messageId, result) in group {
                     switch result {
                     case .success(let message):
-                        await syncCoordinator.saveMessage(
-                            message,
-                            labelIds: labelIds,
-                            modificationTransaction: transaction,
-                            in: context
-                        )
-                        successCount += 1
+                        do {
+                            let disposition = try await syncCoordinator.saveMessage(
+                                message,
+                                labelIds: labelIds,
+                                modificationTransaction: transaction,
+                                in: context
+                            )
+                            // Excluded and deterministically-unprocessable
+                            // messages are handled outcomes; only a real
+                            // persistence failure may block the cursor.
+                            if disposition == .failed {
+                                failedCount += 1
+                                Log.warning("Failed to persist message \(messageId) in background", category: .background)
+                            } else {
+                                successCount += 1
+                            }
+                        } catch {
+                            failedCount += 1
+                            Log.error("Run-fatal persistence failure in background sync", category: .background, error: error)
+                        }
                     case .failure(let error):
                         failedCount += 1
                         Log.warning("Failed to fetch message \(messageId) in background: \(error.localizedDescription)", category: .background)

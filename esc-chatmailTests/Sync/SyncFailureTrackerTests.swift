@@ -103,16 +103,16 @@ final class SyncFailureTrackerTests: XCTestCase {
         XCTAssertEqual(Set(ids), Set(["a", "b", "c"]))
     }
 
-    func testRecordFailure_hugeBatchTrimsToMaxFailedMessagesLimit() async {
-        // Seed more IDs than the cap (2x max) so implementation truncates to max.
-        let maxSize = SyncConfig.maxFailedMessagesBeforeAdvance * 2
-        let oversized = (0..<(maxSize + 5)).map { "id-\($0)" }
+    func testRecordFailure_hugeBatchKeepsEveryTrackedId() async {
+        // Tracked IDs must never be truncated: dropped IDs would be silently
+        // lost when the escape hatch advances the cursor past them. Bounding
+        // happens at the drain (maxAbandonedMessagesPerSync), not here.
+        let oversized = (0..<(SyncConfig.maxFailedMessagesBeforeAdvance * 2 + 5)).map { "id-\($0)" }
 
         await sut.recordFailure(failedIds: oversized)
 
         let ids = await sut.persistentFailedIds
-        XCTAssertLessThanOrEqual(ids.count, maxSize)
-        XCTAssertGreaterThan(ids.count, 0)
+        XCTAssertEqual(ids, oversized, "Every failed ID must stay tracked until durably abandoned")
     }
 
     // MARK: - shouldAdvanceHistoryId

@@ -670,7 +670,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             photoPrefetcher: { _ in }
         )
 
-        await htmlPersister.saveMessage(
+        try await htmlPersister.saveMessage(
             GmailMessage(
                 id: processedMessage.id,
                 threadId: processedMessage.gmThreadId,
@@ -712,7 +712,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             photoPrefetcher: { _ in }
         )
 
-        await htmlPersister.saveMessage(
+        try await htmlPersister.saveMessage(
             makeMultipartAlternativeMessage(
                 id: messageId,
                 plainText: plainText,
@@ -748,7 +748,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             photoPrefetcher: { _ in }
         )
 
-        await htmlPersister.saveMessage(
+        try await htmlPersister.saveMessage(
             makeMultipartAlternativeMessage(
                 id: messageId,
                 plainText: plainText,

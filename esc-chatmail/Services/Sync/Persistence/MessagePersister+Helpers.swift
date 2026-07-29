@@ -170,12 +170,16 @@ extension MessagePersister {
         )
     }
 
+    /// Removes any local row for an excluded-mailbox message.
+    /// - Returns: false when the lookup/delete failed — the local row may
+    ///   still exist, so the message must not be reported as cleanly excluded.
+    @discardableResult
     func deleteExistingMessageIfPresent(
         id: String,
         modificationTransaction: ModificationTracker.Transaction?,
         in context: NSManagedObjectContext
-    ) async {
-        let modifiedConversationID: NSManagedObjectID? = await context.perform {
+    ) async -> Bool {
+        let (succeeded, modifiedConversationID): (Bool, NSManagedObjectID?) = await context.perform {
             let request = Message.fetchRequest()
             request.predicate = MessagePredicates.id(id)
             request.fetchLimit = 1
@@ -183,15 +187,15 @@ extension MessagePersister {
 
             do {
                 guard let message = try context.fetch(request).first else {
-                    return nil
+                    return (true, nil)
                 }
 
                 let conversationID = message.conversation?.objectID
                 context.delete(message)
-                return conversationID
+                return (true, conversationID)
             } catch {
                 Log.error("Failed to delete excluded mailbox message \(id)", category: .coreData, error: error)
-                return nil
+                return (false, nil)
             }
         }
 
@@ -201,6 +205,7 @@ extension MessagePersister {
                 in: modificationTransaction
             )
         }
+        return succeeded
     }
 
     /// Creates an attachment entity using AttachmentFactory.

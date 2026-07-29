@@ -30,7 +30,13 @@ final class BatchProcessorTests: XCTestCase {
             progressHandler: { processed, total in
                 await events.append("progress \(processed)/\(total)")
             },
-            messageHandler: { _ in },
+            messageHandler: { messages in
+                // successfulCount now reflects the persistence report, not
+                // fetch success — report every message as persisted.
+                var report = MessagePersistenceReport()
+                for message in messages { report.record(message.id, .persisted) }
+                return report
+            },
             batchCompletion: {
                 await events.append("completion")
             }
@@ -60,7 +66,7 @@ final class BatchProcessorTests: XCTestCase {
                 batchSize: 2,
                 messageFetcher: fetcher,
                 progressHandler: { _, _ in },
-                messageHandler: { _ in },
+                messageHandler: { _ in .empty },
                 batchCompletion: {
                     let count = await completions.increment()
                     if count == 2 { throw CompletionFailure() }
@@ -88,7 +94,7 @@ final class BatchProcessorTests: XCTestCase {
             batchSize: 2,
             messageFetcher: fetcher,
             progressHandler: { _, _ in },
-            messageHandler: { _ in },
+            messageHandler: { _ in .empty },
             batchCompletion: { _ = await completions.increment() }
         )
 
@@ -124,7 +130,7 @@ final class BatchProcessorTests: XCTestCase {
                 batchSize: 2,
                 messageFetcher: fetcher,
                 progressHandler: { _, _ in },
-                messageHandler: { _ in },
+                messageHandler: { _ in .empty },
                 batchCompletion: {
                     // Cancel after the first chunk commits, waiting out the
                     // startup race where the box has not been assigned yet;

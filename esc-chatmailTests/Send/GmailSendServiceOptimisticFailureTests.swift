@@ -374,7 +374,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             ),
             photoPrefetcher: { _ in }
         )
-        await persister.saveMessage(
+        try await persister.saveMessage(
             GmailMessage(
                 id: remoteResult.messageId,
                 threadId: remoteResult.threadId,

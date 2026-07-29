@@ -235,17 +235,18 @@ final class SyncEngine: ObservableObject {
     }
 
     /// Saves a message (used by BackgroundSyncManager)
+    @discardableResult
     func saveMessage(
         _ gmailMessage: GmailMessage,
         labelIds: Set<String>? = nil,
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
-    ) async {
+    ) async throws -> MessagePersistDisposition {
         // Use centralized AliasManager for alias resolution
         let myAliases = await AliasManager.shared.getAliases(from: context)
         let sendAsAliases = await SendAsAliasManager.shared.getAliases(from: context)
 
-        await messagePersister.saveMessage(
+        return try await messagePersister.saveMessage(
             gmailMessage,
             labelIds: labelIds,
             myAliases: myAliases,

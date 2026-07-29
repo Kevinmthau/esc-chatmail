@@ -60,11 +60,11 @@ struct ReconciliationPhase: SyncPhase {
 
             context.reportProgress(0.5, status: "Recovering \(missedIds.count) missed messages...", phase: self)
 
-            let failedMissedIds = try await BatchProcessor.retryFailedMessages(
+            let recoveryOutcome = try await BatchProcessor.retryFailedMessages(
                 failedIds: missedIds,
                 messageFetcher: messageFetcher
             ) { [messagePersister] messages in
-                await messagePersister.saveMessages(
+                try await messagePersister.saveMessages(
                     messages,
                     labelIds: context.labelIds,
                     myAliases: context.myAliases,
@@ -74,8 +74,10 @@ struct ReconciliationPhase: SyncPhase {
                 )
             }
 
-            if !failedMissedIds.isEmpty {
-                log.warning("Failed to fetch \(failedMissedIds.count) missed messages")
+            if recoveryOutcome.hasBlockingFailures {
+                // Missed-message recovery is a safety net outside history
+                // semantics; failures here are logged, not cursor-gating.
+                log.warning("Failed to recover \(recoveryOutcome.blockingFailureIds.count) missed messages")
             }
         }
 
