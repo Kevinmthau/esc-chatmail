@@ -136,7 +136,7 @@ final class InitialSyncOrchestrator {
 
             // Phase 4: Handle failures and determine historyId advancement
             let completionTimer = timing.start("completionPolicy")
-            let syncCompletedWithWarnings = await handleSyncCompletion(
+            let syncCompletedWithWarnings = try await handleSyncCompletion(
                 result: result,
                 profile: profile,
                 labelIds: labelIds,
@@ -328,15 +328,17 @@ final class InitialSyncOrchestrator {
         labelIds: Set<String>,
         modificationTransaction: ModificationTracker.Transaction,
         context: NSManagedObjectContext
-    ) async -> Bool {
+    ) async throws -> Bool {
         var syncCompletedWithWarnings = false
 
         if result.hasFailures {
             log.warning("Initial sync has \(result.failedIds.count) failed messages")
             syncCompletedWithWarnings = true
 
-            // Retry failed messages
-            let stillFailedIds = await BatchProcessor.retryFailedMessages(
+            // Retry failed messages. Quota exhaustion propagates: the initial
+            // sync aborts without advancing historyId or recording the
+            // remaining IDs as failures, and resumes on a later run.
+            let stillFailedIds = try await BatchProcessor.retryFailedMessages(
                 failedIds: result.failedIds,
                 messageFetcher: messageFetcher
             ) { [messagePersister, myAliases, sendAsAliases] messages in

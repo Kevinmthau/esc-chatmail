@@ -3,7 +3,7 @@ import XCTest
 
 final class MessageFetcherTests: XCTestCase {
 
-    func testFetchBatch_includesExhaustedTransientFailuresInFailedIds() async {
+    func testFetchBatch_includesExhaustedTransientFailuresInFailedIds() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.getMessageResponses["ok"] = GmailMessageBuilder().withId("ok").build()
         mockAPI.getMessageErrors["transient"] = APIError.timeout
@@ -13,7 +13,7 @@ final class MessageFetcherTests: XCTestCase {
         let fetcher = MessageFetcher(apiClient: mockAPI, clock: clock)
         let successes = SuccessCollector()
 
-        let failedIds = await fetcher.fetchBatch(["ok", "transient", "missing"]) { messages in
+        let failedIds = try await fetcher.fetchBatch(["ok", "transient", "missing"]) { messages in
             for message in messages {
                 await successes.append(message.id)
             }
@@ -24,6 +24,28 @@ final class MessageFetcherTests: XCTestCase {
         XCTAssertEqual(Set(failedIds), Set(["transient", "missing"]))
         XCTAssertEqual(mockAPI.getMessageCallCount, 6) // ok(1) + missing(1) + transient(4)
         XCTAssertEqual(clock.sleeps.count, 3, "One backoff sleep per retry attempt")
+    }
+
+    // MARK: - Quota exhaustion
+
+    func testFetchBatch_quotaExhaustionThrowsInsteadOfRecordingPerMessageFailures() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.getMessageErrors["quota"] = APIError.quotaExhausted("Daily Limit Exceeded")
+
+        let clock = FakeSyncClock()
+        let fetcher = MessageFetcher(apiClient: mockAPI, clock: clock)
+
+        do {
+            _ = try await fetcher.fetchBatch(["quota"]) { _ in }
+            XCTFail("Quota exhaustion must abort the run, not return the ID as a per-message failure")
+        } catch let APIError.quotaExhausted(message) {
+            XCTAssertTrue(message.contains("Daily Limit Exceeded"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(mockAPI.getMessageCallCount, 1, "Quota exhaustion cannot recover within the run - no retry passes")
+        XCTAssertTrue(clock.sleeps.isEmpty, "No retry backoff for an aborted run")
     }
 
     // MARK: - fetchAbandonedMessages
@@ -53,6 +75,21 @@ final class MessageFetcherTests: XCTestCase {
 
         XCTAssertTrue(result.goneIds.isEmpty, "Only a 404 proves the message is gone; auth/403 errors must not delete tracking records")
         XCTAssertEqual(Set(result.failedIds), Set(["auth", "forbidden"]))
+    }
+
+    func testFetchAbandonedMessages_quotaExhaustionRecordsNoOutcomes() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.getMessageErrors["stuck"] = APIError.quotaExhausted("Daily Limit Exceeded")
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        let result = await fetcher.fetchAbandonedMessages(["stuck"])
+
+        XCTAssertTrue(result.fetched.isEmpty)
+        XCTAssertTrue(result.goneIds.isEmpty)
+        XCTAssertTrue(
+            result.failedIds.isEmpty,
+            "Quota exhaustion is not an attempt outcome - recording it would burn the abandoned-drain retry budget"
+        )
     }
 
     func testFetchAbandonedMessages_emptyInput_returnsEmpty() async {

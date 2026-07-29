@@ -33,7 +33,9 @@ extension APIError {
             // Daily/project quota cannot recover within this run — abort and
             // let the next scheduled sync retry after the window resets.
             // Distinct from `.rateLimited` so future policy can defer longer;
-            // must never be treated as a per-message permanent failure.
+            // must never be treated as a per-message permanent failure:
+            // `MessageFetcher.fetchBatch` throws it instead of bucketing IDs,
+            // and pending-action processing requeues and stops its run.
             return .abort
         case .serverError(let code):
             return code >= 500 ? .retry : .abort

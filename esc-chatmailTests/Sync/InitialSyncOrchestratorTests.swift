@@ -335,7 +335,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         try await coreDataStack.saveAsync(context: context)
 
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
-        let hadWarnings = await sut.handleSyncCompletion(
+        let hadWarnings = try await sut.handleSyncCompletion(
             result: BatchProcessingResult(
                 totalProcessed: 1,
                 successfulCount: 0,

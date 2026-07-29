@@ -60,7 +60,7 @@ struct ReconciliationPhase: SyncPhase {
 
             context.reportProgress(0.5, status: "Recovering \(missedIds.count) missed messages...", phase: self)
 
-            let failedMissedIds = await BatchProcessor.retryFailedMessages(
+            let failedMissedIds = try await BatchProcessor.retryFailedMessages(
                 failedIds: missedIds,
                 messageFetcher: messageFetcher
             ) { [messagePersister] messages in

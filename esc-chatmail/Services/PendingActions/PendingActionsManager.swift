@@ -224,9 +224,11 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         // Process actions one by one (uses extension methods). Stops on
         // cancellation so a cancelled sync task doesn't burn through the
-        // remaining queue with backoff delays skipped.
+        // remaining queue with backoff delays skipped, and when an action
+        // reports an account-scoped failure (quota exhaustion) that would
+        // fail every remaining action identically.
         while !Task.isCancelled, let action = await fetchNextPendingAction(context: context) {
-            await processAction(action, context: context)
+            guard await processAction(action, context: context) == .continueRun else { break }
         }
 
         await cleanupCompletedActions(context: context)

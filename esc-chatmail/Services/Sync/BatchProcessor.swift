@@ -37,7 +37,10 @@ struct BatchProcessor {
         for batch in messageIds.chunked(into: batchSize) {
             try Task.checkCancellation()
 
-            let failedIds = await messageFetcher.fetchBatch(batch) { messages in
+            // Quota exhaustion propagates and aborts the remaining chunks:
+            // they would all fail identically, and per-message verdicts must
+            // not be recorded for an account-scoped condition.
+            let failedIds = try await messageFetcher.fetchBatch(batch) { messages in
                 await messageHandler(messages)
             }
 
@@ -66,16 +69,18 @@ struct BatchProcessor {
     ///   - messageHandler: Handler for successfully fetched groups of messages,
     ///     sorted into chronological order
     /// - Returns: IDs that still failed after retry
+    /// - Throws: `APIError.quotaExhausted` — the run must abort rather than
+    ///   record the remaining IDs as failures
     static func retryFailedMessages(
         failedIds: [String],
         messageFetcher: MessageFetcher,
         messageHandler: @escaping ([GmailMessage]) async -> Void
-    ) async -> [String] {
+    ) async throws -> [String] {
         guard !failedIds.isEmpty else { return [] }
 
         Log.debug("Retrying \(failedIds.count) failed messages...", category: .sync)
 
-        let stillFailedIds = await messageFetcher.fetchBatch(failedIds) { messages in
+        let stillFailedIds = try await messageFetcher.fetchBatch(failedIds) { messages in
             await messageHandler(messages)
         }
 
