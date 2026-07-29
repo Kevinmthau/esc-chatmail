@@ -56,9 +56,17 @@ extension GmailAPIClient {
                 }
                 throw APIError.historyIdExpired
 
+            case 403:
+                // Reason-aware mapping shared with the message path. Note the
+                // history path's thrownAPIErrorsAbortImmediately: a 403
+                // rate-limit aborts this run as `.rateLimited` (recovery
+                // classifies it retryable at run level) instead of spinning
+                // same-request retries mid-history.
+                throw self.classify403(from: data)
+
             case 400...499:
-                // Remaining client errors (403 quota/scope, 400 bad request …)
-                // are non-retriable; mirrors the message path. The engine owns
+                // Remaining client errors (400 bad request …) are
+                // non-retriable; mirrors the message path. The engine owns
                 // 429/401 before this mapping is consulted.
                 let errorMessage = self.gmailErrorMessage(from: data)
                     ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)

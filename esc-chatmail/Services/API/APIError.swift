@@ -9,10 +9,15 @@ enum APIError: LocalizedError {
     case invalidData(String)
     case authenticationError
     case credentialsRevoked
-    /// Server rejected with 429. `retryAfter` carries the (capped) server
-    /// Retry-After in seconds when the response provided one, so outer retry
-    /// owners can honor server pacing instead of synthetic backoff.
+    /// Server rejected with 429, or a 403 whose `errors[].reason` names a
+    /// per-user/per-request rate limit. `retryAfter` carries the (capped)
+    /// server Retry-After in seconds when the response provided one, so outer
+    /// retry owners can honor server pacing instead of synthetic backoff.
     case rateLimited(retryAfter: TimeInterval?)
+    /// Gmail reported the account's daily/project quota exhausted (403 with
+    /// reason dailyLimitExceeded/quotaExceeded). Distinct from `rateLimited`:
+    /// same-request retries cannot succeed until the quota window resets.
+    case quotaExhausted(String)
     case serverError(Int)
     case timeout
     case historyIdExpired
@@ -37,6 +42,8 @@ enum APIError: LocalizedError {
                 return "Rate limited by server (retry after \(Int(retryAfter))s)"
             }
             return "Rate limited by server"
+        case .quotaExhausted(let message):
+            return "Gmail API quota exhausted: \(message)"
         case .serverError(let code):
             return "Server error: \(code)"
         case .timeout:
@@ -62,6 +69,19 @@ struct GmailErrorResponse: Codable {
         let code: Int
         let message: String
         let status: String?
+        /// Gmail's per-error items; `reason` is the actionable discriminator
+        /// (e.g. rateLimitExceeded vs insufficientPermissions on a 403).
+        let errors: [ErrorItem]?
+
+        var primaryReason: String? {
+            errors?.compactMap(\.reason).first
+        }
+    }
+
+    struct ErrorItem: Codable {
+        let message: String?
+        let domain: String?
+        let reason: String?
     }
 }
 

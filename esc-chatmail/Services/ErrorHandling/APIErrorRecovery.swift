@@ -29,6 +29,12 @@ extension APIError {
             return .abortNoRetry
         case .rateLimited, .timeout, .networkError:
             return .retry
+        case .quotaExhausted:
+            // Daily/project quota cannot recover within this run — abort and
+            // let the next scheduled sync retry after the window resets.
+            // Distinct from `.rateLimited` so future policy can defer longer;
+            // must never be treated as a per-message permanent failure.
+            return .abort
         case .serverError(let code):
             return code >= 500 ? .retry : .abort
         case .invalidURL, .invalidData, .decodingError, .notFound:
