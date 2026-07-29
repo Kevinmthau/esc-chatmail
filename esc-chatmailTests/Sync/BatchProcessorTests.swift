@@ -53,6 +53,36 @@ final class BatchProcessorTests: XCTestCase {
         ])
     }
 
+    /// successfulCount reflects the persistence report, and persistence
+    /// failures make the whole result a blocking failure even when every
+    /// fetch succeeded.
+    func testMixedPersistenceReportGatesResultTruthfully() async throws {
+        let ids = ["a", "b", "c"]
+        let api = MockGmailAPIClient()
+        let fetcher = makeFetcher(ids: ids, api: api)
+
+        let result = try await BatchProcessor.processMessages(
+            messageIds: ids,
+            batchSize: 3,
+            messageFetcher: fetcher,
+            progressHandler: { _, _ in },
+            messageHandler: { messages in
+                var report = MessagePersistenceReport()
+                for (index, message) in messages.enumerated() {
+                    report.record(message.id, index == 0 ? .failed : .persisted)
+                }
+                return report
+            }
+        )
+
+        XCTAssertEqual(result.totalProcessed, 3)
+        XCTAssertEqual(result.successfulCount, 2, "Only persisted messages count as successful")
+        XCTAssertTrue(result.failedIds.isEmpty, "No fetch failures occurred")
+        XCTAssertTrue(result.hasFailures, "A persistence failure must gate the cursor")
+        XCTAssertEqual(result.blockingFailureIds.count, 1)
+        XCTAssertEqual(result.persistence.failedIds.count, 1)
+    }
+
     func testBatchCompletionErrorAbortsRemainingChunks() async {
         struct CompletionFailure: Error {}
         let ids = ["a", "b", "c", "d", "e", "f"]

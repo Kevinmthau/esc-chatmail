@@ -173,6 +173,56 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(historyId, "2000", "A 404'd message is resolved, not a blocking failure")
         let consecutive = await failureTracker.consecutiveFailureCount
         XCTAssertEqual(consecutive, 0)
+        XCTAssertGreaterThanOrEqual(
+            apiClient.getMessageCallCount, 1,
+            "Positive control: the message must actually have been requested"
+        )
+    }
+
+    /// The core truthfulness contract: a message that FETCHES successfully
+    /// but fails to PERSIST must freeze the cursor exactly like a fetch
+    /// failure — previously it was counted successful and skipped forever.
+    @MainActor
+    func testPersistenceFailureFreezesCursor() async throws {
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-new"))],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+
+        struct RoutingFailure: Error {}
+        let sut = makeOrchestrator(conversationCreationError: RoutingFailure())
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertGreaterThanOrEqual(
+            apiClient.getMessageCallCount, 1,
+            "Positive control: the fetch must have succeeded before persistence failed"
+        )
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(
+            historyId, Self.startingHistoryId,
+            "A fetched-but-unpersisted message must freeze the cursor"
+        )
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 1, "Persistence failures must count toward the escape threshold")
     }
 
     /// A deterministically malformed payload (no payload/headers) can never
@@ -212,6 +262,10 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(historyId, "2000", "Retrying a deterministically malformed payload can never succeed")
         let consecutive = await failureTracker.consecutiveFailureCount
         XCTAssertEqual(consecutive, 0)
+        XCTAssertGreaterThanOrEqual(
+            apiClient.getMessageCallCount, 1,
+            "Positive control: the message must actually have been fetched and classified"
+        )
     }
 
     @MainActor
@@ -254,10 +308,20 @@ final class IncrementalSyncCursorTests: XCTestCase {
     }
 
     @MainActor
-    private func makeOrchestrator() -> IncrementalSyncOrchestrator {
-        let conversationManager = ConversationManager(
-            currentUserEmail: { Self.myEmail }
-        )
+    private func makeOrchestrator(conversationCreationError: Error? = nil) -> IncrementalSyncOrchestrator {
+        let conversationManager: ConversationManager
+        if let conversationCreationError {
+            conversationManager = ConversationManager(
+                findOrCreateConversationHandler: { _, _, _, _, _, _ in
+                    throw conversationCreationError
+                },
+                currentUserEmail: { Self.myEmail }
+            )
+        } else {
+            conversationManager = ConversationManager(
+                currentUserEmail: { Self.myEmail }
+            )
+        }
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
             saveHTML: { _, _ in nil },

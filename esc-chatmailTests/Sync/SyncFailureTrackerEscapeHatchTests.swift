@@ -93,6 +93,33 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         XCTAssertEqual(rows.first?.retryCount, 2, "Re-abandonment must not reset the drain's retry budget")
     }
 
+    /// A failed abandoned-ledger save must block the escape hatch: advancing
+    /// would discard the only durable record of the IDs being skipped.
+    func testFailedLedgerSaveBlocksEscapeHatch() async throws {
+        let failingStack = CoreDataStack(
+            persistentContainerForTesting: FailingReadStore.makeFailingContainer()
+        )
+        let failingTracker = SyncFailureTracker(defaults: defaults, coreDataStack: failingStack)
+
+        for _ in 0..<SyncConfig.maxConsecutiveSyncFailures {
+            await failingTracker.recordFailure(failedIds: ["stuck-1"])
+        }
+
+        let shouldAdvance = await failingTracker.shouldAdvanceHistoryId(
+            hadFailures: true,
+            latestHistoryId: "999"
+        )
+
+        XCTAssertFalse(shouldAdvance, "The cursor must stay frozen when the ledger save fails")
+        let consecutive = await failingTracker.consecutiveFailureCount
+        XCTAssertEqual(
+            consecutive, SyncConfig.maxConsecutiveSyncFailures,
+            "Failure tracking must survive so the hatch retries next run"
+        )
+        let trackedIds = await failingTracker.persistentFailedIds
+        XCTAssertEqual(trackedIds, ["stuck-1"], "Tracked IDs must not be cleared on a failed ledger save")
+    }
+
     func testBelowThresholdDoesNotAdvanceAndPersistsNothing() async throws {
         for _ in 0..<(SyncConfig.maxConsecutiveSyncFailures - 1) {
             await tracker.recordFailure(failedIds: ["stuck-1"])

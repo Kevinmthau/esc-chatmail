@@ -109,11 +109,21 @@ final class BackgroundMessageProcessor {
         let syncCoordinator = await MainActor.run { self.syncCoordinator }
 
         if !changeSet.messageIdsToDelete.isEmpty {
-            let deletedConversationIDs = await deleteMessages(
-                messageIds: Array(changeSet.messageIdsToDelete),
-                modificationTransaction: modificationTransaction,
-                in: context
-            )
+            let deletedConversationIDs: Set<NSManagedObjectID>
+            do {
+                deletedConversationIDs = try await deleteMessages(
+                    messageIds: Array(changeSet.messageIdsToDelete),
+                    modificationTransaction: modificationTransaction,
+                    in: context
+                )
+            } catch {
+                Log.error("Background history processing failed to apply deletions", category: .background, error: error)
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+                return BackgroundMessageProcessingResult(
+                    fetchedCount: 0,
+                    failedFetchCount: 1
+                )
+            }
             let deletionSaved = await rollupMutationSerializer.performSyncMutation(
                 conversationIDs: deletedConversationIDs,
                 in: context
@@ -361,36 +371,33 @@ final class BackgroundMessageProcessor {
         }
     }
 
-    /// Deletes messages from Core Data
+    /// Deletes messages from Core Data. Throws on Core Data failure — like
+    /// the foreground path, a lost deletion is indistinguishable from "no
+    /// local rows matched" and must not let the background cursor advance.
     @discardableResult
     func deleteMessages(
         messageIds: [String],
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
-    ) async -> Set<NSManagedObjectID> {
-        let modifiedConversationIDs: Set<NSManagedObjectID> = await context.perform {
+    ) async throws -> Set<NSManagedObjectID> {
+        let modifiedConversationIDs: Set<NSManagedObjectID> = try await context.perform {
             let fetchRequest: NSFetchRequest<Message> = Message.fetchRequest()
             fetchRequest.predicate = MessagePredicates.ids(messageIds)
             fetchRequest.fetchBatchSize = 100
             fetchRequest.relationshipKeyPathsForPrefetching = ["conversation", "attachments"]
 
-            do {
-                let messages = try context.fetch(fetchRequest)
-                var conversationIDs: Set<NSManagedObjectID> = []
-                conversationIDs.reserveCapacity(messages.count)
+            let messages = try context.fetch(fetchRequest)
+            var conversationIDs: Set<NSManagedObjectID> = []
+            conversationIDs.reserveCapacity(messages.count)
 
-                for message in messages {
-                    if let conversationID = message.conversation?.objectID {
-                        conversationIDs.insert(conversationID)
-                    }
-                    context.delete(message)
+            for message in messages {
+                if let conversationID = message.conversation?.objectID {
+                    conversationIDs.insert(conversationID)
                 }
-
-                return conversationIDs
-            } catch {
-                Log.error("Failed to batch delete background messages", category: .background, error: error)
-                return []
+                context.delete(message)
             }
+
+            return conversationIDs
         }
 
         if !modifiedConversationIDs.isEmpty {

@@ -83,31 +83,31 @@ final class SyncFailureTrackerTests: XCTestCase {
         XCTAssertEqual(ids, Set(["id-1", "id-2"]))
     }
 
-    func testRecordFailure_multipleBatches_accumulatesCounterAndIds() async {
-        await sut.recordFailure(failedIds: ["a"])
+    func testRecordFailure_laterRunReplacesTrackedSet() async {
+        // Each failing run reports its complete failing set over the same
+        // frozen window; an ID absent from the latest run either succeeded or
+        // is gone, so keeping it would spuriously abandon recovered messages.
+        await sut.recordFailure(failedIds: ["a", "b"])
         await sut.recordFailure(failedIds: ["b", "c"])
 
         let count = await sut.consecutiveFailureCount
         XCTAssertEqual(count, 2)
-        let ids = Set(await sut.persistentFailedIds)
-        XCTAssertEqual(ids, Set(["a", "b", "c"]))
+        let ids = await sut.persistentFailedIds
+        XCTAssertEqual(ids, ["b", "c"], "Recovered IDs must drop out of tracking")
     }
 
-    func testRecordFailure_duplicateIdsAcrossBatches_notDoubled() async {
-        await sut.recordFailure(failedIds: ["a", "b"])
-        await sut.recordFailure(failedIds: ["b", "c"])
+    func testRecordFailure_duplicateIdsWithinRun_notDoubled() async {
+        await sut.recordFailure(failedIds: ["a", "b", "b", "a", "c"])
 
         let ids = await sut.persistentFailedIds
-        // b should only appear once
-        XCTAssertEqual(ids.filter { $0 == "b" }.count, 1)
-        XCTAssertEqual(Set(ids), Set(["a", "b", "c"]))
+        XCTAssertEqual(ids, ["a", "b", "c"])
     }
 
     func testRecordFailure_hugeBatchKeepsEveryTrackedId() async {
         // Tracked IDs must never be truncated: dropped IDs would be silently
         // lost when the escape hatch advances the cursor past them. Bounding
         // happens at the drain (maxAbandonedMessagesPerSync), not here.
-        let oversized = (0..<(SyncConfig.maxFailedMessagesBeforeAdvance * 2 + 5)).map { "id-\($0)" }
+        let oversized = (0..<25).map { "id-\($0)" }
 
         await sut.recordFailure(failedIds: oversized)
 

@@ -52,4 +52,23 @@ final class FailingReadStore: NSIncrementalStore {
         context.persistentStoreCoordinator = coordinator
         return context
     }
+
+    /// A persistent container backed solely by a failing store, for injecting
+    /// store-level failures into components that create their own contexts
+    /// (e.g. via `CoreDataStack(persistentContainerForTesting:)`).
+    static func makeFailingContainer() -> NSPersistentContainer {
+        _ = registerOnce
+        let model = CoreDataStack.shared.persistentContainer.managedObjectModel
+        let container = NSPersistentContainer(name: "ESCChatmail", managedObjectModel: model)
+        let description = NSPersistentStoreDescription(
+            url: URL(fileURLWithPath: "/dev/null/failing-read-store-\(UUID().uuidString)")
+        )
+        description.type = storeType
+        description.shouldAddStoreAsynchronously = false
+        container.persistentStoreDescriptions = [description]
+        container.loadPersistentStores { _, error in
+            precondition(error == nil, "FailingReadStore must load; requests fail, not the store itself")
+        }
+        return container
+    }
 }

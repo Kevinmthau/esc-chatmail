@@ -37,15 +37,17 @@ actor SyncFailureTracker {
         let consecutiveFailures = defaults.integer(forKey: SyncConfig.consecutiveFailuresKey) + 1
         defaults.set(consecutiveFailures, forKey: SyncConfig.consecutiveFailuresKey)
 
-        // Track persistent failed IDs. Never truncate: dropped IDs would be
-        // silently lost when the escape hatch advances the cursor past them.
-        // Growth is bounded in practice by batch size × the 3-run escape
-        // threshold, and the abandoned-message drain is bounded per run
-        // (maxAbandonedMessagesPerSync), which is the correct place to bound.
-        var persistentIds = defaults.stringArray(forKey: SyncConfig.persistentFailedIdsKey) ?? []
-        let existingSet = Set(persistentIds)
-        let newIds = failedIds.filter { !existingSet.contains($0) }
-        persistentIds.append(contentsOf: newIds)
+        // Track this run's complete failing set, REPLACING the previous one.
+        // The cursor is frozen while failures persist, so each failing run
+        // re-scans the same window and reports every ID still failing — an ID
+        // absent from the latest run either succeeded or is gone, and keeping
+        // it would let stale IDs accumulate and be spuriously abandoned by
+        // the escape hatch. Never truncate (dropped IDs would be silently
+        // lost when the escape hatch advances); size is bounded by one sync
+        // window's failures, and the abandoned-message drain bounds per-run
+        // retry work (maxAbandonedMessagesPerSync).
+        var seen = Set<String>()
+        let persistentIds = failedIds.filter { seen.insert($0).inserted }
 
         defaults.set(persistentIds, forKey: SyncConfig.persistentFailedIdsKey)
 

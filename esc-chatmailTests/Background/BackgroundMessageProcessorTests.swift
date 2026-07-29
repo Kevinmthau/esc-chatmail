@@ -474,7 +474,7 @@ final class BackgroundMessageProcessorTests: XCTestCase {
 
         let backgroundContext = stack.newBackgroundContext()
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
-        await processor.deleteMessages(
+        try await processor.deleteMessages(
             messageIds: ["delete-me"],
             modificationTransaction: modificationTransaction,
             in: backgroundContext
