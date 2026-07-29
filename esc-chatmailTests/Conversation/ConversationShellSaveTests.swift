@@ -70,39 +70,34 @@ final class ConversationShellSaveTests: XCTestCase {
         XCTAssertTrue(callerStillDirty, "The caller's pending changes remain its own to save")
     }
 
-    /// Participants attach in the caller's context (batch-prefetched Person
-    /// cache) and become durable with the caller's save, not the shell save.
-    func testParticipantsAttachInCallerContextAndRideItsSave() async throws {
+    /// The published row must carry its full identity: participants (and
+    /// their Person rows) are durable WITH the shell save. A durable
+    /// participant-less conversation would match the maintenance sweep's
+    /// empty-conversation predicate and render as "Unknown Contact".
+    func testParticipantsAreDurableWithThePublishedShell() async throws {
         let context = testStack.newBackgroundContext()
         let serializer = ConversationCreationSerializer()
 
-        let objectID = try await serializer.findOrCreateConversationObjectID(
+        _ = try await serializer.findOrCreateConversationObjectID(
             for: makeIdentity(),
             in: context
         )
 
-        let pendingParticipants: Int = await context.perform {
-            let conversation = try? context.existingObject(with: objectID) as? Conversation
-            return conversation?.participants?.count ?? -1
-        }
-        XCTAssertEqual(pendingParticipants, 1, "Participants exist as pending caller-context state")
-
+        // Fresh context, store truth only, no caller save.
         let verification = testStack.newBackgroundContext()
-        let storedBeforeSave: Int = await verification.perform {
-            let request = ConversationParticipant.fetchRequest()
-            request.includesPendingChanges = false
-            return (try? verification.count(for: request)) ?? -1
+        let (participantCount, personCount): (Int, Int) = await verification.perform {
+            let participants = ConversationParticipant.fetchRequest()
+            participants.includesPendingChanges = false
+            let persons = Person.fetchRequest()
+            persons.predicate = NSPredicate(format: "email == %@", "alice@example.com")
+            persons.includesPendingChanges = false
+            return (
+                (try? verification.count(for: participants)) ?? -1,
+                (try? verification.count(for: persons)) ?? -1
+            )
         }
-        XCTAssertEqual(storedBeforeSave, 0, "Participants ride the caller's save, not the shell save")
-
-        try await context.perform { try context.save() }
-
-        let storedAfterSave: Int = await verification.perform {
-            let request = ConversationParticipant.fetchRequest()
-            request.includesPendingChanges = false
-            return (try? verification.count(for: request)) ?? -1
-        }
-        XCTAssertEqual(storedAfterSave, 1)
+        XCTAssertEqual(participantCount, 1, "Participants must publish with the shell, not lag it")
+        XCTAssertEqual(personCount, 1, "The participant's Person row must be durable too")
     }
 
     /// Intra-batch dedup: a second resolution for the same identity on the
@@ -132,9 +127,14 @@ final class ConversationShellSaveTests: XCTestCase {
     }
 
     /// A failed dedup lookup must throw — creating anyway could duplicate a
-    /// conversation that exists but could not be read.
+    /// conversation that exists but could not be read. The store's request
+    /// log proves the abort happened AT the lookup: the failing store saw
+    /// only fetch requests, never a save.
     func testLookupFailureThrowsInsteadOfCreating() async throws {
         let failingContext = try FailingReadStore.makeFailingContext()
+        let failingStore = try XCTUnwrap(
+            failingContext.persistentStoreCoordinator?.persistentStores.first as? FailingReadStore
+        )
         let serializer = ConversationCreationSerializer()
 
         do {
@@ -146,5 +146,10 @@ final class ConversationShellSaveTests: XCTestCase {
         } catch {
             // Expected.
         }
+
+        XCTAssertEqual(
+            failingStore.requestTypes, [.fetchRequestType],
+            "The serializer must abort at the dedup lookup, before any create/save reaches a store"
+        )
     }
 }

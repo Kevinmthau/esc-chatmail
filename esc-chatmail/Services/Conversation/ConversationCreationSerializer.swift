@@ -72,14 +72,22 @@ actor ConversationCreationSerializer {
             return existingObjectID
         }
 
-        // Phase 2: create and commit the conversation SHELL in a dedicated
-        // sibling context so the save publishes only the new row. The shell
-        // must be store-visible immediately (cross-context and intra-batch
-        // dedup both use includesPendingChanges = false fetches, and the row
-        // publishes to the UI before its first message persists), but saving
-        // the caller's context here would commit half-processed batch state —
-        // and bypass the orchestrator's allowsIntermediateContextSaves guard.
-        // The save also yields the permanent objectID callers rely on.
+        // Phase 2: create and commit the complete new-conversation graph
+        // (conversation + participants + any not-yet-stored Person rows) in a
+        // dedicated sibling context. The row must be store-visible immediately
+        // (cross-context and intra-batch dedup both use
+        // includesPendingChanges = false fetches, and the row publishes to
+        // the UI before its first message persists), but saving the caller's
+        // context here would commit half-processed batch state — and bypass
+        // the orchestrator's allowsIntermediateContextSaves guard. The save
+        // commits only NEW rows and yields the permanent objectID callers
+        // rely on. Committing participants WITH the row matters: a durable
+        // participant-less conversation would match the maintenance sweep's
+        // empty-conversation predicate, render as "Unknown Contact", and have
+        // no repair path. Person resolution store-fetches in this context; a
+        // Person pending unsaved in the caller's context can be duplicated
+        // here (narrow window) and is repaired by the Person merge pass —
+        // strictly better than durable identity-less rows.
         guard let coordinator = context.persistentStoreCoordinator else {
             throw CoreDataError.persistentFailure(
                 NSError(
@@ -96,7 +104,7 @@ actor ConversationCreationSerializer {
         let shellObjectID: NSManagedObjectID = try await shellContext.perform {
             let shell: Conversation
             do {
-                shell = try ConversationFactory.createShell(
+                shell = try ConversationFactory.create(
                     for: identity,
                     initialLastMessageDate: initialLastMessageDate,
                     initialSnippet: initialSnippet,
@@ -114,19 +122,6 @@ actor ConversationCreationSerializer {
                 throw error
             }
             return shell.objectID
-        }
-
-        // Phase 3: attach participants in the caller's context, where Person
-        // resolution hits the batch-prefetched factory cache (a sibling
-        // context would mint duplicate Person rows — Person.email has no
-        // uniqueness constraint). Participants ride the caller's next save.
-        // If attachment fails, the durable shell is participant-less; the
-        // messageless-conversation grace-period repair covers that window.
-        try await context.perform {
-            guard let conversation = try context.existingObject(with: shellObjectID) as? Conversation else {
-                throw CoreDataError.entityCreationFailed("Conversation")
-            }
-            try ConversationFactory.attachParticipants(for: identity, to: conversation, in: context)
         }
 
         return shellObjectID
