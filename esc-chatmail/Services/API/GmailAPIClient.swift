@@ -195,8 +195,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             if let statusCode {
                 switch statusCode {
                 case 403:
-                    let errorMessage = self.gmailErrorMessage(from: data) ?? "Missing required OAuth permissions"
-                    throw APIError.invalidData("Gmail API 403: \(errorMessage)")
+                    throw self.classify403(from: data)
 
                 case 404:
                     throw APIError.notFound(self.gmailErrorMessage(from: data) ?? "resource")
@@ -420,6 +419,23 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         }
 
         throw lastError ?? URLError(.unknown)
+    }
+
+    /// Gmail uses 403 for both retryable rate limiting and terminal
+    /// policy/scope failures; the nested `errors[].reason` disambiguates.
+    /// See https://developers.google.com/workspace/gmail/api/guides/handle-errors
+    nonisolated func classify403(from data: Data) -> APIError {
+        let message = gmailErrorMessage(from: data) ?? "Missing required OAuth permissions"
+        switch gmailErrorDetail(from: data)?.primaryReason {
+        case "rateLimitExceeded", "userRateLimitExceeded":
+            return .rateLimited(retryAfter: nil)
+        case "dailyLimitExceeded", "quotaExceeded":
+            return .quotaExhausted(message)
+        default:
+            // Policy/scope failures (insufficientPermissions, domainPolicy,
+            // accessNotConfigured, …) and reason-less bodies stay terminal.
+            return .invalidData("Gmail API 403: \(message)")
+        }
     }
 
     private nonisolated func gmailErrorDetail(from data: Data) -> GmailErrorResponse.GmailErrorDetail? {

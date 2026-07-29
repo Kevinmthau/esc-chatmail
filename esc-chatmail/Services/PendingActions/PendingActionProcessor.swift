@@ -1,6 +1,15 @@
 import Foundation
 import CoreData
 
+/// Whether the pending-action processing loop may continue after an action's
+/// outcome. `.stopRun` means the failure is account-scoped (Gmail quota
+/// exhausted): every remaining action would fail identically, burning its
+/// retry budget toward abandonment for a condition no action caused.
+enum PendingActionRunDisposition {
+    case continueRun
+    case stopRun
+}
+
 /// Extension containing action processing logic for PendingActionsManager.
 ///
 /// This handles the execution of pending actions, including retry logic,
@@ -143,8 +152,10 @@ extension PendingActionsManager {
         }
     }
 
-    /// Processes a single pending action.
-    func processAction(_ action: PendingAction, context: NSManagedObjectContext) async {
+    /// Processes a single pending action and reports whether the processing
+    /// run may continue.
+    @discardableResult
+    func processAction(_ action: PendingAction, context: NSManagedObjectContext) async -> PendingActionRunDisposition {
         let objectID = action.objectID
         let actionType = action.actionTypeEnum
         let messageId = action.messageIdValue
@@ -178,9 +189,20 @@ extension PendingActionsManager {
                 "Processed action: \(type.rawValue) for message: \(messageId ?? "N/A")",
                 category: .sync
             )
+            return .continueRun
 
         } catch {
             Log.error("Failed to process action: \(error)", category: .sync)
+
+            if let apiError = error as? APIError, case .quotaExhausted = apiError {
+                // Account-scoped, not a verdict on this action: requeue it
+                // untouched (no retry-budget burn, no abandonment) and stop
+                // the run; a later cycle retries after the quota window
+                // resets.
+                Log.warning("Gmail quota exhausted - requeueing action and stopping the pending-action run", category: .sync)
+                await updateActionStatus(objectID: objectID, status: "pending", context: context)
+                return .stopRun
+            }
 
             let shouldRetry = shouldRetryError(error)
             await handleActionFailure(
@@ -199,8 +221,11 @@ extension PendingActionsManager {
                 // - After 2nd failure (retryCount was 1): 2^1 * base = 4s
                 // - After 3rd failure (retryCount was 2): 2^2 * base = 8s, etc.
                 let delay = baseRetryDelay * pow(2.0, Double(retryCount))
-                guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000)) else { return }
+                guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000)) else {
+                    return .stopRun
+                }
             }
+            return .continueRun
         }
     }
 

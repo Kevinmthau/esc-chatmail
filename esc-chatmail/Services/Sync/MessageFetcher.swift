@@ -16,6 +16,11 @@ private struct BoundedFetchResult {
     /// Largest server-provided Retry-After (seconds, capped) among rate-limited
     /// failures in this pass — the outer retry loop honors it over synthetic backoff.
     let maxRetryAfterSeconds: TimeInterval?
+    /// Set when Gmail reported the account's quota exhausted during this pass.
+    /// The pass stops issuing requests and the affected IDs appear in no
+    /// failure bucket: quota exhaustion is account-scoped, never a
+    /// per-message verdict.
+    let quotaError: APIError?
 }
 
 /// Outcome of a single retry pass over previously abandoned messages
@@ -98,6 +103,7 @@ final class MessageFetcher: @unchecked Sendable {
         var notFoundIds: [String] = []
         var exhaustedRetryIds: [String] = []
         var maxRetryAfterSeconds: TimeInterval?
+        var quotaError: APIError?
 
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             var iterator = ids.makeIterator()
@@ -142,28 +148,43 @@ final class MessageFetcher: @unchecked Sendable {
                 case .success(let message):
                     successfulMessages.append(message)
                 case .failure(let error):
-                    if case APIError.rateLimited(let retryAfter) = error, let retryAfter {
-                        maxRetryAfterSeconds = max(maxRetryAfterSeconds ?? 0, retryAfter)
-                    }
-                    if self.isRetriableError(error) {
-                        // Transient error (timeout, network, 5xx)
-                        if isFinalAttempt {
-                            // We've exhausted retries, but this might succeed on future sync
-                            exhaustedRetryIds.append(id)
-                        } else {
-                            retriableFailedIds.append(id)
+                    if let apiError = error as? APIError, case .quotaExhausted = apiError {
+                        // Account-scoped: every further request this pass is
+                        // doomed, so stop issuing them and give the affected
+                        // IDs no verdict — quota exhaustion must never be
+                        // recorded as a per-message failure.
+                        if quotaError == nil {
+                            quotaError = apiError
+                            group.cancelAll()
                         }
-                    } else if case APIError.notFound = error {
-                        // The server says the message doesn't exist
-                        notFoundIds.append(id)
-                    } else {
-                        // Non-retriable error (4xx, auth, decoding) - truly permanent
-                        permanentlyFailedIds.append(id)
+                    } else if quotaError == nil {
+                        if case APIError.rateLimited(let retryAfter) = error, let retryAfter {
+                            maxRetryAfterSeconds = max(maxRetryAfterSeconds ?? 0, retryAfter)
+                        }
+                        if self.isRetriableError(error) {
+                            // Transient error (timeout, network, 5xx)
+                            if isFinalAttempt {
+                                // We've exhausted retries, but this might succeed on future sync
+                                exhaustedRetryIds.append(id)
+                            } else {
+                                retriableFailedIds.append(id)
+                            }
+                        } else if case APIError.notFound = error {
+                            // The server says the message doesn't exist
+                            notFoundIds.append(id)
+                        } else {
+                            // Non-retriable error (4xx, auth, decoding) - truly permanent
+                            permanentlyFailedIds.append(id)
+                        }
                     }
+                    // Failures arriving after the quota signal are the
+                    // cancellations of in-flight tasks; those IDs also get
+                    // no verdict.
                 }
 
-                // Start next task if there are more IDs
-                if let nextId = iterator.next() {
+                // Start next task if there are more IDs (and the pass wasn't
+                // aborted by quota exhaustion)
+                if quotaError == nil, let nextId = iterator.next() {
                     group.addTask { await fetchOnce(nextId) }
                     activeTasks += 1
                 }
@@ -176,7 +197,8 @@ final class MessageFetcher: @unchecked Sendable {
             permanentlyFailedIds: permanentlyFailedIds,
             notFoundIds: notFoundIds,
             exhaustedRetryIds: exhaustedRetryIds,
-            maxRetryAfterSeconds: maxRetryAfterSeconds
+            maxRetryAfterSeconds: maxRetryAfterSeconds,
+            quotaError: quotaError
         )
     }
 
@@ -203,6 +225,10 @@ final class MessageFetcher: @unchecked Sendable {
     /// each ID so the caller can decide whether to keep retrying it on future syncs.
     /// No in-place retry loop: these IDs have already failed multiple full syncs, so
     /// one attempt per sync is enough.
+    ///
+    /// Quota exhaustion mid-pass yields no outcome for the affected IDs — like
+    /// the cancellation path below, recording it would burn the drain's retry
+    /// budget on attempts that prove nothing about the messages.
     func fetchAbandonedMessages(_ ids: [String]) async -> AbandonedRetryFetchResult {
         guard !ids.isEmpty, !Task.isCancelled else { return .empty }
 
@@ -226,10 +252,14 @@ final class MessageFetcher: @unchecked Sendable {
     ///   - persist: Callback invoked with each successfully fetched group of messages,
     ///     sorted into chronological order
     /// - Returns: Array of message IDs that failed to fetch after retries
+    /// - Throws: `APIError.quotaExhausted` when Gmail reports the account's
+    ///   quota exhausted. The sync run must abort: the affected IDs get no
+    ///   per-message verdict, so the next scheduled sync retries them after
+    ///   the quota window resets instead of recording permanent failures.
     func fetchBatch(
         _ ids: [String],
         persist: @escaping @Sendable ([GmailMessage]) async -> Void
-    ) async -> [String] {
+    ) async throws -> [String] {
         guard !Task.isCancelled else {
             Log.debug("Batch processing cancelled", category: .sync)
             return ids
@@ -248,6 +278,12 @@ final class MessageFetcher: @unchecked Sendable {
         }
 
         await persistInChronologicalOrder(initialResult.successfulMessages, persist: persist)
+
+        // Abort after persisting what did succeed: classifying the remainder
+        // would turn an account-scoped condition into per-message verdicts.
+        if let quotaError = initialResult.quotaError {
+            throw quotaError
+        }
 
         var currentFailedIds = initialResult.retriableFailedIds
         var pendingRetryAfter = initialResult.maxRetryAfterSeconds
@@ -287,6 +323,10 @@ final class MessageFetcher: @unchecked Sendable {
             permanentlyFailed.append(contentsOf: retryResult.notFoundIds)
             exhaustedRetries.append(contentsOf: retryResult.exhaustedRetryIds)
             await persistInChronologicalOrder(retryResult.successfulMessages, persist: persist)
+
+            if let quotaError = retryResult.quotaError {
+                throw quotaError
+            }
 
             currentFailedIds = retryResult.retriableFailedIds
             pendingRetryAfter = retryResult.maxRetryAfterSeconds

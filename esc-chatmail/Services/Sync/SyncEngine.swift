@@ -343,6 +343,8 @@ final class SyncEngine: ObservableObject {
                 return "Authentication failed"
             case .rateLimited:
                 return "Rate limited, please try again later"
+            case .quotaExhausted:
+                return "Gmail quota reached, will retry later"
             case .timeout:
                 return "Request timed out"
             case .networkError(let underlying):
