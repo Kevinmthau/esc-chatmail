@@ -28,7 +28,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -49,7 +49,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -70,7 +70,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -92,7 +92,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -115,7 +115,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -137,7 +137,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases

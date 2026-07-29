@@ -9,12 +9,29 @@ class MessageProcessor: @unchecked Sendable {
     private let emailTextProcessor = EmailTextProcessor.self
     private let emailNormalizer = EmailNormalizer.self
     private let previewClassifier = EmailPreviewClassifier()
+    private let fetchAttachmentData: @Sendable (_ messageId: String, _ attachmentId: String) async throws -> Data
 
+    init(
+        fetchAttachmentData: (@Sendable (_ messageId: String, _ attachmentId: String) async throws -> Data)? = nil
+    ) {
+        self.fetchAttachmentData = fetchAttachmentData ?? { messageId, attachmentId in
+            let apiClient = await MainActor.run { GmailAPIClient.shared }
+            return try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
+        }
+    }
+
+    /// - Throws: errors from fetching large body parts (Gmail returns bodies
+    ///   >~25KB by attachmentId). A thrown error means the message's content
+    ///   could not be fully materialized and it must NOT be persisted as-is —
+    ///   callers map it to a blocking per-message failure (or a run abort for
+    ///   `APIError.quotaExhausted`) so the cursor cannot advance past a
+    ///   silently body-less message. A 404 for the attachment itself does not
+    ///   throw: the part is genuinely gone, so the message persists without it.
     func processGmailMessage(
         _ gmailMessage: GmailMessage,
         myAliases: Set<String>,
         sendAsAliases: [SendAsAlias] = []
-    ) async -> ProcessedMessage? {
+    ) async throws -> ProcessedMessage? {
         guard let payload = gmailMessage.payload,
               let headers = payload.headers else { return nil }
 
@@ -43,7 +60,7 @@ class MessageProcessor: @unchecked Sendable {
         )
 
         // Process content (may fetch large body parts via API)
-        let content = await extractContent(from: payload, messageId: gmailMessage.id)
+        let content = try await extractContent(from: payload, messageId: gmailMessage.id)
         processedMessage.htmlBody = content.html
         processedMessage.plainTextBody = resolvedPlainTextBody(
             plainText: content.plainText,
@@ -400,14 +417,14 @@ class MessageProcessor: @unchecked Sendable {
         }
     }
 
-    private func extractContent(from part: MessagePart, messageId: String) async -> (html: String?, plainText: String?) {
-        func decodedBody(_ part: MessagePart) async -> String? {
+    private func extractContent(from part: MessagePart, messageId: String) async throws -> (html: String?, plainText: String?) {
+        func decodedBody(_ part: MessagePart) async throws -> String? {
             if let data = part.body?.data {
                 return decodeBody(data, headers: part.headers)
             }
 
             if let attachmentId = part.body?.attachmentId {
-                return await fetchLargeBodyContent(
+                return try await fetchLargeBodyContent(
                     attachmentId: attachmentId,
                     messageId: messageId,
                     headers: part.headers
@@ -424,7 +441,7 @@ class MessageProcessor: @unchecked Sendable {
             return trimmed.isEmpty ? nil : value
         }
 
-        func extract(from part: MessagePart) async -> ExtractedMessageContent {
+        func extract(from part: MessagePart) async throws -> ExtractedMessageContent {
             let resolvedMimeType = resolvedMimeType(for: part)
 
             if isAttachmentContentPart(part) {
@@ -433,13 +450,13 @@ class MessageProcessor: @unchecked Sendable {
 
             if isHTMLMimeType(resolvedMimeType) {
                 return ExtractedMessageContent(
-                    html: normalizedNonEmpty(await decodedBody(part)),
+                    html: normalizedNonEmpty(try await decodedBody(part)),
                     plainText: nil
                 )
             } else if isPlainTextMimeType(resolvedMimeType) {
                 return ExtractedMessageContent(
                     html: nil,
-                    plainText: normalizedNonEmpty(await decodedBody(part))
+                    plainText: normalizedNonEmpty(try await decodedBody(part))
                 )
             }
 
@@ -449,7 +466,7 @@ class MessageProcessor: @unchecked Sendable {
 
             var extracted = ExtractedMessageContent()
             for subpart in parts {
-                let childContent = await extract(from: subpart)
+                let childContent = try await extract(from: subpart)
                 extracted.mergeMissing(from: childContent)
                 if extracted.html != nil && extracted.plainText != nil {
                     break
@@ -459,13 +476,13 @@ class MessageProcessor: @unchecked Sendable {
             return extracted
         }
 
-        var extracted = await extract(from: part)
+        var extracted = try await extract(from: part)
 
         // Don't clean HTML content here - preserve original for display
         // The cleaning will be done only when creating snippets
 
         if extracted.html == nil {
-            extracted.html = await extractEmbeddedHTMLFromTextualBodies(from: part, messageId: messageId)
+            extracted.html = try await extractEmbeddedHTMLFromTextualBodies(from: part, messageId: messageId)
         }
 
         return (extracted.html, normalizedPlainTextBody(extracted.plainText))
@@ -529,8 +546,8 @@ class MessageProcessor: @unchecked Sendable {
     private func extractEmbeddedHTMLFromTextualBodies(
         from part: MessagePart,
         messageId: String
-    ) async -> String? {
-        if let decodedText = await decodedTextualBody(from: part, messageId: messageId),
+    ) async throws -> String? {
+        if let decodedText = try await decodedTextualBody(from: part, messageId: messageId),
            let extractedHTML = RawEmailSourceSanitizer.extractHTMLText(from: decodedText) {
             let trimmed = extractedHTML.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
@@ -540,7 +557,7 @@ class MessageProcessor: @unchecked Sendable {
 
         if let parts = part.parts {
             for subpart in parts {
-                if let html = await extractEmbeddedHTMLFromTextualBodies(from: subpart, messageId: messageId) {
+                if let html = try await extractEmbeddedHTMLFromTextualBodies(from: subpart, messageId: messageId) {
                     return html
                 }
             }
@@ -549,13 +566,13 @@ class MessageProcessor: @unchecked Sendable {
         return nil
     }
 
-    private func decodedTextualBody(from part: MessagePart, messageId: String) async -> String? {
+    private func decodedTextualBody(from part: MessagePart, messageId: String) async throws -> String? {
         if let data = part.body?.data {
             return decodeBody(data, headers: part.headers)
         }
 
         if let attachmentId = part.body?.attachmentId {
-            return await fetchLargeBodyContent(
+            return try await fetchLargeBodyContent(
                 attachmentId: attachmentId,
                 messageId: messageId,
                 headers: part.headers
@@ -565,17 +582,31 @@ class MessageProcessor: @unchecked Sendable {
         return nil
     }
 
-    /// Fetches large body content via the attachment API
-    /// Gmail returns body parts larger than ~25KB with attachmentId instead of inline data
-    private func fetchLargeBodyContent(attachmentId: String, messageId: String, headers: [MessageHeader]?) async -> String? {
+    /// Fetches large body content via the attachment API.
+    /// Gmail returns body parts larger than ~25KB with attachmentId instead of inline data.
+    ///
+    /// Error contract: a 404 returns nil — the attachment is genuinely gone
+    /// server-side, so the message can still persist without this part. Every
+    /// other failure (rate limit, quota, network, auth, decoding) throws:
+    /// swallowing it here would persist the message with a silently empty
+    /// body, count it as a truthful persistence success, and advance the
+    /// cursor past content that was never stored — reconciliation only checks
+    /// for missing IDs, so nothing would ever heal it.
+    private func fetchLargeBodyContent(attachmentId: String, messageId: String, headers: [MessageHeader]?) async throws -> String? {
         do {
-            let apiClient = await MainActor.run { GmailAPIClient.shared }
-            let attachmentData = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
+            let attachmentData = try await fetchAttachmentData(messageId, attachmentId)
             let text = String(decoding: attachmentData, as: UTF8.self)
             return decodeTransferEncoding(text, headers: headers)
+        } catch let error as APIError {
+            if case .notFound = error {
+                Log.warning("Large body \(attachmentId) for message \(messageId) gone server-side (404); persisting without it", category: .sync)
+                return nil
+            }
+            Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .sync)
+            throw error
         } catch {
             Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .sync)
-            return nil
+            throw error
         }
     }
     
