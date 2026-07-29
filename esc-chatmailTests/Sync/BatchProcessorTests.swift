@@ -108,7 +108,13 @@ final class BatchProcessorTests: XCTestCase {
         let fetcher = makeFetcher(ids: ids, api: api)
 
         final class TaskBox: @unchecked Sendable {
-            var task: Task<BatchProcessingResult, Error>?
+            private let lock = NSLock()
+            private var _task: Task<BatchProcessingResult, Error>?
+
+            var task: Task<BatchProcessingResult, Error>? {
+                get { lock.withLock { _task } }
+                set { lock.withLock { _task = newValue } }
+            }
         }
         let box = TaskBox()
 
@@ -120,9 +126,13 @@ final class BatchProcessorTests: XCTestCase {
                 progressHandler: { _, _ in },
                 messageHandler: { _ in },
                 batchCompletion: {
-                    // Cancel after the first chunk commits; chunk 2's
-                    // checkCancellation must abort the run.
-                    box.task?.cancel()
+                    // Cancel after the first chunk commits, waiting out the
+                    // startup race where the box has not been assigned yet;
+                    // chunk 2's checkCancellation must then abort the run.
+                    while !Task.isCancelled {
+                        box.task?.cancel()
+                        await Task.yield()
+                    }
                 }
             )
         }

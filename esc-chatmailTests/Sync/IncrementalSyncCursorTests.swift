@@ -20,8 +20,14 @@ final class IncrementalSyncCursorTests: XCTestCase {
     private static let myEmail = "me@example.com"
     private static let startingHistoryId = "1000"
 
+    /// The reconciliation phase stamps `lastReconciliationTime` into
+    /// `UserDefaults.standard` (IncrementalSyncOrchestrator) — snapshot and
+    /// restore it so runs here don't leak state into other suites.
+    private var savedReconciliationTime: Any?
+
     override func setUp() async throws {
         try await super.setUp()
+        savedReconciliationTime = UserDefaults.standard.object(forKey: SyncConfig.lastReconciliationTimeKey)
         suiteName = "IncrementalSyncCursorTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         // SQLite store: the post-sync cleanup issues NSBatchDeleteRequests,
@@ -36,6 +42,12 @@ final class IncrementalSyncCursorTests: XCTestCase {
 
     override func tearDown() async throws {
         await ModificationTracker.shared.reset()
+        if let savedReconciliationTime {
+            UserDefaults.standard.set(savedReconciliationTime, forKey: SyncConfig.lastReconciliationTimeKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: SyncConfig.lastReconciliationTimeKey)
+        }
+        savedReconciliationTime = nil
         defaults?.removePersistentDomain(forName: suiteName)
         defaults = nil
         suiteName = nil

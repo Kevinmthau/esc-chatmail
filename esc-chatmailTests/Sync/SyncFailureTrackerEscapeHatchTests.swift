@@ -68,6 +68,31 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         XCTAssertNotNil(lastSuccess)
     }
 
+    /// Exercises the update-existing branch of abandonment: a second trip
+    /// through the escape hatch must refresh `abandonedAt`/`reason` on the
+    /// existing row while leaving `retryCount` untouched — the drain owns that
+    /// counter, and re-abandonment must not consume its retry budget.
+    func testReAbandonmentPreservesDrainRetryCount() async throws {
+        for _ in 0..<SyncConfig.maxConsecutiveSyncFailures {
+            await tracker.recordFailure(failedIds: ["stuck-1"])
+        }
+        _ = await tracker.shouldAdvanceHistoryId(hadFailures: true, latestHistoryId: "999")
+
+        // Simulate the drain having spent attempts on the row.
+        try await setRetryCount(2, forGmailMessageId: "stuck-1")
+
+        // The same message fails again and trips the escape hatch a second time.
+        for _ in 0..<SyncConfig.maxConsecutiveSyncFailures {
+            await tracker.recordFailure(failedIds: ["stuck-1"])
+        }
+        let shouldAdvance = await tracker.shouldAdvanceHistoryId(hadFailures: true, latestHistoryId: "1001")
+        XCTAssertTrue(shouldAdvance)
+
+        let rows = try await fetchAbandonedRows()
+        XCTAssertEqual(rows.count, 1, "Re-abandonment must update the existing row, not duplicate it")
+        XCTAssertEqual(rows.first?.retryCount, 2, "Re-abandonment must not reset the drain's retry budget")
+    }
+
     func testBelowThresholdDoesNotAdvanceAndPersistsNothing() async throws {
         for _ in 0..<(SyncConfig.maxConsecutiveSyncFailures - 1) {
             await tracker.recordFailure(failedIds: ["stuck-1"])
@@ -91,6 +116,17 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         let gmailMessageId: String?
         let reason: String?
         let retryCount: Int16
+    }
+
+    private func setRetryCount(_ count: Int16, forGmailMessageId id: String) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await context.perform {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "AbandonedSyncMessage")
+            request.predicate = NSPredicate(format: "gmailMessageId == %@", id)
+            let row = try XCTUnwrap(try context.fetch(request).first)
+            row.setValue(count, forKey: "retryCount")
+            try context.save()
+        }
     }
 
     private func fetchAbandonedRows() async throws -> [AbandonedRow] {

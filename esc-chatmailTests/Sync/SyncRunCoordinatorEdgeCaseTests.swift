@@ -46,18 +46,27 @@ final class SyncRunCoordinatorEdgeCaseTests: XCTestCase {
         let coordinator = SyncRunCoordinator()
         let run = await coordinator.beginRun(kind: .foregroundIncremental)!
 
-        let waiters = (0..<3).map { _ in
-            Task { await coordinator.waitUntilIdle() }
+        let resumed = (0..<3).map { _ in LockedFlag() }
+        let waiters = resumed.map { flag in
+            Task {
+                await coordinator.waitUntilIdle()
+                flag.set()
+            }
         }
-        // Let the waiters park before the run ends.
-        await Task.yield()
-        await Task.yield()
+        // Give the waiters generous opportunity to park before the run ends
+        // (the actor has no parking introspection; this makes a vacuous
+        // "returned immediately after endRun" pass vanishingly unlikely).
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertTrue(resumed.allSatisfy { !$0.isSet }, "No waiter may resume while the run is active")
 
         await coordinator.endRun(run)
 
         for waiter in waiters {
             await waiter.value
         }
+        XCTAssertTrue(resumed.allSatisfy(\.isSet))
         let running = await coordinator.isRunning()
         XCTAssertFalse(running)
     }

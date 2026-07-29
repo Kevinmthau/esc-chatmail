@@ -47,22 +47,49 @@ final class ModelConstraintMetadataTests: XCTestCase {
         )
     }
 
-    /// A store created from the shared model must report metadata compatible
-    /// with that same model. This is the drift tripwire: production loads
-    /// stores with the (currently no-op) runtime-mutated model, so any change
-    /// that makes the effective production model differ from the bundled one
-    /// shows up here as an incompatibility — the precondition for a
-    /// missing-source-model migration failure on the next model version.
-    func testFreshSqliteStoreMetadataIsCompatibleWithBundledModel() throws {
-        let stack = TestCoreDataStack(storeKind: .sqlite)
-        let coordinator = try XCTUnwrap(stack.persistentContainer.persistentStoreCoordinator)
-        let store = try XCTUnwrap(coordinator.persistentStores.first)
+    /// The real drift tripwire: replays the production runtime mutation
+    /// (`CoreDataStack.enforceUniquenessConstraints`, which is skipped under
+    /// XCTest) against a freshly loaded copy of the bundled model and asserts
+    /// it changes nothing. If the declared constraint ever leaves the
+    /// .xcdatamodel while the runtime append remains, the mutated model's
+    /// version hash diverges here — the exact divergence that would strand
+    /// production store metadata with no matching bundled model.
+    ///
+    /// Mirrors the production guard verbatim; simplify to constraint-presence
+    /// only once the runtime mutation is deleted. Fresh model copies stay
+    /// inside an autoreleasepool and never touch entity classes, per the
+    /// single-model-per-process rule (see TestCoreDataStack).
+    func testRuntimeConstraintMutationIsANoOpOnTheBundledModel() throws {
+        try autoreleasepool {
+            let momdURL = try XCTUnwrap(
+                Bundle(for: CoreDataStack.self).url(forResource: "ESCChatmail", withExtension: "momd")
+            )
+            let currentModelURL = momdURL.appendingPathComponent("ESCChatmail 2.mom")
+            let rawModel = try XCTUnwrap(NSManagedObjectModel(contentsOf: currentModelURL))
+            let mutatedModel = try XCTUnwrap(NSManagedObjectModel(contentsOf: currentModelURL))
 
-        let metadata = coordinator.metadata(for: store)
-        XCTAssertTrue(
-            sharedModel.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata),
-            "Store metadata no longer matches the bundled model — lightweight migration " +
-            "would fail to locate a source model for existing stores"
-        )
+            let rawMessage = try XCTUnwrap(rawModel.entitiesByName["Message"])
+            let mutatedMessage = try XCTUnwrap(mutatedModel.entitiesByName["Message"])
+
+            // Production logic, replicated: append ["id"] unless already present.
+            let constraint: [String] = ["id"]
+            let guardMatched = mutatedMessage.uniquenessConstraints
+                .contains(where: { ($0 as? [String]) == constraint })
+            if !guardMatched {
+                mutatedMessage.uniquenessConstraints.append(constraint as [Any])
+            }
+
+            XCTAssertTrue(
+                guardMatched,
+                "The runtime mutation's guard no longer matches the declared constraint — " +
+                "production would append a duplicate and change every store's version hash"
+            )
+            XCTAssertEqual(
+                rawMessage.versionHash, mutatedMessage.versionHash,
+                "The effective production model diverges from the bundled model — " +
+                "existing stores would hit NSMigrationMissingSourceModelError on the next " +
+                "model version, which the recovery ladder answers by deleting the store"
+            )
+        }
     }
 }
