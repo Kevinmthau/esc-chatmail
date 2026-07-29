@@ -32,6 +32,7 @@ struct AbandonedRetryFetchResult {
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
 final class MessageFetcher: @unchecked Sendable {
     private let apiClient: any GmailAPIClientProtocol
+    private let clock: any SyncClock
 
     /// Maximum number of retry attempts for failed messages
     private let maxRetryAttempts = 3
@@ -41,10 +42,12 @@ final class MessageFetcher: @unchecked Sendable {
 
     @MainActor init() {
         self.apiClient = GmailAPIClient.shared
+        self.clock = SystemSyncClock()
     }
 
-    init(apiClient: any GmailAPIClientProtocol) {
+    init(apiClient: any GmailAPIClientProtocol, clock: any SyncClock = SystemSyncClock()) {
         self.apiClient = apiClient
+        self.clock = clock
     }
 
     /// Checks if an error is retriable (transient network/server issues)
@@ -261,7 +264,7 @@ final class MessageFetcher: @unchecked Sendable {
             Log.debug("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...", category: .sync)
 
             do {
-                try await Task.sleep(nanoseconds: delay)
+                try await clock.sleep(nanoseconds: delay)
             } catch {
                 // Task was cancelled during sleep
                 break

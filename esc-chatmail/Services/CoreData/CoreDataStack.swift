@@ -114,6 +114,12 @@ final class CoreDataStack: @unchecked Sendable {
     func debugSetStoreLoadErrorForTesting(_ error: Error) {
         setStoreLoadError(error)
     }
+
+    /// Test-only: forces the store-loaded flag so readiness gating (pending /
+    /// slow-load branches) can be exercised without loading a real store.
+    func debugSetStoreLoadedForTesting(_ loaded: Bool) {
+        setStoreLoaded(loaded)
+    }
 #endif
 
     lazy var persistentContainer: NSPersistentContainer = {

@@ -9,7 +9,8 @@ final class MessageFetcherTests: XCTestCase {
         mockAPI.getMessageErrors["transient"] = APIError.timeout
         mockAPI.getMessageErrors["missing"] = APIError.notFound("missing")
 
-        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        let clock = FakeSyncClock()
+        let fetcher = MessageFetcher(apiClient: mockAPI, clock: clock)
         let successes = SuccessCollector()
 
         let failedIds = await fetcher.fetchBatch(["ok", "transient", "missing"]) { messages in
@@ -22,6 +23,7 @@ final class MessageFetcherTests: XCTestCase {
         XCTAssertEqual(Set(successfulIds), Set(["ok"]))
         XCTAssertEqual(Set(failedIds), Set(["transient", "missing"]))
         XCTAssertEqual(mockAPI.getMessageCallCount, 6) // ok(1) + missing(1) + transient(4)
+        XCTAssertEqual(clock.sleeps.count, 3, "One backoff sleep per retry attempt")
     }
 
     // MARK: - fetchAbandonedMessages
