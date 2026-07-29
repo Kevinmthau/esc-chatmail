@@ -184,6 +184,30 @@ struct ConversationFactory {
         initialInboxSeed: ConversationInboxSeed? = nil,
         in context: NSManagedObjectContext
     ) throws -> Conversation {
+        let conversation = try createShell(
+            for: identity,
+            initialLastMessageDate: initialLastMessageDate,
+            initialSnippet: initialSnippet,
+            initialInboxSeed: initialInboxSeed,
+            in: context
+        )
+        try attachParticipants(for: identity, to: conversation, in: context)
+        return conversation
+    }
+
+    /// Creates the conversation row alone — every seeded attribute, no
+    /// participant/person rows. The creation serializer commits this shell in
+    /// its own context so the published row never carries unrelated caller
+    /// state; participants attach in the caller's context afterward and ride
+    /// the batch save (keeping Person resolution on the caller's prefetched
+    /// cache).
+    static func createShell(
+        for identity: ConversationIdentity,
+        initialLastMessageDate: Date? = nil,
+        initialSnippet: String? = nil,
+        initialInboxSeed: ConversationInboxSeed? = nil,
+        in context: NSManagedObjectContext
+    ) throws -> Conversation {
         guard let conversation = NSEntityDescription.insertNewObject(
             forEntityName: "Conversation",
             into: context
@@ -224,14 +248,21 @@ struct ConversationFactory {
             conversation.latestInboxDate = initialInboxSeed.latestInboxDate
         }
 
-        // Create participants with display names from email headers
+        return conversation
+    }
+
+    /// Creates participant/person rows for the identity and links them to the
+    /// conversation, resolving Persons through the context's factory cache.
+    static func attachParticipants(
+        for identity: ConversationIdentity,
+        to conversation: Conversation,
+        in context: NSManagedObjectContext
+    ) throws {
         for email in identity.participants {
             let displayName = identity.participantDisplayNames[email]
             let person = try PersonFactory.findOrCreate(email: email, displayName: displayName, in: context)
             try createParticipant(person: person, conversation: conversation, role: .normal, in: context)
         }
-
-        return conversation
     }
 
     /// Creates a conversation participant
