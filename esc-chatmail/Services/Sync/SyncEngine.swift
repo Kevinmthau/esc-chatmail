@@ -52,15 +52,35 @@ final class SyncEngine: ObservableObject {
 
     // MARK: - Initialization
 
-    private init() {
-        let messageFetcher = MessageFetcher()
-        let messagePersister = MessagePersister()
-        let historyProcessor = HistoryProcessor()
-        let dataCleanupService = DataCleanupService()
-        let conversationManager = ConversationManager()
-        let coreDataStack = CoreDataStack.shared
-        let attachmentDownloader = AttachmentDownloader.shared
+    private convenience init() {
+        self.init(
+            messageFetcher: MessageFetcher(),
+            messagePersister: MessagePersister(),
+            historyProcessor: HistoryProcessor(),
+            dataCleanupService: DataCleanupService(),
+            conversationManager: ConversationManager(),
+            coreDataStack: CoreDataStack.shared,
+            attachmentDownloader: AttachmentDownloader.shared,
+            networkMonitor: NetworkMonitorService(),
+            syncRunCoordinator: .shared
+        )
+    }
 
+    /// Designated initializer with injectable dependencies (production uses the
+    /// convenience initializer via `shared`; tests supply their own graph).
+    /// Wiring is identical to production: the orchestrators are built from the
+    /// injected pieces.
+    init(
+        messageFetcher: MessageFetcher,
+        messagePersister: MessagePersister,
+        historyProcessor: HistoryProcessor,
+        dataCleanupService: DataCleanupService,
+        conversationManager: ConversationManager,
+        coreDataStack: CoreDataStack,
+        attachmentDownloader: AttachmentDownloader,
+        networkMonitor: NetworkMonitorService,
+        syncRunCoordinator: SyncRunCoordinator
+    ) {
         let reconciliation = SyncReconciliation(
             messageFetcher: messageFetcher
         )
@@ -71,8 +91,8 @@ final class SyncEngine: ObservableObject {
         self.conversationManager = conversationManager
         self.coreDataStack = coreDataStack
         self.attachmentDownloader = attachmentDownloader
-        self.networkMonitor = NetworkMonitorService()
-        self.syncRunCoordinator = .shared
+        self.networkMonitor = networkMonitor
+        self.syncRunCoordinator = syncRunCoordinator
 
         self.initialSyncOrchestrator = InitialSyncOrchestrator(
             messageFetcher: messageFetcher,
