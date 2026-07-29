@@ -434,12 +434,19 @@ final class IncrementalSyncOrchestrator {
                     in: phaseContext.coreDataContext
                 )
             } catch {
-                // Run-fatal persistence failure: keep every tracking record.
+                // Run-fatal persistence failure: the persister throws only for
+                // account-scoped infrastructure errors, so the fetched
+                // messages proved nothing about themselves — give them NO
+                // outcome. Recording a failure here would burn the drain's
+                // bounded retry budget and, at the cap, delete the only
+                // durable pointer to messages the cursor already advanced
+                // past. Fetch-level verdicts (404s, per-message fetch
+                // failures) stand: they are independent of local persistence.
                 Log.error("Abandoned-message retry aborted by persistence failure", category: .sync, error: error)
                 return AbandonedRetryOutcome(
                     recoveredIds: [],
                     goneIds: result.goneIds,
-                    failedIds: result.failedIds + result.fetched.map { $0.id }
+                    failedIds: result.failedIds
                 )
             }
         }
