@@ -348,6 +348,12 @@ actor MessagePersister {
             if let apiError = error as? APIError, case .quotaExhausted = apiError {
                 throw apiError
             }
+            if error is CancellationError {
+                // A cancelled run proves nothing about the message; recording
+                // a failure would be a spurious blocking verdict (cancelled
+                // FETCHES likewise record nothing — see MessageFetcher).
+                throw error
+            }
             Log.warning("Body fetch failed for message \(Log.hashIdentifier(gmailMessage.id)): \(error)", category: .sync)
             return .bodyFetchFailed(id: gmailMessage.id)
         }

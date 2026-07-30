@@ -25,8 +25,11 @@ class MessageProcessor: @unchecked Sendable {
     ///   could not be fully materialized and it must NOT be persisted as-is —
     ///   callers map it to a blocking per-message failure (or a run abort for
     ///   `APIError.quotaExhausted`) so the cursor cannot advance past a
-    ///   silently body-less message. A 404 for the attachment itself does not
-    ///   throw: the part is genuinely gone, so the message persists without it.
+    ///   silently body-less message. Deterministic per-part failures (404,
+    ///   undecodable response) do not throw: retrying cannot materialize the
+    ///   part, so the message persists without it. Failures of the
+    ///   best-effort embedded-HTML salvage probe never throw either (except
+    ///   quota/cancellation) — by then the body verdict is already decided.
     func processGmailMessage(
         _ gmailMessage: GmailMessage,
         myAliases: Set<String>,
@@ -543,11 +546,30 @@ class MessageProcessor: @unchecked Sendable {
         return (normalizedContentIDs, attachmentIDs)
     }
 
+    /// Best-effort salvage probe for HTML embedded in textual bodies. The
+    /// message's body verdict was already decided by the main extraction by
+    /// the time this runs, so a failed probe fetch must NOT fail the message —
+    /// non-account-scoped errors are swallowed and the probe simply yields
+    /// nothing. Only `APIError.quotaExhausted` (run abort) and task
+    /// cancellation propagate.
     private func extractEmbeddedHTMLFromTextualBodies(
         from part: MessagePart,
         messageId: String
     ) async throws -> String? {
-        if let decodedText = try await decodedTextualBody(from: part, messageId: messageId),
+        var decodedText: String?
+        do {
+            decodedText = try await decodedTextualBody(from: part, messageId: messageId)
+        } catch {
+            if let apiError = error as? APIError, case .quotaExhausted = apiError {
+                throw apiError
+            }
+            if error is CancellationError {
+                throw error
+            }
+            Log.debug("Skipping embedded-HTML probe for message \(messageId): \(error)", category: .sync)
+            decodedText = nil
+        }
+        if let decodedText,
            let extractedHTML = RawEmailSourceSanitizer.extractHTMLText(from: decodedText) {
             let trimmed = extractedHTML.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
@@ -571,7 +593,10 @@ class MessageProcessor: @unchecked Sendable {
             return decodeBody(data, headers: part.headers)
         }
 
-        if let attachmentId = part.body?.attachmentId {
+        // Fetch only body-content parts. File attachments (PDFs, images,
+        // archives) are never message bodies — downloading them just to probe
+        // for embedded HTML wastes bandwidth and adds needless failure modes.
+        if let attachmentId = part.body?.attachmentId, !isAttachmentContentPart(part) {
             return try await fetchLargeBodyContent(
                 attachmentId: attachmentId,
                 messageId: messageId,
@@ -585,25 +610,33 @@ class MessageProcessor: @unchecked Sendable {
     /// Fetches large body content via the attachment API.
     /// Gmail returns body parts larger than ~25KB with attachmentId instead of inline data.
     ///
-    /// Error contract: a 404 returns nil — the attachment is genuinely gone
-    /// server-side, so the message can still persist without this part. Every
-    /// other failure (rate limit, quota, network, auth, decoding) throws:
-    /// swallowing it here would persist the message with a silently empty
-    /// body, count it as a truthful persistence success, and advance the
-    /// cursor past content that was never stored — reconciliation only checks
-    /// for missing IDs, so nothing would ever heal it.
+    /// Error contract: deterministic per-part failures return nil — a 404
+    /// (attachment gone server-side) or an undecodable response
+    /// (invalidData/decodingError) repeats on every fetch, so blocking the
+    /// message on them could only end in abandonment; the message still
+    /// persists without this part. Every other failure (rate limit, quota,
+    /// network, auth) throws: swallowing it here would persist the message
+    /// with a silently empty body, count it as a truthful persistence
+    /// success, and advance the cursor past content that was never stored —
+    /// reconciliation only checks for missing IDs, so nothing would ever
+    /// heal it.
     private func fetchLargeBodyContent(attachmentId: String, messageId: String, headers: [MessageHeader]?) async throws -> String? {
         do {
             let attachmentData = try await fetchAttachmentData(messageId, attachmentId)
             let text = String(decoding: attachmentData, as: UTF8.self)
             return decodeTransferEncoding(text, headers: headers)
         } catch let error as APIError {
-            if case .notFound = error {
+            switch error {
+            case .notFound:
                 Log.warning("Large body \(attachmentId) for message \(messageId) gone server-side (404); persisting without it", category: .sync)
                 return nil
+            case .invalidData, .decodingError:
+                Log.warning("Large body \(attachmentId) for message \(messageId) undecodable (deterministic); persisting without it: \(error)", category: .sync)
+                return nil
+            default:
+                Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .sync)
+                throw error
             }
-            Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .sync)
-            throw error
         } catch {
             Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .sync)
             throw error

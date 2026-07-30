@@ -152,6 +152,33 @@ final class MessagePersisterDispositionTests: XCTestCase {
     }
 
     @MainActor
+    func testCancelledBodyFetchThrowsWithoutVerdict() async throws {
+        let persister = makePersister(
+            messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
+                throw CancellationError()
+            })
+        )
+        let context = coreDataStack.newBackgroundContext()
+
+        do {
+            _ = try await persister.saveMessages(
+                [makeLargeBodyMessage(id: "m-cancelled")],
+                myAliases: [Self.myEmail],
+                in: context
+            )
+            XCTFail("A cancelled run proves nothing about the message and must not yield a verdict")
+        } catch is CancellationError {
+            // Expected: no per-message verdict for a cancelled run.
+        }
+
+        let rowCount: Int = await context.perform {
+            let request = Message.fetchRequest()
+            return (try? context.count(for: request)) ?? -1
+        }
+        XCTAssertEqual(rowCount, 0)
+    }
+
+    @MainActor
     func testMissingLargeBodyAttachmentStillPersistsMessage() async throws {
         let persister = makePersister(
             messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
