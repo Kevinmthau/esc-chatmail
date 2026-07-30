@@ -175,14 +175,14 @@
     </entity>
     <entity name="AbandonedSyncMessage" representedClassName="AbandonedSyncMessage" syncable="YES">
         <attribute name="abandonedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="failureClass" optional="YES" attributeType="String"/>
         <attribute name="gmailMessageId" attributeType="String"/>
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="nextRetryAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="reason" optional="YES" attributeType="String"/>
         <attribute name="retryCount" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="state" optional="YES" attributeType="String"/>
-        <attribute name="failureClass" optional="YES" attributeType="String"/>
         <attribute name="sourceHistoryId" optional="YES" attributeType="String"/>
-        <attribute name="nextRetryAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="state" optional="YES" attributeType="String"/>
         <fetchIndex name="byGmailMessageIdIndex">
             <fetchIndexElement property="gmailMessageId" type="Binary" order="ascending"/>
         </fetchIndex>

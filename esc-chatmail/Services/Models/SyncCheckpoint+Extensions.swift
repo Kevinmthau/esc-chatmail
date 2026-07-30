@@ -10,6 +10,11 @@ import CoreData
 /// `BackgroundSyncContinuationState.isCompatible` pattern): consumers must
 /// discard a checkpoint whose accountEmail doesn't match the signed-in
 /// account rather than resume another account's state.
+///
+/// Note: the constraint is on `kind` ALONE, so a write for one account
+/// replaces another account's row of the same kind. Correct while the app is
+/// single-account; if multi-account ever lands, the constraint must become
+/// (`kind`, `accountEmail`) in a NEW model version — never by editing v3.
 extension SyncCheckpoint {
     @NSManaged public var id: UUID
     @NSManaged public var accountEmail: String
