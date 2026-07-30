@@ -33,11 +33,28 @@ final class CoreDataErrorClassifierTests: XCTestCase {
             NSMigrationError,
             NSMigrationConstraintViolationError,
             NSMigrationCancelledError,
-            NSMigrationMissingSourceModelError
+            NSMigrationMissingSourceModelError,
+            NSPersistentStoreIncompatibleVersionHashError
         ]
         for code in codes {
             let error = NSError(domain: NSCocoaErrorDomain, code: code)
             XCTAssertTrue(CoreDataErrorClassifier.isMigrationError(error), "Expected code \(code) to be classified as migration")
+        }
+    }
+
+    /// A version-hash mismatch is deterministic (the store's hashes match no
+    /// bundled model), so it must never be classified retryable: retries can't
+    /// fix it and only delayed the same migration-recovery outcome.
+    func testIsRecoverableError_incompatibleVersionHash_returnsFalse() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: NSPersistentStoreIncompatibleVersionHashError)
+        XCTAssertFalse(CoreDataErrorClassifier.isRecoverableError(error, currentAttempts: 0, maxAttempts: 3))
+    }
+
+    func testRecommendedAction_incompatibleVersionHash_returnsMigrationRecoveryImmediately() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: NSPersistentStoreIncompatibleVersionHashError)
+        let action = CoreDataErrorClassifier.recommendedAction(for: error, currentAttempts: 0, maxAttempts: 3)
+        guard case .migrationRecovery = action else {
+            return XCTFail("Expected .migrationRecovery on first attempt (no pointless retries), got \(action)")
         }
     }
 

@@ -47,6 +47,14 @@ final class CoreDataRecoveryHandler {
             // Create timestamped backup before attempting recovery
             let backupURL = try CoreDataBackupManager.createTimestampedBackup(at: storeURL)
             Log.info("Created backup before migration recovery: \(backupURL.path)", category: .coreData)
+            // Deliberate data loss, worth shouting about: deleting the store
+            // destroys PendingAction and OutboundSendMutationRecord rows — the
+            // only non-re-syncable user data — and forces a full re-bootstrap.
+            // The backup above is the sole copy of those rows.
+            Log.error(
+                "Migration recovery is DELETING the store; queued PendingAction/OutboundSendMutationRecord rows are lost except in the backup at \(backupURL.lastPathComponent)",
+                category: .coreData
+            )
 
             // Remove problematic store
             try CoreDataBackupManager.removeStore(at: storeURL)

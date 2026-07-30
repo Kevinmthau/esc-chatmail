@@ -45,6 +45,10 @@ public class OutboundSendMutationRecord: NSManagedObject, Identifiable {
 public class AbandonedSyncMessage: NSManagedObject, Identifiable {
 }
 
+@objc(SyncCheckpoint)
+public class SyncCheckpoint: NSManagedObject, Identifiable {
+}
+
 extension Attachment {
     enum State: String {
         case queued = "queued"

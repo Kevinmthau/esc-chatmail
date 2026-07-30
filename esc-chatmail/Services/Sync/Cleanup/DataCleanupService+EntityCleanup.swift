@@ -481,3 +481,78 @@ extension DataCleanupService {
         "\(message.objectID.uriRepresentation().absoluteString)|\(kind)"
     }
 }
+
+// MARK: - Duplicate Label Merge
+
+extension DataCleanupService {
+
+    /// Collapses `Label` rows that share a Gmail label id onto one survivor.
+    ///
+    /// `Label.id` has no uniqueness constraint (pre-v3 entities don't gain
+    /// constraints until v4, after repairs soak), and duplicate rows are worse
+    /// than cosmetic: `LabelPersister` builds id-keyed dictionaries from
+    /// fetched labels, which trapped on duplicates until it switched to
+    /// first-wins collapsing. This pass repairs the store so that collapse is
+    /// a transient shield, not the permanent state.
+    ///
+    /// Unlike Person, `Label.messages` is Nullify — no cascade risk — but the
+    /// message repointing must still precede the delete so no message loses a
+    /// label association mid-merge.
+    func mergeDuplicateLabels(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        await context.perform {
+            let request = Label.fetchRequest()
+            request.fetchBatchSize = 100
+
+            let labels: [Label]
+            do {
+                labels = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch labels for duplicate merge", category: .coreData, error: error)
+                return
+            }
+
+            var rowsById: [String: [Label]] = [:]
+            for label in labels {
+                rowsById[label.id, default: []].append(label)
+            }
+
+            var deletedObjectIDs: [NSManagedObjectID] = []
+
+            for (_, rows) in rowsById where rows.count > 1 {
+                // Deterministic survivor so reruns converge; Gmail's canonical
+                // name arrives via saveLabels upserts either way.
+                guard let survivor = rows.min(by: {
+                    $0.objectID.uriRepresentation().absoluteString
+                        < $1.objectID.uriRepresentation().absoluteString
+                }) else { continue }
+
+                for loser in rows where loser !== survivor {
+                    for message in loser.messages ?? [] {
+                        message.removeFromLabels(loser)
+                        message.addToLabels(survivor)
+                    }
+                    deletedObjectIDs.append(loser.objectID)
+                    context.delete(loser)
+                }
+            }
+
+            guard !deletedObjectIDs.isEmpty else { return }
+
+            self.coreDataStack.saveIfNeeded(context: context)
+
+            let changes = [NSDeletedObjectsKey: deletedObjectIDs]
+            NSManagedObjectContext.mergeChanges(
+                fromRemoteContextSave: changes,
+                into: [self.coreDataStack.viewContext]
+            )
+
+            let duration = CFAbsoluteTimeGetCurrent() - startTime
+            Log.info(
+                "Merged \(deletedObjectIDs.count) duplicate label rows in \(String(format: "%.3f", duration))s",
+                category: .coreData
+            )
+        }
+    }
+}

@@ -128,7 +128,6 @@ final class CoreDataStack: @unchecked Sendable {
         }
 
         let container = NSPersistentContainer(name: "ESCChatmail")
-        enforceUniquenessConstraints(in: container)
 
         // Configure for automatic migration
         let description = container.persistentStoreDescriptions.first
@@ -149,25 +148,16 @@ final class CoreDataStack: @unchecked Sendable {
         return container
     }()
 
-    private func enforceUniquenessConstraints(in container: NSPersistentContainer) {
-        // Under unit tests this model instance is shared with the per-test
-        // in-memory stacks (one model per process keeps +entity unambiguous),
-        // and the test suite's fixtures rely on constraint-free semantics.
-        if RuntimeEnvironment.isRunningUnitTests { return }
-
-        guard let messageEntity = container.managedObjectModel.entitiesByName["Message"] else {
-            Log.error("Missing Message entity for uniqueness constraints", category: .coreData)
-            return
-        }
-
-        let constraint: [String] = ["id"]
-        if messageEntity.uniquenessConstraints.contains(where: { ($0 as? [String]) == constraint }) {
-            return
-        }
-
-        messageEntity.uniquenessConstraints.append(constraint as [Any])
-        Log.info("Applied uniqueness constraint on Message.id", category: .coreData)
-    }
+    // NOTE: a runtime `enforceUniquenessConstraints` mutation lived here from
+    // 2026-02 to 2026-07. It was born a no-op — the Message.id constraint has
+    // been declared in the versioned .xcdatamodel since v1 (2025-09) — but it
+    // was a latent landmine: had the declared constraint ever left the model,
+    // the runtime append would have made every production store's metadata
+    // match no bundled model, and the next model version would have wiped
+    // upgrading stores via the recovery ladder. Deleted with model v3. Model
+    // changes belong in versioned .xcdatamodel files only; never mutate the
+    // loaded model at runtime. ModelConstraintMetadataTests pins the declared
+    // constraints.
 
     private func loadPersistentStores(for container: NSPersistentContainer) {
         container.loadPersistentStores { [weak self] storeDescription, error in
