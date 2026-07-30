@@ -84,10 +84,17 @@ actor ConversationCreationSerializer {
         // rely on. Committing participants WITH the row matters: a durable
         // participant-less conversation would match the maintenance sweep's
         // empty-conversation predicate, render as "Unknown Contact", and have
-        // no repair path. Person resolution store-fetches in this context; a
-        // Person pending unsaved in the caller's context can be duplicated
-        // here (narrow window) and is repaired by the Person merge pass —
-        // strictly better than durable identity-less rows.
+        // no repair path. Person resolution store-fetches in this context, so
+        // a Person still pending unsaved in the caller's context is missed and
+        // inserted again here: any batch that opens a conversation for someone
+        // who already appeared in an earlier message of the same batch leaves
+        // two durable rows for that email. Nothing repairs them. Person.email
+        // has no uniqueness constraint and duplicate rows are tolerated by
+        // design — PersonFactory's fetchLimit-1 lookup collapses them
+        // arbitrarily (see CoreDataFactories), so that email's display name
+        // and avatar may resolve to either row. Accepted deliberately: a
+        // duplicate identity row still renders, a durable identity-less
+        // conversation does not.
         guard let coordinator = context.persistentStoreCoordinator else {
             throw CoreDataError.persistentFailure(
                 NSError(
