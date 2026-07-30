@@ -150,12 +150,24 @@ describe('ConversationRow in select mode', () => {
     )
 
     const option = await screen.findByRole('option', { name: 'Alice Chen, 2 unread' })
-    expect(option.getAttribute('tabindex')).toBe('0')
+    // Roving tabindex: an option is not a tab stop unless the list says so.
+    expect(option.getAttribute('tabindex')).toBe('-1')
 
     fireEvent.keyDown(option, { key: ' ' })
     fireEvent.keyDown(option, { key: 'Enter' })
     fireEvent.keyDown(option, { key: 'a' })
     expect(onToggleSelect).toHaveBeenCalledTimes(2)
+  })
+
+  it('exposes the tab stop and loaded-window position the list assigns', async () => {
+    renderWithRouter(
+      <ConversationRow conversation={record()} selecting tabbable posInSet={7} setSize={50} />,
+    )
+
+    const option = await screen.findByRole('option', { name: 'Alice Chen, 2 unread' })
+    expect(option.getAttribute('tabindex')).toBe('0')
+    expect(option.getAttribute('aria-posinset')).toBe('7')
+    expect(option.getAttribute('aria-setsize')).toBe('50')
   })
 
   it('drops the hover quick actions so the row is a single hit target', async () => {

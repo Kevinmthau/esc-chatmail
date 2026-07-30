@@ -18,6 +18,12 @@ interface ConversationRowProps {
   /** Multi-select mode: the row toggles selection instead of navigating. */
   selecting?: boolean
   selected?: boolean
+  /** Roving tab stop: true only on the listbox's single tabbable option. */
+  tabbable?: boolean
+  /** 1-based position of this option within the loaded window. */
+  posInSet?: number
+  /** aria-setsize: the loaded row count, or -1 while the total is unknown. */
+  setSize?: number
   onToggleSelect?: (conversationId: string) => void
 }
 
@@ -29,8 +35,11 @@ interface ConversationRowProps {
  *
  * In multi-select mode the row becomes a listbox option: a leading
  * checkmark-circle, no link, no quick actions or context menu (iOS drops its
- * swipe actions the same way). Both modes lay out inside the same 88px box, so
- * the virtualizer's fixed row size holds either way.
+ * swipe actions the same way). The list owns the APG roving tabindex — only
+ * its active option is tabbable — and aria-posinset/-setsize describe the
+ * loaded window, since virtualization keeps most options out of the DOM. Both
+ * modes lay out inside the same 88px box, so the virtualizer's fixed row size
+ * holds either way.
  */
 export function ConversationRow({
   conversation,
@@ -38,6 +47,9 @@ export function ConversationRow({
   query,
   selecting = false,
   selected = false,
+  tabbable = false,
+  posInSet,
+  setSize,
   onToggleSelect,
 }: ConversationRowProps) {
   const unread = conversation.inboxUnreadCount > 0
@@ -76,7 +88,9 @@ export function ConversationRow({
         role="option"
         aria-selected={selected}
         aria-label={rowLabel}
-        tabIndex={0}
+        aria-posinset={posInSet}
+        aria-setsize={setSize}
+        tabIndex={tabbable ? 0 : -1}
         onClick={toggle}
         onKeyDown={(event) => {
           // Space is the listbox idiom for toggling an option; Enter mirrors
