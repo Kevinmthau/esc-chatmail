@@ -29,7 +29,8 @@ final class MessagePersisterDispositionTests: XCTestCase {
     @MainActor
     private func makePersister(
         conversationCreationError: Error? = nil,
-        coreDataStack: CoreDataStack? = nil
+        coreDataStack: CoreDataStack? = nil,
+        messageProcessor: MessageProcessor = MessageProcessor()
     ) -> MessagePersister {
         let conversationManager: ConversationManager
         if let conversationCreationError {
@@ -44,6 +45,7 @@ final class MessagePersisterDispositionTests: XCTestCase {
         }
         return MessagePersister(
             coreDataStack: coreDataStack ?? self.coreDataStack,
+            messageProcessor: messageProcessor,
             saveHTML: { _, _ in nil },
             conversationManager: conversationManager
         )
@@ -59,6 +61,152 @@ final class MessagePersisterDispositionTests: XCTestCase {
             .withSubject("Subject \(id)")
             .withSnippet("Snippet \(id)")
             .build()
+    }
+
+    /// A message whose body Gmail returns by attachmentId (bodies >~25KB),
+    /// forcing the processor's large-body fetch.
+    private func makeLargeBodyMessage(id: String) -> GmailMessage {
+        GmailMessage(
+            id: id,
+            threadId: "t-\(id)",
+            labelIds: ["INBOX"],
+            snippet: "Snippet \(id)",
+            historyId: nil,
+            internalDate: "1700000000000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "text/plain",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Alice Smith <alice@example.com>"),
+                    MessageHeader(name: "To", value: Self.myEmail),
+                    MessageHeader(name: "Subject", value: "Subject \(id)"),
+                    MessageHeader(name: "Content-Type", value: "text/plain; charset=UTF-8")
+                ],
+                body: MessageBody(size: 30_000, data: nil, attachmentId: "att-\(id)"),
+                parts: nil
+            ),
+            sizeEstimate: 30_000
+        )
+    }
+
+    // MARK: - Large-body fetch failures
+
+    @MainActor
+    func testRateLimitedLargeBodyFetchReportsFailedWithoutPersisting() async throws {
+        let persister = makePersister(
+            messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
+                throw APIError.rateLimited(retryAfter: nil)
+            })
+        )
+        let context = coreDataStack.newBackgroundContext()
+
+        let report = try await persister.saveMessages(
+            [makeLargeBodyMessage(id: "m-rate-limited")],
+            myAliases: [Self.myEmail],
+            in: context
+        )
+
+        XCTAssertEqual(
+            report.failedIds, ["m-rate-limited"],
+            "A transient body-fetch failure must block the cursor, not persist an empty body"
+        )
+        XCTAssertTrue(report.persistedIds.isEmpty)
+        XCTAssertTrue(report.unprocessableIds.isEmpty)
+
+        let rowCount: Int = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "m-rate-limited")
+            return (try? context.count(for: request)) ?? -1
+        }
+        XCTAssertEqual(rowCount, 0, "No body-less row may be created for a failed body fetch")
+    }
+
+    @MainActor
+    func testQuotaExhaustedLargeBodyFetchAbortsTheBatchWithNoVerdict() async throws {
+        let persister = makePersister(
+            messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
+                throw APIError.quotaExhausted("Daily Limit Exceeded")
+            })
+        )
+        let context = coreDataStack.newBackgroundContext()
+
+        do {
+            _ = try await persister.saveMessages(
+                [makeFullMessage(id: "m-inline"), makeLargeBodyMessage(id: "m-quota")],
+                myAliases: [Self.myEmail],
+                in: context
+            )
+            XCTFail("Quota exhaustion is account-scoped and must abort the batch")
+        } catch let error as APIError {
+            guard case .quotaExhausted = error else {
+                return XCTFail("Expected quotaExhausted, got \(error)")
+            }
+        }
+
+        let rowCount: Int = await context.perform {
+            let request = Message.fetchRequest()
+            return (try? context.count(for: request)) ?? -1
+        }
+        XCTAssertEqual(rowCount, 0, "An aborted batch must leave no per-message verdicts or rows")
+    }
+
+    @MainActor
+    func testCancelledBodyFetchThrowsWithoutVerdict() async throws {
+        let persister = makePersister(
+            messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
+                throw CancellationError()
+            })
+        )
+        let context = coreDataStack.newBackgroundContext()
+
+        do {
+            _ = try await persister.saveMessages(
+                [makeLargeBodyMessage(id: "m-cancelled")],
+                myAliases: [Self.myEmail],
+                in: context
+            )
+            XCTFail("A cancelled run proves nothing about the message and must not yield a verdict")
+        } catch is CancellationError {
+            // Expected: no per-message verdict for a cancelled run.
+        }
+
+        let rowCount: Int = await context.perform {
+            let request = Message.fetchRequest()
+            return (try? context.count(for: request)) ?? -1
+        }
+        XCTAssertEqual(rowCount, 0)
+    }
+
+    @MainActor
+    func testMissingLargeBodyAttachmentStillPersistsMessage() async throws {
+        let persister = makePersister(
+            messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
+                throw APIError.notFound("attachment")
+            })
+        )
+        let context = coreDataStack.newBackgroundContext()
+
+        let report = try await persister.saveMessages(
+            [makeLargeBodyMessage(id: "m-gone-attachment")],
+            myAliases: [Self.myEmail],
+            in: context
+        )
+
+        XCTAssertEqual(
+            report.persistedIds, ["m-gone-attachment"],
+            "A 404'd attachment is gone for good; the message must persist without it"
+        )
+        XCTAssertTrue(report.failedIds.isEmpty)
+
+        let persistedRow: (found: Bool, bodyText: String?) = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "m-gone-attachment")
+            guard let row = (try? context.fetch(request))?.first else { return (false, nil) }
+            return (true, row.bodyText)
+        }
+        XCTAssertTrue(persistedRow.found)
+        XCTAssertNil(persistedRow.bodyText)
     }
 
     @MainActor
@@ -157,7 +305,7 @@ final class MessagePersisterDispositionTests: XCTestCase {
         let persister = makePersister()
         let failingContext = try FailingReadStore.makeFailingContext()
 
-        let processed = await persister.prepareMessage(
+        let processed = try await persister.prepareMessage(
             makeFullMessage(id: "m-unreadable"),
             myAliases: [Self.myEmail]
         )

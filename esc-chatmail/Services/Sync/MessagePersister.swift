@@ -157,6 +157,12 @@ actor MessagePersister {
         case processed(ProcessedMessage)
         /// Processing failed; nothing to persist.
         case unprocessable(id: String)
+        /// A large body part could not be fetched (rate limit, network, auth).
+        /// The failure may succeed later, so persistence must report `.failed`
+        /// — persisting now would store a permanently body-less message behind
+        /// an advancing cursor. Distinct from `.unprocessable`, whose payload
+        /// defect repeats on every fetch.
+        case bodyFetchFailed(id: String)
     }
 
     // MARK: - Message Persistence
@@ -176,7 +182,7 @@ actor MessagePersister {
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async throws -> MessagePersistDisposition {
-        let prepared = await prepareMessage(
+        let prepared = try await prepareMessage(
             gmailMessage,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -210,8 +216,9 @@ actor MessagePersister {
     /// desired persistence order (typically chronological).
     /// - Returns: the per-ID persistence report; every message in
     ///   `gmailMessages` lands in exactly one bucket. Throws only on
-    ///   run-fatal conditions (schema/model failures) that would fail every
-    ///   message identically.
+    ///   run-fatal conditions — schema/model failures that would fail every
+    ///   message identically, or `APIError.quotaExhausted` from a large-body
+    ///   fetch (account-scoped; the batch gets no verdict and the run aborts).
     @discardableResult
     func saveMessages(
         _ gmailMessages: [GmailMessage],
@@ -223,7 +230,7 @@ actor MessagePersister {
     ) async throws -> MessagePersistenceReport {
         guard !gmailMessages.isEmpty else { return .empty }
 
-        let prepared = await prepareMessagesConcurrently(
+        let prepared = try await prepareMessagesConcurrently(
             gmailMessages,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -284,6 +291,7 @@ actor MessagePersister {
         switch prepared {
         case .excludedMailbox(let id, _): return id
         case .unprocessable(let id): return id
+        case .bodyFetchFailed(let id): return id
         case .processed(let processedMessage): return processedMessage.id
         }
     }
@@ -311,11 +319,17 @@ actor MessagePersister {
 
     /// Processes a Gmail message into a `PreparedMessage`. Performs no Core Data writes,
     /// so it is safe to run concurrently across many messages.
+    /// - Throws: `APIError.quotaExhausted` when a large-body fetch reports the
+    ///   account's quota exhausted. Account-scoped: the run must abort with no
+    ///   per-message verdict (mirrors `MessageFetcher.fetchBatch`'s quota
+    ///   throw) so the next scheduled sync retries after the window resets.
+    ///   Every other body-fetch failure is a per-message verdict:
+    ///   `.bodyFetchFailed`, persisted as `.failed`.
     nonisolated func prepareMessage(
         _ gmailMessage: GmailMessage,
         myAliases: Set<String>,
         sendAsAliases: [SendAsAlias] = []
-    ) async -> PreparedMessage {
+    ) async throws -> PreparedMessage {
         if let messageLabelIds = gmailMessage.labelIds,
            let excludedMailboxLabel = messageLabelIds.first(where: Self.excludedMailboxLabelIDs.contains) {
             return .excludedMailbox(id: gmailMessage.id, label: excludedMailboxLabel)
@@ -327,11 +341,28 @@ actor MessagePersister {
         Log.debug("Processing: from=\(Log.redact(address: fromHeader)) subjLen=\(subjectHeader.count)", category: .sync)
 
         // Process the Gmail message (may fetch large body parts via API)
-        guard let processedMessage = await messageProcessor.processGmailMessage(
-            gmailMessage,
-            myAliases: myAliases,
-            sendAsAliases: sendAsAliases
-        ) else {
+        let processedMessage: ProcessedMessage?
+        do {
+            processedMessage = try await messageProcessor.processGmailMessage(
+                gmailMessage,
+                myAliases: myAliases,
+                sendAsAliases: sendAsAliases
+            )
+        } catch {
+            if let apiError = error as? APIError, case .quotaExhausted = apiError {
+                throw apiError
+            }
+            if error is CancellationError {
+                // A cancelled run proves nothing about the message; recording
+                // a failure would be a spurious blocking verdict (cancelled
+                // FETCHES likewise record nothing — see MessageFetcher).
+                throw error
+            }
+            Log.warning("Body fetch failed for message \(Log.hashIdentifier(gmailMessage.id)): \(error)", category: .sync)
+            return .bodyFetchFailed(id: gmailMessage.id)
+        }
+
+        guard let processedMessage else {
             return .unprocessable(id: gmailMessage.id)
         }
 
@@ -339,14 +370,18 @@ actor MessagePersister {
     }
 
     /// Prepares messages concurrently with bounded parallelism, preserving input order.
+    /// - Throws: `APIError.quotaExhausted` from any message's preparation. The
+    ///   first quota signal cancels the remaining preparation tasks and the
+    ///   whole batch gets no verdict — the run aborts before persistence, so
+    ///   the unadvanced cursor re-fetches the batch next sync.
     nonisolated func prepareMessagesConcurrently(
         _ gmailMessages: [GmailMessage],
         myAliases: Set<String>,
         sendAsAliases: [SendAsAlias] = []
-    ) async -> [PreparedMessage] {
+    ) async throws -> [PreparedMessage] {
         let maxConcurrent = max(1, min(SyncConfig.maxConcurrentMessageProcessing, gmailMessages.count))
 
-        return await withTaskGroup(of: (Int, PreparedMessage).self) { group in
+        return try await withThrowingTaskGroup(of: (Int, PreparedMessage).self) { group in
             var results = [PreparedMessage?](repeating: nil, count: gmailMessages.count)
             var nextIndex = 0
 
@@ -354,7 +389,7 @@ actor MessagePersister {
                 let index = nextIndex
                 let message = gmailMessages[index]
                 group.addTask { [self] in
-                    (index, await self.prepareMessage(
+                    (index, try await self.prepareMessage(
                         message,
                         myAliases: myAliases,
                         sendAsAliases: sendAsAliases
@@ -363,13 +398,13 @@ actor MessagePersister {
                 nextIndex += 1
             }
 
-            for await (index, prepared) in group {
+            while let (index, prepared) = try await group.next() {
                 results[index] = prepared
                 if nextIndex < gmailMessages.count {
                     let refillIndex = nextIndex
                     let message = gmailMessages[refillIndex]
                     group.addTask { [self] in
-                        (refillIndex, await self.prepareMessage(
+                        (refillIndex, try await self.prepareMessage(
                             message,
                             myAliases: myAliases,
                             sendAsAliases: sendAsAliases
@@ -414,6 +449,13 @@ actor MessagePersister {
         case .unprocessable(let id):
             Log.warning("Failed to process message: \(id)", category: .sync)
             return .unprocessable
+
+        case .bodyFetchFailed(let id):
+            // Transient body-fetch failure: persisting would freeze an empty
+            // body behind an advancing cursor, so block the cursor instead
+            // and let the next sync retry the whole message.
+            Log.warning("Large body fetch failed for message \(Log.hashIdentifier(id)); deferring persistence", category: .sync)
+            return .failed
 
         case .processed(let processedMessage):
             // Check for existing message and update if needed
