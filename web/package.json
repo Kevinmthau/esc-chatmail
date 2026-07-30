@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsr generate && tsc -b && vite build",
+    "build:e2e": "tsr generate && tsc -b && vite build --mode e2e",
     "preview": "vite preview",
     "typecheck": "tsr generate && tsc -b",
     "lint": "eslint . --max-warnings 0",

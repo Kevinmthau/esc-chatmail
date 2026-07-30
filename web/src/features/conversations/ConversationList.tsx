@@ -1,12 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent,
-} from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Skeleton } from '@/components/ui/Skeleton'
 import type { SyncProgress } from '@/db/kv'
 import { CONVERSATION_ROW_HEIGHT } from '@/lib/constants'
@@ -104,9 +97,7 @@ export function ConversationList({ filter, query = '', demo = false }: Conversat
   const anchoredIndex =
     activeAnchor.id === null ? -1 : rows.findIndex((row) => row.id === activeAnchor.id)
   const activeIndex =
-    anchoredIndex >= 0
-      ? anchoredIndex
-      : Math.min(activeAnchor.index, Math.max(rows.length - 1, 0))
+    anchoredIndex >= 0 ? anchoredIndex : Math.min(activeAnchor.index, Math.max(rows.length - 1, 0))
 
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({

@@ -1,12 +1,22 @@
 name: Web CI
 
+# The fixtures path is not incidental: the web parity tests import the iOS
+# golden corpus directly through the @fixtures alias rather than copying it, so
+# an iOS-side edit to those fixtures can break the web suite. Without it here,
+# that break would land on main with no web signal at all.
 on:
   pull_request:
     branches: [main]
-    paths: ['web/**', '.github/workflows/web.yml']
+    paths:
+      - 'web/**'
+      - 'esc-chatmailTests/TestSupport/Fixtures/**'
+      - '.github/workflows/web.yml'
   push:
     branches: [main]
-    paths: ['web/**', '.github/workflows/web.yml']
+    paths:
+      - 'web/**'
+      - 'esc-chatmailTests/TestSupport/Fixtures/**'
+      - '.github/workflows/web.yml'
   workflow_dispatch:
 
 concurrency:

@@ -584,6 +584,11 @@ describe('sendMessage', () => {
         },
       }
       // Base64 inflates by 4/3, so this clears MAX_SEND_RAW_BYTES on its own.
+      // Keep the payload at the real ceiling rather than stubbing a smaller
+      // limit: this is the one case that proves the size the send endpoint
+      // actually enforces is refused. Encoding ~26MB under happy-dom costs
+      // several seconds on a shared runner, so the test carries its own
+      // timeout below — vitest's 5s default is not enough.
       const huge = storableBlob([new Uint8Array(MAX_SEND_RAW_BYTES)], { type: 'application/pdf' })
 
       const error = await sendMessage(
@@ -613,7 +618,7 @@ describe('sendMessage', () => {
       expect(await db.attachments.count()).toBe(0)
       expect(await db.blobs.count()).toBe(0)
       expect(await db.outboundSends.count()).toBe(0)
-    })
+    }, 30_000)
 
     it('drops the optimistic attachment rows when sync already delivered the sent copy', async () => {
       await seedReplyConversation()
