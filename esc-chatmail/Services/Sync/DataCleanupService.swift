@@ -104,8 +104,9 @@ struct DataCleanupService: Sendable {
         await removeEmptyConversations(in: context)
         await removeDraftMessages(in: context)
         await cleanupOrphanedData(in: context)
-        // Runs last: the orphan sweeps above delete participation rows, and
-        // merging persons is cheaper once those are gone.
+        // Run last: the orphan sweeps above delete participation rows, and
+        // merging is cheaper once those are gone.
         await mergeDuplicatePersons(in: context)
+        await mergeDuplicateLabels(in: context)
     }
 }

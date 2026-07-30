@@ -5,14 +5,12 @@ import CoreData
 /// Pins the Core Data model/metadata facts the sync-reliability work depends on.
 ///
 /// The uniqueness constraints are declared IN the versioned .xcdatamodel (since
-/// 2025-09), so the app's runtime `enforceUniquenessConstraints` mutation has
-/// always been a no-op: its guard finds the constraint already present and
-/// returns without touching the model. These tests are the tripwire for that
-/// premise — if the declared constraint ever left the model while the runtime
-/// mutation remained, production store metadata would diverge from every
-/// bundled model, and the next model version would fail lightweight migration
-/// with NSMigrationMissingSourceModelError, which the recovery ladder currently
-/// answers by deleting the store.
+/// 2025-09). The runtime `enforceUniquenessConstraints` mutation that once
+/// shadowed the Message.id constraint was deleted with model v3 (it was born a
+/// no-op); model changes belong in versioned model files only. These tests
+/// remain the tripwire for the declared constraints: silently dropping one
+/// changes entity version hashes for every existing store, and reintroducing
+/// any runtime model mutation re-arms the missing-source-model wipe.
 final class ModelConstraintMetadataTests: XCTestCase {
 
     /// The process-wide shared model (see TestCoreDataStack.sharedModel — one
@@ -47,49 +45,30 @@ final class ModelConstraintMetadataTests: XCTestCase {
         )
     }
 
-    /// The real drift tripwire: replays the production runtime mutation
-    /// (`CoreDataStack.enforceUniquenessConstraints`, which is skipped under
-    /// XCTest) against a freshly loaded copy of the bundled model and asserts
-    /// it changes nothing. If the declared constraint ever leaves the
-    /// .xcdatamodel while the runtime append remains, the mutated model's
-    /// version hash diverges here — the exact divergence that would strand
-    /// production store metadata with no matching bundled model.
-    ///
-    /// Mirrors the production guard verbatim; simplify to constraint-presence
-    /// only once the runtime mutation is deleted. Fresh model copies stay
-    /// inside an autoreleasepool and never touch entity classes, per the
-    /// single-model-per-process rule (see TestCoreDataStack).
-    func testRuntimeConstraintMutationIsANoOpOnTheBundledModel() throws {
-        try autoreleasepool {
-            let momdURL = try XCTUnwrap(
-                Bundle(for: CoreDataStack.self).url(forResource: "ESCChatmail", withExtension: "momd")
-            )
-            let currentModelURL = momdURL.appendingPathComponent("ESCChatmail 2.mom")
-            let rawModel = try XCTUnwrap(NSManagedObjectModel(contentsOf: currentModelURL))
-            let mutatedModel = try XCTUnwrap(NSManagedObjectModel(contentsOf: currentModelURL))
+    /// New v3 entity: SyncCheckpoint may carry constraints from birth (the
+    /// no-constraints-on-existing-entities-until-v4 rule applies to entities
+    /// with existing rows, which a brand-new entity has none of).
+    func testSyncCheckpointKindUniquenessConstraintIsDeclaredInTheModel() throws {
+        let checkpoint = try XCTUnwrap(sharedModel.entitiesByName["SyncCheckpoint"])
+        XCTAssertTrue(
+            checkpoint.uniquenessConstraints.contains(where: { ($0 as? [String]) == ["kind"] }),
+            "kind's uniqueness is what makes checkpoint writes natural upserts"
+        )
+    }
 
-            let rawMessage = try XCTUnwrap(rawModel.entitiesByName["Message"])
-            let mutatedMessage = try XCTUnwrap(mutatedModel.entitiesByName["Message"])
-
-            // Production logic, replicated: append ["id"] unless already present.
-            let constraint: [String] = ["id"]
-            let guardMatched = mutatedMessage.uniquenessConstraints
-                .contains(where: { ($0 as? [String]) == constraint })
-            if !guardMatched {
-                mutatedMessage.uniquenessConstraints.append(constraint as [Any])
-            }
-
-            XCTAssertTrue(
-                guardMatched,
-                "The runtime mutation's guard no longer matches the declared constraint — " +
-                "production would append a duplicate and change every store's version hash"
-            )
-            XCTAssertEqual(
-                rawMessage.versionHash, mutatedMessage.versionHash,
-                "The effective production model diverges from the bundled model — " +
-                "existing stores would hit NSMigrationMissingSourceModelError on the next " +
-                "model version, which the recovery ladder answers by deleting the store"
-            )
-        }
+    /// No entity outside the declared set may carry constraints, and no
+    /// pre-v3 entity may gain one before the v4-after-repair-soaks gate
+    /// (adding a constraint changes the entity's version hash AND makes
+    /// existing duplicate rows a migration-time constraint violation).
+    func testNoUndeclaredUniquenessConstraintsExist() {
+        let constrained = sharedModel.entities
+            .filter { !$0.uniquenessConstraints.isEmpty }
+            .compactMap { $0.name }
+            .sorted()
+        XCTAssertEqual(
+            constrained, ["AbandonedSyncMessage", "Message", "SyncCheckpoint"],
+            "A constraint appeared on or vanished from an unexpected entity — " +
+            "pre-v3 entities must not gain constraints until v4, after dedup repairs soak"
+        )
     }
 }

@@ -39,7 +39,10 @@ extension MessagePersister {
             Log.error("Failed to fetch labels by IDs", category: .coreData, error: error)
             return [:]
         }
-        return Dictionary(uniqueKeysWithValues: labels.map { ($0.id, $0) })
+        // Duplicate-id Label rows are possible until the v4 constraint lands
+        // (Label.id has no uniqueness constraint); collapse instead of
+        // trapping — the maintenance merge pass repairs the store rows.
+        return Dictionary(labels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// Saves labels from Gmail API to Core Data with upsert logic
@@ -56,7 +59,9 @@ extension MessagePersister {
                 Log.error("Failed to fetch existing labels for save", category: .coreData, error: error)
                 existingLabels = []
             }
-            var labelDict = Dictionary(uniqueKeysWithValues: existingLabels.map { ($0.id, $0) })
+            // Same duplicate tolerance as fetchLabelsByIds: trapping here would
+            // crash every sync until the maintenance merge pass ran.
+            var labelDict = Dictionary(existingLabels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
             var insertedCount = 0
             var updatedCount = 0
