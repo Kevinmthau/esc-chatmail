@@ -4,10 +4,14 @@ import CoreData
 /// Per-`saveMessages` buffer for source conversations whose rollups became
 /// stale after a message reroute.
 ///
-/// Conversation creation may save the supplied context before the batch
-/// finishes. The synchronous will-save observer drains this buffer on that
-/// context's queue so relationship moves and their repaired rollups cross every
-/// durability boundary together.
+/// Deferring the repairs batches one rollup pass per save instead of one per
+/// reroute. The synchronous will-save observer drains the buffer on the
+/// context's queue before ANY save of the supplied context (batch-boundary
+/// saves, or future callers that save mid-batch), so relationship moves and
+/// their repaired rollups cross every durability boundary together.
+/// (Historically the conversation-creation serializer saved the caller's
+/// context mid-batch; it now commits shells in its own sibling context, but
+/// the observer remains the guard for any other mid-batch save.)
 final class MessagePersisterReroutedSourceRollupBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var conversationIDs = Set<NSManagedObjectID>()

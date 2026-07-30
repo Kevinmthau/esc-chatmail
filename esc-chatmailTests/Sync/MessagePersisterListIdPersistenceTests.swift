@@ -488,7 +488,7 @@ final class MessagePersisterListIdPersistenceTests: XCTestCase {
         )
     }
 
-    func testSaveMessagesRepairsReroutedSourceBeforeLaterConversationCreationSave() async throws {
+    func testSaveMessagesCommitsRerouteAndRepairedSourceRollupTogether() async throws {
         let syncContext = stack.newBackgroundContext()
         try seedSystemLabels(in: syncContext)
         let seedPersister = makePersister()
@@ -548,8 +548,36 @@ final class MessagePersisterListIdPersistenceTests: XCTestCase {
             in: syncContext
         )
 
-        // Do not save `syncContext` here. Resolving the second message's new
-        // participant conversation performs the internal save under test.
+        // Before the caller's save, the reroute and its repaired source
+        // rollup are pending caller-context state: only the new conversation
+        // SHELLS are durable (the serializer commits shells in its own
+        // context and no longer saves the caller's context mid-batch).
+        let durableBeforeSave = try fetchDurableConversationStates()
+        let durableSourceBefore = try XCTUnwrap(durableBeforeSave.first { $0.id == sourceID })
+        XCTAssertEqual(
+            Set(durableSourceBefore.messageIDs),
+            ["source-remains-before-save", "reroute-before-save"],
+            "The move must not be durable until the caller's save"
+        )
+        XCTAssertEqual(
+            durableBeforeSave.first { $0.listId == "list.example.com" }?.messageIDs,
+            [],
+            "The list shell publishes empty; its message rides the batch save"
+        )
+        XCTAssertTrue(
+            durableBeforeSave.contains {
+                $0.id != sourceID &&
+                    $0.listId == nil &&
+                    $0.messageIDs.isEmpty &&
+                    $0.lastMessageDate == Date(timeIntervalSince1970: 300)
+            },
+            "The new participant conversation publishes as a seeded empty shell"
+        )
+
+        // The caller's save is the durability boundary where the move and its
+        // repaired source rollup land together.
+        try await syncContext.perform { try syncContext.save() }
+
         let durableStates = try fetchDurableConversationStates()
         let durableSource = try XCTUnwrap(durableStates.first { $0.id == sourceID })
         XCTAssertEqual(durableSource.messageIDs, ["source-remains-before-save"])
@@ -566,9 +594,10 @@ final class MessagePersisterListIdPersistenceTests: XCTestCase {
             durableStates.contains {
                 $0.id != sourceID &&
                     $0.listId == nil &&
-                    $0.messageIDs.isEmpty &&
+                    $0.messageIDs == ["new-conversation-message"] &&
                     $0.lastMessageDate == Date(timeIntervalSince1970: 300)
-            }
+            },
+            "The batch save lands the new conversation's message alongside the reroute"
         )
     }
 

@@ -27,10 +27,24 @@ final class FailingReadStore: NSIncrementalStore {
         ]
     }
 
+    private let requestLogLock = NSLock()
+    private var _requestTypes: [NSPersistentStoreRequestType] = []
+
+    /// Every request type this store rejected, in order — lets tests prove
+    /// WHICH operation failed (e.g. a lookup fetch, never a save).
+    var requestTypes: [NSPersistentStoreRequestType] {
+        requestLogLock.lock()
+        defer { requestLogLock.unlock() }
+        return _requestTypes
+    }
+
     override func execute(
         _ request: NSPersistentStoreRequest,
         with context: NSManagedObjectContext?
     ) throws -> Any {
+        requestLogLock.lock()
+        _requestTypes.append(request.requestType)
+        requestLogLock.unlock()
         throw NSError(
             domain: "FailingReadStore",
             code: 1,
