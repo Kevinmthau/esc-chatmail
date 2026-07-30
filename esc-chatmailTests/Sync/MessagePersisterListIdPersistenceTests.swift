@@ -446,7 +446,7 @@ final class MessagePersisterListIdPersistenceTests: XCTestCase {
         }
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
 
-        await batchPersister.saveMessages(
+        try await batchPersister.saveMessages(
             gmailMessages,
             labelIds: ["INBOX", "UNREAD"],
             myAliases: ["me@example.com"],
@@ -530,7 +530,7 @@ final class MessagePersisterListIdPersistenceTests: XCTestCase {
             photoPrefetcher: { _ in }
         )
 
-        await batchPersister.saveMessages(
+        try await batchPersister.saveMessages(
             batchMessages.map {
                 GmailMessage(
                     id: $0.id,

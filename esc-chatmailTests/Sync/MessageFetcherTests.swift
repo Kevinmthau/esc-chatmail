@@ -3,7 +3,7 @@ import XCTest
 
 final class MessageFetcherTests: XCTestCase {
 
-    func testFetchBatch_includesExhaustedTransientFailuresInFailedIds() async throws {
+    func testFetchBatch_separatesExhaustedFailuresFromGoneMessages() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.getMessageResponses["ok"] = GmailMessageBuilder().withId("ok").build()
         mockAPI.getMessageErrors["transient"] = APIError.timeout
@@ -13,15 +13,23 @@ final class MessageFetcherTests: XCTestCase {
         let fetcher = MessageFetcher(apiClient: mockAPI, clock: clock)
         let successes = SuccessCollector()
 
-        let failedIds = try await fetcher.fetchBatch(["ok", "transient", "missing"]) { messages in
+        let outcome = try await fetcher.fetchBatch(["ok", "transient", "missing"]) { messages in
             for message in messages {
                 await successes.append(message.id)
             }
+            return .empty
         }
 
         let successfulIds = await successes.values()
         XCTAssertEqual(Set(successfulIds), Set(["ok"]))
-        XCTAssertEqual(Set(failedIds), Set(["transient", "missing"]))
+        XCTAssertEqual(
+            outcome.fetchFailedIds, ["transient"],
+            "Only exhausted/permanent fetch errors block the cursor"
+        )
+        XCTAssertEqual(
+            outcome.goneIds, ["missing"],
+            "A 404 is a terminal outcome — it must not freeze the cursor as a failure"
+        )
         XCTAssertEqual(mockAPI.getMessageCallCount, 6) // ok(1) + missing(1) + transient(4)
         XCTAssertEqual(clock.sleeps.count, 3, "One backoff sleep per retry attempt")
     }
@@ -36,7 +44,7 @@ final class MessageFetcherTests: XCTestCase {
         let fetcher = MessageFetcher(apiClient: mockAPI, clock: clock)
 
         do {
-            _ = try await fetcher.fetchBatch(["quota"]) { _ in }
+            _ = try await fetcher.fetchBatch(["quota"]) { _ in .empty }
             XCTFail("Quota exhaustion must abort the run, not return the ID as a per-message failure")
         } catch let APIError.quotaExhausted(message) {
             XCTAssertTrue(message.contains("Daily Limit Exceeded"))

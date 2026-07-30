@@ -276,7 +276,7 @@ final class SendAsReplyFromTests: XCTestCase {
         )
         let persister = MessagePersister(photoPrefetcher: { _ in })
 
-        await persister.saveMessage(
+        try await persister.saveMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases,

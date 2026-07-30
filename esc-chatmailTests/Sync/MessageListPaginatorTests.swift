@@ -27,6 +27,9 @@ final class MessageListPaginatorTests: XCTestCase {
         } messageHandler: { messages in
             await persisted.append(contentsOf: messages.map(\.id))
             await listCountsAtPersist.append(mockAPI.listMessagesCallCount)
+            var report = MessagePersistenceReport()
+            for message in messages { report.record(message.id, .persisted) }
+            return report
         } pageCompletion: {
             await pageCompletions.increment()
         }

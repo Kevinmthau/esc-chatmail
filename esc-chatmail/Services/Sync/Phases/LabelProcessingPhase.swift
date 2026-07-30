@@ -29,7 +29,7 @@ struct LabelProcessingPhase: SyncPhase {
             // Check for cancellation to respect sync cancel requests
             try Task.checkCancellation()
 
-            await historyProcessor.processLightweightOperations(
+            try await historyProcessor.processLightweightOperations(
                 record,
                 in: context.coreDataContext,
                 syncStartTime: context.syncStartTime,

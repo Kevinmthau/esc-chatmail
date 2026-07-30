@@ -285,7 +285,7 @@ final class InitialSyncOrchestrator {
             }
         } messageHandler: { [messagePersister, myAliases, sendAsAliases] messages in
             // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
-            await messagePersister.saveMessages(
+            try await messagePersister.saveMessages(
                 messages,
                 labelIds: labelIds,
                 myAliases: myAliases,
@@ -332,18 +332,19 @@ final class InitialSyncOrchestrator {
         var syncCompletedWithWarnings = false
 
         if result.hasFailures {
-            log.warning("Initial sync has \(result.failedIds.count) failed messages")
+            log.warning("Initial sync has \(result.blockingFailureIds.count) failed messages")
             syncCompletedWithWarnings = true
 
-            // Retry failed messages. Quota exhaustion propagates: the initial
-            // sync aborts without advancing historyId or recording the
-            // remaining IDs as failures, and resumes on a later run.
-            let stillFailedIds = try await BatchProcessor.retryFailedMessages(
-                failedIds: result.failedIds,
+            // Retry failed messages (fetch failures and persistence failures
+            // alike). Quota exhaustion propagates: the initial sync aborts
+            // without advancing historyId or recording the remaining IDs as
+            // failures, and resumes on a later run.
+            let retryOutcome = try await BatchProcessor.retryFailedMessages(
+                failedIds: result.blockingFailureIds,
                 messageFetcher: messageFetcher
             ) { [messagePersister, myAliases, sendAsAliases] messages in
                 // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
-                await messagePersister.saveMessages(
+                try await messagePersister.saveMessages(
                     messages,
                     labelIds: labelIds,
                     myAliases: myAliases,
@@ -352,6 +353,7 @@ final class InitialSyncOrchestrator {
                     in: context
                 )
             }
+            let stillFailedIds = retryOutcome.blockingFailureIds
 
             let disposition = Self.completionDisposition(
                 hadInitialFailures: true,

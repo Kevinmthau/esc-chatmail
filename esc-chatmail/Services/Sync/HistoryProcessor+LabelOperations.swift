@@ -14,8 +14,8 @@ extension HistoryProcessor {
         in context: NSManagedObjectContext,
         syncStartTime: Date?,
         modificationTransaction: ModificationTracker.Transaction?
-    ) async {
-        let modifiedObjectIDs = await LabelOperationProcessor.process(
+    ) async throws {
+        let modifiedObjectIDs = try await LabelOperationProcessor.process(
             items: labelsAdded,
             operation: .add,
             in: context,
@@ -35,8 +35,8 @@ extension HistoryProcessor {
         in context: NSManagedObjectContext,
         syncStartTime: Date?,
         modificationTransaction: ModificationTracker.Transaction?
-    ) async {
-        let modifiedObjectIDs = await LabelOperationProcessor.process(
+    ) async throws {
+        let modifiedObjectIDs = try await LabelOperationProcessor.process(
             items: labelsRemoved,
             operation: .remove,
             in: context,

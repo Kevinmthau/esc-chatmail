@@ -5,6 +5,11 @@ import CoreData
 
 private struct MessageUpdateResult {
     let didUpdate: Bool
+    /// True when the existing-message lookup itself failed (Core Data error),
+    /// as opposed to the message legitimately not being present. Callers must
+    /// not fall through to creation on a failed lookup — that risks inserting
+    /// a duplicate of a row that exists.
+    var lookupFailed: Bool = false
     let modifiedConversationID: NSManagedObjectID?
     let reroutedFromConversationID: NSManagedObjectID?
     let shouldInvalidateRenderedContent: Bool
@@ -12,6 +17,13 @@ private struct MessageUpdateResult {
     let changedHTMLSourceSignature: String?
     let participantDisplayNameUpdateEmails: [String]
     let participantDisplayNameUpdateConversationIDs: Set<NSManagedObjectID>
+}
+
+/// Three-way outcome of an existing-message update attempt.
+enum ExistingMessageUpdateOutcome: Sendable {
+    case updated
+    case notPresent
+    case lookupFailed
 }
 
 extension MessagePersister {
@@ -47,7 +59,7 @@ extension MessagePersister {
         remoteCommittedSendMutation: RemoteCommittedSendMutationResolution?,
         in context: NSManagedObjectContext
     ) async -> Bool {
-        let result = await performExistingMessageUpdate(
+        let outcome = await updateExistingMessageOutcome(
             processedMessage,
             labelIds: labelIds,
             myAliases: myAliases,
@@ -56,20 +68,23 @@ extension MessagePersister {
             remoteCommittedSendMutation: remoteCommittedSendMutation,
             in: context
         )
-        return result.didUpdate
+        return outcome == .updated
     }
 
-    /// Batch-only update path. Rerouted sources are registered synchronously
-    /// with the invocation-local buffer inside the relationship-move block.
-    func updateExistingMessageDeferringSourceRollup(
+    /// Truthful update attempt: distinguishes "not local yet" (safe to
+    /// create) from "the lookup failed" (must not create — the row may exist).
+    /// Pass a `reroutedSourceRollupBuffer` on the batch path so rerouted
+    /// sources are registered synchronously with the invocation-local buffer
+    /// inside the relationship-move block.
+    func updateExistingMessageOutcome(
         _ processedMessage: ProcessedMessage,
         labelIds: Set<String>?,
         myAliases: Set<String>,
         modificationTransaction: ModificationTracker.Transaction?,
-        reroutedSourceRollupBuffer: MessagePersisterReroutedSourceRollupBuffer,
+        reroutedSourceRollupBuffer: MessagePersisterReroutedSourceRollupBuffer?,
         remoteCommittedSendMutation: RemoteCommittedSendMutationResolution?,
         in context: NSManagedObjectContext
-    ) async -> Bool {
+    ) async -> ExistingMessageUpdateOutcome {
         let result = await performExistingMessageUpdate(
             processedMessage,
             labelIds: labelIds,
@@ -79,7 +94,8 @@ extension MessagePersister {
             remoteCommittedSendMutation: remoteCommittedSendMutation,
             in: context
         )
-        return result.didUpdate
+        if result.didUpdate { return .updated }
+        return result.lookupFailed ? .lookupFailed : .notPresent
     }
 
     private func performExistingMessageUpdate(
@@ -126,6 +142,7 @@ extension MessagePersister {
                 Log.error("Failed to fetch message for update", category: .coreData, error: error)
                 return MessageUpdateResult(
                     didUpdate: false,
+                    lookupFailed: true,
                     modifiedConversationID: nil,
                     reroutedFromConversationID: nil,
                     shouldInvalidateRenderedContent: false,

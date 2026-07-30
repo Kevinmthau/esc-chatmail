@@ -415,50 +415,47 @@ final class IncrementalSyncOrchestrator {
         log.info("Retrying \(ids.count) previously abandoned messages")
         let result = await messageFetcher.fetchAbandonedMessages(ids)
 
-        // A fetched message can still be skipped by the persister (e.g. unprocessable
-        // payload), so "recovered" is determined by what actually reached the context,
-        // not by what was fetched — otherwise the tracking record would be deleted
-        // with no Message row to show for it.
-        var persistedIds: Set<String> = []
+        // A fetched message can still be skipped by the persister (e.g.
+        // unprocessable payload), so "recovered" is what the persistence
+        // report says actually reached the context — otherwise the tracking
+        // record would be deleted with no Message row to show for it. An
+        // excluded message (moved to spam/trash since abandonment) is
+        // resolved: nothing local remains to recover. Unprocessable payloads
+        // stay failed and age out via the drain's retry cap.
+        var report = MessagePersistenceReport.empty
         if !result.fetched.isEmpty {
-            await messagePersister.saveMessages(
-                result.fetched,
-                labelIds: phaseContext.labelIds,
-                myAliases: phaseContext.myAliases,
-                sendAsAliases: phaseContext.sendAsAliases,
-                modificationTransaction: phaseContext.modificationTransaction,
-                in: phaseContext.coreDataContext
-            )
-            persistedIds = await Self.messageIdsPresent(
-                result.fetched.map { $0.id },
-                in: phaseContext.coreDataContext
-            )
-        }
-
-        let unpersistedIds = result.fetched.map { $0.id }.filter { !persistedIds.contains($0) }
-        return AbandonedRetryOutcome(
-            recoveredIds: Array(persistedIds),
-            goneIds: result.goneIds,
-            failedIds: result.failedIds + unpersistedIds
-        )
-    }
-
-    private static func messageIdsPresent(
-        _ ids: [String],
-        in context: NSManagedObjectContext
-    ) async -> Set<String> {
-        await context.perform {
-            let request = Message.fetchRequest()
-            request.predicate = NSPredicate(format: "id IN %@", ids)
             do {
-                return Set(try context.fetch(request).map { $0.id })
+                report = try await messagePersister.saveMessages(
+                    result.fetched,
+                    labelIds: phaseContext.labelIds,
+                    myAliases: phaseContext.myAliases,
+                    sendAsAliases: phaseContext.sendAsAliases,
+                    modificationTransaction: phaseContext.modificationTransaction,
+                    in: phaseContext.coreDataContext
+                )
             } catch {
-                // Treating everything as unpersisted is the safe direction: the
-                // tracking records stay and the messages are retried next sync.
-                Log.error("Failed to verify persisted abandoned messages; treating batch as failed", category: .sync, error: error)
-                return []
+                // Run-fatal persistence failure: the persister throws only for
+                // account-scoped infrastructure errors, so the fetched
+                // messages proved nothing about themselves — give them NO
+                // outcome. Recording a failure here would burn the drain's
+                // bounded retry budget and, at the cap, delete the only
+                // durable pointer to messages the cursor already advanced
+                // past. Fetch-level verdicts (404s, per-message fetch
+                // failures) stand: they are independent of local persistence.
+                Log.error("Abandoned-message retry aborted by persistence failure", category: .sync, error: error)
+                return AbandonedRetryOutcome(
+                    recoveredIds: [],
+                    goneIds: result.goneIds,
+                    failedIds: result.failedIds
+                )
             }
         }
+
+        return AbandonedRetryOutcome(
+            recoveredIds: report.persistedIds + report.excludedIds,
+            goneIds: result.goneIds,
+            failedIds: result.failedIds + report.failedIds + report.unprocessableIds
+        )
     }
 
     // MARK: - History Recovery
@@ -494,7 +491,7 @@ final class IncrementalSyncOrchestrator {
                 }
             } messageHandler: { [messagePersister, myAliases, sendAsAliases] messages in
                 // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
-                await messagePersister.saveMessages(
+                try await messagePersister.saveMessages(
                     messages,
                     labelIds: labelIds,
                     myAliases: myAliases,
@@ -523,11 +520,11 @@ final class IncrementalSyncOrchestrator {
             }
 
             log.info(
-                "Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.failedIds.count)"
+                "Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.blockingFailureIds.count)"
             )
 
             if result.hasFailures {
-                await failureTracker.recordFailure(failedIds: result.failedIds)
+                await failureTracker.recordFailure(failedIds: result.blockingFailureIds)
             }
 
             // Get current historyId from Gmail profile and only advance when failure policy allows it.

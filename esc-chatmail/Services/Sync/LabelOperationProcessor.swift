@@ -41,12 +41,16 @@ struct LabelOperationProcessor {
     ///   - context: Core Data context for database operations
     ///   - syncStartTime: When sync started (for conflict resolution)
     /// - Returns: Array of modified conversation ObjectIDs for rollup updates
+    /// Throws on Core Data failure: a swallowed fetch error here would drop
+    /// every label mutation in the record (including the excluded-mailbox
+    /// delete branch) while looking identical to "nothing to do", letting the
+    /// cursor advance past unapplied changes.
     static func process<T: LabelChangeItem>(
         items: [T]?,
         operation: Operation,
         in context: NSManagedObjectContext,
         syncStartTime: Date?
-    ) async -> [NSManagedObjectID] {
+    ) async throws -> [NSManagedObjectID] {
         guard let items = items, !items.isEmpty else { return [] }
 
         if operation == .remove {
@@ -57,16 +61,13 @@ struct LabelOperationProcessor {
         let allMessageIds = Set(items.map { $0.message.id })
         let allLabelIds = Set(items.flatMap { $0.labelIds })
 
-        return await context.perform {
+        return try await context.perform {
             // Batch fetch all messages
             let messageRequest = Message.fetchRequest()
             messageRequest.predicate = NSPredicate(format: "id IN %@", allMessageIds)
             messageRequest.relationshipKeyPathsForPrefetching = ["labels", "conversation"]
 
-            guard let messages = try? context.fetch(messageRequest) else {
-                Log.error("Failed to batch fetch messages for label \(operation)", category: .sync)
-                return []
-            }
+            let messages = try context.fetch(messageRequest)
 
             // Create dictionary for O(1) lookup (use uniquingKeysWith to handle potential duplicates)
             let messageDict = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
@@ -75,10 +76,7 @@ struct LabelOperationProcessor {
             let labelRequest = Label.fetchRequest()
             labelRequest.predicate = NSPredicate(format: "id IN %@", allLabelIds)
 
-            guard let labels = try? context.fetch(labelRequest) else {
-                Log.error("Failed to batch fetch labels for \(operation)", category: .sync)
-                return []
-            }
+            let labels = try context.fetch(labelRequest)
 
             // A corrupted store can contain multiple Label rows for the same Gmail id.
             // Apply mutations to every matching row so we don't depend on fetch order.
