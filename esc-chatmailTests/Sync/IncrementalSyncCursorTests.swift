@@ -430,6 +430,93 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertTrue(recovered, "The recovered message must be durably persisted")
     }
 
+    // MARK: - History-recovery scenarios
+
+    /// A clean recovery run advances the cursor to the profile's historyId,
+    /// clears previously deferred rows (the re-scan recovered them), and
+    /// resets the failure counter — success state committed only after the
+    /// recovery's durable save.
+    @MainActor
+    func testCleanRecoveryAdvancesCursorAndCommitsSuccess() async throws {
+        try await seedLedgerRow(id: "previously-failing", state: .deferred)
+        defaults.set(1, forKey: SyncConfig.consecutiveFailuresKey)
+
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec", threadId: "t-m-rec")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageResponses["m-rec"] = makeFullMessage(id: "m-rec")
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
+
+        let sut = makeOrchestrator()
+        let result = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(result.hadWarnings, "Recovery runs report warnings")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777", "A clean recovery advances to the profile historyId")
+        let recovered = await messageExists(id: "m-rec")
+        XCTAssertTrue(recovered)
+        let rows = await fetchLedgerRows()
+        XCTAssertTrue(rows.isEmpty, "A clean recovery clears recovered deferred rows")
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 0, "Recovery success must reset the counter after the save")
+        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNotNil(lastSuccess)
+    }
+
+    /// A recovery run with fetch failures freezes the cursor at its prior
+    /// value and commits the failing IDs as durable deferred rows in the same
+    /// save — no success state leaks.
+    @MainActor
+    func testFailingRecoveryFreezesCursorAndCommitsDeferredRows() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec-bad", threadId: "t-m-rec-bad")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        // Persistent per-id transient error: every attempt fails, exhausting retries.
+        apiClient.getMessageErrors["m-rec-bad"] = APIError.timeout
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(
+            historyId, Self.startingHistoryId,
+            "A recovery with unfetched messages must not advance the cursor past them"
+        )
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.gmailMessageId, "m-rec-bad")
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue)
+        XCTAssertEqual(rows.first?.failureClass, AbandonedSyncMessage.FailureClass.fetchFailed.rawValue)
+        XCTAssertNil(rows.first?.sourceHistoryId, "The expired cursor is not a meaningful source position")
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 1, "The failed recovery must count toward the escape threshold")
+        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNil(lastSuccess)
+    }
+
     // MARK: - Fixture
 
     private func seedAccount() async throws {

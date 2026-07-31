@@ -33,6 +33,15 @@ actor SyncFailureTracker {
         self.coreDataStack = coreDataStack
     }
 
+    /// Latched when `recordFailure` could not stage the current failing set
+    /// (ledger read failed). While set, the escape hatch must hold: the counter
+    /// kept incrementing, but the ledger does not contain the IDs the cursor
+    /// would advance past — abandoning a stale (or empty) set would lose the
+    /// unstaged IDs with no durable trace. Cleared by the next successful
+    /// staging or by a committed advance (in-memory only; a relaunch clears it,
+    /// and the next failing run re-records the same frozen window).
+    private var deferredStagingFailed = false
+
     // MARK: - Public API
 
     /// Records a successful sync and resets failure tracking.
@@ -98,7 +107,7 @@ actor SyncFailureTracker {
         let consecutiveFailures = defaults.integer(forKey: SyncConfig.consecutiveFailuresKey) + 1
         defaults.set(consecutiveFailures, forKey: SyncConfig.consecutiveFailuresKey)
 
-        await context.perform {
+        let staged: Bool = await context.perform {
             let trackedAt = Date()
             let request = AbandonedSyncMessage.fetchRequest()
             request.predicate = NSPredicate(
@@ -116,7 +125,7 @@ actor SyncFailureTracker {
                 // cursor stays frozen while failures persist, so the next
                 // failing run re-records the same window.
                 Log.error("Failed to read failure ledger; skipping deferred staging this run", category: .sync, error: error)
-                return
+                return false
             }
 
             var existingByGmailId: [String: AbandonedSyncMessage] = [:]
@@ -148,9 +157,11 @@ actor SyncFailureTracker {
                 row.sourceHistoryId = sourceHistoryId
                 row.abandonedAt = trackedAt
             }
+            return true
         }
+        deferredStagingFailed = !staged
 
-        log.warning("Consecutive failures: \(consecutiveFailures)/\(SyncConfig.maxConsecutiveSyncFailures), staged \(orderedIds.count) deferred IDs")
+        log.warning("Consecutive failures: \(consecutiveFailures)/\(SyncConfig.maxConsecutiveSyncFailures), staged \(staged ? orderedIds.count : 0) deferred IDs")
     }
 
     // MARK: - History Advancement
@@ -211,6 +222,15 @@ actor SyncFailureTracker {
             return .held
         }
 
+        guard !deferredStagingFailed else {
+            // The current failing set never reached the ledger; the deferred
+            // rows on disk (if any) are a stale earlier set. Abandoning them
+            // would advance the cursor past the unstaged IDs with no durable
+            // trace — hold until a run stages successfully.
+            log.error("Escape hatch armed but the current failing set was never staged - keeping cursor frozen for retry")
+            return .held
+        }
+
         log.warning("Maximum consecutive failures (\(consecutiveFailures)) reached - advancing historyId to prevent deadlock")
 
         let abandonedCount: Int? = await context.perform {
@@ -240,8 +260,12 @@ actor SyncFailureTracker {
         }
 
         guard abandonedCount > 0 else {
-            // Nothing tracked (failures without recorded IDs) — a plain advance.
-            return HistoryAdvancePlan(outcome: .advancedClean)
+            // hadFailures means this run recorded blocking IDs, so an empty
+            // deferred set here signals a ledger anomaly (e.g. an earlier read
+            // failure), not a clean run. Advancing would skip the failing IDs
+            // with no durable record — prefer the stall.
+            log.error("Escape hatch found no deferred rows to abandon - keeping cursor frozen for retry")
+            return .held
         }
 
         log.warning("Staged abandonment of \(abandonedCount) unfetchable messages")
@@ -257,8 +281,10 @@ actor SyncFailureTracker {
         case .held:
             return
         case .advancedClean:
+            deferredStagingFailed = false
             recordSuccess()
         case .advancedAbandoning(let count):
+            deferredStagingFailed = false
             recordSuccess()
             // Newly abandoned rows carry their original drain budget, so the
             // drain has work again.

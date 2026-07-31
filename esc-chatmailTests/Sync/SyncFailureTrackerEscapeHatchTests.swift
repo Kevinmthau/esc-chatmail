@@ -161,6 +161,60 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         )
     }
 
+    /// A failed ledger read during recordFailure still counts the strike but
+    /// stages nothing — so a later hatch, reading through a WORKING context,
+    /// must hold rather than abandon a stale (or empty) deferred set: the
+    /// current run's failing IDs never reached the ledger.
+    func testStagingFailureLatchBlocksHatchOverStaleRows() async throws {
+        // A previous run durably tracked an older failing set.
+        try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures - 1, failedIds: ["stale-1"])
+
+        // The threshold-crossing run cannot read the ledger: the strike counts,
+        // the staging is skipped.
+        let failingContext = try FailingReadStore.makeFailingContext()
+        await tracker.recordFailure(fetchFailedIds: ["fresh-1"], in: failingContext)
+        let consecutive = await tracker.consecutiveFailureCount
+        XCTAssertEqual(
+            consecutive, SyncConfig.maxConsecutiveSyncFailures,
+            "The strike must count even when staging is skipped, or a persistently failing store would freeze the cursor with the hatch never arming"
+        )
+
+        // The hatch fetch itself succeeds (working context) — but it must not
+        // abandon stale-1 and advance past fresh-1, which has no durable row.
+        let hatchRun = coreDataStack.newBackgroundContext()
+        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: hatchRun)
+        XCTAssertEqual(plan.outcome, .held, "An unstaged failing set must hold the cursor")
+
+        let rows = try await fetchAbandonedRows()
+        XCTAssertEqual(rows.map(\.gmailMessageId), ["stale-1"])
+        XCTAssertEqual(
+            rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue,
+            "The stale set must not be abandoned in place of the unstaged one"
+        )
+
+        // The next failing run stages successfully (frozen cursor re-scans the
+        // same window, so its set is complete) — the latch clears and the
+        // hatch fires over the now-durable set.
+        let recoveredRun = coreDataStack.newBackgroundContext()
+        await tracker.recordFailure(fetchFailedIds: ["stale-1", "fresh-1"], in: recoveredRun)
+        let retryPlan = await tracker.planHistoryAdvance(hadFailures: true, in: recoveredRun)
+        XCTAssertEqual(retryPlan.outcome, .advancedAbandoning(count: 2))
+    }
+
+    /// The hatch with real failures but ZERO deferred rows signals a ledger
+    /// anomaly: advancing would skip the failing IDs with no durable record.
+    func testHatchHoldsWhenLedgerHasNoDeferredRows() async throws {
+        defaults.set(SyncConfig.maxConsecutiveSyncFailures, forKey: SyncConfig.consecutiveFailuresKey)
+
+        let context = coreDataStack.newBackgroundContext()
+        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: context)
+
+        XCTAssertEqual(
+            plan.outcome, .held,
+            "hadFailures with an empty deferred set must stall, not silently advance"
+        )
+    }
+
     func testBelowThresholdDoesNotAdvanceAndAbandonsNothing() async throws {
         try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures - 1, failedIds: ["stuck-1"])
 

@@ -14,7 +14,12 @@ final class AbandonedMessageRetryTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        testStack = TestCoreDataStack()
+        // SQLite store: the drain predicate's `state == nil` disjunct is
+        // load-bearing under SQL ternary logic (NULL <> 'deferred' filters the
+        // row OUT on SQLite), while the in-memory store's Foundation semantics
+        // evaluate nil != "deferred" as TRUE — an in-memory run would keep the
+        // legacy-row tests green even with the disjunct deleted.
+        testStack = TestCoreDataStack(storeKind: .sqlite)
         coreDataStack = CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
         suiteName = "AbandonedMessageRetryTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!

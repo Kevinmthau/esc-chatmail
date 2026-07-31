@@ -380,4 +380,105 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
 
         await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
     }
+
+    /// The warnings path: a retry that still fails must stage durable deferred
+    /// rows into the sync context (committed by the run's final save), count
+    /// the strike, keep historyId unset, and return NO advance plan — initial
+    /// sync never abandons and never claims success it did not have.
+    @MainActor
+    func testHandleSyncCompletion_permanentFailureStagesDeferredRowsWithoutAdvancing() async throws {
+        let profile = GmailProfile(
+            emailAddress: "initial-sync-test@example.com",
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "history-200"
+        )
+
+        let apiClient = MockGmailAPIClient()
+        // Per-id error: persistent across the retry pass's attempts.
+        apiClient.getMessageErrors["never-recovers"] = APIError.timeout
+
+        let conversationManager = ConversationManager(
+            currentUserEmail: { profile.emailAddress }
+        )
+        let messagePersister = MessagePersister(
+            coreDataStack: coreDataStack,
+            saveHTML: { _, _ in nil },
+            conversationManager: conversationManager
+        )
+        let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        let sut = InitialSyncOrchestrator(
+            messageFetcher: MessageFetcher(apiClient: apiClient, clock: FakeSyncClock()),
+            messagePersister: messagePersister,
+            conversationManager: conversationManager,
+            dataCleanupService: DataCleanupService(
+                coreDataStack: coreDataStack,
+                conversationManager: conversationManager,
+                migrationFlags: InMemoryMigrationFlagStore(),
+                identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
+            ),
+            attachmentDownloader: AttachmentDownloader.shared,
+            coreDataStack: coreDataStack,
+            failureTracker: failureTracker,
+            performanceLogger: .shared
+        )
+
+        let context = coreDataStack.newBackgroundContext()
+        try await messagePersister.saveAccount(
+            profile: profile,
+            aliases: [],
+            in: context,
+            saveHistoryId: false
+        )
+        try await coreDataStack.saveAsync(context: context)
+
+        let modificationTransaction = await ModificationTracker.shared.beginTransaction()
+        let completion = try await sut.handleSyncCompletion(
+            result: BatchProcessingResult(
+                totalProcessed: 1,
+                successfulCount: 0,
+                failedIds: ["never-recovers"]
+            ),
+            profile: profile,
+            labelIds: ["INBOX"],
+            modificationTransaction: modificationTransaction,
+            context: context
+        )
+
+        XCTAssertTrue(completion.hadWarnings)
+        XCTAssertNil(completion.advancePlan, "The warnings path must not carry a success plan to commit")
+
+        // The rows are staged only — durable via the run's final save.
+        try await coreDataStack.saveAsync(context: context)
+
+        let rows: [(id: String, state: String?, failureClass: String?)] = await context.perform {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "AbandonedSyncMessage")
+            request.includesPendingChanges = false
+            let records = (try? context.fetch(request)) ?? []
+            return records.map {
+                (
+                    id: $0.value(forKey: "gmailMessageId") as? String ?? "",
+                    state: $0.value(forKey: "state") as? String,
+                    failureClass: $0.value(forKey: "failureClass") as? String
+                )
+            }
+        }
+        XCTAssertEqual(rows.map(\.id), ["never-recovers"])
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue)
+        XCTAssertEqual(rows.first?.failureClass, AbandonedSyncMessage.FailureClass.fetchFailed.rawValue)
+
+        let consecutiveFailureCount = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutiveFailureCount, 1, "The failed attempt must count toward tracking")
+        let lastSuccessfulSyncTime = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNil(lastSuccessfulSyncTime, "No success state may be recorded on the warnings path")
+
+        let historyId: String? = await context.perform {
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            return (try? context.fetch(request).first)?.historyId
+        }
+        XCTAssertNil(historyId, "Permanent failures must keep historyId unset so initial sync retries")
+
+        await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+    }
 }
