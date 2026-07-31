@@ -1,4 +1,5 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
 final class InitialSyncOrchestratorTests: XCTestCase {
@@ -311,7 +312,10 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
             performanceLogger: .shared
         )
 
-        await failureTracker.recordFailure(failedIds: ["stale-1", "stale-2"])
+        // A previous failing attempt left durable deferred rows and a counter.
+        let previousRun = coreDataStack.newBackgroundContext()
+        await failureTracker.recordFailure(fetchFailedIds: ["stale-1", "stale-2"], in: previousRun)
+        try await coreDataStack.saveAsync(context: previousRun)
 
         let context = coreDataStack.newBackgroundContext()
         try await messagePersister.saveAccount(
@@ -335,7 +339,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         try await coreDataStack.saveAsync(context: context)
 
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
-        let hadWarnings = try await sut.handleSyncCompletion(
+        let completion = try await sut.handleSyncCompletion(
             result: BatchProcessingResult(
                 totalProcessed: 1,
                 successfulCount: 0,
@@ -347,13 +351,25 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
             context: context
         )
 
-        XCTAssertFalse(hadWarnings)
+        XCTAssertFalse(completion.hadWarnings)
+
+        // The stale-row cleanup is staged; it commits with the run's save, and
+        // success state resets only at the post-save commit.
+        try await coreDataStack.saveAsync(context: context)
+        let advancePlan = try XCTUnwrap(completion.advancePlan)
+        await failureTracker.commit(advancePlan)
+
         let consecutiveFailureCount = await failureTracker.consecutiveFailureCount
-        let persistentFailedIds = await failureTracker.persistentFailedIds
         let lastSuccessfulSyncTime = await failureTracker.lastSuccessfulSyncTime
         XCTAssertEqual(consecutiveFailureCount, 0)
-        XCTAssertEqual(persistentFailedIds, [])
         XCTAssertNotNil(lastSuccessfulSyncTime)
+
+        let staleRowCount: Int = await context.perform {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "AbandonedSyncMessage")
+            request.includesPendingChanges = false
+            return (try? context.count(for: request)) ?? -1
+        }
+        XCTAssertEqual(staleRowCount, 0, "A recovered retry must clear the stale deferred rows")
 
         let historyId: String? = await context.perform {
             let request = Account.fetchRequest()

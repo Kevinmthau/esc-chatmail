@@ -144,7 +144,8 @@ final class IncrementalSyncOrchestrator {
             modificationTransaction: modificationTransaction,
             syncStartTime: syncStartTime,
             progressHandler: progressHandler,
-            failureTracker: failureTracker
+            failureTracker: failureTracker,
+            sourceHistoryId: historyId
         )
 
         do {
@@ -170,7 +171,8 @@ final class IncrementalSyncOrchestrator {
                 allowsIntermediateContextSaves: allowsIntermediateContextSaves,
                 syncStartTime: syncStartTime,
                 progressHandler: progressHandler,
-                failureTracker: failureTracker
+                failureTracker: failureTracker,
+                sourceHistoryId: historyId
             )
 
             // Phase 2: Fetch new messages
@@ -186,9 +188,18 @@ final class IncrementalSyncOrchestrator {
 
             // Phase 2b: Retry previously abandoned messages. Their failures must not
             // influence historyId advancement — the cursor moved past them when they
-            // were abandoned. Tracker bookkeeping happens after the final save below.
+            // were abandoned. The outcome is staged into the sync context so ledger
+            // resolution commits atomically with the recovered messages; if the save
+            // fails, the staged changes die with the context and every record stays
+            // for the next drain.
             let abandonedRetryTimer = timing.start("abandonedRetry")
             let abandonedOutcome = await retryAbandonedMessages(phaseContext: phaseContext)
+            await failureTracker.stageAbandonedRetryOutcome(
+                recoveredIds: abandonedOutcome.recoveredIds,
+                goneIds: abandonedOutcome.goneIds,
+                failedIds: abandonedOutcome.failedIds,
+                in: context
+            )
             timing.finish(
                 abandonedRetryTimer,
                 detail: "recovered=\(abandonedOutcome.recoveredIds.count) gone=\(abandonedOutcome.goneIds.count) failed=\(abandonedOutcome.failedIds.count)"
@@ -260,21 +271,23 @@ final class IncrementalSyncOrchestrator {
             )
 
             // Don't advance historyId if history collection was truncated - we need to
-            // retry from the same point to get remaining pages
+            // retry from the same point to get remaining pages. The plan stages any
+            // ledger transition (deferred-row cleanup or abandonment) into the sync
+            // context; its success-side effects apply only after the final save below.
             let historyAdvanceTimer = timing.start("historyAdvanceDecision")
-            let shouldAdvance: Bool
+            let advancePlan: SyncFailureTracker.HistoryAdvancePlan
             if historyResult.wasTruncated {
                 log.info("History was truncated - will retry from same point on next sync")
-                shouldAdvance = false
+                advancePlan = .held
             } else {
-                shouldAdvance = await failureTracker.shouldAdvanceHistoryId(
+                advancePlan = await failureTracker.planHistoryAdvance(
                     hadFailures: fetchResult.hasFailures,
-                    latestHistoryId: historyResult.latestHistoryId
+                    in: context
                 )
             }
-            timing.finish(historyAdvanceTimer, detail: "advance=\(shouldAdvance)")
+            timing.finish(historyAdvanceTimer, detail: "advance=\(advancePlan.shouldAdvance)")
 
-            let historyIdToSave = shouldAdvance ? historyResult.latestHistoryId : nil
+            let historyIdToSave = advancePlan.shouldAdvance ? historyResult.latestHistoryId : nil
             if let historyIdToSave {
                 await messagePersister.setAccountHistoryId(historyIdToSave, in: context)
             }
@@ -337,13 +350,10 @@ final class IncrementalSyncOrchestrator {
                 detail: "rollups=\(modifiedConversations.count) names=\(displayNameOnlyConversations.count)"
             )
 
-            // Only update abandoned-message tracking once the recovered messages are
-            // durably saved; if the save had failed, the records must stay for retry.
-            await failureTracker.recordAbandonedRetryOutcome(
-                recoveredIds: abandonedOutcome.recoveredIds,
-                goneIds: abandonedOutcome.goneIds,
-                failedIds: abandonedOutcome.failedIds
-            )
+            // The final save committed the staged ledger rows together with the
+            // cursor; only now may the tracker's success state change. A failed
+            // save throws past this point, leaving counters and rows intact.
+            await failureTracker.commit(advancePlan)
 
             let cleanupTimer = timing.start("incrementalCleanup")
             await dataCleanupService.runIncrementalCleanup()
@@ -406,8 +416,8 @@ final class IncrementalSyncOrchestrator {
 
     /// Makes one fetch attempt for messages previously abandoned by the failure
     /// tracker, persisting any that now succeed into the sync context. The returned
-    /// outcome must be applied to the failure tracker only after the context is
-    /// durably saved.
+    /// outcome is staged into the same context (stageAbandonedRetryOutcome) so
+    /// ledger resolution and the recovered messages commit in one save.
     private func retryAbandonedMessages(phaseContext: SyncPhaseContext) async -> AbandonedRetryOutcome {
         let ids = await failureTracker.fetchRetryableAbandonedMessageIds()
         guard !ids.isEmpty else { return .empty }
@@ -524,17 +534,24 @@ final class IncrementalSyncOrchestrator {
             )
 
             if result.hasFailures {
-                await failureTracker.recordFailure(failedIds: result.blockingFailureIds)
+                // Recovery runs because the old cursor expired; there is no
+                // meaningful source position to stamp on the deferred rows.
+                await failureTracker.recordFailure(
+                    fetchFailedIds: result.failedIds,
+                    persistenceFailedIds: result.persistence.failedIds,
+                    sourceHistoryId: nil,
+                    in: context
+                )
             }
 
             // Get current historyId from Gmail profile and only advance when failure policy allows it.
             // This prevents data loss when recovery fetched only a partial set of messages.
             let profile = try await messageFetcher.getProfile()
-            let shouldAdvanceHistoryId = await failureTracker.shouldAdvanceHistoryId(
+            let advancePlan = await failureTracker.planHistoryAdvance(
                 hadFailures: result.hasFailures,
-                latestHistoryId: profile.historyId
+                in: context
             )
-            if shouldAdvanceHistoryId {
+            if advancePlan.shouldAdvance {
                 await messagePersister.setAccountHistoryId(profile.historyId, in: context)
             } else {
                 log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
@@ -570,7 +587,11 @@ final class IncrementalSyncOrchestrator {
             committedModificationTransaction = true
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
 
-            if shouldAdvanceHistoryId {
+            // The save above committed the staged ledger rows with the cursor;
+            // only now may the tracker's success state change.
+            await failureTracker.commit(advancePlan)
+
+            if advancePlan.shouldAdvance {
                 log.info("History recovery complete, new historyId: \(profile.historyId)")
             } else {
                 log.info("History recovery complete with warnings; historyId not advanced")

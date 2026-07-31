@@ -26,6 +26,9 @@ struct SyncPhaseContext {
     let syncStartTime: Date
     let progressHandler: (Double, String) -> Void
     let failureTracker: SyncFailureTracker
+    /// The frozen history cursor this run started from; stamped onto deferred
+    /// failure-ledger rows so recovery can bound re-enumeration.
+    let sourceHistoryId: String?
 
     init(
         coreDataContext: NSManagedObjectContext,
@@ -36,7 +39,8 @@ struct SyncPhaseContext {
         allowsIntermediateContextSaves: Bool = true,
         syncStartTime: Date,
         progressHandler: @escaping (Double, String) -> Void,
-        failureTracker: SyncFailureTracker
+        failureTracker: SyncFailureTracker,
+        sourceHistoryId: String? = nil
     ) {
         self.coreDataContext = coreDataContext
         self.labelIds = labelIds
@@ -47,6 +51,7 @@ struct SyncPhaseContext {
         self.syncStartTime = syncStartTime
         self.progressHandler = progressHandler
         self.failureTracker = failureTracker
+        self.sourceHistoryId = sourceHistoryId
     }
 
     /// Reports progress within the phase's progress range

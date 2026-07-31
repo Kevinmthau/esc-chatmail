@@ -14,6 +14,14 @@ struct InitialSyncCompletionDisposition: Equatable {
     let hadWarnings: Bool
 }
 
+/// Result of the completion policy: whether the run ends with warnings, and —
+/// when the failure tracker was consulted — the staged advancement plan whose
+/// success-side effects must be committed only after the final save.
+struct InitialSyncCompletionOutcome {
+    let hadWarnings: Bool
+    let advancePlan: SyncFailureTracker.HistoryAdvancePlan?
+}
+
 /// Orchestrates the initial full sync from Gmail
 ///
 /// Responsibilities:
@@ -136,13 +144,14 @@ final class InitialSyncOrchestrator {
 
             // Phase 4: Handle failures and determine historyId advancement
             let completionTimer = timing.start("completionPolicy")
-            let syncCompletedWithWarnings = try await handleSyncCompletion(
+            let completion = try await handleSyncCompletion(
                 result: result,
                 profile: profile,
                 labelIds: labelIds,
                 modificationTransaction: modificationTransaction,
                 context: context
             )
+            let syncCompletedWithWarnings = completion.hadWarnings
             timing.finish(completionTimer, detail: "warnings=\(syncCompletedWithWarnings)")
 
             // Phase 5: Keep historyId and rollup updates in the same save so later syncs
@@ -187,6 +196,13 @@ final class InitialSyncOrchestrator {
             _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
             committedModificationTransaction = true
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
+
+            // The save above committed the staged ledger state; only now may the
+            // tracker's success state change. On the warnings path there is no
+            // plan — deferred rows stay tracked and the counter stands.
+            if let advancePlan = completion.advancePlan {
+                await failureTracker.commit(advancePlan)
+            }
 
             let conversationCount = await countConversations(in: context)
 
@@ -328,12 +344,9 @@ final class InitialSyncOrchestrator {
         labelIds: Set<String>,
         modificationTransaction: ModificationTracker.Transaction,
         context: NSManagedObjectContext
-    ) async throws -> Bool {
-        var syncCompletedWithWarnings = false
-
+    ) async throws -> InitialSyncCompletionOutcome {
         if result.hasFailures {
             log.warning("Initial sync has \(result.blockingFailureIds.count) failed messages")
-            syncCompletedWithWarnings = true
 
             // Retry failed messages (fetch failures and persistence failures
             // alike). Quota exhaustion propagates: the initial sync aborts
@@ -365,19 +378,27 @@ final class InitialSyncOrchestrator {
 
             if disposition.hadWarnings {
                 log.warning("\(stillFailedIds.count) messages permanently failed - keeping historyId unset so initial sync can retry safely")
-                await failureTracker.recordFailure(failedIds: stillFailedIds)
-            } else {
-                log.info("All failed messages recovered on retry - advancing historyId")
-                await failureTracker.recordSuccess()
+                // Stages deferred ledger rows into the sync context; they commit
+                // with the run's final save. There is no cursor yet, so no
+                // sourceHistoryId to stamp.
+                await failureTracker.recordFailure(
+                    fetchFailedIds: retryOutcome.fetchFailedIds,
+                    persistenceFailedIds: retryOutcome.persistence.failedIds,
+                    sourceHistoryId: nil,
+                    in: context
+                )
+                return InitialSyncCompletionOutcome(hadWarnings: true, advancePlan: nil)
             }
-            syncCompletedWithWarnings = disposition.hadWarnings
-        } else {
-            log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
-            await messagePersister.setAccountHistoryId(profile.historyId, in: context)
-            await failureTracker.recordSuccess()
+
+            log.info("All failed messages recovered on retry - advancing historyId")
+            let advancePlan = await failureTracker.planHistoryAdvance(hadFailures: false, in: context)
+            return InitialSyncCompletionOutcome(hadWarnings: false, advancePlan: advancePlan)
         }
 
-        return syncCompletedWithWarnings
+        log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
+        await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+        let advancePlan = await failureTracker.planHistoryAdvance(hadFailures: false, in: context)
+        return InitialSyncCompletionOutcome(hadWarnings: false, advancePlan: advancePlan)
     }
 
     nonisolated static func completionDisposition(

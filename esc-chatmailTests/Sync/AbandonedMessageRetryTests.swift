@@ -36,7 +36,12 @@ final class AbandonedMessageRetryTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func seedAbandonedMessage(id: String, retryCount: Int16 = 0, abandonedAt: Date = Date()) async throws {
+    private func seedAbandonedMessage(
+        id: String,
+        retryCount: Int16 = 0,
+        abandonedAt: Date = Date(),
+        state: String? = nil
+    ) async throws {
         let context = coreDataStack.newBackgroundContext()
         try await context.perform {
             let record = AbandonedSyncMessage(context: context)
@@ -45,8 +50,22 @@ final class AbandonedMessageRetryTests: XCTestCase {
             record.setValue(abandonedAt, forKey: "abandonedAt")
             record.setValue(retryCount, forKey: "retryCount")
             record.setValue("test", forKey: "reason")
+            record.setValue(state, forKey: "state")
             try context.save()
         }
+    }
+
+    /// Stages the outcome into a fresh context and saves it — the caller-side
+    /// shape of the sync run's final save.
+    private func applyRetryOutcome(recoveredIds: [String], goneIds: [String], failedIds: [String]) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        await sut.stageAbandonedRetryOutcome(
+            recoveredIds: recoveredIds,
+            goneIds: goneIds,
+            failedIds: failedIds,
+            in: context
+        )
+        try await coreDataStack.saveAsync(context: context)
     }
 
     private func storedRecords() async throws -> [(id: String, retryCount: Int16)] {
@@ -95,6 +114,20 @@ final class AbandonedMessageRetryTests: XCTestCase {
         XCTAssertEqual(ids, [])
     }
 
+    func testFetchRetryable_excludesDeferredRows() async throws {
+        // Deferred rows are still covered by the frozen cursor: the normal
+        // re-scan of the same history window retries them, so offering them to
+        // the drain would fetch them twice per run and burn their retry budget
+        // before abandonment.
+        try await seedAbandonedMessage(id: "still-tracked", state: AbandonedSyncMessage.State.deferred.rawValue)
+        try await seedAbandonedMessage(id: "legacy-abandoned", state: nil)
+        try await seedAbandonedMessage(id: "abandoned", state: AbandonedSyncMessage.State.abandoned.rawValue)
+
+        let ids = await sut.fetchRetryableAbandonedMessageIds()
+
+        XCTAssertEqual(Set(ids), ["legacy-abandoned", "abandoned"], "Only abandoned rows (nil state = legacy) are drain-eligible")
+    }
+
     func testFetchRetryable_resetsLegacyRetryCountsOnce() async throws {
         // Legacy records counted re-abandonments in retryCount and can sit at or
         // above the drain's cap without any drain attempt having run.
@@ -109,14 +142,40 @@ final class AbandonedMessageRetryTests: XCTestCase {
         XCTAssertTrue(defaults.bool(forKey: SyncConfig.abandonedRetryCountResetKey), "Reset runs once and latches")
     }
 
-    // MARK: - recordAbandonedRetryOutcome
+    // MARK: - stageAbandonedRetryOutcome
+
+    func testStageOutcome_isStagedOnly_storeUntouchedUntilCallerSaves() async throws {
+        // The outcome must commit with the caller's save — atomically with the
+        // recovered messages — so a failed save leaves every record for the
+        // next drain.
+        try await seedAbandonedMessage(id: "recovered")
+        try await seedAbandonedMessage(id: "failed", retryCount: 1)
+
+        let context = coreDataStack.newBackgroundContext()
+        await sut.stageAbandonedRetryOutcome(
+            recoveredIds: ["recovered"],
+            goneIds: [],
+            failedIds: ["failed"],
+            in: context
+        )
+
+        let records = try await storedRecords()
+        XCTAssertEqual(
+            Set(records.map(\.id)), ["recovered", "failed"],
+            "Without the caller's save, no record may be removed"
+        )
+        XCTAssertEqual(
+            records.first(where: { $0.id == "failed" })?.retryCount, 1,
+            "Without the caller's save, no retry budget may be spent"
+        )
+    }
 
     func testRecordOutcome_removesRecoveredAndGoneRecords() async throws {
         try await seedAbandonedMessage(id: "recovered")
         try await seedAbandonedMessage(id: "gone")
         try await seedAbandonedMessage(id: "untouched")
 
-        await sut.recordAbandonedRetryOutcome(recoveredIds: ["recovered"], goneIds: ["gone"], failedIds: [])
+        try await applyRetryOutcome(recoveredIds: ["recovered"], goneIds: ["gone"], failedIds: [])
 
         let records = try await storedRecords()
         XCTAssertEqual(records.map(\.id), ["untouched"])
@@ -125,7 +184,7 @@ final class AbandonedMessageRetryTests: XCTestCase {
     func testRecordOutcome_incrementsRetryCountForFailures() async throws {
         try await seedAbandonedMessage(id: "failed", retryCount: 2)
 
-        await sut.recordAbandonedRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ["failed"])
+        try await applyRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ["failed"])
 
         let records = try await storedRecords()
         XCTAssertEqual(records.count, 1)
@@ -138,7 +197,7 @@ final class AbandonedMessageRetryTests: XCTestCase {
         for _ in 0..<SyncConfig.maxAbandonedMessageRetries {
             let ids = await sut.fetchRetryableAbandonedMessageIds()
             XCTAssertEqual(ids, ["flaky"])
-            await sut.recordAbandonedRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ids)
+            try await applyRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ids)
         }
 
         let ids = await sut.fetchRetryableAbandonedMessageIds()
@@ -151,7 +210,7 @@ final class AbandonedMessageRetryTests: XCTestCase {
     func testRecordOutcome_deletesRecordWhenFailureReachesCap() async throws {
         try await seedAbandonedMessage(id: "last-chance", retryCount: Int16(SyncConfig.maxAbandonedMessageRetries - 1))
 
-        await sut.recordAbandonedRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ["last-chance"])
+        try await applyRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ["last-chance"])
 
         let records = try await storedRecords()
         XCTAssertTrue(records.isEmpty, "A failure that brings retryCount to the cap deletes the record")
@@ -160,7 +219,7 @@ final class AbandonedMessageRetryTests: XCTestCase {
     func testRecordOutcome_allEmpty_isNoOp() async throws {
         try await seedAbandonedMessage(id: "kept")
 
-        await sut.recordAbandonedRetryOutcome(recoveredIds: [], goneIds: [], failedIds: [])
+        try await applyRetryOutcome(recoveredIds: [], goneIds: [], failedIds: [])
 
         let records = try await storedRecords()
         XCTAssertEqual(records.map(\.id), ["kept"])
