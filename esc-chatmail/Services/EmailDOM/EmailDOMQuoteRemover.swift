@@ -47,13 +47,17 @@ enum EmailDOMQuoteRemover {
 
         do {
             try removeQuotedContainers(in: document)
-            let didTruncateAtStructuralBoundary = try truncateAtStructuralBoundaries(in: document)
-            if !didTruncateAtStructuralBoundary {
-                try truncateAtTextMarkers(in: document)
+            if mode != .quotedContainersOnly {
+                let didTruncateAtStructuralBoundary = try truncateAtStructuralBoundaries(in: document)
+                if !didTruncateAtStructuralBoundary {
+                    try truncateAtTextMarkers(in: document)
+                }
             }
-            if mode == .quotedAndSignatures {
+            if mode == .quotedAndSignatures || mode == .quotedContainersOnly {
                 try removeSignatureWrappers(in: document)
                 try removeFooterContainers(in: document)
+            }
+            if mode == .quotedAndSignatures {
                 try truncateAtSignatureMarkers(in: document)
                 try truncateTrailingContactSignature(in: document)
             }

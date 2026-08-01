@@ -471,12 +471,40 @@ struct ConversationRollupUpdater: Sendable {
         // creation and has no relation to the (varying) participant rows. Keep
         // a stored title that isn't address-derived; otherwise fall through so
         // sender-derived names fill in and address-y placeholders self-correct.
-        if conversation.conversationType == .list,
-           PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
-               conversation.displayName,
-               participantEmails: participantEmails
-           ) != nil {
-            return
+        // A title equal to the raw List-Id is the creation-time fallback for
+        // bare `List-Id: <id>` headers, not a real phrase — upgrade it to the
+        // sender's From name once a single distinct sender is known, so a
+        // newsletter shows its brand ("TBPN") instead of a machine identifier.
+        if conversation.conversationType == .list {
+            let sanitizedStoredTitle = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+                conversation.displayName,
+                participantEmails: participantEmails
+            )
+            let storedTitleIsRawListId = isRawListIdTitle(
+                conversation.displayName,
+                listId: conversation.listId
+            )
+
+            if sanitizedStoredTitle != nil, !storedTitleIsRawListId {
+                return
+            }
+
+            if storedTitleIsRawListId {
+                if let senderName = singleSenderDisplayName(
+                    for: conversation,
+                    normalizedMyEmail: normalizedMyEmail,
+                    headerDisplayNamesByEmail: headerDisplayNamesByEmail
+                ) {
+                    if conversation.displayName != senderName {
+                        conversation.displayName = senderName
+                    }
+                    return
+                }
+
+                // Multi-sender (or nameless) lists keep the stable List-Id
+                // placeholder rather than a participant-derived join.
+                return
+            }
         }
 
         let finalDisplayName = PersonDisplayNameResolver.conversationDisplayName(
@@ -494,11 +522,78 @@ struct ConversationRollupUpdater: Sendable {
         conversation.displayName = finalDisplayName
     }
 
+    /// True when a list conversation's stored title is just the raw List-Id
+    /// identifier — the creation-time fallback for bare `List-Id: <id>`
+    /// headers — rather than a human display phrase.
+    static func isRawListIdTitle(_ title: String?, listId: String?) -> Bool {
+        guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let listId = listId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty,
+              !listId.isEmpty else {
+            return false
+        }
+        return title.caseInsensitiveCompare(listId) == .orderedSame
+    }
+
+    private func isRawListIdTitle(_ title: String?, listId: String?) -> Bool {
+        Self.isRawListIdTitle(title, listId: listId)
+    }
+
+    /// Resolves the From display name of a list conversation's single distinct
+    /// sender. Returns nil when the conversation has zero or multiple distinct
+    /// non-self senders, or when no real name resolves for that sender.
+    private func singleSenderDisplayName(
+        for conversation: Conversation,
+        normalizedMyEmail: String,
+        headerDisplayNamesByEmail: [String: String]
+    ) -> String? {
+        guard let messages = conversation.messages else { return nil }
+
+        var distinctSenderEmails = Set<String>()
+        for message in messages {
+            guard let senderEmail = message.senderEmail else { continue }
+            let normalizedEmail = EmailNormalizer.normalize(senderEmail)
+            guard !normalizedEmail.isEmpty,
+                  normalizedEmail != normalizedMyEmail else { continue }
+            distinctSenderEmails.insert(normalizedEmail)
+        }
+
+        guard distinctSenderEmails.count == 1,
+              let senderEmail = distinctSenderEmails.first else {
+            return nil
+        }
+
+        let storedDisplayName = conversation.participants?
+            .first { participant in
+                guard let person = participant.person else { return false }
+                return EmailNormalizer.normalize(person.email) == senderEmail
+            }?
+            .person?.displayName
+
+        let resolved = PersonDisplayNameResolver.participantDisplayName(
+            email: senderEmail,
+            contactDisplayName: nil,
+            headerDisplayName: headerDisplayNamesByEmail[senderEmail],
+            storedDisplayName: storedDisplayName
+        )
+        return resolved.isReal ? resolved.name : nil
+    }
+
     private func headerDisplayNamesByEmail(from conversation: Conversation) -> [String: String] {
         guard let messages = conversation.messages else { return [:] }
 
+        // Newest-first so the most recent From header wins; an older, fuller
+        // variant of the same name may still upgrade it (see
+        // EmailNormalizer.mergeNewestFirstHeaderDisplayName).
+        let orderedMessages = messages.sorted {
+            if $0.internalDate != $1.internalDate {
+                return $0.internalDate > $1.internalDate
+            }
+            return $0.id > $1.id
+        }
+
         var displayNames: [String: String] = [:]
-        for message in messages {
+        for message in orderedMessages {
             guard let senderEmail = message.senderEmail else { continue }
             let normalizedEmail = EmailNormalizer.normalize(senderEmail)
             guard !normalizedEmail.isEmpty,
@@ -509,13 +604,11 @@ struct ConversationRollupUpdater: Sendable {
                 continue
             }
 
-            if EmailNormalizer.isBetterDisplayName(
+            displayNames[normalizedEmail] = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
                 displayName,
-                than: displayNames[normalizedEmail],
+                into: displayNames[normalizedEmail],
                 forEmail: normalizedEmail
-            ) {
-                displayNames[normalizedEmail] = displayName
-            }
+            )
         }
 
         return displayNames

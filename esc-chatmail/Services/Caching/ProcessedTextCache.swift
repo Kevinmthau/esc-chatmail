@@ -951,7 +951,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
             quoteRemoved = PlainTextQuoteRemover.extractQuotes(from: unwrapped).mainContent
         } else {
             let headerRemoved = removePlainTextHeaderQuoteBlocks(from: unwrapped)
-            quoteRemoved = removeResidualHTMLTextQuoteMarkers(from: headerRemoved)
+            let attributionRemoved = removeStandaloneQuoteAttributionLines(from: headerRemoved)
+            quoteRemoved = removeResidualHTMLTextQuoteMarkers(from: attributionRemoved)
         }
         let formatted = formatSignOffLineBreaks
             ? TextProcessing.formatSignOffLineBreaks(in: quoteRemoved)
@@ -985,6 +986,22 @@ actor ProcessedTextCache: MemoryWarningHandler {
         }
 
         return text
+    }
+
+    /// Drops lines that are ONLY a quote attribution ("On …, Olga wrote:")
+    /// without truncating anything after them. The containers-only cleanup
+    /// removes the quoted blockquote but leaves its attribution line behind;
+    /// truncating at it (the residual-marker behavior) would rediscard the
+    /// content that follows.
+    nonisolated private static func removeStandaloneQuoteAttributionLines(from text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        guard lines.count > 1 else { return text }
+
+        let kept = lines.filter { line in
+            !isHTMLTextQuoteAttributionLine(line.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        guard kept.count != lines.count else { return text }
+        return kept.joined(separator: "\n")
     }
 
     nonisolated private static func isHTMLTextQuoteAttributionLine(_ text: String) -> Bool {
@@ -1108,7 +1125,14 @@ actor ProcessedTextCache: MemoryWarningHandler {
     }
 
     nonisolated fileprivate static func cleanedHTMLForProcessing(_ html: String) -> HTMLProcessingCleanupResult {
-        let fallback = HTMLCleanupFallback.cleanedHTML(from: html, modes: [.quotedAndSignatures, .quotedOnly])
+        // quotedContainersOnly is the quote-first-reply rescue: when marker
+        // truncation wipes the whole body (attribution + blockquote first,
+        // content after), removing just the quoted containers keeps the
+        // content that follows them.
+        let fallback = HTMLCleanupFallback.cleanedHTML(
+            from: html,
+            modes: [.quotedAndSignatures, .quotedOnly, .quotedContainersOnly]
+        )
         return HTMLProcessingCleanupResult(
             html: fallback.html,
             applyPlainTextQuoteRemoval: fallback.appliedMode == nil

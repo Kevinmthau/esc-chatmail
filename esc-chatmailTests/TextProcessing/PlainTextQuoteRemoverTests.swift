@@ -211,6 +211,46 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Makes sense.")
     }
 
+    // MARK: - Quote Removal - Bottom-Posted Replies
+
+    func testRemoveQuotes_bottomPostedReplyAfterQuoteBlock_recoversContent() {
+        let text = """
+        On Aug 1, 2026, at 9:00 AM, Olga Smith <olga@example.com> wrote:
+
+        > Are you free for lunch tomorrow?
+        > We could try the new place.
+
+        Yes! Tomorrow at noon works great for me.
+        See you there.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Yes! Tomorrow at noon works great for me.\nSee you there.")
+    }
+
+    func testRemoveQuotes_quoteOnlyMessage_remainsEmpty() {
+        let text = """
+        On Aug 1, 2026, at 9:00 AM, Olga Smith <olga@example.com> wrote:
+
+        > Are you free for lunch tomorrow?
+        > We could try the new place.
+        """
+        XCTAssertEqual(PlainTextQuoteRemover.removeQuotes(from: text), "")
+    }
+
+    func testRemoveQuotes_topPostedReplyWithTrailingDisclaimer_doesNotRecoverTrailingText() {
+        let text = """
+        Sounds good, see you then.
+
+        On Aug 1, 2026, at 9:00 AM, Olga Smith <olga@example.com> wrote:
+
+        > Are you free for lunch tomorrow?
+
+        CONFIDENTIALITY NOTICE: This message is intended only for the recipient.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Sounds good, see you then.")
+    }
+
     // MARK: - Signature Removal - Standard Delimiters
 
     func testRemoveSignature_dashDashPattern_removes() {

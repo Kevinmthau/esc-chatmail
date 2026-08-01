@@ -397,6 +397,28 @@ final class ProcessedTextCacheTests: XCTestCase {
         }
     }
 
+    /// Quote-first (bottom-posted) reply: attribution and quoted history sit
+    /// at the top, the author's text after. Marker truncation used to remove
+    /// everything from the attribution onward, leaving an empty bubble for a
+    /// message whose original view clearly has content.
+    func testChatBubbleTextProcessor_htmlBottomPostedReply_recoversContentAfterQuote() {
+        let html = """
+        <html><body>
+        <div>On Aug 1, 2026, at 9:00 AM, Olga Smith &lt;olga@example.com&gt; wrote:</div>
+        <blockquote type="cite"><div>Are you free for lunch tomorrow?</div></blockquote>
+        <div>Yes! Tomorrow at noon works great.</div>
+        </body></html>
+        """
+
+        let result = ChatBubbleTextProcessor.htmlCompatibilityFallback(
+            from: html,
+            classifyRichContent: false
+        )
+
+        XCTAssertEqual(result.mainText, "Yes! Tomorrow at noon works great.")
+        XCTAssertFalse(result.mainText?.contains("Are you free for lunch tomorrow?") ?? true)
+    }
+
     func testChatBubbleTextProcessor_htmlLiteralQuoteLikeProse_isNotPlainTextQuoteRemoved() {
         let html = """
         <p>Please keep this literal example: On Jan 30, 2026 at 7:32 PM, Name should remain in the help text.</p>

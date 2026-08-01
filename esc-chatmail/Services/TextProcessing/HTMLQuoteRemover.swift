@@ -7,6 +7,13 @@ enum HTMLQuoteRemover {
     enum RemovalMode {
         case quotedOnly
         case quotedAndSignatures
+        /// Selector-based container removal only (quote containers, signature
+        /// wrappers, footers) — no structural or text-marker truncation. Used
+        /// as the last cleanup fallback for quote-first replies whose actual
+        /// content sits AFTER the quoted block: marker truncation removes
+        /// everything from the attribution line onward, so this mode keeps
+        /// the content and drops just the quoted subtrees.
+        case quotedContainersOnly
     }
 
     // MARK: - Public API

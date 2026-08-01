@@ -17,13 +17,17 @@ private extension ForwardedMessageDisplayContent {
             subject: subject,
             timestampText: timestampText,
             recipientSummary: recipientSummary,
-            previewSnippet: previewSnippet
+            previewSnippet: previewSnippet,
+            fullBodyText: fullBodyText
         )
     }
 
     func supplementingMissingHeaderFields(
         from fallback: ForwardedMessageDisplayContent
     ) -> ForwardedMessageDisplayContent {
+        // The fallback is parsed from the raw bodyText, so its body carries
+        // the complete forwarded content; the chatPreviewText parse's body is
+        // quote-stripped and possibly truncated. Prefer the fallback's.
         ForwardedMessageDisplayContent(
             leadInText: leadInText,
             senderDisplayName: senderDisplayName ?? fallback.senderDisplayName,
@@ -31,7 +35,8 @@ private extension ForwardedMessageDisplayContent {
             subject: subject ?? fallback.subject,
             timestampText: timestampText ?? fallback.timestampText,
             recipientSummary: recipientSummary ?? fallback.recipientSummary,
-            previewSnippet: previewSnippet
+            previewSnippet: previewSnippet,
+            fullBodyText: fallback.fullBodyText ?? fullBodyText
         )
     }
 }
