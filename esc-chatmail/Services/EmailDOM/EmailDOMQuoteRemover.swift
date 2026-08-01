@@ -46,7 +46,17 @@ enum EmailDOMQuoteRemover {
         document.outputSettings().prettyPrint(pretty: false)
 
         do {
-            try removeQuotedContainers(in: document)
+            let removedQuotedContainerCount = try removeQuotedContainers(in: document)
+            // The containers-only rescue exists for quote-in-container shapes
+            // (attribution + blockquote first, content after). When no quote
+            // container was removed there is no boundary between quoted
+            // history and content, so this mode must not claim the document:
+            // an empty result fails the caller's meaningful-content check and
+            // the cleanup chain falls back to the original HTML with full
+            // plain-text quote removal.
+            if mode == .quotedContainersOnly, removedQuotedContainerCount == 0 {
+                return ""
+            }
             if mode != .quotedContainersOnly {
                 let didTruncateAtStructuralBoundary = try truncateAtStructuralBoundaries(in: document)
                 if !didTruncateAtStructuralBoundary {

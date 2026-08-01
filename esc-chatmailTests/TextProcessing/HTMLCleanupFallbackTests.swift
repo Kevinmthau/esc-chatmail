@@ -89,6 +89,25 @@ final class HTMLCleanupFallbackTests: XCTestCase {
         XCTAssertFalse(result.html.contains("Quoted history line"), "Unexpected html: \(result.html)")
     }
 
+    /// Marker-only quote with NO container: there is no boundary between the
+    /// quoted history and content, so the containers-only mode must decline
+    /// and the chain must fall back to the original (which then goes through
+    /// full plain-text quote removal).
+    func testChain_markerOnlyQuoteWithoutContainer_fallsBackToOriginal() {
+        let markerOnlyHTML = """
+        <div>On Jan 31, 2026 at 12:31 PM, Scott Wunderlich wrote:</div>
+        <div>Earlier message only.</div>
+        """
+
+        let result = HTMLCleanupFallback.cleanedHTML(
+            from: markerOnlyHTML,
+            modes: [.quotedAndSignatures, .quotedOnly, .quotedContainersOnly]
+        )
+
+        XCTAssertNil(result.appliedMode)
+        XCTAssertEqual(result.html, markerOnlyHTML)
+    }
+
     func testChain_emptyInput_returnsOriginal() {
         let result = HTMLCleanupFallback.cleanedHTML(
             from: "",
