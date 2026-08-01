@@ -152,7 +152,8 @@ enum ChatBubbleTextProcessor {
             from: cleanup.html,
             decodeHTMLEntities: decodeHTMLEntities,
             formatSignOffLineBreaks: formatSignOffLineBreaks,
-            applyPlainTextQuoteRemoval: cleanup.applyPlainTextQuoteRemoval
+            applyPlainTextQuoteRemoval: cleanup.applyPlainTextQuoteRemoval,
+            stripStandaloneQuoteAttributionLines: cleanup.stripStandaloneQuoteAttributionLines
         )
 
         if plainText == nil {
@@ -215,6 +216,12 @@ enum ChatBubbleTextProcessor {
 fileprivate struct HTMLProcessingCleanupResult {
     let html: String
     let applyPlainTextQuoteRemoval: Bool
+    /// True only for the containers-only rescue: that mode skips marker
+    /// truncation, so a leftover attribution line must be dropped at the
+    /// text level. The fuller modes already truncate attributions in the DOM,
+    /// and running the line filter on their output risks deleting legitimate
+    /// prose.
+    let stripStandaloneQuoteAttributionLines: Bool
 }
 
 /// Thread-safe cache for processed message text content
@@ -933,7 +940,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
         from html: String,
         decodeHTMLEntities: Bool = false,
         formatSignOffLineBreaks: Bool = true,
-        applyPlainTextQuoteRemoval: Bool = false
+        applyPlainTextQuoteRemoval: Bool = false,
+        stripStandaloneQuoteAttributionLines: Bool = false
     ) -> String? {
         // HTML compatibility fallback for records missing chatPreviewText. The
         // extraction itself is DOM-backed; the plain-text quote cleanup below is
@@ -951,7 +959,9 @@ actor ProcessedTextCache: MemoryWarningHandler {
             quoteRemoved = PlainTextQuoteRemover.extractQuotes(from: unwrapped).mainContent
         } else {
             let headerRemoved = removePlainTextHeaderQuoteBlocks(from: unwrapped)
-            let attributionRemoved = removeStandaloneQuoteAttributionLines(from: headerRemoved)
+            let attributionRemoved = stripStandaloneQuoteAttributionLines
+                ? removeStandaloneQuoteAttributionLines(from: headerRemoved)
+                : headerRemoved
             quoteRemoved = removeResidualHTMLTextQuoteMarkers(from: attributionRemoved)
         }
         let formatted = formatSignOffLineBreaks
@@ -998,10 +1008,25 @@ actor ProcessedTextCache: MemoryWarningHandler {
         guard lines.count > 1 else { return text }
 
         let kept = lines.filter { line in
-            !isHTMLTextQuoteAttributionLine(line.trimmingCharacters(in: .whitespacesAndNewlines))
+            !isStandaloneQuoteAttributionLine(line.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         guard kept.count != lines.count else { return text }
         return kept.joined(separator: "\n")
+    }
+
+    /// A genuine attribution needs more than the "wrote:" suffix — prose like
+    /// "Here is what I wrote:" must survive. Real client attributions start
+    /// with a date preposition ("On …", "Am …") or embed the quoted sender's
+    /// address.
+    nonisolated private static func isStandaloneQuoteAttributionLine(_ line: String) -> Bool {
+        guard isHTMLTextQuoteAttributionLine(line) else { return false }
+
+        let lowercased = line.lowercased()
+        let datePrefixes = ["on ", "am ", "le ", "el ", "il ", "em ", "op "]
+        if datePrefixes.contains(where: { lowercased.hasPrefix($0) }) {
+            return true
+        }
+        return line.contains("@") || line.contains("<")
     }
 
     nonisolated private static func isHTMLTextQuoteAttributionLine(_ text: String) -> Bool {
@@ -1135,7 +1160,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
         )
         return HTMLProcessingCleanupResult(
             html: fallback.html,
-            applyPlainTextQuoteRemoval: fallback.appliedMode == nil
+            applyPlainTextQuoteRemoval: fallback.appliedMode == nil,
+            stripStandaloneQuoteAttributionLines: fallback.appliedMode == .quotedContainersOnly
         )
     }
 

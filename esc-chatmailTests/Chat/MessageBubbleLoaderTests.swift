@@ -1014,6 +1014,66 @@ final class MessageBubbleLoaderTests: XCTestCase {
         )
     }
 
+    func testLoadContent_structuredChatPreviewForward_prefersRawBodyForFullBodyText() async {
+        let messageId = "bubble-forwarded-structured-preview-full-body-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        // The persisted preview parses with full header fields but carries a
+        // stripped, truncated body; the raw bodyText has the complete email.
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                FYI
+
+                ---------- Forwarded message ---------
+                From: Brynn Example <brynn@example.com>
+                Date: Sat, Aug 1, 2026 at 9:00 AM
+                Subject: Weekend plans
+                To: olga@example.com
+
+                Hi Olga,
+
+                Here is the complete second paragraph that the persisted preview truncated away entirely.
+                """,
+                chatPreviewText: """
+                FYI
+
+                ---------- Forwarded message ---------
+                From: Brynn Example <brynn@example.com>
+                Date: Sat, Aug 1, 2026 at 9:00 AM
+                Subject: Weekend plans
+                To: olga@example.com
+
+                Hi Olga,
+                """,
+                bodyStorageURI: nil,
+                cleanedSnippet: "FYI",
+                snippet: "FYI ---------- Forwarded message ---------",
+                subject: "Fwd: Weekend plans",
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Brynn Example")
+        let fullBodyText = result.forwardedDisplayContent?.fullBodyText ?? ""
+        XCTAssertTrue(
+            fullBodyText.contains("complete second paragraph"),
+            "fullBodyText must come from the raw bodyText, not the truncated preview: \(fullBodyText)"
+        )
+    }
+
     func testLoadContent_incomingForwardedMessageWithOutlookHeaders_returnsStructuredForwardPreview() async {
         let messageId = "bubble-incoming-forwarded-outlook-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)

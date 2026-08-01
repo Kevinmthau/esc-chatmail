@@ -419,6 +419,27 @@ final class ProcessedTextCacheTests: XCTestCase {
         XCTAssertFalse(result.mainText?.contains("Are you free for lunch tomorrow?") ?? true)
     }
 
+    /// Prose that merely ends with "wrote:" is not an attribution. The
+    /// standalone-attribution filter only runs for the containers-only rescue
+    /// and requires a genuine attribution shape, so ordinary lines survive.
+    func testChatBubbleTextProcessor_htmlProseEndingInWroteColon_survivesCleanup() {
+        let html = """
+        <div>Here is what I wrote:</div>
+        <div>The draft is attached for your review.</div>
+        """
+
+        let result = ChatBubbleTextProcessor.htmlCompatibilityFallback(
+            from: html,
+            classifyRichContent: false
+        )
+
+        XCTAssertTrue(
+            result.mainText?.contains("Here is what I wrote:") ?? false,
+            "Unexpected mainText: \(result.mainText ?? "nil")"
+        )
+        XCTAssertTrue(result.mainText?.contains("The draft is attached") ?? false)
+    }
+
     func testChatBubbleTextProcessor_htmlLiteralQuoteLikeProse_isNotPlainTextQuoteRemoved() {
         let html = """
         <p>Please keep this literal example: On Jan 30, 2026 at 7:32 PM, Name should remain in the help text.</p>
