@@ -86,14 +86,20 @@ enum ConversationParticipantExtractor {
         )
         guard !participantEmailSet.isEmpty else { return [:] }
 
+        // Newest-first so the most recent From header wins; an older, fuller
+        // variant of the same name may still upgrade it (see
+        // EmailNormalizer.mergeNewestFirstHeaderDisplayName).
         let request = NSFetchRequest<NSDictionary>(entityName: "Message")
         request.resultType = .dictionaryResultType
-        request.propertiesToFetch = ["senderEmail", "senderName"]
-        request.returnsDistinctResults = true
+        request.propertiesToFetch = ["senderEmail", "senderName", "internalDate"]
         request.predicate = NSPredicate(
             format: "conversation == %@ AND senderEmail != nil AND senderName != nil",
             conversation
         )
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
         request.fetchBatchSize = 50
 
         let rows: [NSDictionary]
@@ -116,13 +122,11 @@ enum ConversationParticipantExtractor {
                 continue
             }
 
-            if EmailNormalizer.isBetterDisplayName(
+            displayNames[normalizedEmail] = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
                 displayName,
-                than: displayNames[normalizedEmail],
+                into: displayNames[normalizedEmail],
                 forEmail: normalizedEmail
-            ) {
-                displayNames[normalizedEmail] = displayName
-            }
+            )
         }
 
         return displayNames

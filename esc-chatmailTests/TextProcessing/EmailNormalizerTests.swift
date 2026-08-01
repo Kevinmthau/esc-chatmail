@@ -312,6 +312,51 @@ final class EmailNormalizerTests: XCTestCase {
 
     // MARK: - Hide My Email Detection
 
+    // MARK: - mergeNewestFirstHeaderDisplayName
+
+    func testMergeNewestFirstHeaderDisplayName_rebrandKeepsNewestName() {
+        let result = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
+            "Technology Brothers",
+            into: "TBPN",
+            forEmail: "tbpn@mail.beehiiv.com"
+        )
+        XCTAssertEqual(result, "TBPN")
+    }
+
+    func testMergeNewestFirstHeaderDisplayName_olderFullerVariantUpgradesNewestName() {
+        let result = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
+            "Katie Thau",
+            into: "Katie",
+            forEmail: "katie@example.com"
+        )
+        XCTAssertEqual(result, "Katie Thau")
+    }
+
+    func testMergeNewestFirstHeaderDisplayName_noWinnerYetUsesCandidate() {
+        let result = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
+            "Technology Brothers",
+            into: nil,
+            forEmail: "tbpn@mail.beehiiv.com"
+        )
+        XCTAssertEqual(result, "Technology Brothers")
+    }
+
+    func testMergeNewestFirstHeaderDisplayName_unrelatedOlderNameNeverReplacesNewest() {
+        let result = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
+            "Completely Different Sender",
+            into: "Current Name",
+            forEmail: "sender@example.com"
+        )
+        XCTAssertEqual(result, "Current Name")
+    }
+
+    func testIsDisplayNameTokenSubset_subsetAndNonSubset() {
+        XCTAssertTrue(EmailNormalizer.isDisplayNameTokenSubset("Katie", of: "Katie Thau"))
+        XCTAssertTrue(EmailNormalizer.isDisplayNameTokenSubset("katie thau", of: "Katie Thau"))
+        XCTAssertFalse(EmailNormalizer.isDisplayNameTokenSubset("TBPN", of: "Technology Brothers"))
+        XCTAssertFalse(EmailNormalizer.isDisplayNameTokenSubset("", of: "Katie Thau"))
+    }
+
     func testIsHideMyEmailDisplayName_exactMatch_returnsTrue() {
         XCTAssertTrue(EmailNormalizer.isHideMyEmailDisplayName("Hide My Email"))
     }

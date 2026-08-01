@@ -11,7 +11,7 @@ enum CacheVersioning {
     /// Embedded in every ProcessedTextCache key. Bump when text-processing
     /// output changes shape (classification, signature/quote removal, chat
     /// preview derivation).
-    static let processedTextProcessingVersion = "2026-05-30-chat-preview-primary-v2"
+    static let processedTextProcessingVersion = "2026-08-01-bottom-post-recovery-v1"
 
     /// Embedded in email preview snapshot cache keys. Bump when the preview
     /// renderer's visual output changes.

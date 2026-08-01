@@ -158,6 +158,37 @@ class EmailNormalizer {
         return isBetterDisplayName(new, than: existing)
     }
 
+    /// Merges one sanitized header From display name into the running winner
+    /// for an email, with candidates supplied NEWEST-FIRST.
+    ///
+    /// The newest header name is authoritative: a sender that deliberately
+    /// rebrands ("Technology Brothers" → "TBPN") must not stay pinned to the
+    /// old name just because it has more words. An older name may still
+    /// replace the newest one when it is a fuller variant of the same name —
+    /// the newest name's tokens all appear in it ("Katie" → "Katie Thau") —
+    /// and ranks better under `isBetterDisplayName`.
+    static func mergeNewestFirstHeaderDisplayName(
+        _ olderCandidate: String,
+        into newestWinner: String?,
+        forEmail email: String
+    ) -> String {
+        guard let newestWinner else { return olderCandidate }
+        guard isDisplayNameTokenSubset(newestWinner, of: olderCandidate),
+              isBetterDisplayName(olderCandidate, than: newestWinner, forEmail: email) else {
+            return newestWinner
+        }
+        return olderCandidate
+    }
+
+    /// True when every comparison token of `name` appears among `other`'s
+    /// tokens — i.e. `other` is a fuller variant of the same name.
+    static func isDisplayNameTokenSubset(_ name: String, of other: String) -> Bool {
+        let nameParts = displayNameParts(name)
+        guard !nameParts.isEmpty else { return false }
+        let otherParts = Set(displayNameParts(other))
+        return nameParts.allSatisfy { otherParts.contains($0) }
+    }
+
     static func isAddressDerivedDisplayName(_ displayName: String?, forEmail email: String) -> Bool {
         guard let displayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !displayName.isEmpty else {
