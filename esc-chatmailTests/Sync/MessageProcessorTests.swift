@@ -934,6 +934,36 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertEqual(result.score, 45)
     }
 
+    // MARK: - RFC 2047 Header Decoding
+
+    func testProcessGmailMessage_decodesRFC2047EncodedSubject() async throws {
+        let message = GmailMessageBuilder()
+            .withId("rfc2047-subject")
+            .withSubject("=?utf-8?B?SsO2cmcgTcO8bGxlcg==?=")
+            .withFrom("jorg@example.com", name: "Jörg")
+            .withBodyText("Hello")
+            .build()
+
+        let processedMessage = try await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.headers.subject, "Jörg Müller")
+    }
+
+    func testProcessGmailMessage_plainSubjectPassesThroughUnchanged() async throws {
+        let message = GmailMessageBuilder()
+            .withId("plain-subject")
+            .withSubject("Quarterly report: Q1 =? draft ?=")
+            .withFrom("sender@example.com")
+            .withBodyText("Hello")
+            .build()
+
+        let processedMessage = try await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.headers.subject, "Quarterly report: Q1 =? draft ?=")
+    }
+
     // MARK: - Attachment Extraction
 
     func testProcessGmailMessage_extractsInlineDataAttachmentWithoutAttachmentId() async throws {
