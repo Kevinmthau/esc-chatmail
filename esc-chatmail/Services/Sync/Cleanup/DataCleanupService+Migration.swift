@@ -144,6 +144,125 @@ extension DataCleanupService {
 
 }
 
+// MARK: - RFC 2047 Header Text Repair
+
+extension DataCleanupService {
+
+    static let rfc2047HeaderTextRepairKey = "hasDecodedRFC2047HeaderTextV1"
+
+    /// One-time repair: earlier builds persisted raw RFC 2047 encoded-words
+    /// ("=?utf-8?B?...?=") straight from From/Subject headers into display
+    /// fields, which rendered as garbage sender names. Ingestion now decodes
+    /// at parse time (EmailNormalizer / MessageProcessor); this pass decodes
+    /// what already landed in the store.
+    ///
+    /// Idempotent: decoding an already-decoded value is a no-op, so interim
+    /// saves are safe and the flag is only written after a successful save.
+    func decodeRFC2047HeaderTextIfNeeded(in context: NSManagedObjectContext) async {
+        guard !migrationFlags.bool(forKey: Self.rfc2047HeaderTextRepairKey) else { return }
+
+        let startTime = CFAbsoluteTimeGetCurrent()
+        // "=?" appears in every encoded word; CONTAINS narrows the scan to
+        // candidate rows and the decoder verifies the full "=?...?=" shape.
+        let encodedWordMarker = "=?"
+
+        let result: (changedPersonEmails: Set<String>, personCount: Int, messageCount: Int, conversationCount: Int) = await context.perform {
+            var changedPersonEmails: Set<String> = []
+            var personCount = 0
+            var messageCount = 0
+            var conversationCount = 0
+
+            let personRequest = Person.fetchRequest()
+            personRequest.predicate = NSPredicate(format: "displayName CONTAINS %@", encodedWordMarker)
+            personRequest.fetchBatchSize = 100
+            for person in (try? context.fetch(personRequest)) ?? [] {
+                guard let garbled = person.displayName else { continue }
+                let decoded = EmailNormalizer.sanitizeDisplayName(garbled)
+                guard decoded != garbled else { continue }
+                person.displayName = decoded.isEmpty ? nil : decoded
+                changedPersonEmails.insert(person.email)
+                personCount += 1
+            }
+
+            let messageRequest = Message.fetchRequest()
+            messageRequest.predicate = NSPredicate(
+                format: "senderName CONTAINS %@ OR subject CONTAINS %@",
+                encodedWordMarker, encodedWordMarker
+            )
+            messageRequest.fetchBatchSize = 200
+            for message in (try? context.fetch(messageRequest)) ?? [] {
+                var changed = false
+                if let garbled = message.senderName {
+                    let decoded = EmailNormalizer.sanitizeDisplayName(garbled)
+                    if decoded != garbled {
+                        message.senderName = decoded.isEmpty ? nil : decoded
+                        changed = true
+                    }
+                }
+                if let garbled = message.subject {
+                    let decoded = RFC2047Decoder.decode(garbled)
+                    if decoded != garbled {
+                        message.subject = decoded
+                        changed = true
+                    }
+                }
+                if changed { messageCount += 1 }
+            }
+
+            let conversationRequest = Conversation.fetchRequest()
+            conversationRequest.predicate = NSPredicate(
+                format: "displayName CONTAINS %@ OR snippet CONTAINS %@",
+                encodedWordMarker, encodedWordMarker
+            )
+            conversationRequest.fetchBatchSize = 100
+            for conversation in (try? context.fetch(conversationRequest)) ?? [] {
+                var changed = false
+                if let garbled = conversation.displayName {
+                    let decoded = RFC2047Decoder.decode(garbled)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if decoded != garbled, !decoded.isEmpty {
+                        conversation.displayName = decoded
+                        changed = true
+                    }
+                }
+                if let garbled = conversation.snippet {
+                    let decoded = RFC2047Decoder.decode(garbled)
+                    if decoded != garbled {
+                        conversation.snippet = decoded
+                        changed = true
+                    }
+                }
+                if changed { conversationCount += 1 }
+            }
+
+            return (changedPersonEmails, personCount, messageCount, conversationCount)
+        }
+
+        guard await context.performSaveIfNeeded(caller: "DataCleanupService.decodeRFC2047HeaderText") else {
+            Log.warning("RFC 2047 header text repair save failed; will retry next cleanup", category: .coreData)
+            return
+        }
+
+        migrationFlags.set(true, forKey: Self.rfc2047HeaderTextRepairKey)
+
+        let totalChanged = result.personCount + result.messageCount + result.conversationCount
+        if totalChanged > 0 {
+            // Cached person rows and message-list snapshots may still carry
+            // the garbled names; drop them so the decoded values publish.
+            PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(
+                emails: result.changedPersonEmails
+            )
+            await ConversationCache.shared.clearAllCaches()
+
+            let duration = CFAbsoluteTimeGetCurrent() - startTime
+            Log.info(
+                "RFC 2047 header text repair decoded \(result.personCount) person(s), \(result.messageCount) message(s), \(result.conversationCount) conversation(s) in \(String(format: "%.2f", duration))s",
+                category: .coreData
+            )
+        }
+    }
+}
+
 // MARK: - Participant-Set Split Migration
 
 extension DataCleanupService {

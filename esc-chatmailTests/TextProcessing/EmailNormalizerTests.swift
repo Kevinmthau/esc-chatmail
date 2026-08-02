@@ -211,6 +211,60 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertEqual(result, "John Smith")
     }
 
+    // MARK: - extractDisplayName RFC 2047 Tests (issue #149)
+
+    func testExtractDisplayName_rfc2047Base64Name_decodes() {
+        let result = EmailNormalizer.extractDisplayName(
+            from: "=?utf-8?B?SsO2cmcgTcO8bGxlcg==?= <jorg@example.com>"
+        )
+        XCTAssertEqual(result, "Jörg Müller")
+    }
+
+    func testExtractDisplayName_rfc2047QEncodedName_decodes() {
+        let result = EmailNormalizer.extractDisplayName(
+            from: "=?utf-8?q?Jos=C3=A9_Garc=C3=ADa?= <jose@example.com>"
+        )
+        XCTAssertEqual(result, "José García")
+    }
+
+    func testExtractDisplayName_quotedRFC2047Name_decodesAndUnquotes() {
+        let result = EmailNormalizer.extractDisplayName(
+            from: "\"=?utf-8?Q?Costco_Wholesale?=\" <news@costco.example.com>"
+        )
+        XCTAssertEqual(result, "Costco Wholesale")
+    }
+
+    func testExtractDisplayName_rfc2047NameDecodingToQuotedPhrase_stripsDecodedQuotes() {
+        // "=?utf-8?B?IkFjbWUsIEluYyI=?=" decodes to "\"Acme, Inc\"" — the
+        // quotes only appear after decoding and must still be stripped.
+        let result = EmailNormalizer.extractDisplayName(
+            from: "=?utf-8?B?IkFjbWUsIEluYyI=?= <hello@acme.example.com>"
+        )
+        XCTAssertEqual(result, "Acme, Inc")
+    }
+
+    func testExtractDisplayName_multiWordRFC2047Name_decodesAcrossWords() {
+        // Multibyte character split across adjacent encoded words.
+        let result = EmailNormalizer.extractDisplayName(
+            from: "=?UTF-8?B?ww==?= =?UTF-8?B?iW1pbGll?= <emilie@example.com>"
+        )
+        XCTAssertEqual(result, "Émilie")
+    }
+
+    func testExtractDisplayName_malformedRFC2047Name_keptVerbatim() {
+        let result = EmailNormalizer.extractDisplayName(
+            from: "=?utf-8?B?!!!notbase64!!!?= <x@example.com>"
+        )
+        XCTAssertEqual(result, "=?utf-8?B?!!!notbase64!!!?=")
+    }
+
+    func testExtractDisplayName_rfc2047CommentName_decodes() {
+        let result = EmailNormalizer.extractDisplayName(
+            from: "jose@example.com (=?utf-8?B?Sm9zw6k=?=)"
+        )
+        XCTAssertEqual(result, "José")
+    }
+
     // MARK: - formatAsDisplayName Tests
 
     func testFormatAsDisplayName_dotSeparated_formatsAsTitleCase() {
@@ -308,6 +362,26 @@ final class EmailNormalizerTests: XCTestCase {
     func testIsBetterDisplayName_forEmail_prefersIntentionalHeaderCasing() {
         let result = EmailNormalizer.isBetterDisplayName("BONBONWHIMS", than: "Bonbonwhims", forEmail: "bonbonwhims@example.com")
         XCTAssertTrue(result)
+    }
+
+    func testIsBetterDisplayName_forEmail_decodedNameReplacesPersistedEncodedWordGarbage() {
+        // A garbled raw encoded-word persisted by an earlier build must lose
+        // to any decoded candidate — even a "shorter" single-part one.
+        let result = EmailNormalizer.isBetterDisplayName(
+            "José",
+            than: "=?utf-8?B?Sm9zw6k=?=",
+            forEmail: "jose@example.com"
+        )
+        XCTAssertTrue(result)
+    }
+
+    func testIsBetterDisplayName_forEmail_encodedWordNeverReplacesCleanName() {
+        let result = EmailNormalizer.isBetterDisplayName(
+            "=?utf-8?B?Sm9zw6k=?=",
+            than: "José",
+            forEmail: "jose@example.com"
+        )
+        XCTAssertFalse(result)
     }
 
     // MARK: - Hide My Email Detection

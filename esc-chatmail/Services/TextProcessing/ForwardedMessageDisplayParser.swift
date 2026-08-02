@@ -290,7 +290,10 @@ enum ForwardedMessageDisplayParser {
             return nil
         }
 
-        return trimmed(decoded)
+        // Forwarded blocks quote another message's headers as body text, so
+        // raw RFC 2047 encoded-words survive here even though Gmail decodes
+        // real headers — decode them or the card shows "=?utf-8?B?...?=".
+        return trimmed(RFC2047Decoder.decode(decoded))
     }
 
     private static func cleanedTimestamp(from rawValue: String?) -> String? {

@@ -65,7 +65,8 @@ class EmailNormalizer {
     static func extractDisplayName(from string: String) -> String? {
         if let emailStartIndex = string.firstIndex(of: "<") {
             let name = String(string[..<emailStartIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return name.isEmpty ? nil : name.replacingOccurrences(of: "\"", with: "")
+            let sanitized = sanitizeDisplayName(name)
+            return sanitized.isEmpty ? nil : sanitized
         }
 
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -75,18 +76,29 @@ class EmailNormalizer {
            !emailMatch.email.isEmpty {
             let comment = trimmed[trimmed.index(after: commentStart)..<trimmed.index(before: trimmed.endIndex)]
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "\"", with: "")
-            return comment.isEmpty ? nil : comment
+            let sanitized = sanitizeDisplayName(comment)
+            return sanitized.isEmpty ? nil : sanitized
         }
 
         if let emailMatch = firstBareEmailMatch(in: trimmed) {
             let leadingName = String(trimmed[..<emailMatch.range.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "\"", with: "")
-            return leadingName.isEmpty ? nil : leadingName
+            let sanitized = sanitizeDisplayName(leadingName)
+            return sanitized.isEmpty ? nil : sanitized
         }
 
         return nil
+    }
+
+    /// Decodes RFC 2047 encoded-words and strips quoting from a display-name
+    /// phrase parsed out of an address header. Decoding happens AFTER the
+    /// address structure is parsed so decoded content can never inject a fake
+    /// "<addr>" into address parsing, and BEFORE quote-stripping so a name
+    /// that only becomes quoted once decoded is still unquoted for display.
+    static func sanitizeDisplayName(_ name: String) -> String {
+        RFC2047Decoder.decode(name)
+            .replacingOccurrences(of: "\"", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Converts an email username to a formatted display name
@@ -144,6 +156,15 @@ class EmailNormalizer {
               !new.isEmpty else { return false }
         guard let existing = existingName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !existing.isEmpty else { return true }
+
+        // A name still carrying a raw RFC 2047 encoded-word is garbage on
+        // screen: any decoded candidate beats it, and an undecoded candidate
+        // never replaces a clean existing name.
+        let existingLooksEncoded = RFC2047Decoder.containsEncodedWord(existing)
+        let newLooksEncoded = RFC2047Decoder.containsEncodedWord(new)
+        if existingLooksEncoded != newLooksEncoded {
+            return existingLooksEncoded
+        }
 
         if isAddressDerivedDisplayName(existing, forEmail: email) {
             if !isAddressDerivedDisplayName(new, forEmail: email) {
