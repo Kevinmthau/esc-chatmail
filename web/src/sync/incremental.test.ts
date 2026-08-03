@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getLabelReconciledAt, getLastSuccessfulSyncAt, setLastSuccessfulSyncAt } from '@/db/kv'
 import type { ChatmailDB } from '@/db/schema'
 import { HistoryIdExpiredError } from '@/gmail/historyError'
@@ -18,6 +18,7 @@ import {
   makeTestDb,
   ME,
   NOW,
+  b64url,
   seedAccount,
   StubGmailApi,
   testDeps,
@@ -127,6 +128,108 @@ describe('runIncrementalSync', () => {
     expect(conversation.snippet).toBe('New arrival')
     expect((await db.accounts.get(ME))?.historyId).toBe('h2')
     expect(await getLastSuccessfulSyncAt(db)).toBe(NOW)
+  })
+
+  it('holds the cursor for a transient large-body failure and later persists the full body', async () => {
+    await seedAccount(db)
+    api.messages.set('large', {
+      id: 'large',
+      threadId: 't-large',
+      internalDate: String(NOW - 1000),
+      labelIds: ['INBOX', 'UNREAD'],
+      payload: {
+        partId: '',
+        mimeType: 'text/html',
+        headers: [
+          { name: 'From', value: 'alice@example.com' },
+          { name: 'To', value: ME },
+          { name: 'Subject', value: 'Large body' },
+        ],
+        body: { attachmentId: 'body-large', size: 90_000 },
+      },
+    })
+    api.historyFactory = () =>
+      historyPage({
+        history: [
+          {
+            id: '901',
+            messagesAdded: [
+              { message: { id: 'large', threadId: 't-large', labelIds: ['INBOX', 'UNREAD'] } },
+            ],
+          },
+        ],
+      })
+    api.getAttachmentErrors.set(
+      'large:body-large',
+      () => new Error('transient attachment transport failure'),
+    )
+
+    const failed = (await runIncrementalSync(testDeps(db, api))) as IncrementalSyncResult
+    expect(failed.historyIdAdvanced).toBe(false)
+    expect((await db.accounts.get(ME))?.historyId).toBe('h1')
+    expect(await db.messages.get('large')).toBeUndefined()
+
+    api.getAttachmentErrors.delete('large:body-large')
+    api.attachmentResponses.set('large:body-large', {
+      size: 20,
+      data: b64url('<p>Complete body</p>'),
+    })
+    const recovered = (await runIncrementalSync(testDeps(db, api))) as IncrementalSyncResult
+
+    expect(recovered.historyIdAdvanced).toBe(true)
+    expect((await db.accounts.get(ME))?.historyId).toBe('h2')
+    expect((await db.bodies.get('large'))?.html).toBe('<p>Complete body</p>')
+    expect((await db.messages.get('large'))?.hasAttachments).toBe(0)
+  })
+
+  it('holds the cursor when inline bytes exceed quota and retries the same message', async () => {
+    await seedAccount(db)
+    const incoming = textMessage({ id: 'inline', from: 'alice@example.com' })
+    incoming.payload = {
+      partId: '',
+      mimeType: 'multipart/related',
+      headers: incoming.payload!.headers!,
+      parts: [
+        { partId: '0', mimeType: 'text/html', body: { data: b64url('<b>hi</b>') } },
+        {
+          partId: '1',
+          mimeType: 'image/png',
+          headers: [{ name: 'Content-ID', value: '<logo@x>' }],
+          body: { data: b64url('PNGDATA'), size: 7 },
+        },
+      ],
+    }
+    api.messages.set('inline', incoming)
+    api.historyFactory = () =>
+      historyPage({
+        history: [
+          {
+            id: '902',
+            messagesAdded: [
+              { message: { id: 'inline', threadId: 't-inline', labelIds: ['INBOX'] } },
+            ],
+          },
+        ],
+      })
+    const put = vi
+      .spyOn(db.blobs, 'put')
+      .mockRejectedValueOnce(new DOMException('quota', 'QuotaExceededError'))
+
+    const failed = (await runIncrementalSync(testDeps(db, api))) as IncrementalSyncResult
+    expect(failed.historyIdAdvanced).toBe(false)
+    expect((await db.accounts.get(ME))?.historyId).toBe('h1')
+    expect((await db.messages.get('inline'))?.hasAttachments).toBe(0)
+    expect(await db.attachments.where('messageId').equals('inline').count()).toBe(0)
+
+    const recovered = (await runIncrementalSync(testDeps(db, api))) as IncrementalSyncResult
+    const attachment = (await db.attachments.where('messageId').equals('inline').first())!
+    expect(recovered.historyIdAdvanced).toBe(true)
+    expect((await db.accounts.get(ME))?.historyId).toBe('h2')
+    expect(attachment.state).toBe('downloaded')
+    expect(await db.blobs.get(attachment.id)).toBeDefined()
+    expect((await db.messages.get('inline'))?.hasAttachments).toBe(1)
+
+    put.mockRestore()
   })
 
   it('skips messagesAdded already labeled SPAM/DRAFT/TRASH', async () => {

@@ -7,15 +7,18 @@
 // the history cursor back two syncs out of three, and churns the abandoned
 // registry forever, because `findMissedMessageIds` re-lists the id on every
 // single sync (it is absent locally and always will be). Instead they are
-// parked in `abandonedMessages` with retryCount already at the give-up
-// threshold, which keeps a durable, inspectable trace, keeps the drain away
-// from them, and lets the cursor advance.
+// parked in `abandonedMessages` with an explicit terminal marker (and the
+// legacy retryCount threshold for older readers), which keeps a durable,
+// inspectable trace, keeps the drain away from them, and lets the cursor
+// advance.
 
 import type { ChatmailDB } from '@/db/schema'
-import { MAX_ABANDONED_RETRIES } from './abandoned'
 import type { PersistPlan } from './persist'
 
 export const UNPROCESSABLE_REASON = 'Message payload could not be parsed'
+// Compatibility marker for older builds that inferred terminal records from
+// the former five-attempt ceiling instead of the explicit `terminal` field.
+const LEGACY_TERMINAL_RETRY_COUNT = 5
 
 /** Parks unparseable ids as terminal abandoned records (never drained). */
 export async function recordUnprocessableMessages(
@@ -30,7 +33,8 @@ export async function recordUnprocessableMessages(
         gmailMessageId,
         abandonedAt: now,
         reason: UNPROCESSABLE_REASON,
-        retryCount: MAX_ABANDONED_RETRIES,
+        retryCount: LEGACY_TERMINAL_RETRY_COUNT,
+        terminal: 1,
       })
     }
   })

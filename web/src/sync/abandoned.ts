@@ -2,20 +2,39 @@
 // SyncFailureTracker.swift: after 3 consecutive failed syncs over the same
 // stuck ids, the ids are written to abandonedMessages and the history cursor
 // advances anyway (deadlock prevention). Each later sync drains up to 50
-// abandoned ids with ONE fetch attempt each; an id is given up permanently
-// after 5 drain attempts.
+// abandoned ids with ONE fetch attempt each. Transient records remain durable
+// until recovered or confirmed gone, with capped backoff between attempts.
 
 import type { ChatmailDB } from '@/db/schema'
 import type { GmailSyncApi } from './deps'
 import { fetchMessagesBounded, type FetchMessagesOptions } from './fetch'
 import { applyPersist, preparePersist, type PersistContext } from './persist'
+import { recordUnprocessableMessages, unprocessablePlanIds } from './unprocessable'
 
 export const MAX_CONSECUTIVE_SYNC_FAILURES = 3
 export const MAX_ABANDONED_RETRIES = 5
 export const MAX_ABANDONED_PER_SYNC = 50
+export const ABANDONED_RETRY_BASE_DELAY_MS = 5 * 60 * 1000
+export const ABANDONED_RETRY_MAX_DELAY_MS = 24 * 60 * 60 * 1000
+
+const LEGACY_UNPROCESSABLE_REASON = 'Message payload could not be parsed'
 
 const CONSECUTIVE_FAILURES_KEY = 'syncConsecutiveFailures'
 const PERSISTENT_FAILED_IDS_KEY = 'syncPersistentFailedIds'
+
+function isTerminalRecord(record: { terminal?: 0 | 1; reason: string }): boolean {
+  // Before `terminal` existed, retryCount=5 plus this exact reason was the
+  // only marker for parser tombstones. Other legacy rows remain recoverable.
+  return (
+    record.terminal === 1 ||
+    (record.terminal === undefined && record.reason === LEGACY_UNPROCESSABLE_REASON)
+  )
+}
+
+export function abandonedRetryDelayMs(retryCount: number): number {
+  const exponent = Math.min(Math.max(0, retryCount - 1), 20)
+  return Math.min(ABANDONED_RETRY_BASE_DELAY_MS * 2 ** exponent, ABANDONED_RETRY_MAX_DELAY_MS)
+}
 
 async function getKvNumber(db: ChatmailDB, key: string): Promise<number> {
   const row = await db.syncState.get(key)
@@ -93,6 +112,7 @@ export async function shouldAdvanceHistoryId(
           ...existing,
           abandonedAt: now,
           reason: 'Max sync failures reached',
+          terminal: isTerminalRecord(existing) ? 1 : 0,
         })
       } else {
         await db.abandonedMessages.put({
@@ -100,6 +120,8 @@ export async function shouldAdvanceHistoryId(
           abandonedAt: now,
           reason: 'Max sync failures reached',
           retryCount: 0,
+          terminal: 0,
+          nextAttemptAt: now,
         })
       }
     }
@@ -109,14 +131,23 @@ export async function shouldAdvanceHistoryId(
   return true
 }
 
-/** Abandoned ids still worth retrying (retryCount < 5), oldest first. */
+/** Due transient abandoned ids, oldest due time first. */
 export async function retryableAbandonedIds(
   db: ChatmailDB,
+  now = Date.now(),
   limit = MAX_ABANDONED_PER_SYNC,
 ): Promise<string[]> {
-  const rows = await db.abandonedMessages.where('retryCount').below(MAX_ABANDONED_RETRIES).toArray()
-  rows.sort((a, b) => a.abandonedAt - b.abandonedAt)
-  return rows.slice(0, limit).map((row) => row.gmailMessageId)
+  const rows = await db.abandonedMessages.toArray()
+  return rows
+    .filter(
+      (row) =>
+        !isTerminalRecord(row) && (row.nextAttemptAt === undefined || row.nextAttemptAt <= now),
+    )
+    .sort(
+      (a, b) => (a.nextAttemptAt ?? 0) - (b.nextAttemptAt ?? 0) || a.abandonedAt - b.abandonedAt,
+    )
+    .slice(0, limit)
+    .map((row) => row.gmailMessageId)
 }
 
 export interface AbandonedDrainOutcome {
@@ -127,12 +158,13 @@ export interface AbandonedDrainOutcome {
 
 /**
  * Applies a drain outcome: recovered and server-side-deleted ids leave the
- * registry; failures increment retryCount, deleting the record once it
- * reaches MAX_ABANDONED_RETRIES (given up permanently).
+ * registry; transient failures remain durable and receive capped exponential
+ * backoff. Terminal parser tombstones are never touched by the drain.
  */
 export async function recordAbandonedRetryOutcome(
   db: ChatmailDB,
   outcome: AbandonedDrainOutcome,
+  now = Date.now(),
 ): Promise<void> {
   const resolved = new Set([...outcome.recoveredIds, ...outcome.goneIds])
   if (resolved.size === 0 && outcome.failedIds.length === 0) return
@@ -141,15 +173,17 @@ export async function recordAbandonedRetryOutcome(
     for (const id of resolved) {
       await db.abandonedMessages.delete(id)
     }
-    for (const id of outcome.failedIds) {
+    for (const id of new Set(outcome.failedIds)) {
       const record = await db.abandonedMessages.get(id)
-      if (record === undefined) continue
+      if (record === undefined || isTerminalRecord(record)) continue
       const retryCount = record.retryCount + 1
-      if (retryCount >= MAX_ABANDONED_RETRIES) {
-        await db.abandonedMessages.delete(id)
-      } else {
-        await db.abandonedMessages.put({ ...record, retryCount })
-      }
+      await db.abandonedMessages.put({
+        ...record,
+        retryCount,
+        terminal: 0,
+        lastAttemptAt: now,
+        nextAttemptAt: now + abandonedRetryDelayMs(retryCount),
+      })
     }
   })
 }
@@ -177,23 +211,29 @@ export async function drainAbandoned(
     outcome: { recoveredIds: [], goneIds: [], failedIds: [] },
     touchedConversationIds: new Set(),
   }
-  const ids = await retryableAbandonedIds(db)
+  const ids = await retryableAbandonedIds(db, now)
   if (ids.length === 0) return empty
 
   const fetchResult = await fetchMessagesBounded(api, ids, { ...fetchOptions, maxAttempts: 1 })
 
   const plans = await preparePersist(fetchResult.fetched, ctx)
+  const terminalIds = new Set(unprocessablePlanIds(plans))
+  await recordUnprocessableMessages(db, [...terminalIds], now)
   const applied = await applyPersist(db, plans, now)
 
   // "Recovered" is what actually reached the store (or is now known to live in
   // an excluded mailbox), not what was fetched — otherwise the record would be
   // deleted with nothing to show for it.
-  const resolvedIds = new Set<string>(applied.persistedMessageIds)
+  const resolvedIds = new Set<string>(
+    [...applied.persistedMessageIds].filter((id) => !applied.retryableMessageIds.has(id)),
+  )
   for (const plan of plans) {
     if (plan.kind === 'excluded') resolvedIds.add(plan.id)
   }
   const recoveredIds = fetchResult.fetched.map((m) => m.id).filter((id) => resolvedIds.has(id))
-  const unpersisted = fetchResult.fetched.map((m) => m.id).filter((id) => !resolvedIds.has(id))
+  const unpersisted = fetchResult.fetched
+    .map((m) => m.id)
+    .filter((id) => !resolvedIds.has(id) && !terminalIds.has(id))
 
   return {
     outcome: {

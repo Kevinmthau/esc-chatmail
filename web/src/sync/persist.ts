@@ -30,6 +30,7 @@ import {
 import { calculateNewsletterScore } from '@/mime/newsletter'
 import { isLocalAttachmentId, matchLocalAttachment } from '@/outbox/outboundAttachments'
 import {
+  LargeBodyFetchError,
   parseEmailAddresses,
   parseGmailMessage,
   type ParsedAddress,
@@ -85,6 +86,7 @@ export interface MessagePersistPlan {
 export type PersistPlan =
   | { kind: 'excluded'; id: string; label: string }
   | { kind: 'unprocessable'; id: string }
+  | { kind: 'retryableFailure'; id: string }
   | MessagePersistPlan
 
 export interface PersistApplyResult {
@@ -92,6 +94,8 @@ export interface PersistApplyResult {
   touchedConversationIds: Set<string>
   /** Message ids present in the store after apply (created or updated). */
   persistedMessageIds: Set<string>
+  /** Message ids persisted without all durable inline attachment bytes. */
+  retryableMessageIds: Set<string>
   /** Message ids deleted locally because they live in an excluded mailbox. */
   deletedMessageIds: Set<string>
 }
@@ -195,7 +199,15 @@ export async function preparePersistPlan(
 
   const parseOptions: ParseGmailMessageOptions = {}
   if (ctx.fetchLargeBody !== undefined) parseOptions.fetchLargeBody = ctx.fetchLargeBody
-  const parsed = await parseGmailMessage(msg, parseOptions)
+  let parsed
+  try {
+    parsed = await parseGmailMessage(msg, parseOptions)
+  } catch (error) {
+    if (error instanceof LargeBodyFetchError) {
+      return { kind: 'retryableFailure', id: msg.id }
+    }
+    throw error
+  }
   if (parsed === null) {
     return { kind: 'unprocessable', id: msg.id }
   }
@@ -280,7 +292,8 @@ export async function preparePersistPlan(
         byteSize: att.size,
         width: 0,
         height: 0,
-        state: isInline ? 'downloaded' : 'queued',
+        // Inline bytes and metadata become downloaded atomically during apply.
+        state: 'queued',
         lastDownloadFailedAt: 0,
       },
       inlineData: att.inlineData,
@@ -308,7 +321,7 @@ export async function preparePersistPlan(
     isUnread: isUnread ? 1 : 0,
     isNewsletter: newsletter.isNewsletter ? 1 : 0,
     isCalendarInvite: parsed.isLikelyCalendarInvite ? 1 : 0,
-    hasAttachments: parsed.hasAttachments || attachments.length > 0 ? 1 : 0,
+    hasAttachments: attachments.length > 0 ? 1 : 0,
     labelIds: effectiveLabelIds(labelIds, ctx.knownLabelIds),
     localModifiedAt: 0,
   }
@@ -344,6 +357,11 @@ export async function preparePersist(
   concurrency: number = PREPARE_CONCURRENCY,
 ): Promise<PersistPlan[]> {
   return mapWithConcurrency(messages, concurrency, (msg) => preparePersistPlan(msg, ctx))
+}
+
+/** Message ids whose oversized body fetch failed and must be retried later. */
+export function retryableFailurePlanIds(plans: readonly PersistPlan[]): string[] {
+  return plans.filter((plan) => plan.kind === 'retryableFailure').map((plan) => plan.id)
 }
 
 // ---------------------------------------------------------------------------
@@ -397,19 +415,43 @@ async function adoptLocalAttachment(
   db: ChatmailDB,
   local: AttachmentRow,
   incoming: Omit<AttachmentRow, 'messageId'>,
+  inlineData: Uint8Array | null,
   messageId: string,
   now: number,
-): Promise<void> {
+): Promise<{ kind: 'adopted' } | { kind: 'retryable'; localRetained: boolean }> {
   const blobRow = await db.blobs.get(local.id)
-  let bytesMoved = false
-  if (blobRow !== undefined) {
+  const sourceBlob =
+    blobRow?.blob ??
+    (inlineData === null
+      ? undefined
+      : new Blob([inlineData as unknown as BlobPart], { type: incoming.mimeType }))
+
+  if (sourceBlob !== undefined) {
+    // A key change briefly duplicates the blob unless the old record goes
+    // first. This transaction makes the move atomic; if the new write still
+    // exceeds quota, restore the old record before retaining its metadata.
+    if (blobRow !== undefined) await db.blobs.delete(local.id)
     try {
-      await putBlob(db, incoming.id, blobRow.blob, now)
-      bytesMoved = true
+      await putBlob(db, incoming.id, sourceBlob, now)
     } catch (error) {
       if (!(error instanceof BlobQuotaExceededError)) throw error
+      // The local row and blob are still a coherent, usable pair. Keep them
+      // published until a later sync can durably move the bytes.
+      if (blobRow !== undefined) {
+        await db.blobs.put(blobRow)
+        return { kind: 'retryable', localRetained: true }
+      }
+
+      // A pre-existing local row without bytes is already unusable. Suppress
+      // it and let the same incoming inline part retry through the normal path.
+      await db.attachments.delete(local.id)
+      return { kind: 'retryable', localRetained: false }
     }
-    if (bytesMoved) await db.blobs.delete(local.id)
+  } else if (incoming.gmailAttachmentId === '') {
+    // Neither local nor server-addressable bytes exist. Do not replace the
+    // broken local row with another impossible queued row.
+    await db.attachments.delete(local.id)
+    return { kind: 'retryable', localRetained: false }
   }
 
   await db.attachments.delete(local.id)
@@ -424,9 +466,10 @@ async function adoptLocalAttachment(
     filename: incoming.filename,
     mimeType: incoming.mimeType,
     byteSize: incoming.byteSize > 0 ? incoming.byteSize : local.byteSize,
-    state: bytesMoved ? 'downloaded' : 'queued',
+    state: sourceBlob === undefined ? 'queued' : 'downloaded',
     lastDownloadFailedAt: 0,
   })
+  return { kind: 'adopted' }
 }
 
 async function putAttachments(
@@ -434,9 +477,11 @@ async function putAttachments(
   messageId: string,
   planned: readonly PlannedAttachment[],
   now: number,
-): Promise<void> {
+): Promise<boolean> {
+  let hadRetryableFailure = false
   const existingRows = await db.attachments.where('messageId').equals(messageId).toArray()
   const existingIds = new Set(existingRows.map((row) => row.id))
+  const existingById = new Map(existingRows.map((row) => [row.id, row]))
   const existingContentIds = new Set(
     existingRows.map((row) => row.contentId).filter((cid) => cid !== ''),
   )
@@ -450,32 +495,68 @@ async function putAttachments(
     const local = matchLocalAttachment(row, localRows, consumedLocalIds)
     if (local !== null) {
       consumedLocalIds.add(local.id)
+      const adoption = await adoptLocalAttachment(db, local, row, inlineData, messageId, now)
+      if (adoption.kind === 'retryable') {
+        hadRetryableFailure = true
+        if (!adoption.localRetained) {
+          existingIds.delete(local.id)
+          if (local.contentId !== '') existingContentIds.delete(local.contentId)
+        }
+        continue
+      }
       existingIds.delete(local.id)
-      await adoptLocalAttachment(db, local, row, messageId, now)
       existingIds.add(row.id)
       if (row.contentId !== '') existingContentIds.add(row.contentId)
       continue
     }
 
-    if (existingIds.has(row.id)) continue
+    if (existingIds.has(row.id)) {
+      // Repair rows written by older builds that claimed inline bytes were
+      // downloaded even though a quota failure left no blob behind.
+      if (inlineData !== null && (await db.blobs.get(row.id)) === undefined) {
+        const blob = new Blob([inlineData as unknown as BlobPart], { type: row.mimeType })
+        try {
+          await putBlob(db, row.id, blob, now)
+          await db.attachments.update(row.id, { state: 'downloaded', lastDownloadFailedAt: 0 })
+        } catch (error) {
+          if (!(error instanceof BlobQuotaExceededError)) throw error
+          hadRetryableFailure = true
+          const existing = existingById.get(row.id)
+          await db.attachments.delete(row.id)
+          existingIds.delete(row.id)
+          if (existing !== undefined && existing.contentId !== '') {
+            existingContentIds.delete(existing.contentId)
+          }
+        }
+      }
+      continue
+    }
     if (row.contentId !== '' && existingContentIds.has(row.contentId)) continue
-    await db.attachments.put({ ...row, messageId })
-    existingIds.add(row.id)
-    if (row.contentId !== '') existingContentIds.add(row.contentId)
     if (inlineData !== null) {
       const blob = new Blob([inlineData as unknown as BlobPart], { type: row.mimeType })
-      // Via putBlob, never a bare db.blobs.put: a full origin quota raises a
-      // DOMException that would abort this whole APPLY transaction, losing the
-      // page's messages and wedging sync for good once storage fills up.
-      // Inline bytes are a cache — drop them and keep the message; the
-      // attachment row stays 'queued' so the reader can fetch it on demand.
+      // Inline parts cannot be re-downloaded by attachment id. Store the bytes
+      // first and publish metadata only after they exist; on quota exhaustion
+      // suppress the impossible attachment tile and let a later re-sync retry.
       try {
         await putBlob(db, row.id, blob, now)
       } catch (error) {
         if (!(error instanceof BlobQuotaExceededError)) throw error
+        hadRetryableFailure = true
+        continue
       }
+      await db.attachments.put({ ...row, messageId, state: 'downloaded' })
+    } else {
+      await db.attachments.put({ ...row, messageId })
     }
+    existingIds.add(row.id)
+    if (row.contentId !== '') existingContentIds.add(row.contentId)
   }
+
+  // Quota-suppressed inline parts must not leave the message advertising an
+  // attachment that has no usable row or recovery action.
+  const hasAttachments = (await db.attachments.where('messageId').equals(messageId).count()) > 0
+  await db.messages.update(messageId, { hasAttachments: hasAttachments ? 1 : 0 })
+  return hadRetryableFailure
 }
 
 /** Recomputes inbox-only indicators from the conversation's message set. */
@@ -735,7 +816,7 @@ async function applyMessagePlan(
           await db.bodies.put({ messageId: updated.id, html: plan.bodyHtml })
         }
         await upsertPeople(db, plan.people)
-        await putAttachments(db, updated.id, plan.attachments, now)
+        const attachmentRetryable = await putAttachments(db, updated.id, plan.attachments, now)
         await applyFastUpdateForExistingMessage(
           db,
           updated.conversationId,
@@ -745,6 +826,7 @@ async function applyMessagePlan(
         )
         result.touchedConversationIds.add(updated.conversationId)
         result.persistedMessageIds.add(updated.id)
+        if (attachmentRetryable) result.retryableMessageIds.add(updated.id)
         return
       }
 
@@ -774,10 +856,11 @@ async function applyMessagePlan(
         )
       }
       await upsertPeople(db, plan.people)
-      await putAttachments(db, message.id, plan.attachments, now)
+      const attachmentRetryable = await putAttachments(db, message.id, plan.attachments, now)
       await applyFastUpdateForNewMessage(db, resolvedConversationId, message)
       result.touchedConversationIds.add(resolvedConversationId)
       result.persistedMessageIds.add(message.id)
+      if (attachmentRetryable) result.retryableMessageIds.add(message.id)
     },
   )
 }
@@ -797,6 +880,7 @@ export async function applyPersist(
   const result: PersistApplyResult = {
     touchedConversationIds: new Set(),
     persistedMessageIds: new Set(),
+    retryableMessageIds: new Set(),
     deletedMessageIds: new Set(),
   }
 
@@ -806,7 +890,7 @@ export async function applyPersist(
   })
 
   for (const plan of ordered) {
-    if (plan.kind === 'unprocessable') continue
+    if (plan.kind === 'unprocessable' || plan.kind === 'retryableFailure') continue
     if (plan.kind === 'excluded') {
       await db.transaction(
         'rw',

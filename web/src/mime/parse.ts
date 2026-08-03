@@ -4,9 +4,10 @@
 // extractContent.
 
 import type { CalendarEventData } from '../db/types'
+import { GmailApiError } from '../gmail/errors'
 import type { GmailHeader, GmailMessage, GmailPart } from '../gmail/types'
 import { addressTokens, extractDisplayName, extractEmail, normalizeEmail } from './address'
-import { checkForAttachments, extractAttachments, type ParsedAttachment } from './attachments'
+import { extractAttachments, isAttachmentPart, type ParsedAttachment } from './attachments'
 import { analyzeCalendarInvite } from './calendarInvite'
 import { base64UrlDecodeToString, decodeTransferEncoding } from './decode'
 import { extractPlainTextFromHtml } from './htmlText'
@@ -206,14 +207,16 @@ function canContainEmbeddedRawSourceHtml(mimeType: string | null): boolean {
   return normalized.startsWith('text/') || normalized.startsWith('message/')
 }
 
-function isAttachmentContentPart(part: GmailPart): boolean {
-  const trimmedFilename = part.filename?.trim() ?? ''
-  if (trimmedFilename.length > 0) {
-    return true
-  }
+export class LargeBodyFetchError extends Error {
+  readonly messageId: string
+  readonly attachmentId: string
 
-  const contentDisposition = (headerValueOf(part, 'content-disposition') ?? '').toLowerCase()
-  return contentDisposition.includes('attachment')
+  constructor(messageId: string, attachmentId: string, options?: { cause?: unknown }) {
+    super(`Could not fetch large body ${attachmentId} for message ${messageId}`, options)
+    this.name = 'LargeBodyFetchError'
+    this.messageId = messageId
+    this.attachmentId = attachmentId
+  }
 }
 
 function decodeBody(data: string, headers: readonly GmailHeader[] | undefined): string | null {
@@ -234,8 +237,12 @@ async function fetchLargeBodyContent(
     const text = base64UrlDecodeToString(base64url)
     if (text === null) return null
     return decodeTransferEncoding(text, headers)
-  } catch {
-    return null
+  } catch (error) {
+    // A missing attachment is deterministic; malformed returned bytes are
+    // handled by the decoder above. Everything else may recover later and
+    // must prevent an incomplete message from being persisted.
+    if (error instanceof GmailApiError && error.status === 404) return null
+    throw new LargeBodyFetchError(messageId, attachmentId, { cause: error })
   }
 }
 
@@ -303,7 +310,7 @@ async function extractContent(
   const extract = async (current: GmailPart): Promise<ExtractedMessageContent> => {
     const mimeType = resolvedMimeType(current)
 
-    if (isAttachmentContentPart(current)) {
+    if (isAttachmentPart(current)) {
       return { html: null, plainText: null }
     }
 
@@ -353,7 +360,7 @@ async function extractEmbeddedHtmlFromTextualBodies(
   // An attachment part is never a body slot, so it can never hold the message's
   // embedded HTML — and decoding it would mean pulling the whole file
   // (HTMLContentRecoveryService.collectHTMLCandidates returns [] here too).
-  if (isAttachmentContentPart(part)) return null
+  if (isAttachmentPart(part)) return null
 
   const decodedText = await decodedTextualBody(part, messageId, fetchLargeBody)
   if (decodedText !== null) {
@@ -429,7 +436,7 @@ export async function parseGmailMessage(
   }
 
   const attachments = extractAttachments(payload)
-  const hasAttachments = checkForAttachments(payload) || attachments.length > 0
+  const hasAttachments = attachments.length > 0
 
   const calendar = analyzeCalendarInvite({
     payload,

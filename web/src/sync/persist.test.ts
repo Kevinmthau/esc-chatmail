@@ -178,6 +178,15 @@ describe('preparePersist fan-out', () => {
     }
   }
 
+  it('turns a failed large-body fetch into a retryable plan', async () => {
+    const plan = await preparePersistPlan(largeBodyMessage('m1'), {
+      ...ctx,
+      fetchLargeBody: () => Promise.reject(new Error('offline')),
+    })
+
+    expect(plan).toEqual({ kind: 'retryableFailure', id: 'm1' })
+  })
+
   it('bounds concurrent large-body fetches instead of fanning out over the whole page', async () => {
     // The message-GET tier is bounded at FETCH_CONCURRENCY, but parsing opens a
     // SECOND network tier (attachments.get for oversized bodies). An unbounded
@@ -391,23 +400,27 @@ describe('applyPersist — inline attachment scoping', () => {
     expect(await db.blobs.get(rows2[0]!.id)).toBeUndefined()
   })
 
-  // Inline bytes are a cache. A bare db.blobs.put raises a DOMException that
-  // aborts the whole APPLY transaction, so once the origin quota filled up
-  // EVERY sync page lost its messages and the account never advanced again.
-  // Routing through putBlob turns that into the typed BlobQuotaExceededError,
-  // which this path swallows so the message still lands.
-  it('keeps the message when the origin is out of space for its inline bytes', async () => {
+  it('suppresses an unrecoverable inline row on quota failure and repairs it on re-sync', async () => {
     const quotaError = new DOMException('quota', 'QuotaExceededError')
     const put = vi.spyOn(db.blobs, 'put').mockRejectedValue(quotaError)
+    const message = inlineImageMessage('m1', NOW - 2000)
 
-    await expect(persistMessages([inlineImageMessage('m1', NOW - 2000)])).resolves.toBeDefined()
+    const first = await persistMessages([message])
 
     expect(put).toHaveBeenCalled()
-    // The message and its metadata survived the failed blob write.
-    expect(await db.messages.get('m1')).toBeDefined()
-    const rows = await db.attachments.where('messageId').equals('m1').toArray()
-    expect(rows).toHaveLength(1)
-    expect(await db.blobs.get(rows[0]!.id)).toBeUndefined()
+    expect(first.retryableMessageIds).toEqual(new Set(['m1']))
+    expect((await db.messages.get('m1'))?.hasAttachments).toBe(0)
+    expect(await db.attachments.where('messageId').equals('m1').count()).toBe(0)
+    expect(await db.blobs.count()).toBe(0)
+
+    put.mockRestore()
+    const second = await persistMessages([message])
+    expect(second.retryableMessageIds).toEqual(new Set())
+    const repaired = await db.attachments.where('messageId').equals('m1').toArray()
+    expect(repaired).toHaveLength(1)
+    expect(repaired[0]!.state).toBe('downloaded')
+    expect(await db.blobs.get(repaired[0]!.id)).toBeDefined()
+    expect((await db.messages.get('m1'))?.hasAttachments).toBe(1)
   })
 })
 
@@ -547,6 +560,13 @@ describe('adopting optimistic outbound attachments', () => {
     return msg
   }
 
+  /** The same sent copy when Gmail embeds the small attachment bytes inline. */
+  function inlineSyncedSentCopy(): GmailMessage {
+    const msg = syncedSentCopy()
+    msg.payload!.parts![1]!.body = { data: b64url('ABCD'), size: PHOTO_BYTES.length }
+    return msg
+  }
+
   it('adopts the local row into the server identity instead of duplicating it', async () => {
     await seedSentMessageWithLocalAttachment()
 
@@ -566,6 +586,32 @@ describe('adopting optimistic outbound attachments', () => {
     // The blob moved with the row — the old key is gone, not orphaned.
     expect(await db.blobs.get('local_a1')).toBeUndefined()
     expect((await db.blobs.get('m1:1'))?.byteSize).toBe(PHOTO_BYTES.length)
+  })
+
+  it('retains usable local bytes when inline server-identity adoption exceeds quota', async () => {
+    await seedSentMessageWithLocalAttachment()
+    const put = vi
+      .spyOn(db.blobs, 'put')
+      .mockRejectedValueOnce(new DOMException('quota', 'QuotaExceededError'))
+
+    const failed = await persistMessages([inlineSyncedSentCopy()])
+
+    expect(failed.retryableMessageIds).toEqual(new Set(['m1']))
+    expect(
+      (await db.attachments.where('messageId').equals('m1').toArray()).map((row) => row.id),
+    ).toEqual(['local_a1'])
+    expect(await db.blobs.get('local_a1')).toBeDefined()
+    expect(await db.blobs.get('m1:1')).toBeUndefined()
+
+    put.mockRestore()
+    const recovered = await persistMessages([inlineSyncedSentCopy()])
+    const adopted = (await db.attachments.where('messageId').equals('m1').first())!
+    expect(recovered.retryableMessageIds).toEqual(new Set())
+    expect(adopted.id).not.toBe('local_a1')
+    expect(adopted.state).toBe('downloaded')
+    expect(adopted.gmailAttachmentId).toBe('')
+    expect(await db.blobs.get('local_a1')).toBeUndefined()
+    expect(await db.blobs.get(adopted.id)).toBeDefined()
   })
 
   it('matches on Content-ID when both sides carry one', async () => {

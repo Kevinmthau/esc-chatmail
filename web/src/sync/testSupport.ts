@@ -135,6 +135,11 @@ export class StubGmailApi implements GmailSyncApi {
   getMessageErrors = new Map<string, (attempt: number) => Error | null>()
   getMessageCalls: string[] = []
   private attemptsByMessageId = new Map<string, number>()
+  attachmentResponses = new Map<string, AttachmentResponse>()
+  /** `${messageId}:${attachmentId}` → error factory. */
+  getAttachmentErrors = new Map<string, (attempt: number) => Error | null>()
+  getAttachmentCalls: string[] = []
+  private attemptsByAttachmentKey = new Map<string, number>()
 
   getProfile(): Promise<GmailProfile> {
     return Promise.resolve(this.profile)
@@ -179,8 +184,14 @@ export class StubGmailApi implements GmailSyncApi {
     return Promise.resolve(this.historyPages.shift() ?? { historyId: params.startHistoryId })
   }
 
-  getAttachment(): Promise<AttachmentResponse> {
-    return Promise.resolve({ size: 0, data: '' })
+  getAttachment(messageId: string, attachmentId: string): Promise<AttachmentResponse> {
+    const key = `${messageId}:${attachmentId}`
+    this.getAttachmentCalls.push(key)
+    const attempt = (this.attemptsByAttachmentKey.get(key) ?? 0) + 1
+    this.attemptsByAttachmentKey.set(key, attempt)
+    const error = this.getAttachmentErrors.get(key)?.(attempt)
+    if (error !== undefined && error !== null) return Promise.reject(error)
+    return Promise.resolve(this.attachmentResponses.get(key) ?? { size: 0, data: '' })
   }
 }
 

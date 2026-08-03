@@ -259,6 +259,11 @@ export interface AbandonedMessageRow {
   abandonedAt: number
   reason: string
   retryCount: number
+  /** Terminal parser tombstones are inspectable but never drained. */
+  terminal?: Flag
+  /** Retry scheduling is unindexed; the registry is intentionally small. */
+  lastAttemptAt?: number
+  nextAttemptAt?: number
 }
 
 export interface SyncStateRow {

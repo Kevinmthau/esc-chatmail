@@ -44,6 +44,7 @@ import {
   applyPersist,
   LOCAL_MODIFICATION_MAX_AGE_MS,
   preparePersist,
+  retryableFailurePlanIds,
   type PersistContext,
 } from './persist'
 import { findMissedMessageIds, reconcileLabels, SYNC_QUERY_EXCLUSIONS } from './reconcile'
@@ -361,6 +362,7 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
   })
   failedIds.push(...fetchResult.failed.map((f) => f.id))
   const plans = await preparePersist(fetchResult.fetched, ctx)
+  failedIds.push(...retryableFailurePlanIds(plans))
   // A message that fetched fine but produced no persistable plan (parser
   // rejected it) must not be dropped without a trace — but it is terminal, not
   // transient: the identical response reparses to the identical null, so
@@ -369,6 +371,7 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
   // it in the abandoned registry as a tombstone instead.
   await recordUnprocessableMessages(db, unprocessablePlanIds(plans), depsNow(deps))
   const applied = await applyPersist(db, plans, depsNow(deps))
+  failedIds.push(...applied.retryableMessageIds)
   for (const id of applied.touchedConversationIds) touched.add(id)
   await deps.hooks?.onPhase?.('incremental:afterFetch')
 
@@ -399,8 +402,10 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
     // past it, while the sync still reported clean success.
     failedIds.push(...missedFetch.failed.map((f) => f.id))
     const missedPlans = await preparePersist(missedFetch.fetched, ctx)
+    failedIds.push(...retryableFailurePlanIds(missedPlans))
     await recordUnprocessableMessages(db, unprocessablePlanIds(missedPlans), depsNow(deps))
     const missedApplied = await applyPersist(db, missedPlans, depsNow(deps))
+    failedIds.push(...missedApplied.retryableMessageIds)
     for (const id of missedApplied.touchedConversationIds) touched.add(id)
   }
   const labelReconcile = await reconcileLabels(db, api, depsNow(deps))
@@ -424,7 +429,7 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
   await finalizeSync(db, deps.accountEmail, historyIdToSave, touched, now)
 
   // Post-save bookkeeping (only after the durable save, mirroring iOS).
-  await recordAbandonedRetryOutcome(db, drainOutcome)
+  await recordAbandonedRetryOutcome(db, drainOutcome, now)
   if (!hadFailures && !history.wasTruncated) {
     await recordSyncSuccess(db)
     await setLastSuccessfulSyncAt(db, now)

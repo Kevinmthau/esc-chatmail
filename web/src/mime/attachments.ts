@@ -22,15 +22,24 @@ function headerValue(part: GmailPart, name: string): string | null {
   return header ? header.value : null
 }
 
-function shouldTreatInlineDataPartAsAttachment(
-  part: GmailPart,
-  trimmedFilename: string,
-  contentId: string | null,
-): boolean {
+function normalizedContentId(part: GmailPart): string | null {
+  const rawContentId = headerValue(part, 'content-id')
+  return rawContentId !== null ? rawContentId.replace(/^[<>]+|[<>]+$/g, '') : null
+}
+
+/**
+ * Gmail also uses body.attachmentId as indirection for oversized message
+ * bodies. Attachment evidence therefore comes from MIME semantics, never the
+ * presence of attachmentId alone.
+ */
+export function isAttachmentPart(part: GmailPart): boolean {
+  if (part.mimeType?.toLowerCase().startsWith('multipart/') ?? false) return false
+
+  const trimmedFilename = part.filename?.trim() ?? ''
+  const contentId = normalizedContentId(part)
   const contentDisposition = (headerValue(part, 'content-disposition') ?? '').toLowerCase()
 
   const hasAttachmentDisposition = contentDisposition.includes('attachment')
-  const hasInlineDisposition = contentDisposition.includes('inline')
   const isInlineCIDImage =
     (part.mimeType?.toLowerCase().startsWith('image/') ?? false) &&
     contentId !== null &&
@@ -41,10 +50,6 @@ function shouldTreatInlineDataPartAsAttachment(
   }
 
   if (trimmedFilename.length > 0) {
-    return true
-  }
-
-  if (hasInlineDisposition && contentId !== null && contentId.length > 0) {
     return true
   }
 
@@ -167,9 +172,12 @@ function resolvedAttachmentFilename(trimmedFilename: string, mimeType: string): 
   return trimmedFilename
 }
 
-/** True when any part in the tree carries a Gmail attachmentId. */
+/** True when any part in the tree has both content and attachment semantics. */
 export function checkForAttachments(part: GmailPart): boolean {
-  if (part.body?.attachmentId !== undefined) {
+  if (
+    isAttachmentPart(part) &&
+    (part.body?.attachmentId !== undefined || part.body?.data !== undefined)
+  ) {
     return true
   }
 
@@ -197,11 +205,11 @@ export function extractAttachments(part: GmailPart): ParsedAttachment[] {
 
     // Content-ID format is typically <unique-id@domain.com>; strip the angle
     // brackets for matching against cid: URLs.
-    const rawContentId = headerValue(current, 'content-id')
-    const contentId = rawContentId !== null ? rawContentId.replace(/^[<>]+|[<>]+$/g, '') : null
+    const contentId = normalizedContentId(current)
+    const isAttachment = isAttachmentPart(current)
 
     const attachmentId = current.body?.attachmentId
-    if (attachmentId !== undefined && !isMultipart && !seenIds.has(attachmentId)) {
+    if (attachmentId !== undefined && !isMultipart && isAttachment && !seenIds.has(attachmentId)) {
       seenIds.add(attachmentId)
       attachments.push({
         id: attachmentId,
@@ -211,11 +219,7 @@ export function extractAttachments(part: GmailPart): ParsedAttachment[] {
         contentId,
         inlineData: null,
       })
-    } else if (
-      !isMultipart &&
-      current.body?.data !== undefined &&
-      shouldTreatInlineDataPartAsAttachment(current, trimmedFilename, contentId)
-    ) {
+    } else if (!isMultipart && current.body?.data !== undefined && isAttachment) {
       const decodedData = base64UrlDecodeToBytes(current.body.data)
       if (decodedData !== null) {
         const size = current.body.size ?? decodedData.length

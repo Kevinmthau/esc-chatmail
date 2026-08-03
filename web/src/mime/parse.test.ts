@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { GmailApiError, NetworkError } from '../gmail/errors'
 import type { GmailMessage, GmailPart } from '../gmail/types'
 import { extractAttachments } from './attachments'
-import { parseGmailMessage } from './parse'
+import { LargeBodyFetchError, parseGmailMessage } from './parse'
 
 function b64url(text: string): string {
   const bytes = new TextEncoder().encode(text)
@@ -111,6 +112,31 @@ describe('parseGmailMessage content extraction', () => {
     expect(parsed!.attachments[0]!.id).toBe('att-1')
   })
 
+  it('keeps an inline Content-ID HTML root as body content, not an attachment', async () => {
+    const parsed = await parseGmailMessage(
+      message({
+        partId: '',
+        mimeType: 'multipart/related',
+        headers: baseHeaders,
+        parts: [
+          {
+            partId: '0',
+            mimeType: 'text/html',
+            headers: [
+              { name: 'Content-Disposition', value: 'inline' },
+              { name: 'Content-ID', value: '<root-html@x>' },
+            ],
+            body: { data: b64url('<p>Related root</p>') },
+          },
+        ],
+      }),
+    )
+
+    expect(parsed!.html).toBe('<p>Related root</p>')
+    expect(parsed!.attachments).toEqual([])
+    expect(parsed!.hasAttachments).toBe(false)
+  })
+
   it('skips attachment parts as body content (filename and disposition)', async () => {
     const parsed = await parseGmailMessage(
       message({
@@ -161,6 +187,45 @@ describe('parseGmailMessage content extraction', () => {
     expect(fetchLargeBody).toHaveBeenCalledWith('msg-1', 'body-att-9')
     expect(parsed!.html).toBe('<div>Large HTML</div>')
     expect(parsed!.plainText).toBe('small plain')
+    // attachmentId is Gmail's indirection for this body, not an attachment.
+    expect(parsed!.attachments).toEqual([])
+    expect(parsed!.hasAttachments).toBe(false)
+  })
+
+  it('surfaces transient large-body failures without producing an incomplete message', async () => {
+    const fetchLargeBody = vi.fn(() => Promise.reject(new NetworkError('offline')))
+
+    const result = parseGmailMessage(
+      message({
+        partId: '',
+        mimeType: 'text/html',
+        headers: baseHeaders,
+        body: { attachmentId: 'body-att-9', size: 90_000 },
+      }),
+      { fetchLargeBody },
+    )
+
+    await expect(result).rejects.toMatchObject({
+      name: 'LargeBodyFetchError',
+      messageId: 'msg-1',
+      attachmentId: 'body-att-9',
+    } satisfies Partial<LargeBodyFetchError>)
+  })
+
+  it('treats a missing large-body part as a deterministic empty body', async () => {
+    const fetchLargeBody = vi.fn(() => Promise.reject(new GmailApiError(404, 'notFound', 'gone')))
+    const parsed = await parseGmailMessage(
+      message({
+        partId: '',
+        mimeType: 'text/html',
+        headers: baseHeaders,
+        body: { attachmentId: 'gone-body', size: 90_000 },
+      }),
+      { fetchLargeBody },
+    )
+
+    expect(parsed!.html).toBeNull()
+    expect(parsed!.attachments).toEqual([])
   })
 
   it('never downloads binary attachments for the embedded-HTML rescue', async () => {
@@ -383,6 +448,30 @@ describe('extractAttachments', () => {
 
     // Deterministic across runs.
     expect(extractAttachments(tree)[0]!.id).toBe(attachment.id)
+  })
+
+  it('keeps server-backed CID images while ignoring bare body indirection', () => {
+    const tree: GmailPart = {
+      partId: '',
+      mimeType: 'multipart/related',
+      parts: [
+        {
+          partId: '0',
+          mimeType: 'text/html',
+          body: { attachmentId: 'large-html', size: 90_000 },
+        },
+        {
+          partId: '1',
+          mimeType: 'image/png',
+          headers: [{ name: 'Content-ID', value: '<remote-logo@x>' }],
+          body: { attachmentId: 'remote-logo', size: 5_000 },
+        },
+      ],
+    }
+
+    expect(extractAttachments(tree)).toEqual([
+      expect.objectContaining({ id: 'remote-logo', contentId: 'remote-logo@x' }),
+    ])
   })
 
   it('ignores inline data parts that do not look like attachments', () => {

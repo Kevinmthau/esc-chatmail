@@ -15,7 +15,12 @@ import { persistAccountAliases } from './aliases'
 import { depsNow, depsRandom, depsSleep, makeFetchLargeBody, type SyncDeps } from './deps'
 import { fetchMessagesBounded } from './fetch'
 import { recordSyncFailure, shouldAdvanceHistoryId } from './abandoned'
-import { applyPersist, preparePersist, type PersistContext } from './persist'
+import {
+  applyPersist,
+  preparePersist,
+  retryableFailurePlanIds,
+  type PersistContext,
+} from './persist'
 import { SYNC_QUERY_EXCLUSIONS } from './reconcile'
 import { recordUnprocessableMessages, unprocessablePlanIds } from './unprocessable'
 
@@ -83,6 +88,7 @@ export async function listSyncPages(
       failedIds.push(...fetchResult.failed.map((f) => f.id))
 
       const plans = await preparePersist(fetchResult.fetched, ctx)
+      failedIds.push(...retryableFailurePlanIds(plans))
       // applyPersist silently skips unparseable plans. Park them in the
       // abandoned registry instead of dropping them without a trace: this path
       // is shared with history recovery, where the lookback window closes
@@ -90,6 +96,7 @@ export async function listSyncPages(
       // the run still reporting a clean success.
       await recordUnprocessableMessages(db, unprocessablePlanIds(plans), depsNow(deps))
       const applied = await applyPersist(db, plans, depsNow(deps))
+      failedIds.push(...applied.retryableMessageIds)
       processedCount += applied.persistedMessageIds.size
 
       // Per-page rollup + the page's messages persist together, so killing

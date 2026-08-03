@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatmailDB } from '@/db/schema'
 import { GmailApiError } from '@/gmail/errors'
 import {
+  abandonedRetryDelayMs,
   consecutiveFailureCount,
   drainAbandoned,
   MAX_ABANDONED_RETRIES,
@@ -15,10 +16,12 @@ import {
 } from './abandoned'
 import { runIncrementalSync, type IncrementalSyncResult } from './incremental'
 import type { PersistContext } from './persist'
+import { UNPROCESSABLE_REASON } from './unprocessable'
 import {
   makeTestDb,
   ME,
   NOW,
+  b64url,
   seedAccount,
   StubGmailApi,
   testDeps,
@@ -94,7 +97,7 @@ describe('failure tracking', () => {
 })
 
 describe('recordAbandonedRetryOutcome', () => {
-  it('deletes recovered and gone ids, increments failures, gives up at 5', async () => {
+  it('deletes resolved ids but retains and schedules failures at the old retry cap', async () => {
     await db.abandonedMessages.bulkPut([
       { gmailMessageId: 'rec', abandonedAt: NOW, reason: 'r', retryCount: 1 },
       { gmailMessageId: 'gone', abandonedAt: NOW, reason: 'r', retryCount: 0 },
@@ -106,30 +109,69 @@ describe('recordAbandonedRetryOutcome', () => {
         retryCount: MAX_ABANDONED_RETRIES - 1,
       },
     ])
-    await recordAbandonedRetryOutcome(db, {
-      recoveredIds: ['rec'],
-      goneIds: ['gone'],
-      failedIds: ['fail', 'last'],
-    })
+    await recordAbandonedRetryOutcome(
+      db,
+      {
+        recoveredIds: ['rec'],
+        goneIds: ['gone'],
+        failedIds: ['fail', 'last'],
+      },
+      NOW,
+    )
     expect(await db.abandonedMessages.get('rec')).toBeUndefined()
     expect(await db.abandonedMessages.get('gone')).toBeUndefined()
     expect((await db.abandonedMessages.get('fail'))?.retryCount).toBe(1)
-    // Reached the cap: given up permanently (deleted).
-    expect(await db.abandonedMessages.get('last')).toBeUndefined()
+    expect(await db.abandonedMessages.get('last')).toMatchObject({
+      retryCount: MAX_ABANDONED_RETRIES,
+      lastAttemptAt: NOW,
+      nextAttemptAt: NOW + abandonedRetryDelayMs(MAX_ABANDONED_RETRIES),
+      terminal: 0,
+    })
+    expect(await retryableAbandonedIds(db, NOW)).not.toContain('last')
+    expect(
+      await retryableAbandonedIds(db, NOW + abandonedRetryDelayMs(MAX_ABANDONED_RETRIES)),
+    ).toContain('last')
   })
 
-  it('retryableAbandonedIds excludes exhausted records and orders oldest first', async () => {
+  it('excludes scheduled and terminal rows while retaining recoverable legacy rows', async () => {
     await db.abandonedMessages.bulkPut([
-      { gmailMessageId: 'new', abandonedAt: NOW, reason: 'r', retryCount: 0 },
-      { gmailMessageId: 'old', abandonedAt: NOW - 5000, reason: 'r', retryCount: 4 },
       {
-        gmailMessageId: 'done',
+        gmailMessageId: 'due',
+        abandonedAt: NOW - 5000,
+        reason: 'r',
+        retryCount: 4,
+        terminal: 0,
+        nextAttemptAt: NOW,
+      },
+      {
+        gmailMessageId: 'waiting',
+        abandonedAt: NOW,
+        reason: 'r',
+        retryCount: 1,
+        terminal: 0,
+        nextAttemptAt: NOW + 1,
+      },
+      {
+        gmailMessageId: 'legacy-transient',
         abandonedAt: NOW - 9000,
         reason: 'r',
         retryCount: MAX_ABANDONED_RETRIES,
       },
+      {
+        gmailMessageId: 'terminal',
+        abandonedAt: NOW - 10_000,
+        reason: 'r',
+        retryCount: MAX_ABANDONED_RETRIES,
+        terminal: 1,
+      },
+      {
+        gmailMessageId: 'legacy-terminal',
+        abandonedAt: NOW - 11_000,
+        reason: UNPROCESSABLE_REASON,
+        retryCount: MAX_ABANDONED_RETRIES,
+      },
     ])
-    expect(await retryableAbandonedIds(db)).toEqual(['old', 'new'])
+    expect(await retryableAbandonedIds(db, NOW)).toEqual(['legacy-transient', 'due'])
   })
 })
 
@@ -159,6 +201,89 @@ describe('drainAbandoned', () => {
     const result = await drainAbandoned(db, api, ctx, NOW)
     expect(result.outcome.failedIds).toEqual(['flaky'])
     expect(api.getMessageCalls.filter((c) => c.startsWith('flaky'))).toHaveLength(1)
+  })
+
+  it('keeps an inline-quota failure retryable instead of reporting it recovered', async () => {
+    await db.abandonedMessages.put({
+      gmailMessageId: 'inline',
+      abandonedAt: NOW,
+      reason: 'r',
+      retryCount: 0,
+    })
+    const message = textMessage({ id: 'inline', from: 'alice@example.com' })
+    message.payload = {
+      partId: '',
+      mimeType: 'multipart/related',
+      headers: message.payload!.headers!,
+      parts: [
+        { partId: '0', mimeType: 'text/html', body: { data: b64url('<b>hi</b>') } },
+        {
+          partId: '1',
+          mimeType: 'image/png',
+          headers: [{ name: 'Content-ID', value: '<logo@x>' }],
+          body: { data: b64url('PNGDATA'), size: 7 },
+        },
+      ],
+    }
+    api.messages.set('inline', message)
+    const put = vi
+      .spyOn(db.blobs, 'put')
+      .mockRejectedValueOnce(new DOMException('quota', 'QuotaExceededError'))
+
+    const result = await drainAbandoned(db, api, ctx, NOW)
+
+    expect(result.outcome.recoveredIds).toEqual([])
+    expect(result.outcome.failedIds).toEqual(['inline'])
+    expect(await db.messages.get('inline')).toBeDefined()
+    put.mockRestore()
+  })
+
+  it('terminalizes a fetched message that cannot be parsed instead of retrying forever', async () => {
+    await db.abandonedMessages.put({
+      gmailMessageId: 'broken',
+      abandonedAt: NOW,
+      reason: 'transport failed',
+      retryCount: 2,
+      terminal: 0,
+    })
+    api.messages.set('broken', { id: 'broken', threadId: 't-broken', labelIds: ['INBOX'] })
+
+    const result = await drainAbandoned(db, api, ctx, NOW)
+
+    expect(result.outcome).toEqual({ recoveredIds: [], goneIds: [], failedIds: [] })
+    expect(await db.abandonedMessages.get('broken')).toMatchObject({
+      gmailMessageId: 'broken',
+      reason: UNPROCESSABLE_REASON,
+      terminal: 1,
+    })
+    expect(await retryableAbandonedIds(db, NOW + 365 * 24 * 60 * 60 * 1000)).toEqual([])
+  })
+
+  it('recovers after exceeding five attempts instead of losing the tombstone', async () => {
+    await db.abandonedMessages.put({
+      gmailMessageId: 'stuck',
+      abandonedAt: NOW,
+      reason: 'r',
+      retryCount: MAX_ABANDONED_RETRIES - 1,
+      terminal: 0,
+      nextAttemptAt: NOW,
+    })
+    api.getMessageErrors.set('stuck', () => new GmailApiError(500, 'backendError', 'boom'))
+
+    const failed = await drainAbandoned(db, api, ctx, NOW)
+    await recordAbandonedRetryOutcome(db, failed.outcome, NOW)
+    const retained = (await db.abandonedMessages.get('stuck'))!
+    expect(retained.retryCount).toBe(MAX_ABANDONED_RETRIES)
+    const retryAt = retained.nextAttemptAt ?? 0
+    expect(retryAt).toBeGreaterThan(NOW)
+
+    api.getMessageErrors.delete('stuck')
+    api.messages.set('stuck', textMessage({ id: 'stuck', from: 'alice@example.com' }))
+    const recovered = await drainAbandoned(db, api, ctx, retryAt)
+    await recordAbandonedRetryOutcome(db, recovered.outcome, retryAt)
+
+    expect(await db.messages.get('stuck')).toBeDefined()
+    expect(await db.abandonedMessages.get('stuck')).toBeUndefined()
   })
 })
 
