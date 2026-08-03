@@ -4,6 +4,9 @@ struct ForwardedMessageCard: View {
     let content: ForwardedMessageDisplayContent
     let subjectFallback: String?
     let isFromMe: Bool
+    /// When set, the card shows the forwarded email's complete body instead
+    /// of the three-line preview snippet (chat transcript presentation).
+    var fullBodyText: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -41,7 +44,12 @@ struct ForwardedMessageCard: View {
                     .lineLimit(1)
             }
 
-            if let previewLine = content.previewSnippet {
+            if let fullBodyText {
+                Text(fullBodyText)
+                    .font(.system(size: 13, weight: .regular, design: .default))
+                    .foregroundStyle(secondaryTextColor.opacity(isFromMe ? 1 : 0.92))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let previewLine = content.previewSnippet {
                 Text(previewLine)
                     .font(.system(size: 13, weight: .regular, design: .default))
                     .foregroundStyle(secondaryTextColor.opacity(isFromMe ? 1 : 0.92))

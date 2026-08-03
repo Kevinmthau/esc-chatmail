@@ -136,6 +136,14 @@ enum PlainTextQuoteRemover {
             }
 
             cleanText = String(cleanText[..<endIndex])
+
+            // Bottom-posted reply rescue: when the message STARTS with the
+            // quote (nothing before it), the author's text sits after the
+            // ">"-prefixed block. Truncation alone would return an empty
+            // bubble for a message that has real content.
+            if cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                cleanText = bottomPostedContent(inQuotedRegion: quotedText)
+            }
         }
 
         // Remove signatures (optional).
@@ -155,6 +163,41 @@ enum PlainTextQuoteRemover {
     }
 
     // MARK: - Private Helpers
+
+    /// Recovers a bottom-posted reply's own text from a quote-first region:
+    /// the non-">"-prefixed lines that FOLLOW the last ">"-prefixed line.
+    /// Requires an actual ">" block — without markers there is no reliable
+    /// boundary between quoted history and new text, so nothing is recovered.
+    /// Attribution/header/forward-marker lines never count as content.
+    private static func bottomPostedContent(inQuotedRegion quotedRegion: String) -> String {
+        let lines = quotedRegion.components(separatedBy: .newlines)
+        guard let lastQuoteMarkerLineIndex = lines.lastIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix(">")
+        }) else {
+            return ""
+        }
+
+        let trailingLines = lines[(lastQuoteMarkerLineIndex + 1)...].filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { return true }
+
+            let lowercased = trimmed.lowercased()
+            if isQuoteAttributionLine(lowercased) {
+                return false
+            }
+            if headerPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) {
+                return false
+            }
+            if forwardMarkersLowercased.contains(where: { lowercased.contains($0) }) {
+                return false
+            }
+            return true
+        }
+
+        return trailingLines
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// Finds the earliest match of any quote indicator pattern
     private static func findEarliestPatternMatch(in text: String) -> Int {

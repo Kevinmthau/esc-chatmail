@@ -67,6 +67,7 @@ struct DataCleanupService: Sendable {
     func runFullCleanup(in context: NSManagedObjectContext) async {
         await migrateConversationsToArchiveModel(in: context)
         await splitConversationsByParticipantSetIfNeeded(in: context)
+        await decodeRFC2047HeaderTextIfNeeded(in: context)
         await removeDuplicateMessages(in: context)
         await removeDuplicateConversations(in: context)
         await mergeActiveConversationDuplicates(in: context)
@@ -76,6 +77,7 @@ struct DataCleanupService: Sendable {
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
         await splitConversationsByParticipantSetIfNeeded(in: context)
+        await decodeRFC2047HeaderTextIfNeeded(in: context)
 
         guard IncrementalCleanupSchedule.isDue() else {
             Log.debug("Skipping incremental cleanup; cadence not due", category: .coreData)

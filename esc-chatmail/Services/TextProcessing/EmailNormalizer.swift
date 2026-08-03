@@ -65,7 +65,8 @@ class EmailNormalizer {
     static func extractDisplayName(from string: String) -> String? {
         if let emailStartIndex = string.firstIndex(of: "<") {
             let name = String(string[..<emailStartIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return name.isEmpty ? nil : name.replacingOccurrences(of: "\"", with: "")
+            let sanitized = sanitizeDisplayName(name)
+            return sanitized.isEmpty ? nil : sanitized
         }
 
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -75,18 +76,29 @@ class EmailNormalizer {
            !emailMatch.email.isEmpty {
             let comment = trimmed[trimmed.index(after: commentStart)..<trimmed.index(before: trimmed.endIndex)]
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "\"", with: "")
-            return comment.isEmpty ? nil : comment
+            let sanitized = sanitizeDisplayName(comment)
+            return sanitized.isEmpty ? nil : sanitized
         }
 
         if let emailMatch = firstBareEmailMatch(in: trimmed) {
             let leadingName = String(trimmed[..<emailMatch.range.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "\"", with: "")
-            return leadingName.isEmpty ? nil : leadingName
+            let sanitized = sanitizeDisplayName(leadingName)
+            return sanitized.isEmpty ? nil : sanitized
         }
 
         return nil
+    }
+
+    /// Decodes RFC 2047 encoded-words and strips quoting from a display-name
+    /// phrase parsed out of an address header. Decoding happens AFTER the
+    /// address structure is parsed so decoded content can never inject a fake
+    /// "<addr>" into address parsing, and BEFORE quote-stripping so a name
+    /// that only becomes quoted once decoded is still unquoted for display.
+    static func sanitizeDisplayName(_ name: String) -> String {
+        RFC2047Decoder.decode(name)
+            .replacingOccurrences(of: "\"", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Converts an email username to a formatted display name
@@ -145,6 +157,15 @@ class EmailNormalizer {
         guard let existing = existingName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !existing.isEmpty else { return true }
 
+        // A name still carrying a raw RFC 2047 encoded-word is garbage on
+        // screen: any decoded candidate beats it, and an undecoded candidate
+        // never replaces a clean existing name.
+        let existingLooksEncoded = RFC2047Decoder.containsEncodedWord(existing)
+        let newLooksEncoded = RFC2047Decoder.containsEncodedWord(new)
+        if existingLooksEncoded != newLooksEncoded {
+            return existingLooksEncoded
+        }
+
         if isAddressDerivedDisplayName(existing, forEmail: email) {
             if !isAddressDerivedDisplayName(new, forEmail: email) {
                 return displayNameParts(new).count >= displayNameParts(existing).count
@@ -156,6 +177,37 @@ class EmailNormalizer {
         }
 
         return isBetterDisplayName(new, than: existing)
+    }
+
+    /// Merges one sanitized header From display name into the running winner
+    /// for an email, with candidates supplied NEWEST-FIRST.
+    ///
+    /// The newest header name is authoritative: a sender that deliberately
+    /// rebrands ("Technology Brothers" → "TBPN") must not stay pinned to the
+    /// old name just because it has more words. An older name may still
+    /// replace the newest one when it is a fuller variant of the same name —
+    /// the newest name's tokens all appear in it ("Katie" → "Katie Thau") —
+    /// and ranks better under `isBetterDisplayName`.
+    static func mergeNewestFirstHeaderDisplayName(
+        _ olderCandidate: String,
+        into newestWinner: String?,
+        forEmail email: String
+    ) -> String {
+        guard let newestWinner else { return olderCandidate }
+        guard isDisplayNameTokenSubset(newestWinner, of: olderCandidate),
+              isBetterDisplayName(olderCandidate, than: newestWinner, forEmail: email) else {
+            return newestWinner
+        }
+        return olderCandidate
+    }
+
+    /// True when every comparison token of `name` appears among `other`'s
+    /// tokens — i.e. `other` is a fuller variant of the same name.
+    static func isDisplayNameTokenSubset(_ name: String, of other: String) -> Bool {
+        let nameParts = displayNameParts(name)
+        guard !nameParts.isEmpty else { return false }
+        let otherParts = Set(displayNameParts(other))
+        return nameParts.allSatisfy { otherParts.contains($0) }
     }
 
     static func isAddressDerivedDisplayName(_ displayName: String?, forEmail email: String) -> Bool {

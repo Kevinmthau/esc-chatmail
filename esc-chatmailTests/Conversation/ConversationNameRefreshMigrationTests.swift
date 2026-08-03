@@ -579,11 +579,14 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
     // The preview repair runs at .background priority and first awaits the
     // shared SyncEngine going idle, so on a loaded CI runner the first poll
     // success can take several seconds; the deadline is generous because a
-    // green run exits at the first successful poll anyway. The 50ms interval
-    // keeps this MainActor fetch-and-refresh poll from contending with the
-    // repair task's own MainActor hops.
+    // green run exits at the first successful poll anyway. 15s still timed
+    // out on a CI run whose test phase ran ~2x slower than baseline, so the
+    // deadline sits far above any observed stall while staying under CI's
+    // 120s per-test allowance. The 50ms interval keeps this MainActor
+    // fetch-and-refresh poll from contending with the repair task's own
+    // MainActor hops.
     private func waitUntil(
-        timeout: TimeInterval = 15.0,
+        timeout: TimeInterval = 60.0,
         pollIntervalNanoseconds: UInt64 = 50_000_000,
         condition: @escaping @MainActor () throws -> Bool,
         file: StaticString = #filePath,

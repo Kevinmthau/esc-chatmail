@@ -17,13 +17,17 @@ private extension ForwardedMessageDisplayContent {
             subject: subject,
             timestampText: timestampText,
             recipientSummary: recipientSummary,
-            previewSnippet: previewSnippet
+            previewSnippet: previewSnippet,
+            fullBodyText: fullBodyText
         )
     }
 
     func supplementingMissingHeaderFields(
         from fallback: ForwardedMessageDisplayContent
     ) -> ForwardedMessageDisplayContent {
+        // The fallback is parsed from the raw bodyText, so its body carries
+        // the complete forwarded content; the chatPreviewText parse's body is
+        // quote-stripped and possibly truncated. Prefer the fallback's.
         ForwardedMessageDisplayContent(
             leadInText: leadInText,
             senderDisplayName: senderDisplayName ?? fallback.senderDisplayName,
@@ -31,7 +35,27 @@ private extension ForwardedMessageDisplayContent {
             subject: subject ?? fallback.subject,
             timestampText: timestampText ?? fallback.timestampText,
             recipientSummary: recipientSummary ?? fallback.recipientSummary,
-            previewSnippet: previewSnippet
+            previewSnippet: previewSnippet,
+            fullBodyText: fallback.fullBodyText ?? fullBodyText
+        )
+    }
+
+    /// Keeps this parse's header fields but takes the fallback's full body:
+    /// the fallback comes from the raw bodyText, while this parse's body may
+    /// be quote-stripped or truncated.
+    func preferringFullBodyText(
+        from fallback: ForwardedMessageDisplayContent
+    ) -> ForwardedMessageDisplayContent {
+        guard let fallbackFullBodyText = fallback.fullBodyText else { return self }
+        return ForwardedMessageDisplayContent(
+            leadInText: leadInText,
+            senderDisplayName: senderDisplayName,
+            senderEmail: senderEmail,
+            subject: subject,
+            timestampText: timestampText,
+            recipientSummary: recipientSummary,
+            previewSnippet: previewSnippet,
+            fullBodyText: fallbackFullBodyText
         )
     }
 }
@@ -55,9 +79,15 @@ extension MessageBubbleLoader {
                 )
             }
 
-            guard !chatPreviewContent.hasForwardedHeaderFields,
-                  let fallbackContent else {
+            guard let fallbackContent else {
                 return chatPreviewContent
+            }
+
+            // Even a fully-structured preview parse derives its body from the
+            // quote-stripped, possibly truncated chatPreviewText; the raw
+            // bodyText parse carries the complete forwarded email.
+            if chatPreviewContent.hasForwardedHeaderFields {
+                return chatPreviewContent.preferringFullBodyText(from: fallbackContent)
             }
 
             return chatPreviewContent.supplementingMissingHeaderFields(from: fallbackContent)
