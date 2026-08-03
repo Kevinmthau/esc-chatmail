@@ -62,7 +62,14 @@ struct MessageFetchPhase: SyncPhase {
             log.warning(
                 "\(result.failedIds.count) messages failed to fetch, \(result.persistence.failedIds.count) failed to persist"
             )
-            await context.failureTracker.recordFailure(failedIds: result.blockingFailureIds)
+            // Staged into the sync context, not saved: the deferred ledger rows
+            // commit with the run's final save, atomically with the frozen cursor.
+            await context.failureTracker.recordFailure(
+                fetchFailedIds: result.failedIds,
+                persistenceFailedIds: result.persistence.failedIds,
+                sourceHistoryId: context.sourceHistoryId,
+                in: context.coreDataContext
+            )
         }
 
         return result

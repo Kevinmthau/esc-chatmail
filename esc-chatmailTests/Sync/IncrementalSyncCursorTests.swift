@@ -294,6 +294,229 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertNil(lastSuccess)
     }
 
+    // MARK: - Durable ledger scenarios
+
+    /// The durable-deferral contract: a held run commits the failing IDs as
+    /// deferred ledger rows in the SAME save that keeps the cursor frozen — a
+    /// crash after the run leaves the tracked set durable, not in UserDefaults.
+    @MainActor
+    func testFailingRunCommitsDeferredLedgerRowsWithFrozenCursor() async throws {
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-bad"))
+        apiClient.getMessageErrors["m-bad"] = APIError.timeout
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.gmailMessageId, "m-bad")
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue)
+        XCTAssertEqual(rows.first?.failureClass, AbandonedSyncMessage.FailureClass.fetchFailed.rawValue)
+        XCTAssertEqual(
+            rows.first?.sourceHistoryId, Self.startingHistoryId,
+            "The row must record the frozen cursor position that produced it"
+        )
+    }
+
+    /// The escape hatch's atomicity contract: at the threshold, the cursor
+    /// advance and the deferred→abandoned transition commit in one save, and
+    /// the counters reset only afterwards.
+    @MainActor
+    func testEscapeHatchCommitsAbandonmentWithAdvancedCursor() async throws {
+        defaults.set(
+            SyncConfig.maxConsecutiveSyncFailures - 1,
+            forKey: SyncConfig.consecutiveFailuresKey
+        )
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-stuck"))
+        apiClient.getMessageErrors["m-stuck"] = APIError.timeout
+
+        let abandonedNotification = expectation(forNotification: .syncMessagesAbandoned, object: nil) { note in
+            (note.userInfo?["count"] as? Int) == 1
+        }
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        await fulfillment(of: [abandonedNotification], timeout: 5)
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000", "The escape hatch must advance at the threshold")
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.gmailMessageId, "m-stuck")
+        XCTAssertEqual(
+            rows.first?.state, AbandonedSyncMessage.State.abandoned.rawValue,
+            "The skipped ID must be durably abandoned in the same run that advanced past it"
+        )
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 0)
+    }
+
+    /// Deferred rows from an earlier failing run are removed by the next clean
+    /// run — the frozen-cursor re-scan recovered their messages.
+    @MainActor
+    func testCleanRunClearsPreviouslyDeferredRows() async throws {
+        try await seedLedgerRow(id: "previously-failing", state: .deferred)
+        defaults.set(1, forKey: SyncConfig.consecutiveFailuresKey)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let rows = await fetchLedgerRows()
+        XCTAssertTrue(rows.isEmpty, "A clean run must clear recovered deferred rows")
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 0)
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000")
+    }
+
+    /// The drain must skip deferred rows: their messages are retried by the
+    /// normal re-scan of the frozen window, and a drain fetch would both
+    /// double-fetch them and burn their retry budget before abandonment.
+    @MainActor
+    func testDrainSkipsDeferredRows() async throws {
+        try await seedLedgerRow(id: "deferred-not-drained", state: .deferred)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertFalse(
+            apiClient.getMessageCalledIds.contains("deferred-not-drained"),
+            "The drain must not fetch rows that are still covered by the frozen cursor"
+        )
+        XCTAssertGreaterThanOrEqual(
+            apiClient.getMessageCallCount, 1,
+            "Positive control: the run did fetch the history message"
+        )
+    }
+
+    /// Drain resolution is atomic with the recovered message: the ledger row's
+    /// deletion and the persisted Message row commit in the same final save.
+    @MainActor
+    func testDrainRecoveryCommitsRowDeletionWithPersistedMessage() async throws {
+        try await seedLedgerRow(id: "was-abandoned", state: .abandoned)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+        apiClient.getMessageResponses["was-abandoned"] = makeFullMessage(id: "was-abandoned")
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let rows = await fetchLedgerRows()
+        XCTAssertTrue(rows.isEmpty, "A recovered abandoned row must leave the ledger")
+        let recovered = await messageExists(id: "was-abandoned")
+        XCTAssertTrue(recovered, "The recovered message must be durably persisted")
+    }
+
+    // MARK: - History-recovery scenarios
+
+    /// A clean recovery run advances the cursor to the profile's historyId,
+    /// clears previously deferred rows (the re-scan recovered them), and
+    /// resets the failure counter — success state committed only after the
+    /// recovery's durable save.
+    @MainActor
+    func testCleanRecoveryAdvancesCursorAndCommitsSuccess() async throws {
+        try await seedLedgerRow(id: "previously-failing", state: .deferred)
+        defaults.set(1, forKey: SyncConfig.consecutiveFailuresKey)
+
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec", threadId: "t-m-rec")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageResponses["m-rec"] = makeFullMessage(id: "m-rec")
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
+
+        let sut = makeOrchestrator()
+        let result = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(result.hadWarnings, "Recovery runs report warnings")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777", "A clean recovery advances to the profile historyId")
+        let recovered = await messageExists(id: "m-rec")
+        XCTAssertTrue(recovered)
+        let rows = await fetchLedgerRows()
+        XCTAssertTrue(rows.isEmpty, "A clean recovery clears recovered deferred rows")
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 0, "Recovery success must reset the counter after the save")
+        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNotNil(lastSuccess)
+    }
+
+    /// A recovery run with fetch failures freezes the cursor at its prior
+    /// value and commits the failing IDs as durable deferred rows in the same
+    /// save — no success state leaks.
+    @MainActor
+    func testFailingRecoveryFreezesCursorAndCommitsDeferredRows() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec-bad", threadId: "t-m-rec-bad")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        // Persistent per-id transient error: every attempt fails, exhausting retries.
+        apiClient.getMessageErrors["m-rec-bad"] = APIError.timeout
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(
+            historyId, Self.startingHistoryId,
+            "A recovery with unfetched messages must not advance the cursor past them"
+        )
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.gmailMessageId, "m-rec-bad")
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue)
+        XCTAssertEqual(rows.first?.failureClass, AbandonedSyncMessage.FailureClass.fetchFailed.rawValue)
+        XCTAssertNil(rows.first?.sourceHistoryId, "The expired cursor is not a meaningful source position")
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 1, "The failed recovery must count toward the escape threshold")
+        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNil(lastSuccess)
+    }
+
     // MARK: - Fixture
 
     private func seedAccount() async throws {
@@ -405,6 +628,76 @@ final class IncrementalSyncCursorTests: XCTestCase {
             request.fetchLimit = 1
             request.includesPendingChanges = false
             return (try? context.fetch(request).first)?.historyId
+        }
+    }
+
+    /// One history page delivering a single new message and latestHistoryId "2000".
+    private func makeSinglePageHistory(messageId: String) -> [(pageToken: String?, response: HistoryResponse)] {
+        [
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: messageId))],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ]
+    }
+
+    private struct LedgerRow {
+        let gmailMessageId: String?
+        let state: String?
+        let failureClass: String?
+        let sourceHistoryId: String?
+    }
+
+    private func seedLedgerRow(id: String, state: AbandonedSyncMessage.State) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await context.perform {
+            let record = AbandonedSyncMessage(context: context)
+            record.setValue(UUID(), forKey: "id")
+            record.setValue(id, forKey: "gmailMessageId")
+            record.setValue(Date(timeIntervalSinceNow: -3600), forKey: "abandonedAt")
+            record.setValue(Int16(0), forKey: "retryCount")
+            record.setValue(state.rawValue, forKey: "state")
+            try context.save()
+        }
+    }
+
+    private func fetchLedgerRows() async -> [LedgerRow] {
+        let context = coreDataStack.newBackgroundContext()
+        return await context.perform {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "AbandonedSyncMessage")
+            request.includesPendingChanges = false
+            let records = (try? context.fetch(request)) ?? []
+            return records.map {
+                LedgerRow(
+                    gmailMessageId: $0.value(forKey: "gmailMessageId") as? String,
+                    state: $0.value(forKey: "state") as? String,
+                    failureClass: $0.value(forKey: "failureClass") as? String,
+                    sourceHistoryId: $0.value(forKey: "sourceHistoryId") as? String
+                )
+            }
+        }
+    }
+
+    private func messageExists(id: String) async -> Bool {
+        let context = coreDataStack.newBackgroundContext()
+        return await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            request.includesPendingChanges = false
+            return ((try? context.count(for: request)) ?? 0) > 0
         }
     }
 }

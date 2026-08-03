@@ -5,7 +5,22 @@ import CoreData
 ///
 /// This prevents sync from getting permanently stuck on unfetchable messages
 /// by advancing historyId after a configurable number of consecutive failures.
-/// Abandoned message IDs are persisted to Core Data for potential retry.
+///
+/// Failed message IDs are tracked as durable `AbandonedSyncMessage` rows staged
+/// into the CALLER's sync context — never saved here — so the tracked set and
+/// every ledger transition commit atomically with the history cursor at the
+/// run's existing final save. UserDefaults holds only the consecutive-failure
+/// counter and the last-success timestamp; success-side mutations are applied
+/// exclusively through `commit(_:)` after the final save has succeeded.
+///
+/// Row lifecycle (`AbandonedSyncMessage.state`):
+/// - `deferred`: still covered by the frozen cursor; retried by the normal
+///   re-scan of the same history window, and therefore excluded from the
+///   abandoned-message drain.
+/// - `abandoned` (or `nil` on legacy rows): the cursor has advanced past the
+///   message; only the drain can recover it.
+/// `nextRetryAt` stays unconsumed here — retry pacing belongs to the resumable
+/// executor work.
 actor SyncFailureTracker {
     static let shared = SyncFailureTracker()
 
@@ -18,155 +33,300 @@ actor SyncFailureTracker {
         self.coreDataStack = coreDataStack
     }
 
+    /// Latched when `recordFailure` could not stage the current failing set
+    /// (ledger read failed). While set, the escape hatch must hold: the counter
+    /// kept incrementing, but the ledger does not contain the IDs the cursor
+    /// would advance past — abandoning a stale (or empty) set would lose the
+    /// unstaged IDs with no durable trace. Cleared by the next successful
+    /// staging or by a committed advance (in-memory only; a relaunch clears it,
+    /// and the next failing run re-records the same frozen window).
+    private var deferredStagingFailed = false
+
     // MARK: - Public API
 
-    /// Records a successful sync and resets failure tracking
+    /// Records a successful sync and resets failure tracking.
+    ///
+    /// Mutates UserDefaults only — callers inside a sync run must not invoke
+    /// this before the run's final save; use `planHistoryAdvance(hadFailures:in:)`
+    /// plus `commit(_:)` instead.
     func recordSuccess() {
         defaults.set(0, forKey: SyncConfig.consecutiveFailuresKey)
+        // Legacy cleanup: tracked IDs lived under this key before they moved
+        // into durable AbandonedSyncMessage rows.
         defaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)
         defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
         log.debug("Sync success - reset failure tracking")
     }
 
-    /// Records failed message IDs and increments failure counter
-    /// - Parameter failedIds: Message IDs that failed to fetch
-    func recordFailure(failedIds: [String]) {
-        guard !failedIds.isEmpty else { return }
+    /// Records this run's complete failing set: increments the consecutive
+    /// failure counter and reconciles the durable deferred ledger inside the
+    /// caller's context WITHOUT saving, so the rows commit — or die — with the
+    /// run's final save and can never diverge from the cursor.
+    ///
+    /// The staged set REPLACES the previous deferred set. The cursor is frozen
+    /// while failures persist, so each failing run re-scans the same window and
+    /// reports every ID still failing — an ID absent from the latest run either
+    /// succeeded or is gone, and keeping its row would let stale IDs accumulate
+    /// and be spuriously abandoned by the escape hatch. Never truncate (dropped
+    /// IDs would be silently lost when the escape hatch advances); size is
+    /// bounded by one sync window's failures.
+    ///
+    /// - Parameters:
+    ///   - fetchFailedIds: IDs whose Gmail fetch failed (blocking).
+    ///   - persistenceFailedIds: IDs fetched but not persisted (blocking).
+    ///   - sourceHistoryId: The frozen cursor position that produced these IDs,
+    ///     recorded on each row so later recovery can bound re-enumeration.
+    ///   - context: The sync run's context. Staged only — not saved.
+    func recordFailure(
+        fetchFailedIds: [String],
+        persistenceFailedIds: [String] = [],
+        sourceHistoryId: String? = nil,
+        in context: NSManagedObjectContext
+    ) async {
+        var seen = Set<String>()
+        var dedupedIds: [String] = []
+        var classesById: [String: AbandonedSyncMessage.FailureClass] = [:]
+        for id in fetchFailedIds where seen.insert(id).inserted {
+            dedupedIds.append(id)
+            classesById[id] = .fetchFailed
+        }
+        for id in persistenceFailedIds where seen.insert(id).inserted {
+            dedupedIds.append(id)
+            classesById[id] = .persistenceFailed
+        }
+        guard !dedupedIds.isEmpty else { return }
+        let orderedIds = dedupedIds
+        let classById = classesById
+        let trackedIdSet = seen
 
-        // Increment consecutive failure count
+        // The counter increments immediately (not post-save) so the escape
+        // hatch can fire in the same run that reaches the threshold. A run
+        // whose final save later fails leaves the counter one high — a
+        // conservative error: the hatch may arm one run early, and the set it
+        // abandons is always the current run's staged rows.
         let consecutiveFailures = defaults.integer(forKey: SyncConfig.consecutiveFailuresKey) + 1
         defaults.set(consecutiveFailures, forKey: SyncConfig.consecutiveFailuresKey)
 
-        // Track this run's complete failing set, REPLACING the previous one.
-        // The cursor is frozen while failures persist, so each failing run
-        // re-scans the same window and reports every ID still failing — an ID
-        // absent from the latest run either succeeded or is gone, and keeping
-        // it would let stale IDs accumulate and be spuriously abandoned by
-        // the escape hatch. Never truncate (dropped IDs would be silently
-        // lost when the escape hatch advances); size is bounded by one sync
-        // window's failures, and the abandoned-message drain bounds per-run
-        // retry work (maxAbandonedMessagesPerSync).
-        var seen = Set<String>()
-        let persistentIds = failedIds.filter { seen.insert($0).inserted }
+        let staged: Bool = await context.perform {
+            let trackedAt = Date()
+            let request = AbandonedSyncMessage.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "state == %@ OR gmailMessageId IN %@",
+                AbandonedSyncMessage.State.deferred.rawValue,
+                orderedIds
+            )
+            let existing: [AbandonedSyncMessage]
+            do {
+                existing = try context.fetch(request)
+            } catch {
+                // Without the existing rows, staging would blind-insert
+                // duplicates of rows we could not see (clobbering their drain
+                // retryCount at constraint resolution). Skip staging: the
+                // cursor stays frozen while failures persist, so the next
+                // failing run re-records the same window.
+                Log.error("Failed to read failure ledger; skipping deferred staging this run", category: .sync, error: error)
+                return false
+            }
 
-        defaults.set(persistentIds, forKey: SyncConfig.persistentFailedIdsKey)
+            var existingByGmailId: [String: AbandonedSyncMessage] = [:]
+            for row in existing {
+                existingByGmailId[row.gmailMessageId] = row
+                // Reconcile: a deferred row absent from this run's failing set
+                // recovered (or went gone) on the re-scan — drop it.
+                if row.state == AbandonedSyncMessage.State.deferred.rawValue,
+                   !trackedIdSet.contains(row.gmailMessageId) {
+                    context.delete(row)
+                }
+            }
 
-        log.warning("Consecutive failures: \(consecutiveFailures)/\(SyncConfig.maxConsecutiveSyncFailures), tracking \(persistentIds.count) failed IDs")
+            // Upsert the current failing set. retryCount is owned by the
+            // abandoned-message drain (stageAbandonedRetryOutcome) and counts
+            // drain attempts only; re-tracking must not consume that budget.
+            for id in orderedIds {
+                let row: AbandonedSyncMessage
+                if let existing = existingByGmailId[id] {
+                    row = existing
+                } else {
+                    row = AbandonedSyncMessage(context: context)
+                    row.id = UUID()
+                    row.gmailMessageId = id
+                    row.retryCount = 0
+                }
+                row.state = AbandonedSyncMessage.State.deferred.rawValue
+                row.failureClass = classById[id]?.rawValue
+                row.sourceHistoryId = sourceHistoryId
+                row.abandonedAt = trackedAt
+            }
+            return true
+        }
+        deferredStagingFailed = !staged
+
+        log.warning("Consecutive failures: \(consecutiveFailures)/\(SyncConfig.maxConsecutiveSyncFailures), staged \(staged ? orderedIds.count : 0) deferred IDs")
     }
 
-    /// Determines whether historyId should be advanced despite failures
+    // MARK: - History Advancement
+
+    /// Decision plus staged ledger transition for one sync run's cursor.
+    /// Produced by `planHistoryAdvance(hadFailures:in:)`; hand it back to
+    /// `commit(_:)` only after the run's final save has durably committed.
+    struct HistoryAdvancePlan: Sendable, Equatable {
+        enum Outcome: Sendable, Equatable {
+            /// Advance; no failures remain tracked.
+            case advancedClean
+            /// Advance via the escape hatch; `count` deferred rows were staged
+            /// as abandoned in the caller's context.
+            case advancedAbandoning(count: Int)
+            /// Keep the cursor frozen; tracked rows stay deferred.
+            case held
+        }
+
+        let outcome: Outcome
+
+        var shouldAdvance: Bool { outcome != .held }
+
+        static let held = HistoryAdvancePlan(outcome: .held)
+    }
+
+    /// Determines whether historyId should be advanced despite failures and
+    /// stages the matching ledger transition into the caller's context —
+    /// without saving and without mutating any success state.
     ///
-    /// Returns true if:
-    /// - There were no failures (normal success case)
-    /// - Maximum consecutive failures reached (to prevent deadlock)
+    /// Advance when:
+    /// - There were no failures (normal success case): all deferred rows are
+    ///   staged for deletion (the re-scan recovered them).
+    /// - Maximum consecutive failures reached (to prevent deadlock): every
+    ///   deferred row is staged as `abandoned`, so the skipped IDs and the
+    ///   advancing cursor commit in the same save. If that save fails, the
+    ///   staged transition dies with the context and the cursor stays frozen —
+    ///   advancing without the ledger would discard the only durable record of
+    ///   the skipped IDs.
     ///
-    /// When maximum failures are reached, abandoned message IDs are persisted to Core Data
-    /// and a notification is posted so the UI can inform the user.
-    ///
-    /// - Parameters:
-    ///   - hadFailures: Whether any messages failed to fetch
-    ///   - latestHistoryId: The new historyId to potentially advance to
-    /// - Returns: true if historyId should be advanced
-    func shouldAdvanceHistoryId(hadFailures: Bool, latestHistoryId: String) async -> Bool {
+    /// Apply `commit(_:)` after the final save succeeds; on a failed save,
+    /// discard the plan.
+    func planHistoryAdvance(
+        hadFailures: Bool,
+        in context: NSManagedObjectContext
+    ) async -> HistoryAdvancePlan {
         if !hadFailures {
-            recordSuccess()
-            return true
+            guard let cleared = await deleteDeferredRows(in: context) else {
+                // A clean fetch result does not prove the durable failure
+                // ledger is empty. If it cannot be read, advancing would leave
+                // deferred rows permanently outside both the frozen history
+                // window and the abandoned-message drain.
+                log.error("Failed to read failure ledger for clean advance - keeping cursor frozen for retry")
+                return .held
+            }
+            if cleared > 0 {
+                log.info("Staged removal of \(cleared) recovered deferred messages")
+            }
+            return HistoryAdvancePlan(outcome: .advancedClean)
         }
 
         let consecutiveFailures = defaults.integer(forKey: SyncConfig.consecutiveFailuresKey)
 
-        if consecutiveFailures >= SyncConfig.maxConsecutiveSyncFailures {
-            log.warning("Maximum consecutive failures (\(consecutiveFailures)) reached - advancing historyId to prevent deadlock")
-
-            // Persist abandoned messages to Core Data and notify UI. If the
-            // ledger save fails, the cursor must NOT advance — advancing would
-            // discard the only durable record of the skipped IDs.
-            if let persistentFailedIds = defaults.stringArray(forKey: SyncConfig.persistentFailedIdsKey), !persistentFailedIds.isEmpty {
-                log.warning("Abandoning \(persistentFailedIds.count) unfetchable messages: \(persistentFailedIds.prefix(10))...")
-                let ledgerPersisted = await persistAbandonedMessages(
-                    messageIds: persistentFailedIds,
-                    reason: "Max sync failures reached"
-                )
-                guard ledgerPersisted else {
-                    log.error("Abandoned-message ledger save failed - keeping cursor frozen for retry")
-                    return false
-                }
-            }
-
-            // Reset tracking since we're moving forward
-            recordSuccess()
-            return true
+        guard consecutiveFailures >= SyncConfig.maxConsecutiveSyncFailures else {
+            log.info("Not advancing historyId - \(consecutiveFailures) consecutive failures (max: \(SyncConfig.maxConsecutiveSyncFailures))")
+            return .held
         }
 
-        log.info("Not advancing historyId - \(consecutiveFailures) consecutive failures (max: \(SyncConfig.maxConsecutiveSyncFailures))")
-        return false
+        guard !deferredStagingFailed else {
+            // The current failing set never reached the ledger; the deferred
+            // rows on disk (if any) are a stale earlier set. Abandoning them
+            // would advance the cursor past the unstaged IDs with no durable
+            // trace — hold until a run stages successfully.
+            log.error("Escape hatch armed but the current failing set was never staged - keeping cursor frozen for retry")
+            return .held
+        }
+
+        log.warning("Maximum consecutive failures (\(consecutiveFailures)) reached - advancing historyId to prevent deadlock")
+
+        let abandonedCount: Int? = await context.perform {
+            let abandonedAt = Date()
+            let request = AbandonedSyncMessage.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "state == %@",
+                AbandonedSyncMessage.State.deferred.rawValue
+            )
+            guard let deferredRows = try? context.fetch(request) else { return nil }
+            for row in deferredRows {
+                row.state = AbandonedSyncMessage.State.abandoned.rawValue
+                row.abandonedAt = abandonedAt
+                row.reason = "Max sync failures reached"
+                // retryCount untouched: the drain owns it, and re-abandonment
+                // must not refresh a partially spent retry budget.
+            }
+            return deferredRows.count
+        }
+
+        guard let abandonedCount else {
+            // The ledger could not be read, so advancing would move the cursor
+            // past IDs whose only durable record we failed to transition —
+            // keep it frozen and retry next run.
+            log.error("Failed to read failure ledger for abandonment - keeping cursor frozen for retry")
+            return .held
+        }
+
+        guard abandonedCount > 0 else {
+            // hadFailures means this run recorded blocking IDs, so an empty
+            // deferred set here signals a ledger anomaly (e.g. an earlier read
+            // failure), not a clean run. Advancing would skip the failing IDs
+            // with no durable record — prefer the stall.
+            log.error("Escape hatch found no deferred rows to abandon - keeping cursor frozen for retry")
+            return .held
+        }
+
+        log.warning("Staged abandonment of \(abandonedCount) unfetchable messages")
+        return HistoryAdvancePlan(outcome: .advancedAbandoning(count: abandonedCount))
     }
 
-    /// Persists abandoned message IDs to Core Data for later retry.
-    /// - Returns: false when the ledger save failed — the caller must not
-    ///   advance the cursor past IDs that were never durably recorded.
-    private func persistAbandonedMessages(messageIds: [String], reason: String) async -> Bool {
-        let context = coreDataStack.newBackgroundContext()
-
-        let saved: Bool = await context.perform {
-            let abandonedAt = Date()
-
-            // Batch fetch all existing abandoned messages in a single query (eliminates N+1)
-            let existingRequest = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
-            existingRequest.predicate = NSPredicate(format: "gmailMessageId IN %@", messageIds)
-            let existingMessages = (try? context.fetch(existingRequest)) ?? []
-
-            // Create dictionary for O(1) lookup
-            var existingByGmailId: [String: AbandonedSyncMessage] = [:]
-            for message in existingMessages {
-                if let gmailId = message.value(forKey: "gmailMessageId") as? String {
-                    existingByGmailId[gmailId] = message
-                }
-            }
-
-            // Update or create records. retryCount is owned by the abandoned-message
-            // drain (recordAbandonedRetryOutcome) and counts drain attempts only;
-            // re-abandonment must not consume the drain's retry budget.
-            for messageId in messageIds {
-                if let existing = existingByGmailId[messageId] {
-                    // Update existing record
-                    existing.setValue(abandonedAt, forKey: "abandonedAt")
-                    existing.setValue(reason, forKey: "reason")
-                } else {
-                    // Create new record
-                    let abandoned = AbandonedSyncMessage(context: context)
-                    abandoned.setValue(UUID(), forKey: "id")
-                    abandoned.setValue(messageId, forKey: "gmailMessageId")
-                    abandoned.setValue(abandonedAt, forKey: "abandonedAt")
-                    abandoned.setValue(Int16(0), forKey: "retryCount")
-                    abandoned.setValue(reason, forKey: "reason")
-                }
-            }
-
-            do {
-                try context.save()
-                Log.info("Persisted \(messageIds.count) abandoned message IDs to Core Data", category: .sync)
-                return true
-            } catch {
-                Log.error("Failed to persist abandoned messages", category: .sync, error: error)
-                return false
+    /// Applies the success-side effects of a plan AFTER the caller's final
+    /// save has durably committed the staged ledger rows (and, when advancing,
+    /// the cursor). Never call this when the save failed — discarding the plan
+    /// leaves every tracker state intact for the retry.
+    func commit(_ plan: HistoryAdvancePlan) async {
+        switch plan.outcome {
+        case .held:
+            return
+        case .advancedClean:
+            deferredStagingFailed = false
+            recordSuccess()
+        case .advancedAbandoning(let count):
+            deferredStagingFailed = false
+            recordSuccess()
+            // Newly abandoned rows carry their original drain budget, so the
+            // drain has work again.
+            mayHaveRetryableAbandonedMessages = true
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: .syncMessagesAbandoned,
+                    object: nil,
+                    userInfo: ["count": count]
+                )
             }
         }
+    }
 
-        guard saved else { return false }
-
-        // New records start with retryCount 0, so the drain has work again.
-        mayHaveRetryableAbandonedMessages = true
-
-        // Notify UI about abandoned messages
-        await MainActor.run {
-            NotificationCenter.default.post(
-                name: .syncMessagesAbandoned,
-                object: nil,
-                userInfo: ["count": messageIds.count]
+    /// Stages deletion of every deferred row in the caller's context.
+    /// - Returns: the number of rows staged for deletion, or `nil` when the
+    ///   ledger could not be read.
+    private func deleteDeferredRows(in context: NSManagedObjectContext) async -> Int? {
+        await context.perform {
+            let request = AbandonedSyncMessage.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "state == %@",
+                AbandonedSyncMessage.State.deferred.rawValue
             )
+            let rows: [AbandonedSyncMessage]
+            do {
+                rows = try context.fetch(request)
+            } catch {
+                return nil
+            }
+            for row in rows {
+                context.delete(row)
+            }
+            return rows.count
         }
-        return true
     }
 
     // MARK: - Query Methods
@@ -180,11 +340,6 @@ actor SyncFailureTracker {
     /// Returns the number of consecutive sync failures
     var consecutiveFailureCount: Int {
         defaults.integer(forKey: SyncConfig.consecutiveFailuresKey)
-    }
-
-    /// Returns the IDs of persistently failed messages
-    var persistentFailedIds: [String] {
-        defaults.stringArray(forKey: SyncConfig.persistentFailedIdsKey) ?? []
     }
 
     /// Clears all failure tracking state
@@ -203,7 +358,9 @@ actor SyncFailureTracker {
 
     /// Returns abandoned message IDs that are still worth retrying, oldest first.
     /// IDs whose retryCount has reached `SyncConfig.maxAbandonedMessageRetries` are
-    /// excluded permanently.
+    /// excluded permanently. Deferred rows are excluded: they are still covered
+    /// by the frozen cursor, so the normal re-scan of the same history window
+    /// already retries them — offering them here would fetch them twice per run.
     func fetchRetryableAbandonedMessageIds(limit: Int = SyncConfig.maxAbandonedMessagesPerSync) async -> [String] {
         if mayHaveRetryableAbandonedMessages == false {
             return []
@@ -213,14 +370,17 @@ actor SyncFailureTracker {
 
         let context = coreDataStack.newBackgroundContext()
         let ids: [String]? = await context.perform {
-            let request = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
-            request.predicate = NSPredicate(format: "retryCount < %d", SyncConfig.maxAbandonedMessageRetries)
+            let request = AbandonedSyncMessage.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "retryCount < %d AND (state == nil OR state != %@)",
+                SyncConfig.maxAbandonedMessageRetries,
+                AbandonedSyncMessage.State.deferred.rawValue
+            )
             request.sortDescriptors = [NSSortDescriptor(key: "abandonedAt", ascending: true)]
             request.fetchLimit = limit
 
             do {
-                let messages = try context.fetch(request)
-                return messages.compactMap { $0.value(forKey: "gmailMessageId") as? String }
+                return try context.fetch(request).map(\.gmailMessageId)
             } catch {
                 Log.error("Failed to fetch retryable abandoned sync messages", category: .sync, error: error)
                 return nil
@@ -243,13 +403,13 @@ actor SyncFailureTracker {
 
         let context = coreDataStack.newBackgroundContext()
         let didReset: Bool = await context.perform {
-            let request = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
+            let request = AbandonedSyncMessage.fetchRequest()
             request.predicate = NSPredicate(format: "retryCount > 0")
 
             do {
                 let records = try context.fetch(request)
                 for record in records {
-                    record.setValue(Int16(0), forKey: "retryCount")
+                    record.retryCount = 0
                 }
                 if context.hasChanges {
                     try context.save()
@@ -267,12 +427,21 @@ actor SyncFailureTracker {
         }
     }
 
-    /// Applies the outcome of an abandoned-message retry pass: recovered and
-    /// server-side-deleted messages are removed from tracking; transient failures
-    /// have their retryCount incremented. Records whose retryCount reaches
-    /// `SyncConfig.maxAbandonedMessageRetries` are deleted — they would never be
-    /// offered again, and keeping them would grow the table without bound.
-    func recordAbandonedRetryOutcome(recoveredIds: [String], goneIds: [String], failedIds: [String]) async {
+    /// Stages the outcome of an abandoned-message retry pass into the caller's
+    /// context WITHOUT saving, so ledger resolution commits atomically with the
+    /// recovered messages at the run's next save: recovered and
+    /// server-side-deleted messages are removed from tracking; transient
+    /// failures have their retryCount incremented. Records whose retryCount
+    /// reaches `SyncConfig.maxAbandonedMessageRetries` are deleted — they would
+    /// never be offered again, and keeping them would grow the table without
+    /// bound. If the save later fails, the staged changes die with the context
+    /// and every record stays for the next drain.
+    func stageAbandonedRetryOutcome(
+        recoveredIds: [String],
+        goneIds: [String],
+        failedIds: [String],
+        in context: NSManagedObjectContext
+    ) async {
         let resolvedIds = recoveredIds + goneIds
         guard !resolvedIds.isEmpty || !failedIds.isEmpty else { return }
 
@@ -285,32 +454,27 @@ actor SyncFailureTracker {
 
         mayHaveRetryableAbandonedMessages = nil
 
-        let context = coreDataStack.newBackgroundContext()
         await context.perform {
-            let request = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
+            let request = AbandonedSyncMessage.fetchRequest()
             request.predicate = NSPredicate(format: "gmailMessageId IN %@", resolvedIds + failedIds)
 
             do {
                 let resolvedSet = Set(resolvedIds)
                 for record in try context.fetch(request) {
-                    guard let gmailId = record.value(forKey: "gmailMessageId") as? String else { continue }
-                    if resolvedSet.contains(gmailId) {
+                    if resolvedSet.contains(record.gmailMessageId) {
                         context.delete(record)
                     } else {
-                        let retryCount = (record.value(forKey: "retryCount") as? Int16 ?? 0) + 1
+                        let retryCount = record.retryCount + 1
                         if retryCount >= SyncConfig.maxAbandonedMessageRetries {
-                            Log.warning("Giving up on abandoned message \(gmailId) after \(retryCount) retries", category: .sync)
+                            Log.warning("Giving up on abandoned message \(record.gmailMessageId) after \(retryCount) retries", category: .sync)
                             context.delete(record)
                         } else {
-                            record.setValue(retryCount, forKey: "retryCount")
+                            record.retryCount = retryCount
                         }
                     }
                 }
-                if context.hasChanges {
-                    try context.save()
-                }
             } catch {
-                Log.error("Failed to record abandoned retry outcome", category: .sync, error: error)
+                Log.error("Failed to stage abandoned retry outcome", category: .sync, error: error)
             }
         }
     }
