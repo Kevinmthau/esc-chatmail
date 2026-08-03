@@ -6,6 +6,11 @@ import CryptoKit
 /// are safe to share across concurrency domains. Kept non-final so tests can subclass and
 /// stub `processGmailMessage`; subclasses must likewise only add immutable Sendable state.
 class MessageProcessor: @unchecked Sendable {
+    /// Bounds raw body bytes retained for the second MIME-tree walk. With the
+    /// six-message preparation limit this caps memoized payloads at roughly
+    /// 12 MiB while still covering normal large Gmail body parts.
+    private static let attachmentFetchMemoMaxSuccessBytes = 2 * 1024 * 1024
+
     private let emailTextProcessor = EmailTextProcessor.self
     private let emailNormalizer = EmailNormalizer.self
     private let previewClassifier = EmailPreviewClassifier()
@@ -63,7 +68,9 @@ class MessageProcessor: @unchecked Sendable {
         )
 
         // Process content (may fetch large body parts via API)
-        let fetchMemo = AttachmentFetchMemo()
+        let fetchMemo = AttachmentFetchMemo(
+            maxSuccessBytes: Self.attachmentFetchMemoMaxSuccessBytes
+        )
         let content = try await extractContent(from: payload, messageId: gmailMessage.id, fetchMemo: fetchMemo)
         processedMessage.htmlBody = content.html
         processedMessage.plainTextBody = resolvedPlainTextBody(
@@ -639,25 +646,39 @@ class MessageProcessor: @unchecked Sendable {
     /// recorded — the salvage probe swallows them and keeps walking, and a
     /// later part sharing the same attachmentId deserves the real retry the
     /// pre-memo code performed.
-    private final class AttachmentFetchMemo: @unchecked Sendable {
+    final class AttachmentFetchMemo: @unchecked Sendable {
+        private let maxSuccessBytes: Int
         private let lock = NSLock()
         private var outcomes: [String: Result<Data, any Error>] = [:]
+        private var cachedSuccessBytes = 0
+
+        init(maxSuccessBytes: Int) {
+            self.maxSuccessBytes = max(0, maxSuccessBytes)
+        }
 
         func data(
             for attachmentId: String,
-            fetch: () async throws -> Data
+            fetch: @Sendable () async throws -> Data
         ) async throws -> Data {
+            try Task.checkCancellation()
+
             if let memoized = memoizedOutcome(for: attachmentId) {
                 return try memoized.get()
             }
 
             do {
                 let data = try await fetch()
-                record(.success(data), for: attachmentId)
+                try Task.checkCancellation()
+                recordIfAdmitted(
+                    .success(data),
+                    byteCost: data.count,
+                    for: attachmentId
+                )
                 return data
             } catch {
+                try Task.checkCancellation()
                 if Self.isDeterministicPerPartFailure(error) {
-                    record(.failure(error), for: attachmentId)
+                    recordIfAdmitted(.failure(error), byteCost: 0, for: attachmentId)
                 }
                 throw error
             }
@@ -683,9 +704,26 @@ class MessageProcessor: @unchecked Sendable {
             return outcomes[attachmentId]
         }
 
-        private func record(_ outcome: Result<Data, any Error>, for attachmentId: String) {
+        private func recordIfAdmitted(
+            _ outcome: Result<Data, any Error>,
+            byteCost: Int,
+            for attachmentId: String
+        ) {
             lock.lock()
             defer { lock.unlock() }
+
+            // Preserve the first stable result when duplicate MIME parts race
+            // on the same attachment ID.
+            guard outcomes[attachmentId] == nil else { return }
+
+            if case .success = outcome {
+                // Returning the fetched bytes does not require retaining them.
+                // Once this per-message budget is full, a later MIME-tree walk
+                // may refetch the part rather than growing memory without bound.
+                guard byteCost <= maxSuccessBytes - cachedSuccessBytes else { return }
+                cachedSuccessBytes += byteCost
+            }
+
             outcomes[attachmentId] = outcome
         }
     }

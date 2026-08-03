@@ -393,6 +393,112 @@ final class MessageProcessorLargeBodyFetchTests: XCTestCase {
             "The embedded-HTML sweep must never download file attachments as body candidates"
         )
     }
+
+    // MARK: - Attachment fetch memo
+
+    func testAttachmentFetchMemoCancelledHitThrowsWithoutFetching() async throws {
+        let memo = MessageProcessor.AttachmentFetchMemo(maxSuccessBytes: 4)
+        let script = FetchScript([.success(Data([1, 2, 3, 4]))])
+
+        _ = try await memo.data(for: "att-a") { try script.next() }
+
+        let cancelledRequest = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await memo.data(for: "att-a") { try script.next() }
+        }
+
+        do {
+            _ = try await cancelledRequest.value
+            XCTFail("A cancelled task must not replay memoized bytes")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+
+        XCTAssertEqual(script.recordedCallCount, 1)
+    }
+
+    func testAttachmentFetchMemoDoesNotRecordSuccessReturnedAfterCancellation() async throws {
+        let memo = MessageProcessor.AttachmentFetchMemo(maxSuccessBytes: 4)
+        let script = FetchScript([
+            .success(Data([1, 2, 3, 4])),
+            .success(Data([5, 6, 7, 8])),
+        ])
+
+        let cancelledRequest = Task {
+            try await memo.data(for: "att-a") {
+                let data = try script.next()
+                withUnsafeCurrentTask { $0?.cancel() }
+                return data
+            }
+        }
+
+        do {
+            _ = try await cancelledRequest.value
+            XCTFail("Cancellation after fetch must be observed before memoization")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+
+        let retriedData = try await memo.data(for: "att-a") { try script.next() }
+        XCTAssertEqual(retriedData, Data([5, 6, 7, 8]))
+        XCTAssertEqual(script.recordedCallCount, 2, "The cancelled result must not be retained")
+    }
+
+    func testAttachmentFetchMemoPreservesAdmittedEntriesAndBypassesOverflow() async throws {
+        let memo = MessageProcessor.AttachmentFetchMemo(maxSuccessBytes: 4)
+        let admitted = FetchScript([.success(Data([1, 2, 3, 4]))])
+        let overflow = FetchScript([
+            .success(Data([5])),
+            .success(Data([6])),
+        ])
+
+        _ = try await memo.data(for: "att-admitted") { try admitted.next() }
+        _ = try await memo.data(for: "att-overflow") { try overflow.next() }
+        _ = try await memo.data(for: "att-admitted") { try admitted.next() }
+        let overflowRetry = try await memo.data(for: "att-overflow") { try overflow.next() }
+
+        XCTAssertEqual(overflowRetry, Data([6]))
+        XCTAssertEqual(admitted.recordedCallCount, 1)
+        XCTAssertEqual(overflow.recordedCallCount, 2)
+    }
+
+    func testAttachmentFetchMemoDoesNotAdmitSingleOversizedSuccess() async throws {
+        let memo = MessageProcessor.AttachmentFetchMemo(maxSuccessBytes: 4)
+        let script = FetchScript([
+            .success(Data([1, 2, 3, 4, 5])),
+            .success(Data([6, 7, 8, 9, 10])),
+        ])
+
+        _ = try await memo.data(for: "att-large") { try script.next() }
+        let secondData = try await memo.data(for: "att-large") { try script.next() }
+
+        XCTAssertEqual(secondData, Data([6, 7, 8, 9, 10]))
+        XCTAssertEqual(script.recordedCallCount, 2)
+    }
+
+    func testAttachmentFetchMemoCachesDeterministicFailureAtZeroByteLimit() async throws {
+        let memo = MessageProcessor.AttachmentFetchMemo(maxSuccessBytes: 0)
+        let script = FetchScript([.failure(APIError.notFound("attachment"))])
+
+        for _ in 0..<2 {
+            do {
+                _ = try await memo.data(for: "att-missing") { try script.next() }
+                XCTFail("Expected deterministic not-found failure")
+            } catch let error as APIError {
+                guard case .notFound = error else {
+                    return XCTFail("Expected notFound, got \(error)")
+                }
+            } catch {
+                XCTFail("Expected APIError.notFound, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(script.recordedCallCount, 1)
+    }
 }
 
 /// Scripted attachment-fetch results, consumed in call order. Throws
