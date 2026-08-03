@@ -6,6 +6,11 @@ import CryptoKit
 /// are safe to share across concurrency domains. Kept non-final so tests can subclass and
 /// stub `processGmailMessage`; subclasses must likewise only add immutable Sendable state.
 class MessageProcessor: @unchecked Sendable {
+    /// Bounds raw body bytes retained for the second MIME-tree walk. With the
+    /// six-message preparation limit this caps memoized payloads at roughly
+    /// 12 MiB while still covering normal large Gmail body parts.
+    private static let attachmentFetchMemoMaxSuccessBytes = 2 * 1024 * 1024
+
     private let emailTextProcessor = EmailTextProcessor.self
     private let emailNormalizer = EmailNormalizer.self
     private let previewClassifier = EmailPreviewClassifier()
@@ -63,7 +68,10 @@ class MessageProcessor: @unchecked Sendable {
         )
 
         // Process content (may fetch large body parts via API)
-        let content = try await extractContent(from: payload, messageId: gmailMessage.id)
+        let fetchMemo = AttachmentFetchMemo(
+            maxSuccessBytes: Self.attachmentFetchMemoMaxSuccessBytes
+        )
+        let content = try await extractContent(from: payload, messageId: gmailMessage.id, fetchMemo: fetchMemo)
         processedMessage.htmlBody = content.html
         processedMessage.plainTextBody = resolvedPlainTextBody(
             plainText: content.plainText,
@@ -423,7 +431,11 @@ class MessageProcessor: @unchecked Sendable {
         }
     }
 
-    private func extractContent(from part: MessagePart, messageId: String) async throws -> (html: String?, plainText: String?) {
+    private func extractContent(
+        from part: MessagePart,
+        messageId: String,
+        fetchMemo: AttachmentFetchMemo
+    ) async throws -> (html: String?, plainText: String?) {
         func decodedBody(_ part: MessagePart) async throws -> String? {
             if let data = part.body?.data {
                 return decodeBody(data, headers: part.headers)
@@ -433,7 +445,8 @@ class MessageProcessor: @unchecked Sendable {
                 return try await fetchLargeBodyContent(
                     attachmentId: attachmentId,
                     messageId: messageId,
-                    headers: part.headers
+                    headers: part.headers,
+                    fetchMemo: fetchMemo
                 )
             }
 
@@ -488,7 +501,11 @@ class MessageProcessor: @unchecked Sendable {
         // The cleaning will be done only when creating snippets
 
         if extracted.html == nil {
-            extracted.html = try await extractEmbeddedHTMLFromTextualBodies(from: part, messageId: messageId)
+            extracted.html = try await extractEmbeddedHTMLFromTextualBodies(
+                from: part,
+                messageId: messageId,
+                fetchMemo: fetchMemo
+            )
         }
 
         return (extracted.html, normalizedPlainTextBody(extracted.plainText))
@@ -557,11 +574,12 @@ class MessageProcessor: @unchecked Sendable {
     /// cancellation propagate.
     private func extractEmbeddedHTMLFromTextualBodies(
         from part: MessagePart,
-        messageId: String
+        messageId: String,
+        fetchMemo: AttachmentFetchMemo
     ) async throws -> String? {
         var decodedText: String?
         do {
-            decodedText = try await decodedTextualBody(from: part, messageId: messageId)
+            decodedText = try await decodedTextualBody(from: part, messageId: messageId, fetchMemo: fetchMemo)
         } catch {
             if let apiError = error as? APIError, case .quotaExhausted = apiError {
                 throw apiError
@@ -582,7 +600,11 @@ class MessageProcessor: @unchecked Sendable {
 
         if let parts = part.parts {
             for subpart in parts {
-                if let html = try await extractEmbeddedHTMLFromTextualBodies(from: subpart, messageId: messageId) {
+                if let html = try await extractEmbeddedHTMLFromTextualBodies(
+                    from: subpart,
+                    messageId: messageId,
+                    fetchMemo: fetchMemo
+                ) {
                     return html
                 }
             }
@@ -591,7 +613,11 @@ class MessageProcessor: @unchecked Sendable {
         return nil
     }
 
-    private func decodedTextualBody(from part: MessagePart, messageId: String) async throws -> String? {
+    private func decodedTextualBody(
+        from part: MessagePart,
+        messageId: String,
+        fetchMemo: AttachmentFetchMemo
+    ) async throws -> String? {
         if let data = part.body?.data {
             return decodeBody(data, headers: part.headers)
         }
@@ -603,11 +629,103 @@ class MessageProcessor: @unchecked Sendable {
             return try await fetchLargeBodyContent(
                 attachmentId: attachmentId,
                 messageId: messageId,
-                headers: part.headers
+                headers: part.headers,
+                fetchMemo: fetchMemo
             )
         }
 
         return nil
+    }
+
+    /// Per-`processGmailMessage` memo of attachment fetches, keyed by
+    /// attachmentId. The main extraction and the embedded-HTML salvage probe
+    /// both walk the part tree, so without this the probe re-downloads bytes
+    /// the extraction already fetched. Only outcomes a retry cannot change
+    /// are memoized: successes, and the deterministic per-part failures that
+    /// `fetchLargeBodyContent` maps to nil. Transient failures are never
+    /// recorded — the salvage probe swallows them and keeps walking, and a
+    /// later part sharing the same attachmentId deserves the real retry the
+    /// pre-memo code performed.
+    final class AttachmentFetchMemo: @unchecked Sendable {
+        private let maxSuccessBytes: Int
+        private let lock = NSLock()
+        private var outcomes: [String: Result<Data, any Error>] = [:]
+        private var cachedSuccessBytes = 0
+
+        init(maxSuccessBytes: Int) {
+            self.maxSuccessBytes = max(0, maxSuccessBytes)
+        }
+
+        func data(
+            for attachmentId: String,
+            fetch: @Sendable () async throws -> Data
+        ) async throws -> Data {
+            try Task.checkCancellation()
+
+            if let memoized = memoizedOutcome(for: attachmentId) {
+                return try memoized.get()
+            }
+
+            do {
+                let data = try await fetch()
+                try Task.checkCancellation()
+                recordIfAdmitted(
+                    .success(data),
+                    byteCost: data.count,
+                    for: attachmentId
+                )
+                return data
+            } catch {
+                try Task.checkCancellation()
+                if Self.isDeterministicPerPartFailure(error) {
+                    recordIfAdmitted(.failure(error), byteCost: 0, for: attachmentId)
+                }
+                throw error
+            }
+        }
+
+        /// Mirrors the failure classes `fetchLargeBodyContent` treats as
+        /// deterministic (returns nil for). Divergence is safe: an error
+        /// wrongly deemed transient just re-fetches, and a replayed error is
+        /// classified identically both times.
+        private static func isDeterministicPerPartFailure(_ error: any Error) -> Bool {
+            guard let apiError = error as? APIError else { return false }
+            switch apiError {
+            case .notFound, .invalidData, .decodingError:
+                return true
+            default:
+                return false
+            }
+        }
+
+        private func memoizedOutcome(for attachmentId: String) -> Result<Data, any Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return outcomes[attachmentId]
+        }
+
+        private func recordIfAdmitted(
+            _ outcome: Result<Data, any Error>,
+            byteCost: Int,
+            for attachmentId: String
+        ) {
+            lock.lock()
+            defer { lock.unlock() }
+
+            // Preserve the first stable result when duplicate MIME parts race
+            // on the same attachment ID.
+            guard outcomes[attachmentId] == nil else { return }
+
+            if case .success = outcome {
+                // Returning the fetched bytes does not require retaining them.
+                // Once this per-message budget is full, a later MIME-tree walk
+                // may refetch the part rather than growing memory without bound.
+                guard byteCost <= maxSuccessBytes - cachedSuccessBytes else { return }
+                cachedSuccessBytes += byteCost
+            }
+
+            outcomes[attachmentId] = outcome
+        }
     }
 
     /// Fetches large body content via the attachment API.
@@ -623,9 +741,16 @@ class MessageProcessor: @unchecked Sendable {
     /// success, and advance the cursor past content that was never stored —
     /// reconciliation only checks for missing IDs, so nothing would ever
     /// heal it.
-    private func fetchLargeBodyContent(attachmentId: String, messageId: String, headers: [MessageHeader]?) async throws -> String? {
+    private func fetchLargeBodyContent(
+        attachmentId: String,
+        messageId: String,
+        headers: [MessageHeader]?,
+        fetchMemo: AttachmentFetchMemo
+    ) async throws -> String? {
         do {
-            let attachmentData = try await fetchAttachmentData(messageId, attachmentId)
+            let attachmentData = try await fetchMemo.data(for: attachmentId) {
+                try await self.fetchAttachmentData(messageId, attachmentId)
+            }
             let text = String(decoding: attachmentData, as: UTF8.self)
             return decodeTransferEncoding(text, headers: headers)
         } catch let error as APIError {
