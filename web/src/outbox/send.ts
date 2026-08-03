@@ -202,6 +202,8 @@ export interface SendDraft {
 export interface SendOptions {
   api?: SendApi
   now?: () => number
+  /** Immutable forward semantics recovered from a failed send's journal. */
+  preservedForwardEnvelope?: PreservedForwardEnvelope
   /**
    * A failed message this send replaces (retryFailedSend). Its whole graph —
    * message, attachment rows, blobs, journal — is deleted INSIDE the new
@@ -213,10 +215,46 @@ export interface SendOptions {
   replacesFailedMessageId?: string
 }
 
+/**
+ * The fields a failed forward cannot safely derive from its conversation on
+ * retry. Attachment bytes already live durably in blobs; ids pin their order.
+ * Stored as an unindexed addition to the outbound journal (no Dexie migration).
+ */
+export interface PreservedForwardEnvelope {
+  metadata: ReplyMetadata
+  attachmentIds: string[]
+  htmlBody?: string
+}
+
+type OutboundSendWithForwardEnvelope = OutboundSendRow & {
+  forwardEnvelope?: PreservedForwardEnvelope
+}
+
 export interface SendResult {
   /** The Gmail message id the send committed as. */
   messageId: string
   conversationId: string
+}
+
+function cloneReplyMetadata(metadata: ReplyMetadata): ReplyMetadata {
+  return {
+    ...metadata,
+    recipients: [...metadata.recipients],
+    references: [...metadata.references],
+    replyFrom: { ...metadata.replyFrom },
+  }
+}
+
+function makePreservedForwardEnvelope(
+  metadata: ReplyMetadata,
+  attachments: readonly PendingAttachment[],
+  htmlBody?: string,
+): PreservedForwardEnvelope {
+  return {
+    metadata: cloneReplyMetadata(metadata),
+    attachmentIds: attachments.map((attachment) => attachment.id),
+    ...(htmlBody !== undefined ? { htmlBody } : {}),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -274,13 +312,28 @@ export async function sendMessage(
   let metadata: ReplyMetadata
   let raw: string
   try {
-    metadata = await buildReplyMetadata(db, conversationId, myAliases)
+    const preservedForward = opts.preservedForwardEnvelope
+    metadata =
+      preservedForward !== undefined
+        ? cloneReplyMetadata(preservedForward.metadata)
+        : await buildReplyMetadata(db, conversationId, myAliases)
+    if (
+      preservedForward === undefined &&
+      draft.conversationId === undefined &&
+      (draft.to?.length ?? 0) > 0
+    ) {
+      // Conversation routing intentionally removes self except for its
+      // note-to-self fallback, while MIME must preserve every recipient the
+      // user explicitly entered on a NEW compose. Existing-conversation
+      // replies keep buildReplyMetadata's normal self-filtering behavior.
+      metadata = { ...metadata, recipients: [...(draft.to ?? [])] }
+    }
     if (metadata.recipients.length === 0) {
       throw new SendFailedError('No recipients to send to', {
         userMessage: 'There is no one to send this message to.',
       })
     }
-    if (draft.fromAlias !== undefined) {
+    if (preservedForward === undefined && draft.fromAlias !== undefined) {
       // Exact-address compare (normalizedAliasAddress), NOT the full Gmail
       // canonicalization: normalizeEmail strips dots/plus-tags on gmail.com, so
       // it would collapse distinct sendAs aliases (me@ vs me+news@) onto the
@@ -291,7 +344,7 @@ export async function sendMessage(
       )
       if (chosen !== undefined) metadata = { ...metadata, replyFrom: chosen }
     }
-    if (draft.forward !== undefined) {
+    if (preservedForward === undefined && draft.forward !== undefined) {
       // A forward is not a reply. buildReplyMetadata always targets the
       // conversation's newest message, so forwarding to someone you already
       // chat with would otherwise inherit that message's subject ('Re: …'),
@@ -316,7 +369,7 @@ export async function sendMessage(
         metadata,
         draft.body,
         await toMimeParts(attachments),
-        draft.forward?.htmlBody,
+        preservedForward?.htmlBody ?? draft.forward?.htmlBody,
       ),
     )
   } catch (error) {
@@ -355,7 +408,15 @@ export async function sendMessage(
           await db.bodies.delete(replaces)
           await db.outboundSends.delete(replaces)
         }
-        const journal: OutboundSendRow = {
+        const forwardEnvelope =
+          opts.preservedForwardEnvelope !== undefined || draft.forward !== undefined
+            ? makePreservedForwardEnvelope(
+                metadata,
+                attachments,
+                opts.preservedForwardEnvelope?.htmlBody ?? draft.forward?.htmlBody,
+              )
+            : undefined
+        const journal: OutboundSendWithForwardEnvelope = {
           id: optimisticId,
           conversationId,
           newlyInsertedConversation: newlyInserted ? 1 : 0,
@@ -370,6 +431,7 @@ export async function sendMessage(
           },
           remoteCommittedMessageId: '',
           remoteCommittedThreadId: '',
+          ...(forwardEnvelope !== undefined ? { forwardEnvelope } : {}),
         }
         await db.messages.add(optimistic)
         // Rows and bytes commit together: a row whose blob is missing renders
@@ -701,8 +763,9 @@ export interface ReplayOptions {
 /**
  * Startup recovery scan (OutboundSendMutationTracker replay /
  * reconcileAbandonedOptimisticSendMutations):
- * - terminal journals ('failed'/'finalized') older than the stale window are
- *   swept so the table (and queryOutboundStates scans) cannot grow forever;
+ * - finalized journals and orphaned failed journals older than the stale
+ *   window are swept. A failed journal whose retryable attachment bubble still
+ *   exists is retained because it owns the forward retry envelope;
  * - 'committed' journals (crash between remote accept and local reconcile)
  *   re-run the reconcile;
  * - 'pending' journals older than 10 minutes are abandoned sends (a crash
@@ -725,8 +788,17 @@ export async function replayAbandonedSends(
     .where('status')
     .anyOf('failed', 'finalized')
     .filter((journal) => now() - journal.createdAt >= STALE_PENDING_SEND_MS)
-    .primaryKeys()
-  if (terminal.length > 0) await db.outboundSends.bulkDelete(terminal)
+    .toArray()
+  const terminalIdsToDelete: string[] = []
+  for (const journal of terminal) {
+    const withForwardEnvelope: OutboundSendWithForwardEnvelope = journal
+    if (journal.status === 'failed' && withForwardEnvelope.forwardEnvelope !== undefined) {
+      const message = await db.messages.get(journal.id)
+      if (message?.sendState === 'failed') continue
+    }
+    terminalIdsToDelete.push(journal.id)
+  }
+  if (terminalIdsToDelete.length > 0) await db.outboundSends.bulkDelete(terminalIdsToDelete)
 
   const committed = await db.outboundSends.where('status').equals('committed').toArray()
   for (const journal of committed) {
@@ -765,11 +837,26 @@ export async function retryFailedSend(
   if (message === undefined) throw new SendFailedError('No message to retry')
   if (message.sendState !== 'failed') throw new SendFailedError('Message did not fail to send')
 
+  const journal: OutboundSendWithForwardEnvelope | undefined = await db.outboundSends.get(messageId)
+  const forwardEnvelope = journal?.forwardEnvelope
   const rows = await db.attachments.where('messageId').equals(messageId).toArray()
+  const rowsById = new Map(rows.map((row) => [row.id, row]))
+  const orderedRows =
+    forwardEnvelope !== undefined
+      ? forwardEnvelope.attachmentIds.map((id) => rowsById.get(id))
+      : rows
   const attachments: PendingAttachment[] = []
-  for (const row of rows) {
+  for (const row of orderedRows) {
+    if (row === undefined) {
+      throw new SendFailedError('A forwarded attachment is no longer available')
+    }
     const blobRow = await db.blobs.get(row.id)
-    if (blobRow === undefined) continue
+    if (blobRow === undefined) {
+      if (forwardEnvelope !== undefined) {
+        throw new SendFailedError('A forwarded attachment is no longer available')
+      }
+      continue
+    }
     attachments.push({
       // A fresh id: the old row is deleted (inside the replacement's
       // optimistic transaction) along with its blob.
@@ -791,7 +878,25 @@ export async function retryFailedSend(
   return sendMessage(
     db,
     broker,
-    { conversationId: message.conversationId, body: message.bodyText, attachments },
-    { ...opts, replacesFailedMessageId: messageId },
+    {
+      conversationId: message.conversationId,
+      body: message.bodyText,
+      attachments,
+      ...(forwardEnvelope !== undefined
+        ? {
+            forward: {
+              subject: forwardEnvelope.metadata.subject,
+              ...(forwardEnvelope.htmlBody !== undefined
+                ? { htmlBody: forwardEnvelope.htmlBody }
+                : {}),
+            },
+          }
+        : {}),
+    },
+    {
+      ...opts,
+      replacesFailedMessageId: messageId,
+      ...(forwardEnvelope !== undefined ? { preservedForwardEnvelope: forwardEnvelope } : {}),
+    },
   )
 }

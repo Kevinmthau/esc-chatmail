@@ -296,6 +296,81 @@ describe('drainPendingActions', () => {
     expect(rows.every((r) => r.status === 'completed')).toBe(true)
   })
 
+  it('holds newer overlapping intents after a retriable failure until the next drain', async () => {
+    await db.messages.bulkAdd([
+      msgRow({ id: 'm1', conversationId: 'c1' }),
+      msgRow({ id: 'm2', conversationId: 'c1' }),
+    ])
+    await enqueue(db, { actionType: 'markUnread', conversationId: 'c1', messageId: 'm1' }, NOW)
+    await enqueue(db, { actionType: 'markRead', conversationId: 'c1', messageId: 'm1' }, NOW + 1)
+    await enqueue(db, { actionType: 'star', conversationId: 'c1', messageId: 'm2' }, NOW + 2)
+
+    const calls: Array<{ id: string; changes: LabelChanges }> = []
+    let failFirst = true
+    const api: OutboxApi = {
+      batchModify: () => Promise.resolve(),
+      modifyMessage: (id, changes) => {
+        calls.push({ id, changes })
+        if (failFirst) {
+          failFirst = false
+          return Promise.reject(new GmailApiError(503, 'backendError', 'try again'))
+        }
+        return Promise.resolve()
+      },
+    }
+
+    const first = await drainPendingActions(db, api, { now: () => NOW })
+
+    // m1's newer markRead is untouched. The unrelated m2 action still drains.
+    expect(calls).toEqual([
+      { id: 'm1', changes: { addLabelIds: ['UNREAD'] } },
+      { id: 'm2', changes: { addLabelIds: ['STARRED'] } },
+    ])
+    expect(first).toEqual({ processed: 2, completed: 1, failed: 1, abandoned: 0 })
+    let rows = (await db.pendingActions.toArray()).sort((a, b) => a.createdAt - b.createdAt)
+    expect(rows.map((row) => row.status)).toEqual(['failed', 'pending', 'completed'])
+
+    calls.length = 0
+    await drainPendingActions(db, api, { now: () => NOW, sleep: () => Promise.resolve() })
+
+    // On the next drain the older retry lands first, then the newest intent.
+    expect(calls).toEqual([
+      { id: 'm1', changes: { addLabelIds: ['UNREAD'] } },
+      { id: 'm1', changes: { removeLabelIds: ['UNREAD'] } },
+    ])
+    rows = (await db.pendingActions.toArray()).sort((a, b) => a.createdAt - b.createdAt)
+    expect(rows.every((row) => row.status === 'completed')).toBe(true)
+  })
+
+  it('propagates a failed batch overlap while continuing unrelated rows', async () => {
+    await enqueue(
+      db,
+      { actionType: 'markUnread', conversationId: 'c1', messageIds: ['m1', 'm2'] },
+      NOW,
+    )
+    await enqueue(
+      db,
+      { actionType: 'markRead', conversationId: 'c1', messageIds: ['m2', 'm3'] },
+      NOW + 1,
+    )
+    await enqueue(db, { actionType: 'star', conversationId: 'c1', messageId: 'm3' }, NOW + 2)
+    await enqueue(db, { actionType: 'archive', conversationId: 'c1', messageId: 'm4' }, NOW + 3)
+
+    const api = makeStubApi()
+    api.batchModify = (params) => {
+      api.batchCalls.push(params)
+      return Promise.reject(new NetworkError('offline'))
+    }
+
+    const result = await drainPendingActions(db, api, { now: () => NOW })
+
+    expect(api.batchCalls).toEqual([{ ids: ['m1', 'm2'], addLabelIds: ['UNREAD'] }])
+    expect(api.modifyCalls).toEqual([{ id: 'm4', changes: { removeLabelIds: ['INBOX'] } }])
+    expect(result).toEqual({ processed: 2, completed: 1, failed: 1, abandoned: 0 })
+    const rows = (await db.pendingActions.toArray()).sort((a, b) => a.createdAt - b.createdAt)
+    expect(rows.map((row) => row.status)).toEqual(['failed', 'pending', 'pending', 'completed'])
+  })
+
   it('runs fresh actions first instead of sleeping through older rows still in backoff', async () => {
     // Three archives failed while offline; their 4s window has NOT elapsed.
     for (const [i, id] of ['m1', 'm2', 'm3'].entries()) {

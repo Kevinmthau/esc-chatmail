@@ -294,11 +294,18 @@ async function drainLocked(
   // would land remotely BEFORE the stale retry that is still queued for it.
   const deferred: PendingActionRow[] = []
   const deferredMessageIds = new Set<string>()
+  const blockedUntilNextDrain = new Set<string>()
   let stoppedForAuth = false
 
   for (const row of rows) {
     if (row.id === undefined) continue
     const ids = affectedMessageIds(row)
+    if (ids.some((id) => blockedUntilNextDrain.has(id))) {
+      // Propagate overlap through a batch row: if m1 is blocked, an m1+m2
+      // action must also hold back a later m2-only intent.
+      for (const id of ids) blockedUntilNextDrain.add(id)
+      continue
+    }
     const notReady = readyAt(row) > now()
     const blocked = ids.some((id) => deferredMessageIds.has(id))
     if (notReady || blocked) {
@@ -306,8 +313,14 @@ async function drainLocked(
       for (const id of ids) deferredMessageIds.add(id)
       continue
     }
-    stoppedForAuth = await processRow(db, api, row, result, now, maxRetries)
-    if (stoppedForAuth) break
+    const outcome = await processRow(db, api, row, result, now, maxRetries)
+    if (outcome === 'authStop') {
+      stoppedForAuth = true
+      break
+    }
+    if (outcome === 'retriableFailure') {
+      for (const id of ids) blockedUntilNextDrain.add(id)
+    }
   }
 
   // Pass 2: the deferred rows, still in createdAt order. Sleeps are measured
@@ -317,13 +330,26 @@ async function drainLocked(
     let sleptUntil = 0
     for (const row of deferred) {
       if (row.id === undefined) continue
+      const ids = affectedMessageIds(row)
+      if (ids.some((id) => blockedUntilNextDrain.has(id))) {
+        // An older row touching this message failed during pass 1 or earlier
+        // in this pass. Leave this row untouched until the next drain so the
+        // older retry can never land after this newer intent. Propagate the
+        // dependency across batch rows (m1+m2 blocks a later action for m2).
+        for (const id of ids) blockedUntilNextDrain.add(id)
+        continue
+      }
       const target = readyAt(row)
       const elapsedAt = Math.max(now(), sleptUntil)
       if (target > elapsedAt) {
         await sleep(target - elapsedAt)
         sleptUntil = target
       }
-      if (await processRow(db, api, row, result, now, maxRetries)) break
+      const outcome = await processRow(db, api, row, result, now, maxRetries)
+      if (outcome === 'authStop') break
+      if (outcome === 'retriableFailure') {
+        for (const id of ids) blockedUntilNextDrain.add(id)
+      }
     }
   }
 
@@ -336,7 +362,9 @@ function readyAt(row: PendingActionRow): number {
   return row.lastAttempt + pendingActionBackoffMs(row.retryCount)
 }
 
-/** Executes one claimed row. Returns true when the drain must stop (auth). */
+type ProcessRowOutcome = 'completed' | 'retriableFailure' | 'terminalFailure' | 'authStop'
+
+/** Executes one claimed row and reports how later overlapping rows should proceed. */
 async function processRow(
   db: ChatmailDB,
   api: OutboxApi,
@@ -344,9 +372,9 @@ async function processRow(
   result: DrainResult,
   now: () => number,
   maxRetries: number,
-): Promise<boolean> {
+): Promise<ProcessRowOutcome> {
   const rowId = row.id
-  if (rowId === undefined) return false
+  if (rowId === undefined) return 'completed'
   const previousStatus = row.status
 
   const claimedAt = now()
@@ -357,7 +385,7 @@ async function processRow(
   if (ids.length === 0) {
     await db.pendingActions.update(rowId, { status: 'completed' })
     result.completed += 1
-    return false
+    return 'completed'
   }
 
   try {
@@ -370,25 +398,30 @@ async function processRow(
     }
     await completeAction(db, row, claimedAt)
     result.completed += 1
+    return 'completed'
   } catch (error) {
     if (error instanceof AuthRequiredError) {
       // Not a queue failure: restore the row and stop draining until auth
       // is available again.
       await db.pendingActions.update(rowId, { status: previousStatus, lastAttempt: claimedAt })
       result.processed -= 1
-      return true
+      return 'authStop'
     }
     if (isRetriableError(error)) {
       const retryCount = row.retryCount + 1
       const status = retryCount >= maxRetries ? 'abandoned' : 'failed'
       await db.pendingActions.update(rowId, { status, retryCount, lastAttempt: claimedAt })
-      if (status === 'failed') result.failed += 1
-      else result.abandoned += 1
+      if (status === 'failed') {
+        result.failed += 1
+        return 'retriableFailure'
+      }
+      result.abandoned += 1
+      return 'terminalFailure'
     } else {
       // Non-retriable (4xx and unexpected errors): retrying cannot succeed.
       await db.pendingActions.update(rowId, { status: 'abandoned', lastAttempt: claimedAt })
       result.abandoned += 1
+      return 'terminalFailure'
     }
   }
-  return false
 }

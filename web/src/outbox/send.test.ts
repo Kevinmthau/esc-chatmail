@@ -202,6 +202,45 @@ describe('sendMessage', () => {
     expect((await db.messages.get('g_n1'))?.sendState).toBe('sent')
   })
 
+  it('keeps an explicit self-only compose addressed to the account alias', async () => {
+    const { captured } = respondWith('g_note', 't_note')
+
+    const result = await sendMessage(
+      db,
+      broker,
+      { to: [ME], body: 'note to self' },
+      { now: () => NOW },
+    )
+
+    const mime = decodeBase64Url(captured[0]?.raw ?? '')
+    expect(mime).toContain(`To: ${ME}\r\n`)
+    expect(mime).toContain('note to self')
+    const participants = await db.convoParticipants
+      .where('conversationId')
+      .equals(result.conversationId)
+      .toArray()
+    expect(participants.map((participant) => participant.email)).toEqual([ME])
+  })
+
+  it('preserves self among mixed compose recipients without routing the conversation by self', async () => {
+    const { captured } = respondWith('g_mixed', 't_mixed')
+
+    const result = await sendMessage(
+      db,
+      broker,
+      { to: [ME, 'bob@example.com'], body: 'shared note' },
+      { now: () => NOW },
+    )
+
+    const mime = decodeBase64Url(captured[0]?.raw ?? '')
+    expect(mime).toContain(`To: ${ME}, bob@example.com\r\n`)
+    const participants = await db.convoParticipants
+      .where('conversationId')
+      .equals(result.conversationId)
+      .toArray()
+    expect(participants.map((participant) => participant.email)).toEqual(['bob@example.com'])
+  })
+
   it('rolls back and deletes a newly minted conversation on failure', async () => {
     respondWithError(400)
 
@@ -755,6 +794,119 @@ describe('sendMessage', () => {
       const decoded = parts.map((part) => decodeBase64Body(part))
       expect(decoded[0]).toContain('text part')
       expect(decoded[1]).toContain('<p>html part</p>')
+    })
+
+    it('retries a failed forward with its original immutable envelope', async () => {
+      await seedReplyConversation()
+      const account = (await db.accounts.get(ME))!
+      await db.accounts.put({
+        ...account,
+        aliases: [ME, 'other@example.com'],
+        sendAsAliases: [
+          ...account.sendAsAliases,
+          {
+            email: 'other@example.com',
+            displayName: 'Other Me',
+            isDefault: false,
+            isPrimary: false,
+            verificationStatus: 'accepted',
+          },
+        ],
+      })
+      const setIdentity = makeRecipientParticipantSetIdentity(
+        ['bob@example.com'],
+        new Set([ME, 'other@example.com']),
+      )
+      await db.conversations.update('c1', { participantHash: setIdentity?.participantHash })
+
+      const captured: CapturedSend[] = []
+      let firstAttempt = true
+      const api: SendApi = {
+        send: (params) => {
+          captured.push(params)
+          if (firstAttempt) {
+            firstAttempt = false
+            return Promise.reject(new Error('offline'))
+          }
+          return Promise.resolve({ id: 'g_retry_fwd', threadId: 't_fwd', labelIds: ['SENT'] })
+        },
+      }
+
+      await sendMessage(
+        db,
+        broker,
+        {
+          to: ['bob@example.com'],
+          fromAlias: ME,
+          body: 'private note\n\nforwarded text',
+          forward: {
+            subject: 'Fwd: Original subject',
+            htmlBody: '<html><body><strong>Original HTML</strong></body></html>',
+          },
+          attachments: [
+            pendingAttachment({
+              id: 'local_forward',
+              filename: 'original.pdf',
+              mimeType: 'application/pdf',
+              blob: storableBlob(['%PDF-forward'], { type: 'application/pdf' }),
+            }),
+          ],
+        },
+        { now: () => NOW, api },
+      ).catch(() => undefined)
+
+      const failedMessage = (await db.messages.where('conversationId').equals('c1').toArray()).find(
+        (message) => message.sendState === 'failed',
+      )!
+      expect(failedMessage).toBeDefined()
+
+      // Startup cleanup must retain the journal while its retryable bubble
+      // exists; otherwise a restart after the stale window loses the envelope.
+      await replayAbandonedSends(db, { now: () => NOW + STALE_PENDING_SEND_MS + 1 })
+      expect(await db.outboundSends.get(failedMessage.id)).toBeDefined()
+
+      // Change every value the old retry path re-derived from the live
+      // conversation. None of these may alter the already-authored forward.
+      await db.convoParticipants.where('conversationId').equals('c1').delete()
+      await db.convoParticipants.add({
+        conversationId: 'c1',
+        email: 'mallory@example.com',
+        role: 'normal',
+      })
+      await db.messages.add(
+        msgRow({
+          id: 'g_newer',
+          conversationId: 'c1',
+          internalDate: NOW + 1,
+          subject: 'Changed live subject',
+          gmThreadId: 't_changed',
+          rfcMessageId: '<changed@example.com>',
+          deliveredToAddress: 'other@example.com',
+          replyFromAddress: 'other@example.com',
+        }),
+      )
+
+      await retryFailedSend(db, broker, failedMessage.id, { now: () => NOW + 2, api })
+
+      expect(captured).toHaveLength(2)
+      expect(captured[1]?.threadId).toBeUndefined()
+      const mime = decodeBase64Url(captured[1]?.raw ?? '')
+      expect(mime).toContain('To: bob@example.com\r\n')
+      expect(mime).not.toContain('mallory@example.com')
+      expect(mime).toContain(`From: ${ME}\r\n`)
+      expect(mime).not.toContain('From: Other Me <other@example.com>')
+      expect(mime).toContain('Subject: Fwd: Original subject\r\n')
+      expect(mime).not.toContain('In-Reply-To:')
+      expect(mime).not.toContain('References:')
+      expect(mime).toContain('filename="original.pdf"')
+      expect(mime).toContain(Buffer.from('%PDF-forward').toString('base64'))
+      const decodedParts = mime
+        .split(/Content-Transfer-Encoding: base64\r\n\r\n/u)
+        .slice(1)
+        .map((part) => decodeBase64Body(part))
+        .join('\n')
+      expect(decodedParts).toContain('private note')
+      expect(decodedParts).toContain('<strong>Original HTML</strong>')
     })
 
     it('still routes into the participant-set conversation the recipients belong to', async () => {
