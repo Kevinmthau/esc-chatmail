@@ -17,7 +17,12 @@
 export type AuthState = 'signed_out' | 'authorizing' | 'ready' | 'needs_interaction'
 
 export type AuthRequiredReason =
-  'signed_out' | 'needs_interaction' | 'renewal_failed' | 'scope_denied' | 'stale_epoch'
+  | 'signed_out'
+  | 'needs_interaction'
+  | 'renewal_failed'
+  | 'scope_denied'
+  | 'stale_epoch'
+  | 'account_changed'
 
 /** Typed error rejected to callers whenever a token cannot be produced without user interaction. */
 export class AuthRequiredError extends Error {
@@ -27,6 +32,24 @@ export class AuthRequiredError extends Error {
     super(message)
     this.name = 'AuthRequiredError'
     this.reason = reason
+  }
+}
+
+/**
+ * A successfully verified grant belongs to a different Google account than
+ * the session that requested it. The new account is adopted, but the request
+ * that triggered the switch must stop: it still owns the previous account's
+ * database and other session-scoped dependencies.
+ */
+export class AuthAccountChangedError extends AuthRequiredError {
+  readonly previousEmail: string
+  readonly nextEmail: string
+
+  constructor(previousEmail: string, nextEmail: string) {
+    super(`Google account changed from ${previousEmail} to ${nextEmail}`, 'account_changed')
+    this.name = 'AuthAccountChangedError'
+    this.previousEmail = previousEmail
+    this.nextEmail = nextEmail
   }
 }
 
@@ -107,6 +130,11 @@ export interface AuthBrokerOptions {
   clientId?: string
   /** Defaults to a real BroadcastChannel('auth') when available. */
   createChannel?: () => AuthChannel | null
+  /**
+   * Resolves the Gmail profile email using the candidate token directly.
+   * Injectable so broker tests do not touch the network.
+   */
+  verifyAccessToken?: (accessToken: string) => Promise<string>
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +179,7 @@ export class AuthBroker {
   private readonly flagStorage: Storage
   private readonly clientId: string
   private readonly channel: AuthChannel | null
+  private readonly verifyAccessToken: (accessToken: string) => Promise<string>
   private readonly listeners = new Set<Listener>()
   private readonly wipeHooks: WipeHook[] = []
 
@@ -159,10 +188,10 @@ export class AuthBroker {
   private epoch = 0
   private cached: CachedGrant | null = null
   /**
-   * VERIFIED account identity only — never a typed/remembered login hint. It is
-   * set exclusively by setAccountEmail() (after boot resolved getProfile) or by
-   * restore() from a record that setAccountEmail persisted. Everything that
-   * names a database, an accounts row, or an alias set derives from this.
+   * VERIFIED account identity only — never a typed/remembered login hint. New
+   * grants set it only after the candidate token resolves Gmail's profile;
+   * restore() accepts only records written after that verification. Everything
+   * that names a database, an accounts row, or an alias set derives from this.
    */
   private email: string | null = null
   /**
@@ -172,6 +201,11 @@ export class AuthBroker {
    * be used as a login_hint — never as an identity.
    */
   private loginHint: string | null = null
+  /**
+   * Blocks token access after a verified account switch until the app confirms
+   * it has established dependencies for the new account via setAccountEmail.
+   */
+  private accountChange: AuthAccountChangedError | null = null
   /** Single-flight acquisition shared by all concurrent callers. */
   private pending: Promise<string> | null = null
 
@@ -179,6 +213,7 @@ export class AuthBroker {
     this.gis = gis
     this.flagStorage = gis.flagStorage ?? gis.storage
     this.clientId = options.clientId ?? envClientId()
+    this.verifyAccessToken = options.verifyAccessToken ?? verifyAccessTokenWithGmailProfile
     this.restore()
     this.channel = (options.createChannel ?? defaultCreateChannel)()
     if (this.channel) {
@@ -225,17 +260,22 @@ export class AuthBroker {
   }
 
   /**
-   * Adopts the VERIFIED account email for the current grant. What the user
-   * typed at interactiveSignIn is only an unverified login hint (GIS token
-   * responses carry no account identity), so boot calls this after resolving
-   * the token's real profile email. Re-persists the session record so storage
-   * can never pair this token with a different account's email — and so a
-   * restored record's email is, by construction, always a verified one.
+   * Adopts an independently VERIFIED account email for the current grant.
+   * Acquisition performs this verification before publishing a new token;
+   * callers that already fetched the profile may use this to reinforce or
+   * correct restored identity. Typed login hints never flow through here.
    */
   setAccountEmail(email: string): void {
     const normalized = normalizeLoginHint(email)
-    if (normalized === null || normalized === this.email) return
+    if (normalized === null) return
+    if (normalized === this.email) {
+      // The app has opened/re-established this verified account's DB and may
+      // now expose its token to newly created session-scoped workers.
+      this.accountChange = null
+      return
+    }
     this.email = normalized
+    this.accountChange = null
     if (this.cached !== null) this.persistSession(this.cached)
   }
 
@@ -261,6 +301,7 @@ export class AuthBroker {
     if (this.state === 'needs_interaction') {
       return Promise.reject(new AuthRequiredError('User interaction required', 'needs_interaction'))
     }
+    if (this.accountChange !== null) return Promise.reject(this.accountChange)
     const cached = this.cached
     if (cached && cached.expiresAt - this.gis.now() > EXPIRY_HORIZON_MS) {
       return Promise.resolve(cached.accessToken)
@@ -280,6 +321,7 @@ export class AuthBroker {
     if (this.state === 'needs_interaction') {
       return Promise.reject(new AuthRequiredError('User interaction required', 'needs_interaction'))
     }
+    if (this.accountChange !== null) return Promise.reject(this.accountChange)
     const cached = this.cached
     if (cached && cached.accessToken !== staleToken) {
       return Promise.resolve(cached.accessToken)
@@ -299,7 +341,7 @@ export class AuthBroker {
     // routinely does) grant a different account than the hint names. Adopting
     // it as this.email would name the database, the accounts row and the alias
     // set after an account that does not own the token. It stays a hint until
-    // boot resolves getProfile and calls setAccountEmail.
+    // the candidate token's Gmail profile is verified inside acquire().
     if (hint !== null) this.loginHint = hint
     const previousState = this.state
     this.setState('authorizing')
@@ -326,8 +368,8 @@ export class AuthBroker {
   /**
    * Sign out. The epoch bump, cache drop, and signed_out transition happen
    * synchronously (before any await) so no acquisition started afterwards can
-   * resurrect the retired generation — the async tail (revoke, wipe hooks,
-   * storage clear) is cleanup, not the safety mechanism.
+   * resurrect the retired generation. Persisted state is retired in that same
+   * section so a reload during a slow wipe cannot restore it.
    */
   async signOut(): Promise<void> {
     const tokenToRevoke = this.cached?.accessToken ?? null
@@ -337,7 +379,14 @@ export class AuthBroker {
     this.cached = null
     this.email = null
     this.loginHint = null
+    this.accountChange = null
     this.pending = null
+
+    // Persist retirement before ANY awaited cleanup. A reload/crash while a
+    // DB wipe is pending must observe the new epoch, never the old token.
+    safeRemove(this.gis.storage, AUTH_SESSION_STORAGE_KEY)
+    safeRemove(this.flagStorage, AUTH_HAS_SIGNED_IN_STORAGE_KEY)
+    safeSet(this.gis.storage, AUTH_EPOCH_STORAGE_KEY, String(this.epoch))
 
     // Broadcast so other tabs drop their state.
     if (this.channel) {
@@ -373,12 +422,6 @@ export class AuthBroker {
         // Best-effort cleanup; continue with remaining hooks.
       }
     }
-
-    // Clear storage; persist the bumped epoch so records written by a racing
-    // tab under the old generation are rejected on the next boot restore.
-    safeRemove(this.gis.storage, AUTH_SESSION_STORAGE_KEY)
-    safeRemove(this.flagStorage, AUTH_HAS_SIGNED_IN_STORAGE_KEY)
-    safeSet(this.gis.storage, AUTH_EPOCH_STORAGE_KEY, String(this.epoch))
   }
 
   /** Detach from the cross-tab channel and drop listeners (tests, teardown). */
@@ -431,9 +474,9 @@ export class AuthBroker {
     // a login_hint GIS resolves the grant against the browser's CURRENT default
     // Google session, which may be a different account — that token would then
     // be run against this account's database. The hint is a request, not a
-    // guarantee (Google may ignore it), so the grant is also re-verified: a
-    // token swap notifies listeners below, which is what drives boot's
-    // verifySessionAccount().
+    // guarantee (Google may ignore it), so acquire() verifies the candidate's
+    // Gmail profile before promotion. A token swap then notifies listeners so
+    // the app can re-establish account-scoped dependencies.
     const hint = this.getLoginHint()
     const flight: Promise<string> = this.acquire(
       hint !== null ? { prompt: '', loginHint: hint } : { prompt: '' },
@@ -444,10 +487,14 @@ export class AuthBroker {
       },
       (err: unknown) => {
         if (this.pending === flight) this.pending = null
-        // A sign-out mid-flight already moved us to signed_out; do not
-        // overwrite that with needs_interaction.
-        if (this.state !== 'signed_out') this.setState('needs_interaction')
-        throw toAuthRequired(err, 'renewal_failed')
+        const failure = toAuthRequired(err, 'renewal_failed')
+        // A sign-out mid-flight already moved us to signed_out. An account
+        // change deliberately adopted the verified replacement grant and
+        // published ready; the old-session caller alone must be rejected.
+        if (this.state !== 'signed_out' && failure.reason !== 'account_changed') {
+          this.setState('needs_interaction')
+        }
+        throw failure
       },
     )
     this.pending = flight
@@ -458,6 +505,7 @@ export class AuthBroker {
     // Snapshot the sign-out generation BEFORE calling GIS: if signOut bumps
     // the epoch while the grant is in flight, the result is discarded.
     const epochAtStart = this.epoch
+    const accountAtStart = this.email
     return new Promise<string>((resolve, reject) => {
       let settled = false
       const settleOnce = (fn: () => void) => {
@@ -472,55 +520,7 @@ export class AuthBroker {
         prompt: opts.prompt,
         callback: (response) => {
           settleOnce(() => {
-            if (this.epoch !== epochAtStart) {
-              reject(new AuthRequiredError('Signed out during token acquisition', 'stale_epoch'))
-              return
-            }
-            if (response.error !== undefined || !response.access_token) {
-              reject(
-                new AuthRequiredError(
-                  response.error_description ?? response.error ?? 'Token grant failed',
-                  'renewal_failed',
-                ),
-              )
-              return
-            }
-            if (!scopeIncludesGmailModify(response.scope)) {
-              // Grant came back without gmail.modify: unusable session, the
-              // user must re-consent (interactiveSignIn uses prompt 'consent'
-              // when the flag was never set; callers can also clear state and
-              // re-run consent explicitly).
-              this.setState('needs_interaction')
-              reject(
-                new AuthRequiredError(
-                  'Gmail permission was not granted; re-consent required',
-                  'scope_denied',
-                ),
-              )
-              return
-            }
-            const expiresInSeconds = Number(response.expires_in ?? 0)
-            const grant: CachedGrant = {
-              accessToken: response.access_token,
-              expiresAt: this.gis.now() + expiresInSeconds * 1000,
-              scope: response.scope ?? '',
-            }
-            const previousToken = this.cached?.accessToken ?? null
-            // A grant that REPLACES a live token on an already-'ready' broker
-            // moves no state, so setState would notify nobody — and the token
-            // may belong to a different Google account (GIS resolves silent
-            // renewals against the browser session, and login_hint is only a
-            // hint). Notify explicitly so the app re-verifies the account
-            // before the new token is used against the open database.
-            const swappedWhileReady =
-              this.state === 'ready' &&
-              previousToken !== null &&
-              previousToken !== grant.accessToken
-            this.cached = grant
-            this.persistSession(grant)
-            this.setState('ready')
-            if (swappedWhileReady) this.notify('ready')
-            resolve(grant.accessToken)
+            void this.verifyAndPromote(response, epochAtStart, accountAtStart).then(resolve, reject)
           })
         },
         error_callback: (error) => {
@@ -546,6 +546,80 @@ export class AuthBroker {
     })
   }
 
+  /** Verify a candidate grant before it becomes observable to general callers. */
+  private async verifyAndPromote(
+    response: GisTokenResponse,
+    epochAtStart: number,
+    accountAtStart: string | null,
+  ): Promise<string> {
+    if (this.epoch !== epochAtStart) {
+      throw new AuthRequiredError('Signed out during token acquisition', 'stale_epoch')
+    }
+    if (response.error !== undefined || !response.access_token) {
+      throw new AuthRequiredError(
+        response.error_description ?? response.error ?? 'Token grant failed',
+        'renewal_failed',
+      )
+    }
+    if (!scopeIncludesGmailModify(response.scope)) {
+      this.setState('needs_interaction')
+      throw new AuthRequiredError(
+        'Gmail permission was not granted; re-consent required',
+        'scope_denied',
+      )
+    }
+
+    const expiresInSeconds = Number(response.expires_in ?? 0)
+    const grant: CachedGrant = {
+      accessToken: response.access_token,
+      expiresAt: this.gis.now() + expiresInSeconds * 1000,
+      scope: response.scope ?? '',
+    }
+    const verifiedEmail = normalizeLoginHint(await this.verifyAccessToken(grant.accessToken))
+    if (verifiedEmail === null) {
+      throw new AuthRequiredError(
+        'Gmail profile did not include an account email',
+        'renewal_failed',
+      )
+    }
+
+    // Verification is asynchronous. Re-check the generation before publishing
+    // anything so sign-out during the profile request still wins.
+    if (this.epoch !== epochAtStart) {
+      throw new AuthRequiredError('Signed out during token verification', 'stale_epoch')
+    }
+
+    const previousToken = this.cached?.accessToken ?? null
+    const expectedEmail = accountAtStart ?? this.email
+    const accountChange =
+      expectedEmail !== null && expectedEmail !== verifiedEmail
+        ? new AuthAccountChangedError(expectedEmail, verifiedEmail)
+        : null
+
+    if (accountChange !== null) {
+      // Retire the old account generation before publishing the replacement.
+      // This invalidates other work tied to the old session, while persisting
+      // a self-consistent {token, email, epoch} record for the new account.
+      this.epoch += 1
+    }
+    this.cached = grant
+    this.email = verifiedEmail
+    this.accountChange = accountChange
+    this.persistSession(grant)
+
+    const wasReady = this.state === 'ready'
+    this.setState('ready')
+    if (wasReady && previousToken !== grant.accessToken) this.notify('ready')
+
+    if (accountChange !== null) {
+      // The ready notification synchronously tears down old account workers.
+      // Rejecting the triggering request prevents it from resuming with the
+      // new token while it still holds the previous account's DB/context.
+      throw accountChange
+    }
+    return grant.accessToken
+  }
+
   private persistSession(grant: CachedGrant): void {
     const record: StoredAuthSession = {
       accessToken: grant.accessToken,
@@ -566,6 +640,7 @@ export class AuthBroker {
     this.cached = null
     this.email = null
     this.loginHint = null
+    this.accountChange = null
     this.pending = null
     // sessionStorage is PER-TAB: the originating tab's signOut cleared only
     // its own storage. Mirror that persistence here, or a reload of THIS tab
@@ -658,6 +733,24 @@ function envClientId(): string {
 function defaultCreateChannel(): AuthChannel | null {
   if (typeof BroadcastChannel === 'undefined') return null
   return new BroadcastChannel(AUTH_CHANNEL_NAME) as unknown as AuthChannel
+}
+
+/**
+ * Resolve the account using only the unpromoted candidate token. Supplying a
+ * tiny TokenBroker avoids calling AuthBroker.getToken() from inside its own
+ * acquisition single-flight (which would otherwise await itself forever).
+ */
+async function verifyAccessTokenWithGmailProfile(accessToken: string): Promise<string> {
+  const { getProfile } = await import('../gmail/endpoints')
+  const candidateBroker = {
+    getToken: () => Promise.resolve(accessToken),
+    refreshAfter: () =>
+      Promise.reject(
+        new AuthRequiredError('Gmail rejected the candidate access token', 'renewal_failed'),
+      ),
+  }
+  const profile = await getProfile(candidateBroker)
+  return profile.emailAddress
 }
 
 function scopeIncludesGmailModify(scope: string | undefined): boolean {

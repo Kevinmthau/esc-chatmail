@@ -212,10 +212,13 @@ function onBrokerState(state: AuthState): void {
   if (state === 'ready') {
     if (sessionStarting) return
     if (session !== null) {
-      // A new grant landed while a session is already established (e.g. the
-      // session-expired banner's Continue). GIS lets the user pick ANY Google
-      // account in the popup and the token response carries no account
-      // identity, so verify the grant's account before reusing the session.
+      // AuthBroker verified the candidate before publishing ready. A same-
+      // account renewal can keep the existing workers; an account change must
+      // synchronously stop them before releasing the broker's switch barrier.
+      if (broker?.getEmail() === session.email) {
+        publish('ready')
+        return
+      }
       void verifySessionAccount()
     } else {
       // Stay 'unknown'/previous until the DB is open; establishSession publishes.
@@ -361,13 +364,9 @@ function abandonSession(stops: Array<() => void>, unregisterWipe: (() => void) |
 }
 
 /**
- * A new grant landed while a session is already established (e.g. the
- * session-expired banner's Continue, or a silent renewal that the broker
- * resolved against a different Google session). The grant may belong to a
- * DIFFERENT account than the open DB and its token is ALREADY live on the
- * broker, so the session is suspended before anything else: the scheduler,
- * outbox auto-drain and attachment brokers are stopped up front, and only
- * then is the account resolved.
+ * A verified replacement grant landed while a session is established. When
+ * it belongs to another account, stop the old account's workers before
+ * confirming the new account to AuthBroker and releasing token access.
  *   - match        → re-establish the same session (same DB, unchanged);
  *   - mismatch     → establishSession opens the other account's DB (the old
  *     one is closed, never wiped — it belongs to that account);
@@ -380,12 +379,25 @@ async function verifySessionAccount(): Promise<void> {
   const b = broker
   const s = session
   if (b === null || s === null) return
+  const verifiedEmail = b.getEmail()
+  if (verifiedEmail === s.email) return
   sessionStarting = true
-  // Stop the old session's workers BEFORE the profile round trip. The awaited
-  // fetch below is a multi-second window (retries/backoff) during which a
-  // scheduler tick or outbox drain would otherwise use the NEW, unverified
-  // token against the OLD account's open DB.
+  // This runs synchronously from the broker's ready notification, before the
+  // account-changing acquisition rejects back to its old-session caller.
   teardownSession()
+  if (verifiedEmail !== null) {
+    publish('unknown')
+    // Same-email confirmation clears AuthBroker's account-change barrier only
+    // after A's workers have stopped. establishSession then opens B's DB before
+    // starting any worker that can observe B's token.
+    b.setAccountEmail(verifiedEmail)
+    sessionStarting = false
+    await establishSession(verifiedEmail)
+    return
+  }
+
+  // Compatibility for a restored legacy session record with no verified
+  // email. New grants are always verified inside AuthBroker before ready.
   await resolveAccountAndEstablish(b, s.email)
 }
 

@@ -5,6 +5,7 @@ import {
   AUTH_SCOPES,
   AUTH_SESSION_STORAGE_KEY,
   AuthBroker,
+  AuthAccountChangedError,
   AuthRequiredError,
 } from './authBroker'
 import type {
@@ -50,6 +51,9 @@ class FakeGis {
   pendingRequests: GisTokenClientConfig[] = []
   requestCount = 0
   revoked: string[] = []
+  verifiedEmailByToken = new Map<string, string>()
+  verifyToken: (accessToken: string) => Promise<string> = (accessToken) =>
+    Promise.resolve(this.verifiedEmailByToken.get(accessToken) ?? 'user@example.com')
   /** Replaced to simulate a revocation that fails asynchronously (e.g. CSP). */
   revokeResult: GisRevocationResponse | null = null
 
@@ -72,15 +76,25 @@ class FakeGis {
     return surface
   }
 
-  grantNext(overrides: Partial<GisTokenResponse> = {}): GisTokenClientConfig {
+  grantNext(
+    overrides: Partial<GisTokenResponse> = {},
+    verifiedEmail?: string,
+  ): GisTokenClientConfig {
     const cfg = this.pendingRequests.shift()
     if (!cfg) throw new Error('no pending token request')
-    cfg.callback({
+    const response: GisTokenResponse = {
       access_token: 'tok-default',
       expires_in: 3600,
       scope: AUTH_SCOPES,
       ...overrides,
-    })
+    }
+    if (response.access_token !== undefined) {
+      this.verifiedEmailByToken.set(
+        response.access_token,
+        verifiedEmail ?? cfg.login_hint ?? 'user@example.com',
+      )
+    }
+    cfg.callback(response)
     return cfg
   }
 
@@ -115,7 +129,11 @@ function makeHub() {
 }
 
 function newBroker(gis: FakeGis, createChannel: () => AuthChannel | null = () => null): AuthBroker {
-  return new AuthBroker(gis.surface(), { clientId: 'test-client-id', createChannel })
+  return new AuthBroker(gis.surface(), {
+    clientId: 'test-client-id',
+    createChannel,
+    verifyAccessToken: (accessToken) => gis.verifyToken(accessToken),
+  })
 }
 
 async function completeSignIn(
@@ -127,6 +145,16 @@ async function completeSignIn(
   const flight = broker.interactiveSignIn('user@example.com')
   gis.grantNext({ access_token: token, expires_in: expiresInSeconds })
   await flight
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,10 +174,10 @@ describe('AuthBroker interactive sign-in', () => {
 
     expect(cfg.prompt).toBe('consent') // first-ever sign-in prompts for consent
     expect(broker.getState()).toBe('ready')
-    // The typed value is a HINT, not an identity: it is offered to GIS but the
-    // broker carries no verified account until setAccountEmail runs.
+    // The typed value is only a HINT offered to GIS. Identity comes from the
+    // candidate token's Gmail profile before the grant is published.
     expect(cfg.login_hint).toBe('user@example.com')
-    expect(broker.getEmail()).toBeNull()
+    expect(broker.getEmail()).toBe('user@example.com')
     expect(broker.getLoginHint()).toBe('user@example.com')
     await expect(broker.getToken()).resolves.toBe('tok-1')
 
@@ -159,6 +187,7 @@ describe('AuthBroker interactive sign-in', () => {
     expect(record.accessToken).toBe('tok-1')
     expect(record.epoch).toBe(0)
     expect(record.expiresAt).toBe(gis.time + 3_600_000)
+    expect(record.email).toBe('user@example.com')
     expect(gis.storage.getItem(AUTH_HAS_SIGNED_IN_STORAGE_KEY)).toBe('1')
   })
 
@@ -335,6 +364,67 @@ describe('AuthBroker silent renewal is bound to the account', () => {
     gis.grantNext({ access_token: 'tok-1' }) // same grant re-issued
     await expect(renewing).resolves.toBe('tok-1')
     expect(seen).toEqual([])
+  })
+
+  it('verifies a replacement before promotion and rejects callers when the account changes', async () => {
+    const gis = new FakeGis()
+    const broker = newBroker(gis)
+    const signingIn = broker.interactiveSignIn('a@example.com')
+    gis.grantNext({ access_token: 'tok-a', expires_in: 3600 }, 'a@example.com')
+    await signingIn
+
+    const verification = deferred<string>()
+    gis.verifyToken = vi.fn((accessToken) =>
+      accessToken === 'tok-b'
+        ? verification.promise
+        : Promise.resolve(gis.verifiedEmailByToken.get(accessToken) ?? 'a@example.com'),
+    )
+    const seen: AuthState[] = []
+    broker.subscribe((state) => seen.push(state))
+
+    gis.time += 3_600_000 - 200_000
+    let triggeringOperationResumed = false
+    const renewing = broker.getToken().then((token) => {
+      triggeringOperationResumed = true
+      return token
+    })
+    const concurrent = broker.getToken()
+    gis.grantNext({ access_token: 'tok-b' }, 'b@example.com')
+
+    // The candidate is not cached, persisted, or returned while its identity
+    // is unresolved. The previous account remains internally consistent.
+    await Promise.resolve()
+    const before = JSON.parse(
+      gis.storage.getItem(AUTH_SESSION_STORAGE_KEY) ?? 'null',
+    ) as StoredAuthSession
+    expect(before).toMatchObject({ accessToken: 'tok-a', email: 'a@example.com', epoch: 0 })
+    expect(broker.getEmail()).toBe('a@example.com')
+    expect(triggeringOperationResumed).toBe(false)
+
+    verification.resolve('b@example.com')
+    await expect(renewing).rejects.toBeInstanceOf(AuthAccountChangedError)
+    await expect(concurrent).rejects.toMatchObject({
+      name: 'AuthAccountChangedError',
+      reason: 'account_changed',
+      previousEmail: 'a@example.com',
+      nextEmail: 'b@example.com',
+    })
+
+    // The verified replacement is ready for a newly established B session,
+    // but neither caller tied to A was allowed to continue with it.
+    expect(triggeringOperationResumed).toBe(false)
+    expect(broker.getState()).toBe('ready')
+    expect(broker.getEmail()).toBe('b@example.com')
+    await expect(broker.getToken()).rejects.toMatchObject({ reason: 'account_changed' })
+    // The app confirms it has opened B's DB before new session workers may
+    // observe the replacement token.
+    broker.setAccountEmail('b@example.com')
+    await expect(broker.getToken()).resolves.toBe('tok-b')
+    const after = JSON.parse(
+      gis.storage.getItem(AUTH_SESSION_STORAGE_KEY) ?? 'null',
+    ) as StoredAuthSession
+    expect(after).toMatchObject({ accessToken: 'tok-b', email: 'b@example.com', epoch: 1 })
+    expect(seen).toEqual(['ready'])
   })
 })
 
@@ -519,33 +609,22 @@ describe('AuthBroker setAccountEmail', () => {
 })
 
 describe('AuthBroker login hint is never an identity', () => {
-  it('keeps a typed hint out of getEmail() and out of the persisted record', async () => {
+  it('uses the candidate profile rather than a different typed hint', async () => {
     const gis = new FakeGis()
     const broker = newBroker(gis)
 
     // The user types an address on the sign-in card; GIS's account chooser
     // grants a DIFFERENT account (login_hint is only a hint).
     const flight = broker.interactiveSignIn('typo@gmail.com')
-    gis.grantNext({ access_token: 'tok-1' })
+    gis.grantNext({ access_token: 'tok-1' }, 'real@example.com')
     await flight
 
-    // Regression: interactiveSignIn used to do `this.email = hint`, so the
-    // unverified typed address became the account identity — it named the
-    // database, the accounts row and the alias set, and was persisted with the
-    // token so a reload restored the same wrong pairing.
-    expect(broker.getEmail()).toBeNull()
+    // The verified profile, not the hint, names and is persisted with the DB.
+    expect(broker.getEmail()).toBe('real@example.com')
     const record = JSON.parse(
       gis.storage.getItem(AUTH_SESSION_STORAGE_KEY) ?? 'null',
     ) as StoredAuthSession
-    expect(record.email).toBeNull()
-
-    // Only verification supplies an identity — and it is what gets persisted.
-    broker.setAccountEmail('real@example.com')
-    expect(broker.getEmail()).toBe('real@example.com')
-    const verified = JSON.parse(
-      gis.storage.getItem(AUTH_SESSION_STORAGE_KEY) ?? 'null',
-    ) as StoredAuthSession
-    expect(verified.email).toBe('real@example.com')
+    expect(record.email).toBe('real@example.com')
   })
 
   it('still offers the unverified hint to GIS on a silent renewal', async () => {
@@ -568,16 +647,15 @@ describe('AuthBroker login hint is never an identity', () => {
     const broker = newBroker(gis)
 
     const flight = broker.interactiveSignIn('  Kevin.Thau@Gmail.COM ')
-    const cfg = gis.grantNext({ access_token: 'tok-1' })
+    const cfg = gis.grantNext({ access_token: 'tok-1' }, 'Real@Example.com')
     await flight
 
     // dbNameForAccount lowercases before hashing but db.accounts' primary key
     // does not, so a mixed-case address would key the row differently from the
     // database it names.
     expect(cfg.login_hint).toBe('kevin.thau@gmail.com')
-    expect(broker.getLoginHint()).toBe('kevin.thau@gmail.com')
-    broker.setAccountEmail('Real@Example.com')
     expect(broker.getEmail()).toBe('real@example.com')
+    expect(broker.getLoginHint()).toBe('real@example.com')
   })
 
   it('drops the hint on sign-out', async () => {
@@ -642,6 +720,28 @@ describe('AuthBroker signOut', () => {
     await again
 
     expect(states).toEqual(['authorizing', 'ready', 'signed_out'])
+  })
+
+  it('retires persisted state before awaiting a slow wipe hook', async () => {
+    const gis = new FakeGis()
+    const broker = newBroker(gis)
+    await completeSignIn(broker, gis, 'tok-1')
+
+    const wipe = deferred<void>()
+    broker.registerWipeHook(() => wipe.promise)
+    const signingOut = broker.signOut()
+
+    // signOut has reached its first await, but its synchronous retirement is
+    // already durable. A reload during the wipe cannot resurrect tok-1.
+    expect(gis.storage.getItem(AUTH_SESSION_STORAGE_KEY)).toBeNull()
+    expect(gis.storage.getItem(AUTH_EPOCH_STORAGE_KEY)).toBe('1')
+    expect(gis.storage.getItem(AUTH_HAS_SIGNED_IN_STORAGE_KEY)).toBeNull()
+    const rebooted = newBroker(gis)
+    expect(rebooted.getState()).toBe('signed_out')
+    await expect(rebooted.getToken()).rejects.toMatchObject({ reason: 'signed_out' })
+
+    wipe.resolve()
+    await signingOut
   })
 })
 

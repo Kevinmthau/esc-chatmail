@@ -164,7 +164,14 @@ function seedStoredSession(
 
 /** Boots real mode with a broker restored from `gis`'s stored session. */
 function bootWithBroker(gis: FakeGis, createChannel: () => AuthChannel | null = () => null) {
-  const broker = new AuthBroker(gis.surface(), { clientId: 'test-client-id', createChannel })
+  const broker = new AuthBroker(gis.surface(), {
+    clientId: 'test-client-id',
+    createChannel,
+    verifyAccessToken: async () => {
+      const profile = (await getProfileMock()) as { emailAddress: string }
+      return profile.emailAddress
+    },
+  })
   setBootOverridesForTests({
     clientId: '123-real.apps.googleusercontent.com',
     createBroker: () => broker,
@@ -293,7 +300,7 @@ describe('boot (real mode)', () => {
     getProfileMock.mockResolvedValue({ emailAddress: 'b@example.com', historyId: '7' })
     const flight = broker.interactiveSignIn()
     gis.grantNext({ access_token: 'tok-b' })
-    await flight
+    await expect(flight).rejects.toMatchObject({ reason: 'account_changed' })
 
     // Regression: the session-alive ready path used to publish 'ready' with
     // no account cross-check, syncing B's mailbox into A's DB.
@@ -332,17 +339,17 @@ describe('boot (real mode)', () => {
     getProfileMock.mockRejectedValue(new Error('offline'))
     const flight = broker.interactiveSignIn()
     gis.grantNext({ access_token: 'tok-unverified' })
-    await flight
+    await expect(flight).rejects.toMatchObject({ reason: 'needs_interaction' })
 
-    await vi.waitFor(() => {
-      expect(getAuthState()).toBe('needs_interaction')
-    })
-    // Local data stays available; the account identity is unchanged.
+    // Verification failed before promotion, so the old session and token stay
+    // coherent and available rather than being torn down under a foreign token.
+    expect(getAuthState()).toBe('ready')
     expect(getDB().name).toBe(dbNameForAccount('a@example.com'))
     expect(getAccountEmail()).toBe('a@example.com')
+    await expect(broker.getToken()).resolves.toBe('tok-a')
   })
 
-  it('suspends the session BEFORE awaiting account verification', async () => {
+  it('does not expose a replacement or stop the old session before verification', async () => {
     const gis = new FakeGis()
     seedStoredSession(gis, { email: 'a@example.com', accessToken: 'tok-a' })
     const broker = bootWithBroker(gis)
@@ -372,23 +379,23 @@ describe('boot (real mode)', () => {
     const flight = broker.interactiveSignIn()
     gis.grantNext({ access_token: 'tok-new' })
 
-    // Regression: verification used to await the profile with the session
-    // fully live, so a scheduler tick / outbox drain during that round trip
-    // ran the NEW, still-unverified token against the OLD account's open DB.
-    await vi.waitFor(() => {
-      expect(schedulerStops).toBe(1)
-    })
+    // The candidate is still private to AuthBroker. Existing workers remain
+    // bound to A and can only observe A's old token while verification waits.
+    await Promise.resolve()
+    expect(schedulerStops).toBe(0)
+    await expect(broker.getToken()).resolves.toBe('tok-a')
     await capturedSync!('manual')
-    expect(runSyncMock).not.toHaveBeenCalled()
+    expect(runSyncMock).toHaveBeenCalledTimes(1)
 
     profile.resolve({ emailAddress: 'a@example.com', historyId: '9' })
     await flight
     await vi.waitFor(() => {
       expect(getAuthState()).toBe('ready')
     })
-    // Same account: the session comes back on the same DB, workers restarted.
+    // Same account: no teardown/restart was needed.
     expect(getDB().name).toBe(dbNameForAccount('a@example.com'))
-    expect(startSchedulerMock).toHaveBeenCalledTimes(2)
+    expect(schedulerStops).toBe(0)
+    expect(startSchedulerMock).toHaveBeenCalledTimes(1)
   })
 
   it('verifies a SILENT renewal that grants a different account', async () => {
@@ -408,7 +415,7 @@ describe('boot (real mode)', () => {
     getProfileMock.mockResolvedValue({ emailAddress: 'b@example.com', historyId: '7' })
     const renewing = broker.getToken()
     const cfg = gis.grantNext({ access_token: 'tok-b' })
-    await expect(renewing).resolves.toBe('tok-b')
+    await expect(renewing).rejects.toMatchObject({ reason: 'account_changed' })
 
     // The renewal is bound to the known account...
     expect(cfg.login_hint).toBe('a@example.com')
@@ -665,7 +672,7 @@ describe('boot (real mode)', () => {
     expect(await getDB().pendingActions.count()).toBe(1)
   })
 
-  it('retries verification after a TRANSIENT failure instead of dying behind the banner', async () => {
+  it('does not promote a transiently unverifiable silent-renewal candidate', async () => {
     const gis = new FakeGis()
     seedStoredSession(gis, { email: 'a@example.com', accessToken: 'tok-a', expiresInMs: 60_000 })
     const broker = bootWithBroker(gis)
@@ -676,31 +683,27 @@ describe('boot (real mode)', () => {
     })
     expect(startSchedulerMock).toHaveBeenCalledTimes(1)
 
-    // Unattended silent renewal swaps the token, which triggers verification —
-    // and the profile round trip fails for a transport reason (offline / a 403
-    // rateLimitExceeded from the sync burst that just ran).
+    // The candidate profile request fails for a transport reason. It must not
+    // replace the coherent {A token, A database} session.
     getProfileMock.mockRejectedValue(new Error('Failed to fetch'))
     const renewing = broker.getToken()
     gis.grantNext({ access_token: 'tok-a2' })
-    await expect(renewing).resolves.toBe('tok-a2')
+    await expect(renewing).rejects.toMatchObject({ reason: 'renewal_failed' })
     await vi.waitFor(() => {
       expect(getAuthState()).toBe('needs_interaction')
     })
 
-    // Regression: the teardown that precedes verification had already removed
-    // the scheduler's interval/visibility/online triggers, the outbox drain and
-    // the actions broker — and nothing re-armed them. A single transient
-    // getProfile failure therefore killed sync, drain, refresh and sending
-    // behind a false "Session expired" banner over a valid, fresh token, until
-    // the user happened to tap Continue.
-    getProfileMock.mockResolvedValue({ emailAddress: 'a@example.com', historyId: '12' })
-    window.dispatchEvent(new Event('online'))
-
-    await vi.waitFor(() => {
-      expect(getAuthState()).toBe('ready')
-    })
+    const record = JSON.parse(
+      gis.storage.getItem(AUTH_SESSION_STORAGE_KEY) ?? 'null',
+    ) as StoredAuthSession
+    expect(record).toMatchObject({ accessToken: 'tok-a', email: 'a@example.com' })
     expect(getDB().name).toBe(dbNameForAccount('a@example.com'))
-    expect(startSchedulerMock).toHaveBeenCalledTimes(2)
+    expect(startSchedulerMock).toHaveBeenCalledTimes(1)
+
+    const callsAtFailure = getProfileMock.mock.calls.length
+    window.dispatchEvent(new Event('online'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(getProfileMock.mock.calls.length).toBe(callsAtFailure)
   })
 
   it('does NOT retry verification after a DEFINITIVE auth failure', async () => {
@@ -720,7 +723,7 @@ describe('boot (real mode)', () => {
     )
     const renewing = broker.getToken()
     gis.grantNext({ access_token: 'tok-a2' })
-    await expect(renewing).resolves.toBe('tok-a2')
+    await expect(renewing).rejects.toMatchObject({ reason: 'needs_interaction' })
     await vi.waitFor(() => {
       expect(getAuthState()).toBe('needs_interaction')
     })

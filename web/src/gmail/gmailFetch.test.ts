@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { AUTH_SCOPES, AuthBroker, AuthRequiredError } from '../auth/authBroker'
+import {
+  AUTH_SCOPES,
+  AuthAccountChangedError,
+  AuthBroker,
+  AuthRequiredError,
+} from '../auth/authBroker'
 import type { GisSurface, GisTokenClientConfig } from '../auth/authBroker'
 import { GmailApiError, NetworkError, RateLimitError } from './errors'
 import { GMAIL_API_BASE, gmailFetch } from './gmailFetch'
@@ -132,6 +137,20 @@ describe('gmailFetch', () => {
       name: 'AuthRequiredError',
       reason: 'signed_out',
     })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('never starts a request when an account switch rejects token access', async () => {
+    const accountChanged = new AuthAccountChangedError('a@example.com', 'b@example.com')
+    const broker: TokenBroker = {
+      getToken: () => Promise.reject(accountChanged),
+      refreshAfter: () => Promise.reject(accountChanged),
+    }
+    const fetchImpl = mockFetch(() => json(200, {}))
+
+    await expect(
+      gmailFetch(broker, '/users/me/profile', undefined, { fetchImpl }),
+    ).rejects.toMatchObject({ reason: 'account_changed' })
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
@@ -281,6 +300,7 @@ describe('gmailFetch + AuthBroker integration', () => {
     const broker = new AuthBroker(gis.surface, {
       clientId: 'test-client-id',
       createChannel: () => null,
+      verifyAccessToken: () => Promise.resolve('user@example.com'),
     })
     const signIn = broker.interactiveSignIn('user@example.com')
     gis.grantNext('tok-1')
