@@ -372,9 +372,6 @@ final class InitialSyncOrchestrator {
                 hadInitialFailures: true,
                 permanentlyFailedCount: stillFailedIds.count
             )
-            if disposition.shouldAdvanceHistoryId {
-                await messagePersister.setAccountHistoryId(profile.historyId, in: context)
-            }
 
             if disposition.hadWarnings {
                 log.warning("\(stillFailedIds.count) messages permanently failed - keeping historyId unset so initial sync can retry safely")
@@ -390,15 +387,30 @@ final class InitialSyncOrchestrator {
                 return InitialSyncCompletionOutcome(hadWarnings: true, advancePlan: nil)
             }
 
-            log.info("All failed messages recovered on retry - advancing historyId")
             let advancePlan = await failureTracker.planHistoryAdvance(hadFailures: false, in: context)
-            return InitialSyncCompletionOutcome(hadWarnings: false, advancePlan: advancePlan)
+            if advancePlan.shouldAdvance {
+                log.info("All failed messages recovered on retry - advancing historyId")
+                await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+            } else {
+                log.error("Recovered messages but failure-ledger cleanup could not be planned - keeping historyId unset")
+            }
+            return InitialSyncCompletionOutcome(
+                hadWarnings: !advancePlan.shouldAdvance,
+                advancePlan: advancePlan
+            )
         }
 
-        log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
-        await messagePersister.setAccountHistoryId(profile.historyId, in: context)
         let advancePlan = await failureTracker.planHistoryAdvance(hadFailures: false, in: context)
-        return InitialSyncCompletionOutcome(hadWarnings: false, advancePlan: advancePlan)
+        if advancePlan.shouldAdvance {
+            log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
+            await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+        } else {
+            log.error("Initial sync succeeded but failure-ledger cleanup could not be planned - keeping historyId unset")
+        }
+        return InitialSyncCompletionOutcome(
+            hadWarnings: !advancePlan.shouldAdvance,
+            advancePlan: advancePlan
+        )
     }
 
     nonisolated static func completionDisposition(

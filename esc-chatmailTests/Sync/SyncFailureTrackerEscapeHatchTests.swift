@@ -183,6 +183,9 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         let saveCompleted = expectation(description: "durable save completed")
         let saveGate = SyncPersistenceCancellationGate()
 
+        let initiallyRetryable = await tracker.fetchRetryableAbandonedMessageIds()
+        XCTAssertTrue(initiallyRetryable.isEmpty, "Prime the tracker's empty-store fast path")
+
         try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures, failedIds: ["stuck-1"])
         let hatchRun = coreDataStack.newBackgroundContext()
         let plan = await tracker.planHistoryAdvance(hadFailures: true, in: hatchRun)
@@ -227,6 +230,9 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         let rows = try await fetchAbandonedRows()
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.abandoned.rawValue)
+
+        let retryableAfterCommit = await tracker.fetchRetryableAbandonedMessageIds()
+        XCTAssertEqual(retryableAfterCommit, ["stuck-1"], "The post-save commit must re-arm the abandoned-message drain")
     }
 
     /// A failed ledger read during recordFailure still counts the strike but

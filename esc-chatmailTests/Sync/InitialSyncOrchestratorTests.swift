@@ -268,6 +268,64 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
     }
 
     @MainActor
+    func testHandleSyncCompletion_cleanLedgerReadFailureDoesNotStageInitialCursor() async throws {
+        let profile = GmailProfile(
+            emailAddress: "initial-sync-test@example.com",
+            messagesTotal: 0,
+            threadsTotal: 0,
+            historyId: "history-held"
+        )
+        let apiClient = MockGmailAPIClient()
+        let conversationManager = ConversationManager(currentUserEmail: { profile.emailAddress })
+        let messagePersister = MessagePersister(
+            coreDataStack: coreDataStack,
+            saveHTML: { _, _ in nil },
+            conversationManager: conversationManager
+        )
+        let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        let sut = InitialSyncOrchestrator(
+            messageFetcher: MessageFetcher(apiClient: apiClient),
+            messagePersister: messagePersister,
+            conversationManager: conversationManager,
+            dataCleanupService: DataCleanupService(
+                coreDataStack: coreDataStack,
+                conversationManager: conversationManager,
+                migrationFlags: InMemoryMigrationFlagStore(),
+                identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
+            ),
+            attachmentDownloader: AttachmentDownloader.shared,
+            coreDataStack: coreDataStack,
+            failureTracker: failureTracker,
+            performanceLogger: .shared
+        )
+        let failingContext = try FailingReadStore.makeFailingContext()
+        let modificationTransaction = await ModificationTracker.shared.beginTransaction()
+
+        let completion = try await sut.handleSyncCompletion(
+            result: BatchProcessingResult(totalProcessed: 0, successfulCount: 0, failedIds: []),
+            profile: profile,
+            labelIds: [],
+            modificationTransaction: modificationTransaction,
+            context: failingContext
+        )
+
+        XCTAssertTrue(completion.hadWarnings)
+        let plan = try XCTUnwrap(completion.advancePlan)
+        XCTAssertEqual(plan.outcome, .held)
+
+        let store = try XCTUnwrap(
+            failingContext.persistentStoreCoordinator?.persistentStores.first as? FailingReadStore
+        )
+        XCTAssertEqual(
+            store.requestTypes,
+            [.fetchRequestType],
+            "A held plan must prevent the subsequent account-history mutation"
+        )
+
+        await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+    }
+
+    @MainActor
     func testHandleSyncCompletion_recoveredRetryClearsStaleFailureTrackerState() async throws {
         let profile = GmailProfile(
             emailAddress: "initial-sync-test@example.com",
