@@ -4,11 +4,11 @@ import CoreData
 struct ChatReplyBar: View {
     @Binding var replyText: String
     @Binding var replyingTo: Message?
+    @Binding var attachments: [Attachment]
     let conversation: Conversation
-    let onSend: ([Attachment]) async -> Bool
+    let onSend: () async -> Bool
     var focusBinding: FocusState<Bool>.Binding
     @State private var isSending = false
-    @State private var attachments: [Attachment] = []
     @Environment(\.managedObjectContext) private var viewContext
     
     var canSend: Bool {
@@ -90,10 +90,7 @@ struct ChatReplyBar: View {
             if canSend {
                 Task {
                     isSending = true
-                    let didSend = await onSend(attachments)
-                    if didSend {
-                        attachments = []
-                    }
+                    _ = await onSend()
                     isSending = false
                 }
             }

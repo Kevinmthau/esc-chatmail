@@ -4,13 +4,182 @@ import CoreData
 // MARK: - Helper Methods
 
 extension MessagePersister {
+    func remoteCommittedSendMutationResolutions(
+        for remoteMessageIDs: Set<String>,
+        in context: NSManagedObjectContext
+    ) async -> [String: RemoteCommittedSendMutationResolution] {
+        guard !remoteMessageIDs.isEmpty else { return [:] }
 
+        return await context.perform {
+            let request = OutboundSendMutationRecord.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "remoteCommittedMessageId IN %@",
+                Array(remoteMessageIDs)
+            )
+            request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
+            request.includesPendingChanges = true
+
+            let records: [OutboundSendMutationRecord]
+            do {
+                records = try context.fetch(request)
+            } catch {
+                Log.error(
+                    "Failed to fetch remote committed send mutation routes",
+                    category: .coreData,
+                    error: error
+                )
+                return [:]
+            }
+
+            let recordsByRemoteMessageID = Dictionary(grouping: records) {
+                $0.remoteCommittedMessageId ?? ""
+            }
+            var resolutions: [String: RemoteCommittedSendMutationResolution] = [:]
+            resolutions.reserveCapacity(recordsByRemoteMessageID.count)
+
+            for (remoteMessageID, matchingRecords) in recordsByRemoteMessageID
+                where !remoteMessageID.isEmpty {
+                var anchoredListConversationObjectID: NSManagedObjectID?
+                var anchoredListId: String?
+                var hasUnresolvedExistingAnchor = false
+
+                for record in matchingRecords where !record.newlyInsertedConversation {
+                    guard let conversation = Self.resolveMutationConversation(
+                        uriString: record.conversationURI,
+                        id: record.conversationId,
+                        in: context
+                    ) else {
+                        hasUnresolvedExistingAnchor = true
+                        continue
+                    }
+
+                    guard conversation.conversationType == .list,
+                          let listId = conversation.listId,
+                          !listId.isEmpty else {
+                        continue
+                    }
+
+                    let routingConversation: Conversation
+                    if conversation.isRetainedDrainedShell {
+                        guard let replacement = Self.recoverableListConversation(
+                            listId: listId,
+                            excluding: conversation.objectID,
+                            in: context
+                        ) else {
+                            hasUnresolvedExistingAnchor = true
+                            continue
+                        }
+                        routingConversation = replacement
+                    } else {
+                        routingConversation = conversation
+                    }
+
+                    guard anchoredListConversationObjectID == nil else {
+                        continue
+                    }
+                    anchoredListConversationObjectID = routingConversation.objectID
+                    anchoredListId = listId
+                }
+
+                if hasUnresolvedExistingAnchor &&
+                    anchoredListConversationObjectID == nil {
+                    Log.warning(
+                        "Retaining unresolved existing-conversation send route for a later sync retry",
+                        category: .message
+                    )
+                }
+
+                resolutions[remoteMessageID] = RemoteCommittedSendMutationResolution(
+                    recordObjectIDs: matchingRecords.map(\.objectID),
+                    anchoredListConversationObjectID: anchoredListConversationObjectID,
+                    anchoredListId: anchoredListId,
+                    shouldConsumeAfterPersistence:
+                        anchoredListConversationObjectID != nil || !hasUnresolvedExistingAnchor
+                )
+            }
+
+            return resolutions
+        }
+    }
+
+    nonisolated func consumeRemoteCommittedSendMutation(
+        _ resolution: RemoteCommittedSendMutationResolution?,
+        in context: NSManagedObjectContext
+    ) {
+        guard let resolution, resolution.shouldConsumeAfterPersistence else { return }
+
+        for recordObjectID in resolution.recordObjectIDs {
+            guard let record = try? context.existingObject(
+                with: recordObjectID
+            ) as? OutboundSendMutationRecord,
+            !record.isDeleted else {
+                continue
+            }
+            context.delete(record)
+        }
+    }
+
+    private nonisolated static func resolveMutationConversation(
+        uriString: String?,
+        id: UUID?,
+        in context: NSManagedObjectContext
+    ) -> Conversation? {
+        if let uriString,
+           let uri = URL(string: uriString),
+           let coordinator = context.persistentStoreCoordinator,
+           let objectID = coordinator.managedObjectID(forURIRepresentation: uri),
+           let conversation = try? context.existingObject(with: objectID) as? Conversation,
+           !conversation.isDeleted {
+            return conversation
+        }
+
+        guard let id else { return nil }
+
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+        request.fetchLimit = 1
+        request.includesPendingChanges = true
+        guard let conversation = try? context.fetch(request).first,
+              !conversation.isDeleted else {
+            return nil
+        }
+        return conversation
+    }
+
+    private nonisolated static func recoverableListConversation(
+        listId: String,
+        excluding excludedObjectID: NSManagedObjectID,
+        in context: NSManagedObjectContext
+    ) -> Conversation? {
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "listId == %@", listId)
+        request.includesPendingChanges = true
+
+        guard let conversations = try? context.fetch(request) else {
+            return nil
+        }
+        let candidates = conversations.filter {
+            $0.objectID != excludedObjectID &&
+                !$0.isDeleted &&
+                !$0.isRetainedDrainedShell &&
+                $0.conversationType == .list
+        }
+        return ConversationRoutingPolicy().selectParticipantHashConversation(
+            from: candidates,
+            reactivateArchivedIfNeeded: true
+        )
+    }
+
+    /// Removes any local row for an excluded-mailbox message.
+    /// - Returns: false when the lookup/delete failed — the local row may
+    ///   still exist, so the message must not be reported as cleanly excluded.
+    @discardableResult
     func deleteExistingMessageIfPresent(
         id: String,
         modificationTransaction: ModificationTracker.Transaction?,
         in context: NSManagedObjectContext
-    ) async {
-        let modifiedConversationID: NSManagedObjectID? = await context.perform {
+    ) async -> Bool {
+        let (succeeded, modifiedConversationID): (Bool, NSManagedObjectID?) = await context.perform {
             let request = Message.fetchRequest()
             request.predicate = MessagePredicates.id(id)
             request.fetchLimit = 1
@@ -18,15 +187,15 @@ extension MessagePersister {
 
             do {
                 guard let message = try context.fetch(request).first else {
-                    return nil
+                    return (true, nil)
                 }
 
                 let conversationID = message.conversation?.objectID
                 context.delete(message)
-                return conversationID
+                return (true, conversationID)
             } catch {
                 Log.error("Failed to delete excluded mailbox message \(id)", category: .coreData, error: error)
-                return nil
+                return (false, nil)
             }
         }
 
@@ -36,6 +205,7 @@ extension MessagePersister {
                 in: modificationTransaction
             )
         }
+        return succeeded
     }
 
     /// Creates an attachment entity using AttachmentFactory.

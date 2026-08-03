@@ -12,7 +12,8 @@ struct ReplyMetadataBuilder {
     func buildReplyMetadata(
         conversation: ReplyConversationSnapshot,
         replyingTo: ReplyTargetSnapshot?,
-        sendAsAliases: [SendAsAlias]
+        sendAsAliases: [SendAsAlias],
+        userAliases: Set<String> = []
     ) throws -> OutboundMessageRequest.ReplyMetadata {
         let currentUserEmail = authSession.userEmail ?? ""
         let selectedFrom = try ReplyFromAddressSelector(
@@ -25,13 +26,24 @@ struct ReplyMetadataBuilder {
         )
 
         let userAddresses = Set(
-            ([currentUserEmail] + sendAsAliases.map(\.emailAddress))
+            ([currentUserEmail] + sendAsAliases.map(\.emailAddress) + Array(userAliases))
                 .map(EmailNormalizer.normalize)
                 .filter { !$0.isEmpty }
         )
 
-        let recipients = conversation.participantEmails.filter {
-            !userAddresses.contains(EmailNormalizer.normalize($0))
+        let usableRecipients: ([String]) -> [String] = { emails in
+            emails.filter {
+                let normalized = EmailNormalizer.normalize($0)
+                return !normalized.isEmpty && !userAddresses.contains(normalized)
+            }
+        }
+        let conversationRecipients = usableRecipients(conversation.participantEmails)
+        let recipients: [String]
+        if conversation.isListConversation, let replyingTo {
+            let targetRecipients = usableRecipients(replyingTo.participantEmails)
+            recipients = targetRecipients.isEmpty ? conversationRecipients : targetRecipients
+        } else {
+            recipients = conversationRecipients
         }
 
         var subject: String?

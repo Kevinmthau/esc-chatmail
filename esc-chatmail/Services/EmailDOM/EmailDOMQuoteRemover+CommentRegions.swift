@@ -12,8 +12,10 @@ extension EmailDOMQuoteRemover {
     /// Removes everything between `<!-- openHint -->` and `<!-- closeHint -->`
     /// inclusive. SwiftSoup represents these as `Comment` nodes; selectors
     /// don't reach them, so we walk the comment list directly.
-    static func removeCommentDelimitedRegions(in document: Document, openHint: String, closeHint: String) {
-        guard let body = document.body() else { return }
+    /// Returns true when a delimited region was found and removed.
+    @discardableResult
+    static func removeCommentDelimitedRegions(in document: Document, openHint: String, closeHint: String) -> Bool {
+        guard let body = document.body() else { return false }
         var openComment: Comment?
         var closeComment: Comment?
         let openMatch = openHint.lowercased()
@@ -26,7 +28,7 @@ extension EmailDOMQuoteRemover {
                 closeComment = comment
             }
         }
-        guard let open = openComment, let close = closeComment else { return }
+        guard let open = openComment, let close = closeComment else { return false }
         // Best-effort: if open and close share a parent, remove nodes between.
         // Otherwise just remove the two comments and let other passes handle the body.
         let openParent = open.parent() as? Element
@@ -49,10 +51,11 @@ extension EmailDOMQuoteRemover {
                 try? child.remove()
             }
             try? open.remove()
-            return
+            return true
         }
         try? open.remove()
         try? close.remove()
+        return true
     }
 
     private static func walkAllComments(in node: Node, visit: (Comment) -> Void) {

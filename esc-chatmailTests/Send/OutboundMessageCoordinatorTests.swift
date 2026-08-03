@@ -60,6 +60,10 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertNil(snapshot.sendNewCalls.first?.subject)
         XCTAssertEqual(snapshot.sendReplyCalls.count, 0)
         XCTAssertNotNil(queuedSubmission.conversationReference)
+        XCTAssertEqual(
+            queuedSubmission.optimisticMessageObjectID,
+            snapshot.createdOptimisticMessageObjectIDs.last
+        )
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
         XCTAssertEqual(mutationTracker.trackedConversationReferences, [queuedSubmission.conversationReference])
@@ -139,6 +143,10 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendReplyCalls.first?.originalMessage?.senderEmail, "friend@example.com")
         XCTAssertEqual(snapshot.sendReplyCalls.first?.originalMessage?.body, "Original body")
         XCTAssertTrue(snapshot.sendReplyCalls.first?.originalMessage?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
+        XCTAssertEqual(
+            queuedSubmission.optimisticMessageObjectID,
+            snapshot.createdOptimisticMessageObjectIDs.last
+        )
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
         XCTAssertEqual(mutationTracker.trackedConversationReferences, [queuedSubmission.conversationReference])
@@ -509,6 +517,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
 
     struct Snapshot {
         let createOptimisticCalls: [CreateOptimisticCall]
+        let createdOptimisticMessageObjectIDs: [NSManagedObjectID]
         let sendNewCalls: [SendNewCall]
         let sendReplyCalls: [SendReplyCall]
         let markAttachmentsAsUploadingCalls: [[LocalAttachmentReference]]
@@ -519,6 +528,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     private var optimisticMessages: [String: Message] = [:]
     private var remoteCommittedResults: [String: GmailSendService.SendResult] = [:]
     private var createCalls: [CreateOptimisticCall] = []
+    private var createdOptimisticMessageObjectIDs: [NSManagedObjectID] = []
     private var newCalls: [SendNewCall] = []
     private var replyCalls: [SendReplyCall] = []
     private var markUploadingCalls: [[LocalAttachmentReference]] = []
@@ -534,6 +544,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         queue.sync {
             Snapshot(
                 createOptimisticCalls: createCalls,
+                createdOptimisticMessageObjectIDs: createdOptimisticMessageObjectIDs,
                 sendNewCalls: newCalls,
                 sendReplyCalls: replyCalls,
                 markAttachmentsAsUploadingCalls: markUploadingCalls
@@ -585,10 +596,15 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         message.internalDate = Date()
         message.isFromMe = true
         message.conversation = conversation
+        try context.obtainPermanentIDs(for: [message])
 
+        queue.sync {
+            createdOptimisticMessageObjectIDs.append(message.objectID)
+        }
         optimisticMessages[message.id] = message
         return OptimisticSendHandle(
             optimisticMessageID: message.id,
+            optimisticMessageObjectID: message.objectID,
             conversationReference: ConversationReference(objectID: conversation.objectID)
         )
     }

@@ -89,7 +89,7 @@ struct MessageListPaginator {
         query: String,
         messageFetcher: MessageFetcher,
         progressHandler: @escaping (PagedSyncCheckpoint) async -> Void,
-        messageHandler: @escaping ([GmailMessage]) async -> Void,
+        messageHandler: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport,
         pageCompletion: (() async throws -> Void)? = nil
     ) async throws -> BatchProcessingResult {
         try await fetchAndProcess(
@@ -108,13 +108,15 @@ struct MessageListPaginator {
         batchSize: Int,
         messageFetcher: MessageFetcher,
         progressHandler: @escaping (PagedSyncCheckpoint) async -> Void,
-        messageHandler: @escaping ([GmailMessage]) async -> Void,
+        messageHandler: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport,
         pageCompletion: (() async throws -> Void)? = nil
     ) async throws -> BatchProcessingResult {
         var listedCount = 0
         var processedCount = 0
         var successfulCount = 0
         var failedIds: [String] = []
+        var goneIds: [String] = []
+        var persistence = MessagePersistenceReport()
 
         let stream = MessageIDPageStream(query: query, messageFetcher: messageFetcher)
         try await stream.forEachPage { page in
@@ -153,12 +155,14 @@ struct MessageListPaginator {
                     )
                 )
             } messageHandler: { messages in
-                await messageHandler(messages)
+                try await messageHandler(messages)
             }
 
             processedCount += pageResult.totalProcessed
             successfulCount += pageResult.successfulCount
             failedIds.append(contentsOf: pageResult.failedIds)
+            goneIds.append(contentsOf: pageResult.goneIds)
+            persistence.merge(pageResult.persistence)
 
             await progressHandler(
                 PagedSyncCheckpoint(
@@ -179,7 +183,9 @@ struct MessageListPaginator {
         return BatchProcessingResult(
             totalProcessed: processedCount,
             successfulCount: successfulCount,
-            failedIds: failedIds
+            failedIds: failedIds,
+            goneIds: goneIds,
+            persistence: persistence
         )
     }
 }

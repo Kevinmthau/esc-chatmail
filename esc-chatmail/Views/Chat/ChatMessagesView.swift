@@ -4,18 +4,56 @@ import UIKit
 import Contacts
 import Combine
 
+@MainActor
+private final class ChatMessagesSession: ObservableObject {
+    let scrollState: VirtualScrollState
+    let coordinator: ChatMessagesCoordinator
+    let messageBubbleLoader: MessageBubbleLoader
+
+    private var cancellables = Set<AnyCancellable>()
+
+    init(
+        conversation: Conversation,
+        viewModel: ChatViewModel,
+        chatDependencies: ChatDependencies
+    ) {
+        let scrollState = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: chatDependencies.storage.viewContext,
+            makeBackgroundContext: chatDependencies.storage.makeBackgroundContext
+        )
+        self.scrollState = scrollState
+        self.messageBubbleLoader = chatDependencies.content.makeMessageBubbleLoader()
+        self.coordinator = ChatMessagesCoordinator(
+            scrollState: scrollState,
+            viewModel: viewModel,
+            chatDependencies: chatDependencies,
+            initialPresentationAnchor: .bottom
+        )
+
+        scrollState.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        coordinator.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+    }
+}
+
 struct ChatMessagesView: View {
     let conversation: Conversation
-    @ObservedObject var viewModel: ChatViewModel
+    let viewModel: ChatViewModel
     let chatDependencies: ChatDependencies
+    let isEffectivelyOneToOneConversation: Bool
     let isChatActiveAndUncovered: Bool
     var isTextFieldFocused: FocusState<Bool>.Binding
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
 
-    @StateObject private var scrollState: VirtualScrollState
-    @StateObject private var coordinator: ChatMessagesCoordinator
+    @StateObject private var session: ChatMessagesSession
     @State private var replyBarHeight: CGFloat = 0
     @State private var isBottomAnchorVisible = false
+    @GestureState private var isScrollGestureActive = false
     @ObservedObject private var keyboard = KeyboardResponder.shared
     @Namespace private var bottomID
 
@@ -24,6 +62,7 @@ struct ChatMessagesView: View {
         conversation: Conversation,
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
+        isEffectivelyOneToOneConversation: Bool,
         isChatActiveAndUncovered: Bool,
         isTextFieldFocused: FocusState<Bool>.Binding,
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
@@ -31,43 +70,64 @@ struct ChatMessagesView: View {
         self.conversation = conversation
         self.viewModel = viewModel
         self.chatDependencies = chatDependencies
+        self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.isChatActiveAndUncovered = isChatActiveAndUncovered
         self.isTextFieldFocused = isTextFieldFocused
         self.onOpenFullMessage = onOpenFullMessage
 
-        let scrollState = VirtualScrollState(
-            conversationId: conversation.id.uuidString,
-            initialWindowPosition: .end,
-            viewContext: chatDependencies.storage.viewContext,
-            makeBackgroundContext: chatDependencies.storage.makeBackgroundContext
-        )
-        _scrollState = StateObject(wrappedValue: scrollState)
-        _coordinator = StateObject(
-            wrappedValue: ChatMessagesCoordinator(
-                scrollState: scrollState,
+        _session = StateObject(
+            wrappedValue: ChatMessagesSession(
+                conversation: conversation,
                 viewModel: viewModel,
                 chatDependencies: chatDependencies
             )
         )
     }
 
+    private var scrollState: VirtualScrollState {
+        session.scrollState
+    }
+
+    private var coordinator: ChatMessagesCoordinator {
+        session.coordinator
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             let displayedMessages = scrollState.visibleMessages
+            let displayedMessageIDs = displayedMessages.map(\.objectID)
+            let groupingMessages = senderGroupingMessages(for: displayedMessages)
+            let groupingMessageIDs = groupingMessages.map(\.objectID)
             let keyboardOffset = keyboardAvoidanceOffset()
             let bottomContentInset = max(1, replyBarHeight + keyboardOffset)
-            let isWaitingForInitialWindow = !scrollState.isInitialLoadComplete
+            let initialLoadPhase = scrollState.initialLoadPhase
+            let isWaitingForInitialWindow = initialLoadPhase == .loading
+            let isInitialLoadUnavailable =
+                initialLoadPhase == .empty || initialLoadPhase == .failed
             let isHidingInitialContent = !coordinator.isReadyToShow && !displayedMessages.isEmpty
+            let shouldHideMessages =
+                isWaitingForInitialWindow || isInitialLoadUnavailable || isHidingInitialContent
 
             ZStack(alignment: .bottom) {
                 ZStack {
-                    if !isWaitingForInitialWindow {
-                        messagesScrollView(displayedMessages: displayedMessages, bottomContentInset: bottomContentInset)
-                            .opacity(isHidingInitialContent ? 0 : 1)
-                    }
+                    messagesScrollView(
+                        displayedMessages: displayedMessages,
+                        bottomContentInset: bottomContentInset,
+                        scrollProxy: proxy
+                    )
+                    .opacity(shouldHideMessages ? 0 : 1)
+                    .accessibilityHidden(shouldHideMessages)
+                    // Keep the scroll gesture available while loaded rows are
+                    // waiting for their initial anchor. Taking control reveals
+                    // the rows and cancels further forced anchoring.
+                    .allowsHitTesting(initialLoadPhase == .loaded)
 
-                    if isWaitingForInitialWindow || isHidingInitialContent {
-                        initialLoadPlaceholder(bottomInset: bottomContentInset)
+                    if shouldHideMessages {
+                        initialLoadOverlay(
+                            phase: initialLoadPhase,
+                            isWaitingForInitialAnchor: isHidingInitialContent,
+                            bottomInset: bottomContentInset
+                        )
                     }
                 }
 
@@ -75,13 +135,37 @@ struct ChatMessagesView: View {
                     .padding(.bottom, keyboardOffset)
             }
             .ignoresSafeArea(.keyboard, edges: .bottom)
-            .onAppear { handleAppear(proxy: proxy, displayedMessages: displayedMessages) }
-            .onDisappear { coordinator.handleDisappear() }
-            .onChange(of: senderGroupingMessages(for: displayedMessages).map(\.objectID)) { oldIDs, newIDs in
-                handleDisplayedMessagesChange(oldIDs: oldIDs, newIDs: newIDs, displayedMessages: displayedMessages, proxy: proxy)
+            .onAppear {
+                handleAppear(
+                    proxy: proxy,
+                    displayedMessages: displayedMessages,
+                    groupingMessages: groupingMessages
+                )
+            }
+            .onDisappear {
+                coordinator.handleDisappear()
+                scrollState.cleanup()
+            }
+            .onChange(of: groupingMessageIDs) { oldIDs, newIDs in
+                handleDisplayedMessagesChange(
+                    oldIDs: oldIDs,
+                    newIDs: newIDs,
+                    displayedMessages: displayedMessages,
+                    groupingMessages: groupingMessages,
+                    proxy: proxy
+                )
+            }
+            .onChange(of: displayedMessageIDs) { _, _ in
+                validateReplyTargetAfterMessageCollectionChange()
             }
             .onChange(of: scrollState.isInitialLoadComplete) { _, isComplete in
                 handleInitialWindowLoaded(isComplete: isComplete, proxy: proxy)
+            }
+            .onChange(of: coordinator.isReadyToShow) { _, isReady in
+                guard isReady else { return }
+                ChatViewPerformanceSignposts.contentReady(
+                    conversationID: conversation.id.uuidString
+                )
             }
             .onReceive(scrollState.insertedVisibleMessageEvents) { event in
                 coordinator.handleInsertedVisibleMessageEvent(
@@ -99,6 +183,7 @@ struct ChatMessagesView: View {
                 )
             }
             .onChange(of: scrollState.totalMessageCount) { oldCount, newCount in
+                validateReplyTargetAfterMessageCollectionChange()
                 coordinator.handleMessageCountChange(
                     oldCount: oldCount,
                     newCount: newCount,
@@ -107,7 +192,8 @@ struct ChatMessagesView: View {
                     totalMessageCount: newCount,
                     stabilizeBottomAnchor: keyboard.currentHeight > 0 || isTextFieldFocused.wrappedValue,
                     isInitialWindowLoaded: scrollState.isInitialLoadComplete,
-                    isShowingLatestWindow: scrollState.isShowingLatestWindow
+                    isShowingLatestWindow: scrollState.isShowingLatestWindow,
+                    isBottomAnchorVisible: isBottomAnchorVisible
                 ) { performBottomAnchor($0, proxy: proxy) }
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
@@ -136,7 +222,27 @@ struct ChatMessagesView: View {
         }
     }
 
-    private func messagesScrollView(displayedMessages: [ChatMessageRowModel], bottomContentInset: CGFloat) -> some View {
+    private func messagesScrollView(
+        displayedMessages: [ChatMessageRowModel],
+        bottomContentInset: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) -> some View {
+        GeometryReader { viewport in
+            messagesScrollViewContent(
+                displayedMessages: displayedMessages,
+                bottomContentInset: bottomContentInset,
+                viewportHeight: viewport.size.height,
+                scrollProxy: scrollProxy
+            )
+        }
+    }
+
+    private func messagesScrollViewContent(
+        displayedMessages: [ChatMessageRowModel],
+        bottomContentInset: CGFloat,
+        viewportHeight: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) -> some View {
         ScrollView {
             LazyVStack(spacing: 8) {
                 ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
@@ -150,11 +256,11 @@ struct ChatMessagesView: View {
 
                     MessageBubble(
                         message: message,
-                        messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
+                        messageBubbleLoader: session.messageBubbleLoader,
                         htmlContentHandler: chatDependencies.content.htmlContentHandler,
                         fullEmailOpener: chatDependencies.fullEmailOpener,
                         originalEmailSourceWarmer: chatDependencies.content.originalEmailSourceWarmer,
-                        isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
+                        isEffectivelyOneToOneConversation: isEffectivelyOneToOneConversation,
                         contactRefreshToken: coordinator.contactRefreshToken,
                         isLastFromSender: isLastFromSender,
                         onOpenFullMessage: onOpenFullMessage
@@ -171,41 +277,90 @@ struct ChatMessagesView: View {
                 Color.clear
                     .frame(height: 1)
                     .id(bottomID)
-                    .anchorPreference(key: ChatBottomAnchorBoundsPreferenceKey.self, value: .bounds) {
-                        $0
+                    .anchorPreference(key: ChatScrollGeometryPreferenceKey.self, value: .bounds) {
+                        ChatScrollGeometryPreference(bottomAnchorBounds: $0)
                     }
             }
             .padding(.horizontal)
             .padding(.top, 8)
+            .frame(minHeight: viewportHeight, alignment: .top)
+            .transformAnchorPreference(
+                key: ChatScrollGeometryPreferenceKey.self,
+                value: .bounds
+            ) { preference, contentBounds in
+                preference.contentBounds = contentBounds
+            }
             .contentShape(Rectangle())
             .onTapGesture { isTextFieldFocused.wrappedValue = false }
         }
         .defaultScrollAnchor(.top)
         .scrollDismissesKeyboard(.interactively)
-        .overlayPreferenceValue(ChatBottomAnchorBoundsPreferenceKey.self) { anchor in
-            GeometryReader { proxy in
-                let frame = anchor.map { proxy[$0] } ?? .null
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 2)
+                .updating($isScrollGestureActive) { _, isActive, _ in
+                    isActive = true
+                }
+                .onChanged { _ in handleUserScrollInteraction() }
+        )
+        .overlayPreferenceValue(ChatScrollGeometryPreferenceKey.self) { preference in
+            GeometryReader { geometryProxy in
+                let frame = preference.bottomAnchorBounds
+                    .map { geometryProxy[$0] } ?? .null
+                let contentFrame = preference.contentBounds
+                    .map { geometryProxy[$0] } ?? .null
+                let geometry = ChatScrollGeometry(
+                    bottomAnchorFrame: frame,
+                    contentFrame: contentFrame,
+                    viewportSize: geometryProxy.size
+                )
                 Color.clear
                     .id(scrollState.latestWindowLayoutID)
                     .onAppear {
-                        handleLatestWindowLayout(
-                            frame: frame,
-                            viewportSize: proxy.size,
-                            layoutID: scrollState.latestWindowLayoutID
+                        handleBottomAnchorGeometryUpdate(
+                            geometry: geometry,
+                            layoutID: scrollState.latestWindowLayoutID,
+                            scrollProxy: scrollProxy
                         )
                     }
-                    .onChange(of: frame) { _, newFrame in
-                        updateBottomAnchorVisibility(frame: newFrame, viewportSize: proxy.size)
+                    .onChange(of: geometry) { _, newGeometry in
+                        handleBottomAnchorGeometryUpdate(
+                            geometry: newGeometry,
+                            layoutID: scrollState.latestWindowLayoutID,
+                            scrollProxy: scrollProxy
+                        )
                     }
-                    .onChange(of: proxy.size) { _, newSize in
-                        updateBottomAnchorVisibility(frame: frame, viewportSize: newSize)
+                    .onChange(of: coordinator.initialAnchorGeometryCheckID) { _, _ in
+                        handleBottomAnchorGeometryUpdate(
+                            geometry: geometry,
+                            layoutID: scrollState.latestWindowLayoutID,
+                            scrollProxy: scrollProxy
+                        )
+                    }
+                    .onChange(of: isScrollGestureActive) { _, _ in
+                        handleBottomAnchorGeometryUpdate(
+                            geometry: geometry,
+                            layoutID: scrollState.latestWindowLayoutID,
+                            scrollProxy: scrollProxy
+                        )
+                    }
+                    .onChange(of: coordinator.isUserScrollTakeoverActive) { _, _ in
+                        handleBottomAnchorGeometryUpdate(
+                            geometry: geometry,
+                            layoutID: scrollState.latestWindowLayoutID,
+                            scrollProxy: scrollProxy
+                        )
                     }
             }
             .allowsHitTesting(false)
         }
     }
 
-    private func handleAppear(proxy: ScrollViewProxy, displayedMessages: [ChatMessageRowModel]) {
+    private func handleAppear(
+        proxy: ScrollViewProxy,
+        displayedMessages: [ChatMessageRowModel],
+        groupingMessages: [ChatMessageRowModel]
+    ) {
+        scrollState.resume()
         let messageCount = totalMessageCountForCoordinator()
         if let first = displayedMessages.first, let last = displayedMessages.last {
             Log.diagnostic(
@@ -227,7 +382,7 @@ struct ChatMessagesView: View {
             messageCount: messageCount,
             lastMessage: latestMessageForCoordinator(),
             visibleMessages: scrollState.visibleMessages,
-            senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages),
+            senderGroupingMessages: groupingMessages,
             totalMessageCount: scrollState.totalMessageCount,
             isInitialWindowLoaded: scrollState.isInitialLoadComplete
         ) { performBottomAnchor($0, proxy: proxy) }
@@ -237,21 +392,18 @@ struct ChatMessagesView: View {
         oldIDs: [NSManagedObjectID],
         newIDs: [NSManagedObjectID],
         displayedMessages: [ChatMessageRowModel],
+        groupingMessages: [ChatMessageRowModel],
         proxy: ScrollViewProxy
     ) {
         coordinator.handleDisplayedMessagesChange(
             oldIDs: oldIDs,
             newIDs: newIDs,
             visibleMessages: displayedMessages,
-            senderGroupingMessages: senderGroupingMessages(for: displayedMessages),
+            senderGroupingMessages: groupingMessages,
             messageCount: totalMessageCountForCoordinator(),
             totalMessageCount: scrollState.totalMessageCount,
             isInitialWindowLoaded: scrollState.isInitialLoadComplete
         ) { performBottomAnchor($0, proxy: proxy) }
-
-        if oldIDs.last != newIDs.last, scrollState.isShowingLatestWindow {
-            updateReplyTargetIfNewLatestMessageIsVisible()
-        }
     }
 
     private func handleInitialWindowLoaded(isComplete: Bool, proxy: ScrollViewProxy) {
@@ -267,34 +419,24 @@ struct ChatMessagesView: View {
     }
 
     private func replyBarOverlay(proxy: ScrollViewProxy) -> some View {
-        VStack(spacing: 0) {
-            Divider()
-            ChatReplyBar(
-                replyText: $viewModel.replyText,
-                replyingTo: $viewModel.replyingTo,
-                conversation: conversation,
-                onSend: { attachments in
-                    let didSend = await viewModel.sendReply(with: attachments)
-                    if didSend {
-                        coordinator.handleReplySendCompleted(
-                            messageCount: totalMessageCountForCoordinator(),
-                            totalMessageCount: scrollState.totalMessageCount,
-                            isInitialWindowLoaded: scrollState.isInitialLoadComplete
-                        ) { performBottomAnchor($0, proxy: proxy) }
-                    }
-                    return didSend
-                },
-                focusBinding: isTextFieldFocused
-            )
+        ChatReplyComposerOverlay(
+            composerState: viewModel.composerState,
+            conversation: conversation,
+            measuredHeight: $replyBarHeight,
+            focusBinding: isTextFieldFocused
+        ) {
+            let anchorIntent = coordinator.capturePostSendAnchorIntent()
+            guard let result = await viewModel.sendReply() else { return false }
+
+            coordinator.handleReplySendCompleted(
+                targetMessageID: result.optimisticMessageObjectID,
+                anchorIntent: anchorIntent,
+                messageCount: totalMessageCountForCoordinator(),
+                totalMessageCount: scrollState.totalMessageCount,
+                isInitialWindowLoaded: scrollState.isInitialLoadComplete
+            ) { performBottomAnchor($0, proxy: proxy) }
+            return true
         }
-        .background(Color(UIColor.systemBackground))
-        .background(
-            GeometryReader { geometry in
-                Color.clear
-                    .onAppear { replyBarHeight = geometry.size.height }
-                    .onChange(of: geometry.size.height) { _, newHeight in replyBarHeight = newHeight }
-            }
-        )
     }
 
     private func initialLoadPlaceholder(bottomInset: CGFloat) -> some View {
@@ -304,25 +446,84 @@ struct ChatMessagesView: View {
             .accessibilityLabel("Loading messages")
     }
 
+    @ViewBuilder
+    private func initialLoadOverlay(
+        phase: VirtualScrollState.InitialLoadPhase,
+        isWaitingForInitialAnchor: Bool,
+        bottomInset: CGFloat
+    ) -> some View {
+        switch phase {
+        case .failed:
+            ContentUnavailableView {
+                SwiftUI.Label("Couldn’t Load Messages", systemImage: "exclamationmark.bubble")
+            } description: {
+                Text(scrollState.initialLoadFailureReason ?? "Please try again.")
+            } actions: {
+                Button("Try Again") {
+                    scrollState.retryInitialLoad()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.bottom, bottomInset)
+
+        case .empty:
+            ContentUnavailableView {
+                SwiftUI.Label("No Messages", systemImage: "bubble.left.and.bubble.right")
+            } description: {
+                Text("There aren’t any visible messages in this conversation.")
+            }
+            .padding(.bottom, bottomInset)
+
+        case .loading, .loaded:
+            if phase == .loading || isWaitingForInitialAnchor {
+                initialLoadPlaceholder(bottomInset: bottomInset)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
     private func keyboardAvoidanceOffset() -> CGFloat {
         guard keyboard.isKeyboardVisible else { return 0 }
         return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
     }
 
-    private func updateBottomAnchorVisibility(frame: CGRect, viewportSize: CGSize) {
-        let isVisible = isBottomAnchorVisible(frame: frame, viewportSize: viewportSize)
-        guard isBottomAnchorVisible != isVisible else { return }
-        isBottomAnchorVisible = isVisible
-    }
-
-    private func handleLatestWindowLayout(
-        frame: CGRect,
-        viewportSize: CGSize,
-        layoutID: UUID
+    private func handleBottomAnchorGeometryUpdate(
+        geometry: ChatScrollGeometry,
+        layoutID: UUID,
+        scrollProxy: ScrollViewProxy
     ) {
-        let isVisible = isBottomAnchorVisible(frame: frame, viewportSize: viewportSize)
+        let frame = geometry.bottomAnchorFrame
+        let rawIsVisible = isBottomAnchorVisible(
+            frame: frame,
+            viewportSize: geometry.viewportSize
+        )
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: rawIsVisible,
+            isUserScrollInteractionActive: isScrollGestureActive,
+            contentMinY: geometry.contentFrame.isNull
+                ? nil
+                : geometry.contentFrame.minY,
+            contentHeight: geometry.contentFrame.isNull
+                ? nil
+                : geometry.contentFrame.height,
+            viewportHeight: geometry.viewportSize.height
+        ) { performBottomAnchor($0, proxy: scrollProxy) }
+
+        let isVisible =
+            scrollState.initialLoadPhase == .loaded &&
+            coordinator.isReadyToShow &&
+            !isScrollGestureActive &&
+            !coordinator.isUserScrollTakeoverActive &&
+            rawIsVisible
+        let becameVisible = !isBottomAnchorVisible && isVisible
         if isBottomAnchorVisible != isVisible {
             isBottomAnchorVisible = isVisible
+        }
+        scrollState.setFollowsLatestInsertions(isVisible)
+        if becameVisible, scrollState.initialLoadPhase == .loaded {
+            ChatViewPerformanceSignposts.bottomAnchorVisible(
+                conversationID: conversation.id.uuidString
+            )
         }
         coordinator.handleLatestWindowLayout(
             layoutID: layoutID,
@@ -330,6 +531,14 @@ struct ChatMessagesView: View {
             isShowingLatestWindow: scrollState.isShowingLatestWindow,
             isBottomAnchorVisible: isVisible
         )
+    }
+
+    private func handleUserScrollInteraction() {
+        if isBottomAnchorVisible {
+            isBottomAnchorVisible = false
+        }
+        scrollState.setFollowsLatestInsertions(false)
+        coordinator.handleUserScrollInteraction()
     }
 
     private func isBottomAnchorVisible(frame: CGRect, viewportSize: CGSize) -> Bool {
@@ -350,15 +559,18 @@ struct ChatMessagesView: View {
     }
 
     private func latestMessageForCoordinator() -> Message? {
-        if let latestVisibleMessage = resolvedMessage(for: scrollState.visibleMessages.last) {
+        if scrollState.isShowingLatestWindow,
+           let latestVisibleMessage = resolvedMessage(for: scrollState.visibleMessages.last) {
             return latestVisibleMessage
         }
 
         return viewModel.latestVisibleMessage()
     }
 
-    private func updateReplyTargetIfNewLatestMessageIsVisible() {
-        guard let latestMessage = latestMessageForCoordinator() else { return }
+    private func validateReplyTargetAfterMessageCollectionChange() {
+        let latestMessage = scrollState.isShowingLatestWindow
+            ? latestMessageForCoordinator()
+            : nil
         viewModel.updateReplyingToIfNewSubject(lastMessage: latestMessage)
     }
 
@@ -390,7 +602,10 @@ struct ChatMessagesView: View {
     }
 
     private func senderRunKey(for message: ChatMessageRowModel?) -> String? {
-        coordinator.senderRunKey(for: message, isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation)
+        coordinator.senderRunKey(
+            for: message,
+            isEffectivelyOneToOneConversation: isEffectivelyOneToOneConversation
+        )
     }
 
     private func senderGroupingMessages(for displayedMessages: [ChatMessageRowModel]) -> [ChatMessageRowModel] {
@@ -444,13 +659,67 @@ struct ChatMessagesView: View {
     }
 }
 
-private struct ChatBottomAnchorBoundsPreferenceKey: PreferenceKey {
-    static let defaultValue: Anchor<CGRect>? = nil
+private struct ChatReplyComposerOverlay: View {
+    @ObservedObject var composerState: ChatComposerState
+    let conversation: Conversation
+    @Binding var measuredHeight: CGFloat
+    var focusBinding: FocusState<Bool>.Binding
+    let onSend: () async -> Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            ChatReplyBar(
+                replyText: $composerState.replyText,
+                replyingTo: $composerState.replyingTo,
+                attachments: $composerState.attachments,
+                conversation: conversation,
+                onSend: onSend,
+                focusBinding: focusBinding
+            )
+        }
+        .background(Color(UIColor.systemBackground))
+        .background(
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { measuredHeight = geometry.size.height }
+                    .onChange(of: geometry.size.height) { _, newHeight in
+                        measuredHeight = newHeight
+                    }
+            }
+        )
+    }
+}
+
+private struct ChatScrollGeometryPreference {
+    var bottomAnchorBounds: Anchor<CGRect>?
+    var contentBounds: Anchor<CGRect>?
+
+    init(
+        bottomAnchorBounds: Anchor<CGRect>? = nil,
+        contentBounds: Anchor<CGRect>? = nil
+    ) {
+        self.bottomAnchorBounds = bottomAnchorBounds
+        self.contentBounds = contentBounds
+    }
+}
+
+private struct ChatScrollGeometry: Equatable {
+    let bottomAnchorFrame: CGRect
+    let contentFrame: CGRect
+    let viewportSize: CGSize
+}
+
+private struct ChatScrollGeometryPreferenceKey: PreferenceKey {
+    static let defaultValue = ChatScrollGeometryPreference()
 
     static func reduce(
-        value: inout Anchor<CGRect>?,
-        nextValue: () -> Anchor<CGRect>?
+        value: inout ChatScrollGeometryPreference,
+        nextValue: () -> ChatScrollGeometryPreference
     ) {
-        value = nextValue() ?? value
+        let nextValue = nextValue()
+        value.bottomAnchorBounds =
+            nextValue.bottomAnchorBounds ?? value.bottomAnchorBounds
+        value.contentBounds = nextValue.contentBounds ?? value.contentBounds
     }
 }

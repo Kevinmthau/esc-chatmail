@@ -376,4 +376,65 @@ final class PendingActionsManagerTests: XCTestCase {
 
         XCTAssertEqual(bgCount, 1, "Saved changes should be visible after save")
     }
+
+    // MARK: - Quota exhaustion
+
+    /// Quota exhaustion is account-scoped: it must stop the processing run
+    /// with the failing action requeued untouched, instead of abandoning it
+    /// and burning every remaining action's retry budget on doomed requests.
+    func testProcessAllPendingActions_quotaExhaustionStopsRunWithoutVerdicts() async throws {
+        let executor = QuotaExhaustedActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+
+        _ = PendingActionBuilder().markAsRead().forMessage("m1").pending().createdMinutesAgo(2).build(in: context)
+        _ = PendingActionBuilder().markAsRead().forMessage("m2").pending().createdMinutesAgo(1).build(in: context)
+        try testStack.saveViewContext()
+
+        await manager.processAllPendingActions()
+
+        XCTAssertEqual(
+            executor.executeCallCount, 1,
+            "Quota exhaustion must stop the run - remaining actions would fail identically"
+        )
+
+        context.refreshAllObjects()
+        let request = PendingAction.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
+        let actions = try context.fetch(request)
+        XCTAssertEqual(actions.map(\.status), ["pending", "pending"], "Quota exhaustion is not a verdict on the actions")
+        XCTAssertEqual(actions.map(\.retryCount), [0, 0], "Quota exhaustion must not burn retry budget toward abandonment")
+    }
+}
+
+// MARK: - Quota test doubles
+
+private final class QuotaExhaustedActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _executeCallCount = 0
+
+    var executeCallCount: Int {
+        lock.withLock { _executeCallCount }
+    }
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        lock.withLock { _executeCallCount += 1 }
+        throw APIError.quotaExhausted("Daily Limit Exceeded")
+    }
+}
+
+private final class AlwaysConnectedNetworkMonitor: NetworkMonitorProtocol {
+    var isConnected: Bool { true }
+    var onConnectivityChange: ((Bool) -> Void)?
+    func start() {}
+    func stop() {}
 }

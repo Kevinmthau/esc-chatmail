@@ -3,12 +3,13 @@ import CoreData
 
 protocol BackgroundSyncMessageCoordinating: AnyObject, Sendable {
     func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String>
+    @discardableResult
     func saveMessage(
         _ gmailMessage: GmailMessage,
         labelIds: Set<String>?,
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
-    ) async
+    ) async throws -> MessagePersistDisposition
     func updateConversationRollups(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
@@ -108,11 +109,21 @@ final class BackgroundMessageProcessor {
         let syncCoordinator = await MainActor.run { self.syncCoordinator }
 
         if !changeSet.messageIdsToDelete.isEmpty {
-            let deletedConversationIDs = await deleteMessages(
-                messageIds: Array(changeSet.messageIdsToDelete),
-                modificationTransaction: modificationTransaction,
-                in: context
-            )
+            let deletedConversationIDs: Set<NSManagedObjectID>
+            do {
+                deletedConversationIDs = try await deleteMessages(
+                    messageIds: Array(changeSet.messageIdsToDelete),
+                    modificationTransaction: modificationTransaction,
+                    in: context
+                )
+            } catch {
+                Log.error("Background history processing failed to apply deletions", category: .background, error: error)
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+                return BackgroundMessageProcessingResult(
+                    fetchedCount: 0,
+                    failedFetchCount: 1
+                )
+            }
             let deletionSaved = await rollupMutationSerializer.performSyncMutation(
                 conversationIDs: deletedConversationIDs,
                 in: context
@@ -257,13 +268,26 @@ final class BackgroundMessageProcessor {
                 for await (messageId, result) in group {
                     switch result {
                     case .success(let message):
-                        await syncCoordinator.saveMessage(
-                            message,
-                            labelIds: labelIds,
-                            modificationTransaction: transaction,
-                            in: context
-                        )
-                        successCount += 1
+                        do {
+                            let disposition = try await syncCoordinator.saveMessage(
+                                message,
+                                labelIds: labelIds,
+                                modificationTransaction: transaction,
+                                in: context
+                            )
+                            // Excluded and deterministically-unprocessable
+                            // messages are handled outcomes; only a real
+                            // persistence failure may block the cursor.
+                            if disposition == .failed {
+                                failedCount += 1
+                                Log.warning("Failed to persist message \(messageId) in background", category: .background)
+                            } else {
+                                successCount += 1
+                            }
+                        } catch {
+                            failedCount += 1
+                            Log.error("Run-fatal persistence failure in background sync", category: .background, error: error)
+                        }
                     case .failure(let error):
                         failedCount += 1
                         Log.warning("Failed to fetch message \(messageId) in background: \(error.localizedDescription)", category: .background)
@@ -347,36 +371,33 @@ final class BackgroundMessageProcessor {
         }
     }
 
-    /// Deletes messages from Core Data
+    /// Deletes messages from Core Data. Throws on Core Data failure — like
+    /// the foreground path, a lost deletion is indistinguishable from "no
+    /// local rows matched" and must not let the background cursor advance.
     @discardableResult
     func deleteMessages(
         messageIds: [String],
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
-    ) async -> Set<NSManagedObjectID> {
-        let modifiedConversationIDs: Set<NSManagedObjectID> = await context.perform {
+    ) async throws -> Set<NSManagedObjectID> {
+        let modifiedConversationIDs: Set<NSManagedObjectID> = try await context.perform {
             let fetchRequest: NSFetchRequest<Message> = Message.fetchRequest()
             fetchRequest.predicate = MessagePredicates.ids(messageIds)
             fetchRequest.fetchBatchSize = 100
             fetchRequest.relationshipKeyPathsForPrefetching = ["conversation", "attachments"]
 
-            do {
-                let messages = try context.fetch(fetchRequest)
-                var conversationIDs: Set<NSManagedObjectID> = []
-                conversationIDs.reserveCapacity(messages.count)
+            let messages = try context.fetch(fetchRequest)
+            var conversationIDs: Set<NSManagedObjectID> = []
+            conversationIDs.reserveCapacity(messages.count)
 
-                for message in messages {
-                    if let conversationID = message.conversation?.objectID {
-                        conversationIDs.insert(conversationID)
-                    }
-                    context.delete(message)
+            for message in messages {
+                if let conversationID = message.conversation?.objectID {
+                    conversationIDs.insert(conversationID)
                 }
-
-                return conversationIDs
-            } catch {
-                Log.error("Failed to batch delete background messages", category: .background, error: error)
-                return []
+                context.delete(message)
             }
+
+            return conversationIDs
         }
 
         if !modifiedConversationIDs.isEmpty {

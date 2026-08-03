@@ -114,10 +114,6 @@ struct SyncConfig {
     /// This prevents sync from getting permanently stuck on unfetchable messages
     static let maxConsecutiveSyncFailures = 3
 
-    /// Maximum number of messages that can fail before we advance historyId anyway
-    /// If too many messages fail, we log them and move on to prevent sync deadlock
-    static let maxFailedMessagesBeforeAdvance = 10
-
     /// Maximum number of retry attempts for an abandoned message before giving up on it
     static let maxAbandonedMessageRetries = 5
 

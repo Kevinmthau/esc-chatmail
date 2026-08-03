@@ -293,6 +293,56 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(contactsResolver.lookupCount, 1)
     }
 
+    func testLoadParticipants_latestFromHeaderNameWinsOverOlderMultiWordName() async throws {
+        // A rebranded sender ("Technology Brothers" → "TBPN") must resolve to
+        // the CURRENT From name even though the old name has more words and
+        // still backs the stored Person row.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Technology Brothers")
+            .withParticipantHash(calculateParticipantHash(from: ["tbpn@mail.beehiiv.com"]))
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("tbpn@mail.beehiiv.com")
+            .withDisplayName("Technology Brothers")
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        _ = MessageBuilder()
+            .withId("participant-loader-rebrand-older")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "Technology Brothers")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("participant-loader-rebrand-newer")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "TBPN")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.formattedDisplayName, "TBPN")
+    }
+
     func testLoadParticipants_preservesExplicitBrandNameMatchingEmailLocalPart() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("Unknown Contact")

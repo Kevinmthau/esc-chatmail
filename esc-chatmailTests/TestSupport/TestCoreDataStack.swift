@@ -7,9 +7,12 @@ import CoreData
 final class TestCoreDataStack: @unchecked Sendable {
 
     /// The single `NSManagedObjectModel` instance for the whole test process —
-    /// the same instance the host app's `CoreDataStack.shared` loaded at launch
-    /// (the app skips its runtime uniqueness-constraint mutation under XCTest,
-    /// so this model keeps the constraint-free semantics tests rely on).
+    /// the same instance the host app's `CoreDataStack.shared` loaded at launch.
+    /// Note: the model is NOT constraint-free — `Message.id`,
+    /// `AbandonedSyncMessage.gmailMessageId`, and `SyncCheckpoint.kind`
+    /// uniqueness constraints are declared in the .xcdatamodel itself, so test
+    /// stores enforce them exactly like production, resolved by the merge
+    /// policy. (ModelConstraintMetadataTests pins the declared set.)
     ///
     /// One model per process matters twice over:
     /// - `NSPersistentContainer(name:)` would load a fresh model per test
@@ -50,10 +53,8 @@ final class TestCoreDataStack: @unchecked Sendable {
         case inMemory
         /// Per-instance temp-file SQLite store. Mirrors the production store
         /// options (persistent history tracking ON) for tests that exercise
-        /// history-dependent behavior. Divergence from production: the shared
-        /// test model is constraint-free (the app skips
-        /// `enforceUniquenessConstraints` under XCTest), so `Message.id` has
-        /// no uniqueness constraint here even though production applies one.
+        /// history-dependent behavior. The model matches production, including
+        /// the `Message.id` uniqueness constraint declared in the .xcdatamodel.
         ///
         /// Cleanup: stale store files from PREVIOUS runs are swept on first
         /// use. Per-instance unlink at teardown is deliberately avoided — the

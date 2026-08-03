@@ -28,6 +28,7 @@ final class ConversationBuilder {
     private var pinned: Bool = false
     private var inboxUnreadCount: Int32 = 0
     private var type: String = "personal"
+    private var listId: String?
 
     // MARK: - Fluent Setters
 
@@ -129,6 +130,18 @@ final class ConversationBuilder {
         return self
     }
 
+    /// Marks the conversation as a mailing-list conversation (ConversationType.list).
+    func asList() -> Self {
+        self.type = ConversationType.list.rawValue
+        return self
+    }
+
+    /// Sets the persisted normalized List-Id.
+    func withListId(_ listId: String) -> Self {
+        self.listId = listId
+        return self
+    }
+
     // MARK: - Build
 
     /// Builds the Conversation entity in the given context.
@@ -152,6 +165,7 @@ final class ConversationBuilder {
         conversation.pinned = pinned
         conversation.inboxUnreadCount = inboxUnreadCount
         conversation.type = type
+        conversation.listId = listId
 
         return conversation
     }

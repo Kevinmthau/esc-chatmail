@@ -51,8 +51,8 @@ struct OptimizedConversationRow: View {
         HStack(spacing: 16) {
             // Avatar stack with photo support
             AvatarStackView(
-                alignedAvatarPhotos: avatarPhotos,
-                participants: participantNames,
+                alignedAvatarPhotos: renderedAvatarPhotos,
+                participants: renderedParticipantNames,
                 showsGroupAvatar: showsGroupAvatar,
                 fallbackDisplayText: fallbackDisplayName
             )
@@ -99,12 +99,37 @@ struct OptimizedConversationRow: View {
             onAppear()
         }
         .task {
+            guard Self.shouldLoadParticipantInfo(
+                conversationType: snapshot.conversationType
+            ) else {
+                return
+            }
             await loadContactInfo()
         }
     }
 
+    private var renderedAvatarPhotos: [ProfilePhoto?] {
+        snapshot.conversationType == .list ? [] : avatarPhotos
+    }
+
+    private var renderedParticipantNames: [String] {
+        snapshot.conversationType == .list ? [] : participantNames
+    }
+
+    static func shouldLoadParticipantInfo(
+        conversationType: ConversationType
+    ) -> Bool {
+        ConversationRowView.shouldLoadParticipantInfo(
+            conversationType: conversationType
+        )
+    }
+
     private func loadContactInfo() async {
-        guard let conversationContext else { return }
+        guard Self.shouldLoadParticipantInfo(
+            conversationType: snapshot.conversationType
+        ), let conversationContext else {
+            return
+        }
 
         let info = await participantLoader.loadParticipants(
             from: conversationObjectID,
@@ -114,9 +139,12 @@ struct OptimizedConversationRow: View {
             fallbackDisplayName: fallbackDisplayName
         )
 
-        displayName = info.formattedDisplayName
+        displayName = snapshot.conversationType == .list
+            ? fallbackDisplayName
+            : info.formattedDisplayName
         participantNames = info.avatarDisplayNames
         avatarPhotos = info.avatarPhotos
-        showsGroupAvatar = info.totalUniqueParticipants > 1
+        showsGroupAvatar = snapshot.conversationType == .list ||
+            info.totalUniqueParticipants > 1
     }
 }

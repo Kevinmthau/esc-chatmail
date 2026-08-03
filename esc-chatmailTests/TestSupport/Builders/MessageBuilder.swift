@@ -25,6 +25,7 @@ final class MessageBuilder {
     private var isUnread: Bool = false
     private var isFromMe: Bool = false
     private var isNewsletter: Bool = false
+    private var listId: String?
     private var hasAttachments: Bool = false
     private var conversation: Conversation?
     private var labels: [String] = []
@@ -97,6 +98,12 @@ final class MessageBuilder {
         return self
     }
 
+    /// Sets the persisted normalized List-Id (use `ParsedListId.parse(...)?.id`).
+    func withListId(_ listId: String) -> Self {
+        self.listId = listId
+        return self
+    }
+
     func withAttachments() -> Self {
         self.hasAttachments = true
         return self
@@ -145,6 +152,7 @@ final class MessageBuilder {
         message.isUnread = isUnread
         message.isFromMe = isFromMe
         message.isNewsletter = isNewsletter
+        message.listId = listId
         message.hasAttachments = hasAttachments
         message.conversation = conversation
 

@@ -11,10 +11,14 @@ enum CoreDataErrorClassifier {
     ///   - maxAttempts: Maximum allowed attempts
     /// - Returns: true if the error may succeed on retry
     static func isRecoverableError(_ error: NSError, currentAttempts: Int, maxAttempts: Int) -> Bool {
-        // Check for transient errors that might succeed on retry
+        // Check for transient errors that might succeed on retry.
+        // NSPersistentStoreIncompatibleVersionHashError is deliberately NOT
+        // here: a version-hash mismatch is deterministic — the store's model
+        // hashes match no bundled model — so retrying can never succeed and
+        // only delayed the same migration-recovery outcome. It classifies as
+        // a migration error below.
         let recoverableCodes = [
             NSPersistentStoreTimeoutError,
-            NSPersistentStoreIncompatibleVersionHashError,
             NSPersistentStoreSaveConflictsError
         ]
         return recoverableCodes.contains(error.code) && currentAttempts < maxAttempts
@@ -28,7 +32,8 @@ enum CoreDataErrorClassifier {
             NSMigrationError,
             NSMigrationConstraintViolationError,
             NSMigrationCancelledError,
-            NSMigrationMissingSourceModelError
+            NSMigrationMissingSourceModelError,
+            NSPersistentStoreIncompatibleVersionHashError
         ]
         return migrationCodes.contains(error.code)
     }

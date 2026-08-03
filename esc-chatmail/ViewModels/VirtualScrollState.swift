@@ -7,6 +7,17 @@ import Combine
 struct VirtualScrollMessagePage: @unchecked Sendable {
     let messageIDs: [NSManagedObjectID]
     let totalCount: Int
+    let fetchErrorDescription: String?
+
+    init(
+        messageIDs: [NSManagedObjectID],
+        totalCount: Int,
+        fetchErrorDescription: String? = nil
+    ) {
+        self.messageIDs = messageIDs
+        self.totalCount = totalCount
+        self.fetchErrorDescription = fetchErrorDescription
+    }
 }
 
 struct VirtualScrollInsertedMessageEvent: Equatable {
@@ -23,6 +34,13 @@ struct VirtualScrollInsertedMessageRefresh: Equatable {
 // MARK: - Virtual Scroll State
 @MainActor
 final class VirtualScrollState: ObservableObject {
+    enum InitialLoadPhase: Equatable {
+        case loading
+        case loaded
+        case empty
+        case failed
+    }
+
     enum InitialWindowPosition {
         case beginning
         case end
@@ -34,13 +52,90 @@ final class VirtualScrollState: ObservableObject {
         _ context: NSManagedObjectContext
     ) async -> VirtualScrollMessagePage
 
+    private struct InitialWindowLoad {
+        let range: Range<Int>
+        let page: VirtualScrollMessagePage
+        let messages: [ChatMessageRowModel]
+    }
+
+    private struct LoadedWindowBounds {
+        let startIndex: Int
+        let totalCount: Int
+        let generation: UInt
+    }
+
+    private struct UncachedRefreshAssessment {
+        var orderedDatasetDidChange = false
+        var needsCountReconciliation = false
+    }
+
+    private enum WindowLoadIntent {
+        case latest(requiredFollowIntentRevision: UInt?)
+        case range(Range<Int>)
+    }
+
+    private enum InitialLoadAttemptFailure: Error {
+        case cancelled
+        case pageFetchFailed(description: String, reportedTotalCount: Int?)
+        case rowFetchFailed(description: String, reportedTotalCount: Int)
+        case datasetChanged(reportedTotalCount: Int?)
+        case inconsistentWindow(
+            totalCount: Int,
+            requestedIDCount: Int,
+            resolvedRowCount: Int
+        )
+
+        var reportedTotalCount: Int? {
+            switch self {
+            case .cancelled:
+                return nil
+            case .pageFetchFailed(_, let reportedTotalCount):
+                return reportedTotalCount
+            case .rowFetchFailed(_, let reportedTotalCount):
+                return reportedTotalCount
+            case .datasetChanged(let reportedTotalCount):
+                return reportedTotalCount
+            case .inconsistentWindow(let totalCount, _, _):
+                return totalCount
+            }
+        }
+
+        var userFacingReason: String {
+            "Messages couldn’t be loaded. Please try again."
+        }
+
+        var diagnosticDescription: String {
+            switch self {
+            case .cancelled:
+                return "cancelled"
+            case .pageFetchFailed(let description, let reportedTotalCount):
+                return "page fetch failed total=\(reportedTotalCount.map(String.init) ?? "unknown") error=\(description)"
+            case .rowFetchFailed(let description, let reportedTotalCount):
+                return "row fetch failed total=\(reportedTotalCount) error=\(description)"
+            case .datasetChanged(let reportedTotalCount):
+                return "message dataset changed total=\(reportedTotalCount.map(String.init) ?? "unknown")"
+            case .inconsistentWindow(
+                let totalCount,
+                let requestedIDCount,
+                let resolvedRowCount
+            ):
+                return "inconsistent window total=\(totalCount) ids=\(requestedIDCount) rows=\(resolvedRowCount)"
+            }
+        }
+    }
+
     @Published var visibleMessages: [ChatMessageRowModel] = []
     @Published var totalMessageCount = 0
     @Published var scrollPosition: Int = 0
     @Published var isLoadingMore = false
-    @Published private(set) var isInitialLoadComplete = false
+    @Published private(set) var initialLoadPhase: InitialLoadPhase = .loading
+    @Published private(set) var initialLoadFailureReason: String?
     @Published var placeholderIndices: Set<Int> = []
     @Published private(set) var latestWindowLayoutID = UUID()
+
+    var isInitialLoadComplete: Bool {
+        initialLoadPhase == .loaded || initialLoadPhase == .empty
+    }
 
     let insertedVisibleMessageEvents = PassthroughSubject<VirtualScrollInsertedMessageEvent, Never>()
     let refreshedInsertedMessageEvents = PassthroughSubject<VirtualScrollInsertedMessageRefresh, Never>()
@@ -58,12 +153,29 @@ final class VirtualScrollState: ObservableObject {
     private var resolvedRowsByID: [NSManagedObjectID: ChatMessageRowModel] = [:]
     private var resolvedRowsByAbsoluteIndex: [Int: ChatMessageRowModel] = [:]
     private var viewContextChangesCancellable: AnyCancellable?
+    private var syncCompletedCancellable: AnyCancellable?
     private var cachedConversationObjectID: NSManagedObjectID?
     private var pendingInsertedMessageEvents: [VirtualScrollInsertedMessageEvent] = []
+    private var followsLatestInsertions = true
+    private var followIntentRevision: UInt = 0
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
-    private let localMutationRefreshTaskKey = "refreshLatestWindowForLocalMutation"
+    private let datasetReconcileTaskKey = "reconcileWindowAfterDatasetMutation"
+    private let postSyncValidationTaskKey = "validateWindowAfterSync"
+    private let unclassifiedRefreshCountTaskKey = "reconcileUnclassifiedRefreshCount"
+    private let maximumAutomaticInitialLoadRetryCount = 1
+    private let maximumAutomaticPostSyncValidationRetryCount = 1
+    private let maximumExplicitMessageVisibilityRetryCount = 1
+    private let initialLoadRetryDelayNanoseconds: UInt64 = 100_000_000
+    private var initialLoadSignpostInterval: ChatViewPerformanceSignposts.Interval?
+    private var windowLoadGeneration: UInt = 0
+    private var messageDatasetGeneration: UInt = 0
+    private var postSyncValidationRetryCount = 0
+    private var needsDatasetReconciliationAfterCurrentLoad = false
+    private var needsUnclassifiedRefreshCountReconciliation = false
+    private var needsPostSyncDatasetReconciliation = false
+    private var currentWindowLoadIntent: WindowLoadIntent?
 
     init(
         conversationId: String,
@@ -120,7 +232,55 @@ final class VirtualScrollState: ObservableObject {
 
     var isShowingLatestWindow: Bool {
         guard let messageWindow else { return false }
-        return messageWindow.endIndex >= totalMessageCount
+        return messageWindow.endIndex >= totalMessageCount ||
+            !pendingInsertedMessageEvents.isEmpty
+    }
+
+    func setFollowsLatestInsertions(_ followsLatestInsertions: Bool) {
+        guard self.followsLatestInsertions != followsLatestInsertions else { return }
+        self.followsLatestInsertions = followsLatestInsertions
+        followIntentRevision &+= 1
+
+        if followsLatestInsertions {
+            preloadNext()
+        }
+    }
+
+    private func shouldFollowLatestWindow(_ window: MessageWindow) -> Bool {
+        followsLatestInsertions &&
+            (window.endIndex >= totalMessageCount ||
+                !pendingInsertedMessageEvents.isEmpty)
+    }
+
+    private func isCurrentFollowIntent(_ requiredRevision: UInt?) -> Bool {
+        guard let requiredRevision else { return true }
+        return followsLatestInsertions && followIntentRevision == requiredRevision
+    }
+
+    private func isCurrentWindow(_ window: MessageWindow) -> Bool {
+        guard let currentWindow = messageWindow else { return false }
+        return currentWindow.startIndex == window.startIndex &&
+            currentWindow.endIndex == window.endIndex &&
+            currentWindow.messageIDs == window.messageIDs
+    }
+
+    private func canRestoreCapturedWindow(_ window: MessageWindow) -> Bool {
+        guard !isLoadingMore else { return false }
+        guard case nil = currentWindowLoadIntent else { return false }
+        return isCurrentWindow(window)
+    }
+
+    private func canStartAutomaticReconciliation(_ window: MessageWindow) -> Bool {
+        guard isCurrentWindow(window) else { return false }
+        guard isLoadingMore else {
+            guard case nil = currentWindowLoadIntent else { return false }
+            return true
+        }
+
+        if case .latest(let requiredFollowIntentRevision) = currentWindowLoadIntent {
+            return requiredFollowIntentRevision != nil
+        }
+        return false
     }
 
     private var hasPendingInsertedMessagesInConversation: Bool {
@@ -140,8 +300,17 @@ final class VirtualScrollState: ObservableObject {
         return visibleRangeStartIndex + index
     }
 
+    func retryInitialLoad() {
+        loadInitialMessages()
+    }
+
     private func loadInitialMessages() {
-        isInitialLoadComplete = false
+        finishInitialLoadSignpost(outcome: "restarted")
+        initialLoadSignpostInterval = ChatViewPerformanceSignposts.beginInitialLoad(
+            conversationID: conversationId
+        )
+        initialLoadPhase = .loading
+        initialLoadFailureReason = nil
         isLoadingMore = true
         Log.diagnostic(
             .chatView,
@@ -153,110 +322,518 @@ final class VirtualScrollState: ObservableObject {
         taskManager.run("loadInitial") { [weak self] in
             guard let self = self else { return }
 
-            let preferPendingConversationMessages =
-                self.initialWindowPosition == .end && self.hasPendingInsertedMessagesInConversation
-            var initialRange = await self.initialMessageRange(
+            for retryCount in 0...self.maximumAutomaticInitialLoadRetryCount {
+                let result = await self.loadInitialWindowAttempt()
+
+                guard !Task.isCancelled else { return }
+
+                switch result {
+                case .success(let loadedWindow):
+                    self.publishInitialWindow(loadedWindow)
+                    return
+
+                case .failure(let failure):
+                    if retryCount < self.maximumAutomaticInitialLoadRetryCount {
+                        Log.diagnostic(
+                            .chatView,
+                            level: .warning,
+                            "VirtualScroll initial load retry conv=\(self.conversationId) attempt=\(retryCount + 1) reason=\(failure.diagnosticDescription)",
+                            category: .ui
+                        )
+
+                        do {
+                            try await Task.sleep(
+                                nanoseconds: self.initialLoadRetryDelayNanoseconds
+                            )
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    self.publishInitialLoadFailure(failure)
+                    return
+                }
+            }
+        }
+    }
+
+    private func loadInitialWindowAttempt() async -> Result<InitialWindowLoad, InitialLoadAttemptFailure> {
+        do {
+            let expectedDatasetGeneration = messageDatasetGeneration
+            var preferPendingConversationMessages =
+                initialWindowPosition == .end && hasPendingInsertedMessagesInConversation
+            var initialRange = try await initialMessageRangeForInitialLoad(
                 preferPendingConversationMessages: preferPendingConversationMessages
             )
             Log.diagnostic(
                 .chatView,
                 level: .info,
-                "VirtualScroll initial load request conv=\(self.conversationId) range=\(initialRange.lowerBound)..<\(initialRange.upperBound)",
+                "VirtualScroll initial load request conv=\(conversationId) range=\(initialRange.lowerBound)..<\(initialRange.upperBound)",
                 category: .ui
             )
-            var page = await self.loadPage(
+            var page = try await validatedInitialLoadPage(
                 initialRange,
                 preferPendingConversationMessages: preferPendingConversationMessages
             )
 
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                return .failure(.cancelled)
+            }
 
-            if self.shouldReloadInitialEndWindowForPendingLocalMessages(
-                preferredPendingMessages: preferPendingConversationMessages
-            ) {
-                initialRange = await self.initialMessageRange(
-                    preferPendingConversationMessages: true
+            var remainingEndWindowRebaseAttempts = 2
+            while true {
+                guard !Task.isCancelled else {
+                    return .failure(.cancelled)
+                }
+                guard expectedDatasetGeneration == messageDatasetGeneration else {
+                    throw InitialLoadAttemptFailure.datasetChanged(
+                        reportedTotalCount: page.totalCount
+                    )
+                }
+
+                if shouldReloadInitialEndWindowForPendingLocalMessages(
+                    preferredPendingMessages: preferPendingConversationMessages
+                ) {
+                    preferPendingConversationMessages = true
+                    initialRange = try await initialMessageRangeForInitialLoad(
+                        preferPendingConversationMessages: true
+                    )
+                    Log.diagnostic(
+                        .chatView,
+                        level: .info,
+                        "VirtualScroll initial load switching to pending local messages conv=\(conversationId) range=\(initialRange.lowerBound)..<\(initialRange.upperBound)",
+                        category: .ui
+                    )
+                    page = try await validatedInitialLoadPage(
+                        initialRange,
+                        preferPendingConversationMessages: true
+                    )
+                    continue
+                }
+
+                guard initialWindowPosition == .end,
+                      page.totalCount != initialRange.upperBound else {
+                    break
+                }
+                guard remainingEndWindowRebaseAttempts > 0 else {
+                    throw InitialLoadAttemptFailure.inconsistentWindow(
+                        totalCount: page.totalCount,
+                        requestedIDCount: page.messageIDs.count,
+                        resolvedRowCount: 0
+                    )
+                }
+
+                remainingEndWindowRebaseAttempts -= 1
+                let rebasedStartIndex = max(
+                    0,
+                    page.totalCount - configuration.visibleItemCount
                 )
+                initialRange = rebasedStartIndex..<page.totalCount
                 Log.diagnostic(
                     .chatView,
                     level: .info,
-                    "VirtualScroll initial load switching to pending local messages conv=\(self.conversationId) range=\(initialRange.lowerBound)..<\(initialRange.upperBound)",
+                    "VirtualScroll initial latest-window count drift conv=\(conversationId) observedTotal=\(page.totalCount); rebasing to \(initialRange.lowerBound)..<\(initialRange.upperBound)",
                     category: .ui
                 )
-                page = await self.loadPage(
+                page = try await validatedInitialLoadPage(
                     initialRange,
-                    preferPendingConversationMessages: true
+                    preferPendingConversationMessages: preferPendingConversationMessages
                 )
             }
 
-            guard !Task.isCancelled else { return }
-
-            let messages = await self.resolveRowsOnViewContext(for: page.messageIDs)
-
-            guard !Task.isCancelled else { return }
-
-            let endIndex = initialRange.lowerBound + page.messageIDs.count
-            let window = MessageWindow(
-                startIndex: initialRange.lowerBound,
-                endIndex: endIndex,
-                messageIDs: page.messageIDs,
-                isLoading: false
+            if page.totalCount > 0 && page.messageIDs.isEmpty {
+                throw InitialLoadAttemptFailure.inconsistentWindow(
+                    totalCount: page.totalCount,
+                    requestedIDCount: 0,
+                    resolvedRowCount: 0
+                )
+            }
+            let expectedIDCount = expectedMessageIDCount(
+                in: initialRange,
+                totalCount: page.totalCount
             )
+            guard page.messageIDs.count == expectedIDCount else {
+                throw InitialLoadAttemptFailure.inconsistentWindow(
+                    totalCount: page.totalCount,
+                    requestedIDCount: page.messageIDs.count,
+                    resolvedRowCount: 0
+                )
+            }
 
-            self.totalMessageCount = page.totalCount
-            self.scrollPosition = initialRange.lowerBound
-            self.setMessageWindow(window)
-            self.visibleMessages = messages
-            self.isLoadingMore = false
-            self.isInitialLoadComplete = true
-            Log.diagnostic(
-                .chatView,
-                level: .info,
-                "VirtualScroll initial load complete conv=\(self.conversationId) requested=\(initialRange.lowerBound)..<\(initialRange.upperBound) loaded=\(page.messageIDs.count) total=\(page.totalCount) window=\(window.startIndex)..<\(window.endIndex)",
-                category: .ui
+            let messages: [ChatMessageRowModel]
+            do {
+                messages = try resolveRowsOnViewContextThrowing(for: page.messageIDs)
+            } catch {
+                throw InitialLoadAttemptFailure.rowFetchFailed(
+                    description: error.localizedDescription,
+                    reportedTotalCount: page.totalCount
+                )
+            }
+
+            guard !Task.isCancelled else {
+                return .failure(.cancelled)
+            }
+            guard expectedDatasetGeneration == messageDatasetGeneration else {
+                throw InitialLoadAttemptFailure.datasetChanged(
+                    reportedTotalCount: page.totalCount
+                )
+            }
+
+            guard messages.count == page.messageIDs.count else {
+                throw InitialLoadAttemptFailure.inconsistentWindow(
+                    totalCount: page.totalCount,
+                    requestedIDCount: page.messageIDs.count,
+                    resolvedRowCount: messages.count
+                )
+            }
+
+            let loadedRange = page.totalCount == 0 ? 0..<0 : initialRange
+            return .success(
+                InitialWindowLoad(
+                    range: loadedRange,
+                    page: page,
+                    messages: messages
+                )
+            )
+        } catch let failure as InitialLoadAttemptFailure {
+            return .failure(failure)
+        } catch {
+            return .failure(
+                .pageFetchFailed(
+                    description: error.localizedDescription,
+                    reportedTotalCount: nil
+                )
             )
         }
     }
 
-    func loadLatestWindowIfNeeded(knownTotalCount: Int? = nil) async {
+    private func initialMessageRangeForInitialLoad(
+        preferPendingConversationMessages: Bool
+    ) async throws -> Range<Int> {
+        switch initialWindowPosition {
+        case .beginning:
+            return 0..<configuration.visibleItemCount
+        case .end:
+            let metadataPage = try await validatedInitialLoadPage(
+                0..<0,
+                preferPendingConversationMessages: preferPendingConversationMessages
+            )
+            let startIndex = max(0, metadataPage.totalCount - configuration.visibleItemCount)
+            return startIndex..<metadataPage.totalCount
+        }
+    }
+
+    private func validatedInitialLoadPage(
+        _ range: Range<Int>,
+        preferPendingConversationMessages: Bool
+    ) async throws -> VirtualScrollMessagePage {
+        let page = await loadPage(
+            range,
+            preferPendingConversationMessages: preferPendingConversationMessages
+        )
+
+        if let fetchErrorDescription = page.fetchErrorDescription {
+            throw InitialLoadAttemptFailure.pageFetchFailed(
+                description: fetchErrorDescription,
+                reportedTotalCount: page.totalCount
+            )
+        }
+
+        return page
+    }
+
+    private func publishInitialWindow(_ loadedWindow: InitialWindowLoad) {
+        let page = loadedWindow.page
+        let endIndex = loadedWindow.range.lowerBound + page.messageIDs.count
+        let window = MessageWindow(
+            startIndex: loadedWindow.range.lowerBound,
+            endIndex: endIndex,
+            messageIDs: page.messageIDs,
+            isLoading: false
+        )
+
+        totalMessageCount = page.totalCount
+        scrollPosition = loadedWindow.range.lowerBound
+        setMessageWindow(window)
+        visibleMessages = loadedWindow.messages
+        placeholderIndices.removeAll()
+        isLoadingMore = false
+        needsDatasetReconciliationAfterCurrentLoad = false
+        initialLoadFailureReason = nil
+        initialLoadPhase = loadedWindow.messages.isEmpty ? .empty : .loaded
+        if !loadedWindow.messages.isEmpty {
+            ChatViewPerformanceSignposts.firstRowsResolved(
+                conversationID: conversationId,
+                count: loadedWindow.messages.count
+            )
+        }
+        resolvePendingInsertedMessageEvents()
+        finishInitialLoadSignpost(
+            outcome: loadedWindow.messages.isEmpty ? "empty" : "loaded"
+        )
+        scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
+        schedulePostSyncDatasetReconciliationIfNeeded()
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "VirtualScroll initial load complete conv=\(conversationId) requested=\(loadedWindow.range.lowerBound)..<\(loadedWindow.range.upperBound) loaded=\(page.messageIDs.count) total=\(page.totalCount) window=\(window.startIndex)..<\(window.endIndex)",
+            category: .ui
+        )
+    }
+
+    private func publishInitialLoadFailure(_ failure: InitialLoadAttemptFailure) {
+        if let reportedTotalCount = failure.reportedTotalCount {
+            totalMessageCount = reportedTotalCount
+        }
+        placeholderIndices.removeAll()
+        isLoadingMore = false
+        initialLoadFailureReason = failure.userFacingReason
+        initialLoadPhase = .failed
+        finishInitialLoadSignpost(outcome: "failed")
+        Log.diagnostic(
+            .chatView,
+            level: .error,
+            "VirtualScroll initial load failed conv=\(conversationId) reason=\(failure.diagnosticDescription)",
+            category: .ui
+        )
+    }
+
+    @discardableResult
+    func loadLatestWindowIfNeeded(knownTotalCount: Int? = nil) async -> Bool {
         let knownCountIsAhead = knownTotalCount.map { $0 > totalMessageCount } ?? false
         guard knownCountIsAhead ||
             !isShowingLatestWindow ||
             visibleMessages.isEmpty ||
+            !pendingInsertedMessageEvents.isEmpty ||
             hasPendingInsertedMessagesInConversation else {
-            return
+            return true
         }
 
-        await loadLatestWindow()
+        return await loadLatestWindow()
     }
 
-    func refreshLatestWindowForLocalMutation(knownTotalCount: Int? = nil) async {
-        await loadLatestWindowIfNeeded(knownTotalCount: knownTotalCount)
+    /// Ensures a specific, permanently identified message is published in the
+    /// latest visible window before a caller performs message-targeted work such
+    /// as post-send anchoring.
+    @discardableResult
+    func ensureVisibleMessage(_ objectID: NSManagedObjectID) async -> Bool {
+        guard !objectID.isTemporaryID else { return false }
+
+        return await ensureVisibleMessage(
+            objectID,
+            retryAttemptsRemaining: maximumExplicitMessageVisibilityRetryCount
+        )
     }
 
-    func loadLatestWindow() async {
-        let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
+    private func ensureVisibleMessage(
+        _ objectID: NSManagedObjectID,
+        retryAttemptsRemaining: Int
+    ) async -> Bool {
+        if visibleMessages.contains(where: { $0.objectID == objectID }) {
+            return true
+        }
+
+        // This is an explicit local-send reconciliation, so it intentionally
+        // carries no follow-intent revision. User scroll takeover may suppress
+        // automatic latest following, but must not suppress publishing the
+        // optimistic row itself. Force the view-context path so unsaved pending
+        // inserts are included.
+        _ = await loadLatestWindow(forceViewContext: true)
+
+        if visibleMessages.contains(where: { $0.objectID == objectID }) {
+            return true
+        }
+
+        guard !Task.isCancelled, retryAttemptsRemaining > 0 else {
+            return false
+        }
+
+        // A competing dataset reconciliation can supersede a window generation.
+        // Yield once before the single bounded retry so that work can publish.
+        await Task.yield()
+        return await ensureVisibleMessage(
+            objectID,
+            retryAttemptsRemaining: retryAttemptsRemaining - 1
+        )
+    }
+
+    @discardableResult
+    func loadLatestWindow(
+        forceViewContext: Bool = false,
+        datasetRetryAttemptsRemaining: Int = 1,
+        requiredFollowIntentRevision: UInt? = nil
+    ) async -> Bool {
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            return false
+        }
+        if visibleMessages.isEmpty &&
+            (initialLoadPhase == .empty || initialLoadPhase == .failed) {
+            initialLoadFailureReason = nil
+            initialLoadPhase = .loading
+        }
+        let preferPendingConversationMessages =
+            forceViewContext || hasPendingInsertedMessagesInConversation
+        // Captured before the load: when the current window already abuts the
+        // tail, a latest reload must extend it rather than collapse it to the
+        // last `visibleItemCount` rows. Collapsing dropped every row above the
+        // viewport after a send, and the subsequent lazy re-expansion prepends
+        // shifted the visible content onto older messages once the post-send
+        // corrective scrolls had already fired. The window abuts the tail when
+        // no rows exist beyond it, or when every row beyond it is a pending
+        // tail insertion (the local-send case: the count was already bumped
+        // for rows the window hasn't published yet). A historical window keeps
+        // the collapse behavior so an explicit jump-to-latest stays cheap.
+        let preservedWindowStartIndex = tailAbuttingWindowStartIndex()
+        let loadGeneration = beginWindowLoad(
+            intent: .latest(
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+        )
+        let expectedDatasetGeneration = messageDatasetGeneration
         Log.diagnostic(
             .chatView,
             level: .info,
             "VirtualScroll latest window load start conv=\(conversationId) preferPending=\(preferPendingConversationMessages)",
             category: .ui
         )
-        let totalCount = await loadTotalMessageCount(
+        let loadedTotalCount = await loadTotalMessageCount(
             preferPendingConversationMessages: preferPendingConversationMessages
         )
-        let startIndex = max(0, totalCount - configuration.visibleItemCount)
-        await loadWindow(
+        guard !Task.isCancelled else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return false
+        }
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return false
+        }
+        guard loadGeneration == windowLoadGeneration else { return false }
+        guard expectedDatasetGeneration == messageDatasetGeneration else {
+            guard datasetRetryAttemptsRemaining > 0 else {
+                finishWindowLoadFailure(
+                    operation: "latest window metadata",
+                    description: "message dataset kept changing while loading"
+                )
+                return false
+            }
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll latest metadata changed during load; retrying conv=\(conversationId)",
+                category: .ui
+            )
+            return await loadLatestWindow(
+                forceViewContext: forceViewContext,
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining - 1,
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+        }
+        guard let totalCount = loadedTotalCount else {
+            finishWindowLoadFailure(
+                operation: "latest window metadata",
+                description: "unable to fetch message count"
+            )
+            return false
+        }
+        let collapsedStartIndex = max(0, totalCount - configuration.visibleItemCount)
+        let startIndex: Int
+        if let preservedWindowStartIndex {
+            // Keep the accumulated rows above the viewport, bounded by the
+            // window cap so long sessions do not grow without limit.
+            let cappedStartIndex = max(0, totalCount - configuration.maxWindowSize)
+            startIndex = max(min(preservedWindowStartIndex, collapsedStartIndex), cappedStartIndex)
+        } else {
+            startIndex = collapsedStartIndex
+        }
+        guard let loadedBounds = await loadWindow(
             startIndex: startIndex,
             endIndex: totalCount,
-            preferPendingConversationMessages: preferPendingConversationMessages
-        )
-        scrollPosition = max(startIndex, totalCount - 1)
+            preferPendingConversationMessages: preferPendingConversationMessages,
+            latestRebaseAttemptsRemaining: 2,
+            generation: loadGeneration,
+            datasetGeneration: expectedDatasetGeneration,
+            datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+            requiredFollowIntentRevision: requiredFollowIntentRevision
+        ) else {
+            return false
+        }
+        guard loadedBounds.generation == windowLoadGeneration else { return false }
+        if isCurrentFollowIntent(requiredFollowIntentRevision) {
+            // Mirror publishInitialWindow: anchor the tracked position at the
+            // window head. Parking it at the tail made the window-head row's
+            // onAppear pass markIndexVisible's movement guard, which requested
+            // an older range the fresh window didn't cover and cascaded
+            // prepends that shifted the viewport onto older messages.
+            scrollPosition = loadedBounds.startIndex
+        }
         Log.diagnostic(
             .chatView,
             level: .info,
-            "VirtualScroll latest window load complete conv=\(conversationId) total=\(totalCount) window=\(startIndex)..<\(totalCount)",
+            "VirtualScroll latest window load complete conv=\(conversationId) total=\(loadedBounds.totalCount) window=\(loadedBounds.startIndex)..<\(loadedBounds.totalCount)",
             category: .ui
+        )
+        return true
+    }
+
+    /// The current window's start index when the window abuts the dataset
+    /// tail, nil otherwise. Rows beyond the window's end only count as "tail"
+    /// when they are pending tail insertions the window hasn't published yet.
+    private func tailAbuttingWindowStartIndex() -> Int? {
+        guard let window = messageWindow else { return nil }
+
+        let tailGap = totalMessageCount - window.endIndex
+        if tailGap <= 0 {
+            return window.startIndex
+        }
+
+        var pendingInsertedIDs = Set(pendingInsertedMessageEvents.flatMap(\.messageIDs))
+        if let conversationUUID = UUID(uuidString: conversationId) {
+            for object in viewContext.insertedObjects {
+                guard let message = object as? Message,
+                      message.conversation?.id == conversationUUID else { continue }
+                pendingInsertedIDs.insert(message.objectID)
+            }
+        }
+        pendingInsertedIDs.subtract(window.messageIDs)
+        return tailGap <= pendingInsertedIDs.count ? window.startIndex : nil
+    }
+
+    private func retryWindowAfterDatasetChange(
+        startIndex: Int,
+        endIndex: Int,
+        preferPendingConversationMessages: Bool,
+        latestRebaseAttemptsRemaining: Int?,
+        rangeClampAttemptsRemaining: Int,
+        generation: UInt,
+        datasetRetryAttemptsRemaining: Int,
+        requiredFollowIntentRevision: UInt?,
+        operation: String
+    ) async -> LoadedWindowBounds? {
+        guard datasetRetryAttemptsRemaining > 0 else {
+            finishWindowLoadFailure(
+                operation: operation,
+                description: "message dataset kept changing while loading"
+            )
+            return nil
+        }
+
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "VirtualScroll \(operation) dataset changed; retrying conv=\(conversationId)",
+            category: .ui
+        )
+        return await loadWindow(
+            startIndex: startIndex,
+            endIndex: endIndex,
+            preferPendingConversationMessages:
+                preferPendingConversationMessages || hasPendingInsertedMessagesInConversation,
+            latestRebaseAttemptsRemaining: latestRebaseAttemptsRemaining,
+            rangeClampAttemptsRemaining: rangeClampAttemptsRemaining,
+            generation: generation,
+            datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining - 1,
+            requiredFollowIntentRevision: requiredFollowIntentRevision
         )
     }
 
@@ -276,7 +853,7 @@ final class VirtualScrollState: ObservableObject {
             let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
             taskManager.run("loadWindow") { [weak self] in
                 guard let self = self else { return }
-                await self.loadWindow(
+                _ = await self.loadWindow(
                     startIndex: startIndex,
                     endIndex: endIndex,
                     preferPendingConversationMessages: preferPendingConversationMessages
@@ -288,12 +865,29 @@ final class VirtualScrollState: ObservableObject {
     private func loadWindow(
         startIndex: Int,
         endIndex: Int,
-        preferPendingConversationMessages: Bool = false
-    ) async {
+        preferPendingConversationMessages: Bool = false,
+        latestRebaseAttemptsRemaining: Int? = nil,
+        rangeClampAttemptsRemaining: Int = 1,
+        generation: UInt? = nil,
+        datasetGeneration: UInt? = nil,
+        datasetRetryAttemptsRemaining: Int = 1,
+        requiredFollowIntentRevision: UInt? = nil
+    ) async -> LoadedWindowBounds? {
         guard startIndex >= 0, endIndex >= startIndex else {
-            return
+            return nil
+        }
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            if let generation {
+                finishCancelledWindowLoad(generation: generation)
+            }
+            return nil
         }
 
+        let loadGeneration = generation ?? beginWindowLoad(
+            intent: .range(startIndex..<endIndex)
+        )
+        let expectedDatasetGeneration = datasetGeneration ?? messageDatasetGeneration
+        guard loadGeneration == windowLoadGeneration else { return nil }
         isLoadingMore = true
 
         // Show placeholders while loading
@@ -304,15 +898,166 @@ final class VirtualScrollState: ObservableObject {
             preferPendingConversationMessages: preferPendingConversationMessages
         )
 
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return nil
+        }
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return nil
+        }
+        guard loadGeneration == windowLoadGeneration else {
+            return nil
+        }
+        guard expectedDatasetGeneration == messageDatasetGeneration else {
+            return await retryWindowAfterDatasetChange(
+                startIndex: startIndex,
+                endIndex: endIndex,
+                preferPendingConversationMessages: preferPendingConversationMessages,
+                latestRebaseAttemptsRemaining: latestRebaseAttemptsRemaining,
+                rangeClampAttemptsRemaining: rangeClampAttemptsRemaining,
+                generation: loadGeneration,
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+                requiredFollowIntentRevision: requiredFollowIntentRevision,
+                operation: "window"
+            )
+        }
 
-        let messages = await resolveRowsOnViewContext(for: page.messageIDs)
+        guard page.fetchErrorDescription == nil else {
+            finishWindowLoadFailure(
+                operation: "window",
+                description: page.fetchErrorDescription ?? "Unknown fetch error"
+            )
+            return nil
+        }
 
-        guard !Task.isCancelled else { return }
+        if let latestRebaseAttemptsRemaining, page.totalCount != endIndex {
+            guard latestRebaseAttemptsRemaining > 0 else {
+                finishWindowLoadFailure(
+                    operation: "latest window",
+                    description: "message count kept changing while rebasing"
+                )
+                return nil
+            }
+            let rebasedStartIndex = max(
+                0,
+                page.totalCount - configuration.visibleItemCount
+            )
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll latest window count drift conv=\(conversationId) requested=\(startIndex)..<\(endIndex) observedTotal=\(page.totalCount); rebasing",
+                category: .ui
+            )
+            return await loadWindow(
+                startIndex: rebasedStartIndex,
+                endIndex: page.totalCount,
+                preferPendingConversationMessages: preferPendingConversationMessages,
+                latestRebaseAttemptsRemaining: latestRebaseAttemptsRemaining - 1,
+                rangeClampAttemptsRemaining: rangeClampAttemptsRemaining,
+                generation: loadGeneration,
+                datasetGeneration: expectedDatasetGeneration,
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+        }
 
-        let loadedEndIndex = startIndex + page.messageIDs.count
+        if latestRebaseAttemptsRemaining == nil,
+           page.totalCount > 0,
+           endIndex > page.totalCount,
+           rangeClampAttemptsRemaining > 0 {
+            let desiredWindowCount = max(1, endIndex - startIndex)
+            let latestPossibleStart = max(0, page.totalCount - desiredWindowCount)
+            let adjustedStartIndex = min(startIndex, latestPossibleStart)
+            let adjustedEndIndex = min(
+                page.totalCount,
+                adjustedStartIndex + desiredWindowCount
+            )
+
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll window count drift conv=\(conversationId) requested=\(startIndex)..<\(endIndex) observedTotal=\(page.totalCount); clamping to \(adjustedStartIndex)..<\(adjustedEndIndex)",
+                category: .ui
+            )
+            return await loadWindow(
+                startIndex: adjustedStartIndex,
+                endIndex: adjustedEndIndex,
+                preferPendingConversationMessages: preferPendingConversationMessages,
+                rangeClampAttemptsRemaining: rangeClampAttemptsRemaining - 1,
+                generation: loadGeneration,
+                datasetGeneration: expectedDatasetGeneration,
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+        }
+
+        let expectedIDCount = expectedMessageIDCount(
+            in: startIndex..<endIndex,
+            totalCount: page.totalCount
+        )
+        guard page.totalCount == 0 || expectedIDCount > 0 else {
+            finishWindowLoadFailure(
+                operation: "window",
+                description: "range \(startIndex)..<\(endIndex) is outside observed total \(page.totalCount)"
+            )
+            return nil
+        }
+        guard page.messageIDs.count == expectedIDCount else {
+            finishWindowLoadFailure(
+                operation: "window",
+                description: "received \(page.messageIDs.count) IDs, expected \(expectedIDCount), for range \(startIndex)..<\(endIndex) with total \(page.totalCount)"
+            )
+            return nil
+        }
+
+        let messages: [ChatMessageRowModel]
+        do {
+            messages = try resolveRowsOnViewContextThrowing(for: page.messageIDs)
+        } catch {
+            finishWindowLoadFailure(
+                operation: "window row resolution",
+                description: error.localizedDescription
+            )
+            return nil
+        }
+
+        guard !Task.isCancelled else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return nil
+        }
+        guard loadGeneration == windowLoadGeneration else {
+            return nil
+        }
+        guard expectedDatasetGeneration == messageDatasetGeneration else {
+            return await retryWindowAfterDatasetChange(
+                startIndex: startIndex,
+                endIndex: endIndex,
+                preferPendingConversationMessages: preferPendingConversationMessages,
+                latestRebaseAttemptsRemaining: latestRebaseAttemptsRemaining,
+                rangeClampAttemptsRemaining: rangeClampAttemptsRemaining,
+                generation: loadGeneration,
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining,
+                requiredFollowIntentRevision: requiredFollowIntentRevision,
+                operation: "window row resolution"
+            )
+        }
+        guard messages.count == page.messageIDs.count else {
+            finishWindowLoadFailure(
+                operation: "window row resolution",
+                description: "resolved \(messages.count) of \(page.messageIDs.count) rows"
+            )
+            return nil
+        }
+        guard isCurrentFollowIntent(requiredFollowIntentRevision) else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return nil
+        }
+
+        let publishedStartIndex = page.totalCount == 0 ? 0 : startIndex
+        let loadedEndIndex = publishedStartIndex + page.messageIDs.count
         let window = MessageWindow(
-            startIndex: startIndex,
+            startIndex: publishedStartIndex,
             endIndex: loadedEndIndex,
             messageIDs: page.messageIDs,
             isLoading: false
@@ -323,30 +1068,36 @@ final class VirtualScrollState: ObservableObject {
         visibleMessages = messages
         placeholderIndices.removeAll()
         isLoadingMore = false
-    }
-
-    private func initialMessageRange(
-        preferPendingConversationMessages: Bool = false
-    ) async -> Range<Int> {
-        switch initialWindowPosition {
-        case .beginning:
-            return 0..<configuration.visibleItemCount
-        case .end:
-            let totalCount = await loadTotalMessageCount(
-                preferPendingConversationMessages: preferPendingConversationMessages
-            )
-            let startIndex = max(0, totalCount - configuration.visibleItemCount)
-            return startIndex..<totalCount
-        }
+        updateAvailabilityPhaseAfterWindowLoad(page: page, messages: messages)
+        needsDatasetReconciliationAfterCurrentLoad = false
+        currentWindowLoadIntent = nil
+        resolvePendingInsertedMessageEvents()
+        scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
+        schedulePostSyncDatasetReconciliationIfNeeded()
+        return LoadedWindowBounds(
+            startIndex: publishedStartIndex,
+            totalCount: page.totalCount,
+            generation: loadGeneration
+        )
     }
 
     private func loadTotalMessageCount(
         preferPendingConversationMessages: Bool = false
-    ) async -> Int {
+    ) async -> Int? {
         let metadataPage = await loadPage(
             0..<0,
             preferPendingConversationMessages: preferPendingConversationMessages
         )
+
+        if let fetchErrorDescription = metadataPage.fetchErrorDescription {
+            Log.diagnostic(
+                .chatView,
+                level: .error,
+                "VirtualScroll metadata load failed conv=\(conversationId) error=\(fetchErrorDescription)",
+                category: .ui
+            )
+            return nil
+        }
 
         return metadataPage.totalCount
     }
@@ -395,6 +1146,8 @@ final class VirtualScrollState: ObservableObject {
         let startIndex = window.endIndex
         let endIndex = min(totalMessageCount, startIndex + configuration.pageSize)
         let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
+        let expectedTotalCount = totalMessageCount
+        let expectedDatasetGeneration = messageDatasetGeneration
 
         taskManager.run("preloadNext") { [weak self] in
             guard let self = self else { return }
@@ -405,10 +1158,59 @@ final class VirtualScrollState: ObservableObject {
             )
 
             guard !Task.isCancelled else { return }
+            guard page.fetchErrorDescription == nil else {
+                self.logPreloadFailure(
+                    direction: "next",
+                    description: page.fetchErrorDescription ?? "Unknown fetch error"
+                )
+                return
+            }
+            guard self.messageDatasetGeneration == expectedDatasetGeneration,
+                  page.totalCount == expectedTotalCount else {
+                self.logPreloadFailure(
+                    direction: "next",
+                    description: "message dataset changed while loading"
+                )
+                return
+            }
+            guard Set(page.messageIDs).isDisjoint(with: window.messageIDs) else {
+                self.logPreloadFailure(
+                    direction: "next",
+                    description: "page overlapped the captured window"
+                )
+                return
+            }
+            let expectedIDCount = self.expectedMessageIDCount(
+                in: startIndex..<endIndex,
+                totalCount: page.totalCount
+            )
+            guard expectedIDCount > 0, page.messageIDs.count == expectedIDCount else {
+                self.logPreloadFailure(
+                    direction: "next",
+                    description: "received \(page.messageIDs.count) IDs, expected \(expectedIDCount), for range \(startIndex)..<\(endIndex) with total \(page.totalCount)"
+                )
+                return
+            }
 
-            _ = await self.resolveRowsOnViewContext(for: page.messageIDs)
+            let messages: [ChatMessageRowModel]
+            do {
+                messages = try self.resolveRowsOnViewContextThrowing(for: page.messageIDs)
+            } catch {
+                self.logPreloadFailure(
+                    direction: "next",
+                    description: error.localizedDescription
+                )
+                return
+            }
 
             guard !Task.isCancelled else { return }
+            guard messages.count == page.messageIDs.count else {
+                self.logPreloadFailure(
+                    direction: "next",
+                    description: "resolved \(messages.count) of \(page.messageIDs.count) rows"
+                )
+                return
+            }
 
             guard var currentWindow = self.messageWindow,
                   currentWindow.startIndex == window.startIndex,
@@ -428,6 +1230,7 @@ final class VirtualScrollState: ObservableObject {
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
             self.visibleMessages = self.resolveCachedRows(for: currentWindow.messageIDs)
+            self.schedulePostSyncDatasetReconciliationIfNeeded()
         }
     }
 
@@ -438,6 +1241,8 @@ final class VirtualScrollState: ObservableObject {
         let endIndex = window.startIndex
         let startIndex = max(0, endIndex - configuration.pageSize)
         let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
+        let expectedTotalCount = totalMessageCount
+        let expectedDatasetGeneration = messageDatasetGeneration
 
         taskManager.run("preloadPrevious") { [weak self] in
             guard let self = self else { return }
@@ -448,10 +1253,59 @@ final class VirtualScrollState: ObservableObject {
             )
 
             guard !Task.isCancelled else { return }
+            guard page.fetchErrorDescription == nil else {
+                self.logPreloadFailure(
+                    direction: "previous",
+                    description: page.fetchErrorDescription ?? "Unknown fetch error"
+                )
+                return
+            }
+            guard self.messageDatasetGeneration == expectedDatasetGeneration,
+                  page.totalCount == expectedTotalCount else {
+                self.logPreloadFailure(
+                    direction: "previous",
+                    description: "message dataset changed while loading"
+                )
+                return
+            }
+            guard Set(page.messageIDs).isDisjoint(with: window.messageIDs) else {
+                self.logPreloadFailure(
+                    direction: "previous",
+                    description: "page overlapped the captured window"
+                )
+                return
+            }
+            let expectedIDCount = self.expectedMessageIDCount(
+                in: startIndex..<endIndex,
+                totalCount: page.totalCount
+            )
+            guard expectedIDCount > 0, page.messageIDs.count == expectedIDCount else {
+                self.logPreloadFailure(
+                    direction: "previous",
+                    description: "received \(page.messageIDs.count) IDs, expected \(expectedIDCount), for range \(startIndex)..<\(endIndex) with total \(page.totalCount)"
+                )
+                return
+            }
 
-            _ = await self.resolveRowsOnViewContext(for: page.messageIDs)
+            let messages: [ChatMessageRowModel]
+            do {
+                messages = try self.resolveRowsOnViewContextThrowing(for: page.messageIDs)
+            } catch {
+                self.logPreloadFailure(
+                    direction: "previous",
+                    description: error.localizedDescription
+                )
+                return
+            }
 
             guard !Task.isCancelled else { return }
+            guard messages.count == page.messageIDs.count else {
+                self.logPreloadFailure(
+                    direction: "previous",
+                    description: "resolved \(messages.count) of \(page.messageIDs.count) rows"
+                )
+                return
+            }
 
             guard var currentWindow = self.messageWindow,
                   currentWindow.startIndex == window.startIndex,
@@ -475,50 +1329,232 @@ final class VirtualScrollState: ObservableObject {
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
             self.visibleMessages = self.resolveCachedRows(for: currentWindow.messageIDs)
+            self.schedulePostSyncDatasetReconciliationIfNeeded()
         }
+    }
+
+    private func finishWindowLoadFailure(operation: String, description: String) {
+        placeholderIndices.removeAll()
+        isLoadingMore = false
+        if visibleMessages.isEmpty && initialLoadPhase == .loading {
+            initialLoadFailureReason = "Messages couldn’t be loaded. Please try again."
+            initialLoadPhase = .failed
+        }
+        Log.diagnostic(
+            .chatView,
+            level: .error,
+            "VirtualScroll \(operation) failed conv=\(conversationId) error=\(description); preserving current window",
+            category: .ui
+        )
+        scheduleDeferredDatasetReconciliationIfNeeded()
+        scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
+        schedulePostSyncDatasetReconciliationIfNeeded()
+    }
+
+    private func logPreloadFailure(direction: String, description: String) {
+        Log.diagnostic(
+            .chatView,
+            level: .error,
+            "VirtualScroll \(direction) preload failed conv=\(conversationId) error=\(description); preserving current window",
+            category: .ui
+        )
+    }
+
+    private func updateAvailabilityPhaseAfterWindowLoad(
+        page: VirtualScrollMessagePage,
+        messages: [ChatMessageRowModel]
+    ) {
+        if !messages.isEmpty {
+            initialLoadFailureReason = nil
+            initialLoadPhase = .loaded
+        } else if page.totalCount == 0 {
+            initialLoadFailureReason = nil
+            initialLoadPhase = .empty
+        }
+    }
+
+    private func expectedMessageIDCount(
+        in range: Range<Int>,
+        totalCount: Int
+    ) -> Int {
+        max(0, min(range.upperBound, totalCount) - range.lowerBound)
+    }
+
+    private func beginWindowLoad(intent: WindowLoadIntent) -> UInt {
+        windowLoadGeneration &+= 1
+        currentWindowLoadIntent = intent
+        isLoadingMore = true
+        return windowLoadGeneration
+    }
+
+    private func finishCancelledWindowLoad(generation: UInt) {
+        guard generation == windowLoadGeneration else { return }
+        placeholderIndices.removeAll()
+        isLoadingMore = false
+        currentWindowLoadIntent = nil
     }
 
     /// Cancels all pending tasks when the scroll state is no longer needed
     func cleanup() {
+        finishInitialLoadSignpost(outcome: "cancelled")
+        windowLoadGeneration &+= 1
         taskManager.cancelAll()
+        placeholderIndices.removeAll()
+        isLoadingMore = false
+        needsDatasetReconciliationAfterCurrentLoad = false
+        needsUnclassifiedRefreshCountReconciliation = false
+        needsPostSyncDatasetReconciliation = false
+        currentWindowLoadIntent = nil
         viewContextChangesCancellable?.cancel()
         viewContextChangesCancellable = nil
+        syncCompletedCancellable?.cancel()
+        syncCompletedCancellable = nil
+    }
+
+    /// Restores observation and any interrupted initial load when the chat reappears.
+    func resume() {
+        let wasInactive = viewContextChangesCancellable == nil
+        startObservingViewContextChanges()
+        guard wasInactive else { return }
+
+        if initialLoadPhase == .loading {
+            loadInitialMessages()
+        } else if initialLoadPhase == .loaded || initialLoadPhase == .empty {
+            taskManager.run("resumeWindow") { [weak self] in
+                await self?.reconcileWindowAfterResume()
+            }
+        }
+    }
+
+    private func reconcileWindowAfterResume() async {
+        guard initialLoadPhase == .loaded else {
+            await loadLatestWindow()
+            return
+        }
+        guard let messageWindow else {
+            _ = await loadLatestWindow()
+            return
+        }
+        guard canRestoreCapturedWindow(messageWindow) else { return }
+        if shouldFollowLatestWindow(messageWindow) {
+            let requiredFollowIntentRevision = followIntentRevision
+            let didLoadLatest = await loadLatestWindow(
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+            if didLoadLatest || isCurrentFollowIntent(requiredFollowIntentRevision) {
+                return
+            }
+        }
+
+        guard canRestoreCapturedWindow(messageWindow) else { return }
+        await reloadHistoricalWindowClamped(
+            messageWindow,
+            preferPendingConversationMessages: hasPendingInsertedMessagesInConversation
+        )
+    }
+
+    private func finishInitialLoadSignpost(outcome: String) {
+        guard let interval = initialLoadSignpostInterval else { return }
+        ChatViewPerformanceSignposts.endInitialLoad(
+            interval,
+            conversationID: conversationId,
+            outcome: outcome,
+            visibleRowCount: visibleMessages.count,
+            totalCount: totalMessageCount
+        )
+        initialLoadSignpostInterval = nil
     }
 
     private func startObservingViewContextChanges() {
-        guard viewContextChangesCancellable == nil else { return }
+        if viewContextChangesCancellable == nil {
+            viewContextChangesCancellable = NotificationCenter.default.publisher(
+                for: .NSManagedObjectContextObjectsDidChange,
+                object: viewContext
+            )
+            .sink { [weak self] notification in
+                self?.handleViewContextChange(notification)
+            }
+        }
 
-        viewContextChangesCancellable = NotificationCenter.default.publisher(
-            for: .NSManagedObjectContextObjectsDidChange,
-            object: viewContext
-        )
-        .sink { [weak self] notification in
-            self?.handleViewContextChange(notification)
+        if syncCompletedCancellable == nil {
+            syncCompletedCancellable = NotificationCenter.default.publisher(
+                for: .syncCompleted
+            )
+            .sink { [weak self] _ in
+                self?.schedulePostSyncDatasetReconciliationIfNeeded(
+                    syncDidComplete: true
+                )
+            }
         }
     }
 
     private func handleViewContextChange(_ notification: Notification) {
-        guard let window = messageWindow else { return }
-
         // objectsDidChange fires for every merged sync save while a chat is
         // open. Bail out on type checks alone before any pass below faults
         // objects: only Message/Attachment changes and Person display-name
         // updates can affect this window.
         guard Self.isRelevantChatContextChange(notification.userInfo) else { return }
 
-        let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
-        let shouldRefreshLatestWindow = shouldRefreshLatestWindowForLocalMessageMutation(
-            in: notification,
-            currentWindow: window
+        let insertedMessageIDs = visibleInsertedMessageIDsForCurrentConversation(
+            in: notification
         )
-        let insertedMessageIDs = visibleInsertedMessageIDsForCurrentConversation(in: notification)
+        let hasVisibleInsertion = hasVisibleInsertedMessageForCurrentConversation(
+            in: notification
+        )
+        let deletedMessages = contextObjects(
+            forKeys: [NSDeletedObjectsKey],
+            in: notification
+        ).compactMap { $0 as? Message }
+        let deletedMessageIDs = Set(deletedMessages.map(\.objectID))
+        let hasCurrentConversationDeletion = deletedMessages.contains {
+            belongsToCurrentConversation($0)
+        }
+        let hasDeletedWindowMessage = messageWindow.map {
+            !Set($0.messageIDs).isDisjoint(with: deletedMessageIDs)
+        } ?? false
+        let uncachedRefreshAssessment = assessUncachedRefreshedMessages(
+            in: notification
+        )
+        let hasOrderedDatasetUpdate = containsOrderedDatasetAffectingMessageUpdate(
+            notification
+        )
+        let orderedDatasetDidChange =
+            hasVisibleInsertion ||
+            hasCurrentConversationDeletion ||
+            hasDeletedWindowMessage ||
+            hasOrderedDatasetUpdate ||
+            uncachedRefreshAssessment.orderedDatasetDidChange
+
+        if uncachedRefreshAssessment.needsCountReconciliation {
+            needsUnclassifiedRefreshCountReconciliation = true
+        }
+        if orderedDatasetDidChange {
+            messageDatasetGeneration &+= 1
+        }
+        guard let window = messageWindow else { return }
+
+        let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
+        let canPreserveHistoricalWindowForTailInsertion =
+            !shouldFollowLatestWindow &&
+            hasVisibleInsertion &&
+            !hasCurrentConversationDeletion &&
+            !hasDeletedWindowMessage &&
+            !hasOrderedDatasetUpdate &&
+            visibleInsertedMessagesSortStrictlyAfterWindow(
+                in: notification,
+                window: window
+            )
+        let requiresWindowReconciliation =
+            orderedDatasetDidChange &&
+            !canPreserveHistoricalWindowForTailInsertion
+        let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
         if !insertedMessageIDs.isEmpty {
             let event = VirtualScrollInsertedMessageEvent(
                 id: UUID(),
                 messageIDs: insertedMessageIDs
             )
             insertedVisibleMessageEvents.send(event)
-            if shouldRefreshLatestWindow {
+            if shouldFollowLatestWindow {
                 let autoReadMessageIDs = newestVisibleInsertedMessageIDsForCurrentConversation(
                     in: notification
                 )
@@ -531,20 +1567,7 @@ final class VirtualScrollState: ObservableObject {
             }
         }
 
-        if shouldRefreshLatestWindow {
-            Log.diagnostic(
-                .chatView,
-                level: .info,
-                "VirtualScroll local message mutation refresh requested conv=\(conversationId) knownTotal=\(knownTotalCount)",
-                category: .ui
-            )
-            taskManager.run(localMutationRefreshTaskKey) { [weak self] in
-                guard let self = self else { return }
-                await self.refreshLatestWindowForLocalMutation(knownTotalCount: knownTotalCount)
-                guard !Task.isCancelled else { return }
-                self.resolvePendingInsertedMessageEvents()
-            }
-        } else if knownTotalCount > totalMessageCount {
+        if knownTotalCount > totalMessageCount {
             resolvedRowsByAbsoluteIndex.removeAll()
             totalMessageCount = knownTotalCount
             Log.diagnostic(
@@ -557,21 +1580,312 @@ final class VirtualScrollState: ObservableObject {
 
         let boundaryMessageIDs = Set(resolvedRowsByAbsoluteIndex.values.map(\.objectID))
         let cachedMessageIDs = Set(window.messageIDs).union(boundaryMessageIDs)
-        guard !cachedMessageIDs.isEmpty else { return }
+        let affectedMessageIDs = cachedMessageIDs.isEmpty
+            ? []
+            : refreshedCachedMessageIDs(
+                in: notification,
+                cachedMessageIDs: cachedMessageIDs
+            )
 
-        let affectedMessageIDs = refreshedCachedMessageIDs(
-            in: notification,
-            cachedMessageIDs: cachedMessageIDs
+        let didInvalidateBoundaryRow = !boundaryMessageIDs.isDisjoint(
+            with: affectedMessageIDs
         )
-
-        guard !affectedMessageIDs.isEmpty else { return }
-
-        let didInvalidateBoundaryRow = !boundaryMessageIDs.isDisjoint(with: affectedMessageIDs)
         invalidateCachedRows(for: affectedMessageIDs)
 
-        let refreshedRows = resolveCachedRows(for: window.messageIDs)
-        guard didInvalidateBoundaryRow || refreshedRows != visibleMessages else { return }
-        visibleMessages = refreshedRows
+        if requiresWindowReconciliation {
+            // An in-flight range/latest load owns the user's current scroll
+            // intent. Its dataset token forces a bounded retry, so starting a
+            // second reconciliation here would only invalidate that retry.
+            if !isLoadingMore {
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "VirtualScroll dataset reconciliation requested conv=\(conversationId) followsLatest=\(shouldFollowLatestWindow) knownTotal=\(knownTotalCount)",
+                    category: .ui
+                )
+                taskManager.run(datasetReconcileTaskKey) { [weak self] in
+                    guard let self else { return }
+                    await self.reconcileWindowAfterDatasetMutation(
+                        window: window,
+                        shouldFollowLatestWindow: shouldFollowLatestWindow
+                    )
+                }
+            } else {
+                needsDatasetReconciliationAfterCurrentLoad = true
+            }
+            scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
+            return
+        }
+
+        if !affectedMessageIDs.isEmpty {
+            let refreshedRows = resolveCachedRows(for: window.messageIDs)
+            if didInvalidateBoundaryRow || refreshedRows != visibleMessages {
+                visibleMessages = refreshedRows
+            }
+        }
+        scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
+    }
+
+    @discardableResult
+    private func reconcileWindowAfterDatasetMutation(
+        window: MessageWindow,
+        shouldFollowLatestWindow: Bool
+    ) async -> Bool {
+        guard canStartAutomaticReconciliation(window) else { return false }
+        if shouldFollowLatestWindow && self.shouldFollowLatestWindow(window) {
+            let requiredFollowIntentRevision = followIntentRevision
+            let didLoadLatest = await loadLatestWindow(
+                forceViewContext: true,
+                requiredFollowIntentRevision: requiredFollowIntentRevision
+            )
+            if didLoadLatest {
+                return true
+            }
+            guard !isCurrentFollowIntent(requiredFollowIntentRevision) else {
+                return false
+            }
+        }
+
+        guard canRestoreCapturedWindow(window) else { return false }
+        return await reloadHistoricalWindowClamped(
+            window,
+            preferPendingConversationMessages: true
+        )
+    }
+
+    private func scheduleDeferredDatasetReconciliationIfNeeded() {
+        guard needsDatasetReconciliationAfterCurrentLoad,
+              let window = messageWindow else {
+            return
+        }
+
+        needsDatasetReconciliationAfterCurrentLoad = false
+        let loadIntent = currentWindowLoadIntent
+        currentWindowLoadIntent = nil
+        let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
+        taskManager.run(datasetReconcileTaskKey) { [weak self] in
+            guard let self else { return }
+            guard self.canRestoreCapturedWindow(window) else { return }
+            switch loadIntent {
+            case .latest(let requiredFollowIntentRevision):
+                let didLoadLatest = await self.loadLatestWindow(
+                    forceViewContext: true,
+                    requiredFollowIntentRevision: requiredFollowIntentRevision
+                )
+                if !didLoadLatest,
+                   !self.isCurrentFollowIntent(requiredFollowIntentRevision),
+                   self.canRestoreCapturedWindow(window) {
+                    _ = await self.reloadHistoricalWindowClamped(
+                        window,
+                        preferPendingConversationMessages: true
+                    )
+                }
+            case .range(let range):
+                _ = await self.loadWindow(
+                    startIndex: range.lowerBound,
+                    endIndex: range.upperBound,
+                    preferPendingConversationMessages: true
+                )
+            case nil:
+                await self.reconcileWindowAfterDatasetMutation(
+                    window: window,
+                    shouldFollowLatestWindow: shouldFollowLatestWindow
+                )
+            }
+        }
+    }
+
+    private func scheduleUnclassifiedRefreshCountReconciliationIfNeeded() {
+        guard needsUnclassifiedRefreshCountReconciliation,
+              isInitialLoadComplete,
+              !isLoadingMore,
+              messageWindow != nil else {
+            return
+        }
+
+        taskManager.run(unclassifiedRefreshCountTaskKey) { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return
+            }
+            await self?.reconcileUnclassifiedRefreshCountIfNeeded()
+        }
+    }
+
+    private func reconcileUnclassifiedRefreshCountIfNeeded() async {
+        guard needsUnclassifiedRefreshCountReconciliation else { return }
+        needsUnclassifiedRefreshCountReconciliation = false
+
+        let observedCount = await loadTotalMessageCount(
+            preferPendingConversationMessages: hasPendingInsertedMessagesInConversation
+        )
+        guard !Task.isCancelled, let observedCount else { return }
+        guard observedCount != totalMessageCount else { return }
+
+        messageDatasetGeneration &+= 1
+        guard let window = messageWindow else { return }
+        let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
+
+        if isLoadingMore {
+            needsDatasetReconciliationAfterCurrentLoad = true
+            return
+        }
+
+        await reconcileWindowAfterDatasetMutation(
+            window: window,
+            shouldFollowLatestWindow: shouldFollowLatestWindow
+        )
+    }
+
+    private func schedulePostSyncDatasetReconciliationIfNeeded(
+        syncDidComplete: Bool = false
+    ) {
+        if syncDidComplete {
+            needsPostSyncDatasetReconciliation = true
+            postSyncValidationRetryCount = 0
+        }
+        guard needsPostSyncDatasetReconciliation else { return }
+        guard isInitialLoadComplete,
+              !isLoadingMore,
+              let window = messageWindow else {
+            return
+        }
+
+        needsPostSyncDatasetReconciliation = false
+        let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
+        taskManager.run(postSyncValidationTaskKey) { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            await self.validateWindowAfterSync(
+                window: window,
+                shouldFollowLatestWindow: shouldFollowLatestWindow
+            )
+        }
+    }
+
+    private func validateWindowAfterSync(
+        window: MessageWindow,
+        shouldFollowLatestWindow: Bool
+    ) async {
+        let page = await loadPage(
+            window.startIndex..<window.endIndex,
+            preferPendingConversationMessages: hasPendingInsertedMessagesInConversation
+        )
+        guard !Task.isCancelled else { return }
+
+        guard page.fetchErrorDescription == nil else {
+            needsPostSyncDatasetReconciliation = true
+            Log.diagnostic(
+                .chatView,
+                level: .error,
+                "VirtualScroll post-sync validation failed conv=\(conversationId) error=\(page.fetchErrorDescription ?? "Unknown fetch error")",
+                category: .ui
+            )
+            if postSyncValidationRetryCount < maximumAutomaticPostSyncValidationRetryCount {
+                postSyncValidationRetryCount += 1
+                schedulePostSyncDatasetReconciliationIfNeeded()
+            }
+            return
+        }
+        guard let currentWindow = messageWindow,
+              currentWindow.startIndex == window.startIndex,
+              currentWindow.endIndex == window.endIndex,
+              currentWindow.messageIDs == window.messageIDs else {
+            needsPostSyncDatasetReconciliation = true
+            schedulePostSyncDatasetReconciliationIfNeeded()
+            return
+        }
+        guard page.totalCount != totalMessageCount ||
+                page.messageIDs != window.messageIDs else {
+            postSyncValidationRetryCount = 0
+            return
+        }
+
+        messageDatasetGeneration &+= 1
+        if isLoadingMore {
+            needsDatasetReconciliationAfterCurrentLoad = true
+            needsPostSyncDatasetReconciliation = true
+            return
+        }
+
+        let didReconcile = await reconcileWindowAfterDatasetMutation(
+            window: window,
+            shouldFollowLatestWindow: shouldFollowLatestWindow
+        )
+        guard !Task.isCancelled else { return }
+        guard !didReconcile else {
+            postSyncValidationRetryCount = 0
+            return
+        }
+
+        needsPostSyncDatasetReconciliation = true
+        if postSyncValidationRetryCount < maximumAutomaticPostSyncValidationRetryCount {
+            postSyncValidationRetryCount += 1
+            schedulePostSyncDatasetReconciliationIfNeeded()
+        }
+    }
+
+    @discardableResult
+    private func reloadHistoricalWindowClamped(
+        _ window: MessageWindow,
+        preferPendingConversationMessages: Bool,
+        datasetRetryAttemptsRemaining: Int = 1
+    ) async -> Bool {
+        let loadGeneration = beginWindowLoad(
+            intent: .range(window.startIndex..<window.endIndex)
+        )
+        let expectedDatasetGeneration = messageDatasetGeneration
+        let loadedTotalCount = await loadTotalMessageCount(
+            preferPendingConversationMessages: preferPendingConversationMessages
+        )
+        guard !Task.isCancelled else {
+            finishCancelledWindowLoad(generation: loadGeneration)
+            return false
+        }
+        guard loadGeneration == windowLoadGeneration else { return false }
+        guard expectedDatasetGeneration == messageDatasetGeneration else {
+            guard datasetRetryAttemptsRemaining > 0 else {
+                finishWindowLoadFailure(
+                    operation: "historical window metadata",
+                    description: "message dataset kept changing while loading"
+                )
+                return false
+            }
+            return await reloadHistoricalWindowClamped(
+                window,
+                preferPendingConversationMessages:
+                    preferPendingConversationMessages || hasPendingInsertedMessagesInConversation,
+                datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining - 1
+            )
+        }
+        guard let totalCount = loadedTotalCount else {
+            finishWindowLoadFailure(
+                operation: "dataset reconciliation metadata",
+                description: "unable to fetch message count"
+            )
+            return false
+        }
+
+        let desiredWindowCount = max(1, window.endIndex - window.startIndex)
+        let latestPossibleStart = max(0, totalCount - desiredWindowCount)
+        let adjustedStartIndex = min(window.startIndex, latestPossibleStart)
+        let adjustedEndIndex = min(
+            totalCount,
+            adjustedStartIndex + desiredWindowCount
+        )
+        return await loadWindow(
+            startIndex: adjustedStartIndex,
+            endIndex: adjustedEndIndex,
+            preferPendingConversationMessages: preferPendingConversationMessages,
+            generation: loadGeneration,
+            datasetGeneration: expectedDatasetGeneration,
+            datasetRetryAttemptsRemaining: datasetRetryAttemptsRemaining
+        ) != nil
     }
 
     private func refreshedCachedMessageIDs(
@@ -628,15 +1942,143 @@ final class VirtualScrollState: ObservableObject {
         return affectedMessageIDs
     }
 
-    private func shouldRefreshLatestWindowForLocalMessageMutation(
-        in notification: Notification,
-        currentWindow: MessageWindow
+    private func assessUncachedRefreshedMessages(
+        in notification: Notification
+    ) -> UncachedRefreshAssessment {
+        var assessment = UncachedRefreshAssessment()
+
+        for object in contextObjects(
+            forKeys: [NSRefreshedObjectsKey],
+            in: notification
+        ) {
+            guard let message = object as? Message else { continue }
+
+            let cachedRow = resolvedRowsByID[message.objectID] ??
+                resolvedRowsByAbsoluteIndex.values.first {
+                    $0.objectID == message.objectID
+                }
+            guard cachedRow == nil else { continue }
+
+            // A sibling-context merge does not retain changed property keys.
+            // Delay ambiguous, off-window refreshes until count/sync
+            // reconciliation instead of invalidating an in-flight initial load
+            // for harmless changes such as marking old messages read.
+            guard belongsToCurrentConversation(message) else { continue }
+
+            if !isVisibleInChat(message) ||
+                refreshedMessageCouldBelongInCurrentWindow(message) {
+                assessment.orderedDatasetDidChange = true
+            } else {
+                assessment.needsCountReconciliation = true
+            }
+        }
+
+        return assessment
+    }
+
+    private func refreshedMessageCouldBelongInCurrentWindow(
+        _ message: Message
     ) -> Bool {
-        guard currentWindow.endIndex >= totalMessageCount else {
+        guard let window = messageWindow,
+              let firstMessageID = window.messageIDs.first,
+              let lastMessageID = window.messageIDs.last,
+              let firstRow = resolveCachedRow(for: firstMessageID),
+              let lastRow = resolveCachedRow(for: lastMessageID) else {
             return false
         }
 
-        return hasVisibleInsertedMessageForCurrentConversation(in: notification)
+        if window.startIndex == 0,
+           compareSortOrder(message, to: lastRow) != .orderedDescending {
+            return true
+        }
+        if window.endIndex >= totalMessageCount,
+           compareSortOrder(message, to: firstRow) != .orderedAscending {
+            return true
+        }
+        return compareSortOrder(message, to: firstRow) != .orderedAscending &&
+            compareSortOrder(message, to: lastRow) != .orderedDescending
+    }
+
+    private func compareSortOrder(
+        _ message: Message,
+        to row: ChatMessageRowModel
+    ) -> ComparisonResult {
+        if message.internalDate < row.internalDate {
+            return .orderedAscending
+        }
+        if message.internalDate > row.internalDate {
+            return .orderedDescending
+        }
+        return message.id.compare(row.id)
+    }
+
+    private func containsOrderedDatasetAffectingMessageUpdate(
+        _ notification: Notification
+    ) -> Bool {
+        for object in contextObjects(
+            forKeys: [NSUpdatedObjectsKey],
+            in: notification
+        ) {
+            guard let message = object as? Message,
+                  belongsToCurrentConversation(message) else {
+                continue
+            }
+
+            let changedValues = message.changedValuesForCurrentEvent()
+            let changedKeys = Set(changedValues.keys)
+            if changedKeys.contains("conversation") ||
+                changedKeys.contains("internalDate") {
+                return true
+            }
+            if changedKeys.contains("labels") {
+                guard let previousLabels = changedValues["labels"] as? NSSet else {
+                    return true
+                }
+
+                let excludedLabelIDs = Set(MessagePredicates.chatExcludedLabelIDs)
+                let previousLabelIDs = Set(previousLabels.compactMap {
+                    ($0 as? Label)?.id
+                })
+                guard previousLabelIDs.count == previousLabels.count else {
+                    return true
+                }
+
+                let wasVisible = previousLabelIDs.isDisjoint(
+                    with: excludedLabelIDs
+                )
+                if wasVisible != isVisibleInChat(message) {
+                    return true
+                }
+            }
+        }
+
+        // Automatically merged sibling-context saves arrive as refreshed
+        // objects with no property-key delta. Compare cached rows directly;
+        // ambiguous uncached rows are classified separately so content-only
+        // off-window updates do not invalidate the active fetch.
+        for object in contextObjects(
+            forKeys: [NSRefreshedObjectsKey],
+            in: notification
+        ) {
+            guard let message = object as? Message else { continue }
+
+            let cachedRow = resolvedRowsByID[message.objectID] ??
+                resolvedRowsByAbsoluteIndex.values.first {
+                    $0.objectID == message.objectID
+                }
+            let currentlyBelongs = belongsToCurrentConversation(message)
+
+            guard currentlyBelongs || cachedRow != nil else { continue }
+            guard let cachedRow else { continue }
+
+            if cachedRow.conversationObjectID != message.conversation?.objectID ||
+                cachedRow.internalDate != message.internalDate ||
+                !isVisibleInChat(message) {
+                return true
+            }
+        }
+
+        return false
     }
 
     /// Type-check-only relevance scan for objectsDidChange payloads. Nothing
@@ -695,8 +2137,41 @@ final class VirtualScrollState: ObservableObject {
     /// Conversation's own fault (the previous UUID comparison loaded the
     /// Conversation row for every inserted message in every merge).
     private func belongsToCurrentConversation(_ message: Message) -> Bool {
-        guard let conversationObjectID = currentConversationObjectID() else { return false }
-        return message.conversation?.objectID == conversationObjectID
+        let conversationObjectID = currentConversationObjectID()
+        let conversationUUID = UUID(uuidString: conversationId)
+
+        if let messageConversation = message.conversation {
+            if messageConversation.objectID == conversationObjectID {
+                return true
+            }
+            // A sibling-context merge can publish the relationship before
+            // all required attributes on its destination are materialized.
+            // Reading the nonoptional Swift property in that window traps
+            // while bridging nil; optional KVC keeps the observer resilient.
+            if let messageConversationID =
+                messageConversation.value(forKey: "id") as? UUID,
+               messageConversationID == conversationUUID {
+                return true
+            }
+        }
+
+        // Core Data may clear an inverse relationship before publishing the
+        // deleted object in objectsDidChange. Its committed destination still
+        // identifies which conversation's ordered dataset changed.
+        if let committedConversation = message.committedValues(
+            forKeys: ["conversation"]
+        )["conversation"] as? Conversation {
+            if committedConversation.objectID == conversationObjectID {
+                return true
+            }
+            if let committedConversationID =
+                committedConversation.value(forKey: "id") as? UUID,
+               committedConversationID == conversationUUID {
+                return true
+            }
+        }
+
+        return false
     }
 
     private func hasVisibleInsertedMessageForCurrentConversation(in notification: Notification) -> Bool {
@@ -711,14 +2186,70 @@ final class VirtualScrollState: ObservableObject {
             }
     }
 
+    private func visibleInsertedMessagesSortStrictlyAfterWindow(
+        in notification: Notification,
+        window: MessageWindow
+    ) -> Bool {
+        guard let boundaryMessageID = window.messageIDs.last,
+              let boundaryDate = resolveCachedRow(
+                for: boundaryMessageID
+              )?.internalDate else {
+            return false
+        }
+
+        let insertedMessages = contextObjects(
+            forKeys: [NSInsertedObjectsKey],
+            in: notification
+        ).compactMap { object -> Message? in
+            guard let message = object as? Message,
+                  belongsToCurrentConversation(message),
+                  isVisibleInChat(message) else {
+                return nil
+            }
+            return message
+        }
+
+        return !insertedMessages.isEmpty &&
+            insertedMessages.allSatisfy { $0.internalDate > boundaryDate }
+    }
+
     private func estimatedTotalCountAfterLocalMessageMutation(in notification: Notification) -> Int {
         let insertedCount = visibleInsertedMessageCountForCurrentConversation(in: notification)
+        let deletedCount = visibleDeletedMessageCountForCurrentConversation(in: notification)
 
-        return max(0, totalMessageCount + insertedCount)
+        return max(0, totalMessageCount + insertedCount - deletedCount)
     }
 
     private func visibleInsertedMessageCountForCurrentConversation(in notification: Notification) -> Int {
         visibleInsertedMessageIDsForCurrentConversation(in: notification).count
+    }
+
+    private func visibleDeletedMessageCountForCurrentConversation(
+        in notification: Notification
+    ) -> Int {
+        contextObjects(forKeys: [NSDeletedObjectsKey], in: notification)
+            .compactMap { $0 as? Message }
+            .filter {
+                belongsToCurrentConversation($0) &&
+                    wasVisibleInChatBeforeDeletion($0)
+            }
+            .count
+    }
+
+    private func wasVisibleInChatBeforeDeletion(_ message: Message) -> Bool {
+        if let previousLabels = message.committedValues(
+            forKeys: ["labels"]
+        )["labels"] as? NSSet {
+            let excludedLabelIDs = Set(MessagePredicates.chatExcludedLabelIDs)
+            let previousLabelIDs = Set(previousLabels.compactMap {
+                ($0 as? Label)?.id
+            })
+            if previousLabelIDs.count == previousLabels.count {
+                return previousLabelIDs.isDisjoint(with: excludedLabelIDs)
+            }
+        }
+
+        return isVisibleInChat(message)
     }
 
     private func visibleInsertedMessageIDsForCurrentConversation(
@@ -838,9 +2369,9 @@ final class VirtualScrollState: ObservableObject {
     // context and then storing those managed objects on `@MainActor` state. We now
     // re-resolve background-fetched object IDs on the viewContext before mapping
     // them into lightweight row snapshots for SwiftUI.
-    private func resolveRowsOnViewContext(
+    private func resolveRowsOnViewContextThrowing(
         for messageIDs: [NSManagedObjectID]
-    ) async -> [ChatMessageRowModel] {
+    ) throws -> [ChatMessageRowModel] {
         guard !messageIDs.isEmpty else { return [] }
 
         let request = NSFetchRequest<Message>(entityName: "Message")
@@ -848,7 +2379,7 @@ final class VirtualScrollState: ObservableObject {
         request.fetchBatchSize = messageIDs.count
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
 
-        let fetchedMessages = (try? viewContext.fetch(request)) ?? []
+        let fetchedMessages = try viewContext.fetch(request)
         let resolvedRows: [NSManagedObjectID: ChatMessageRowModel] = Dictionary(
             uniqueKeysWithValues: fetchedMessages.compactMap { message in
                 guard !message.isDeleted else { return nil }
@@ -894,7 +2425,7 @@ final class VirtualScrollState: ObservableObject {
 
         let request = NSFetchRequest<Message>(entityName: "Message")
         request.predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
-        request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
+        request.sortDescriptors = Self.messageSortDescriptors
         request.fetchOffset = index
         request.fetchLimit = 1
         request.fetchBatchSize = 1
@@ -957,29 +2488,40 @@ final class VirtualScrollState: ObservableObject {
         nonisolated(unsafe) let safePredicate = predicate
 
         return await context.perform {
-            let messageIDs: [NSManagedObjectID]
-            if range.isEmpty {
-                messageIDs = []
-            } else {
-                let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
-                request.predicate = safePredicate
-                request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
-                request.fetchOffset = range.lowerBound
-                request.fetchLimit = range.count
-                request.fetchBatchSize = 20
-                request.includesPendingChanges = false
-                request.resultType = .managedObjectIDResultType
-                messageIDs = (try? context.fetch(request)) ?? []
+            do {
+                let messageIDs: [NSManagedObjectID]
+                if range.isEmpty {
+                    messageIDs = []
+                } else {
+                    let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+                    request.predicate = safePredicate
+                    request.sortDescriptors = messageSortDescriptors
+                    request.fetchOffset = range.lowerBound
+                    request.fetchLimit = range.count
+                    request.fetchBatchSize = 20
+                    request.includesPendingChanges = false
+                    request.resultType = .managedObjectIDResultType
+                    messageIDs = try context.fetch(request)
+                }
+
+                // Keep count() on the background context so window sizing stays cheap and
+                // the main actor only resolves the IDs it actually needs to render.
+                let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+                countRequest.predicate = safePredicate
+                countRequest.includesPendingChanges = false
+                let totalCount = try context.count(for: countRequest)
+
+                return VirtualScrollMessagePage(
+                    messageIDs: messageIDs,
+                    totalCount: totalCount
+                )
+            } catch {
+                return VirtualScrollMessagePage(
+                    messageIDs: [],
+                    totalCount: 0,
+                    fetchErrorDescription: error.localizedDescription
+                )
             }
-
-            // Keep count() on the background context so window sizing stays cheap and
-            // the main actor only resolves the IDs it actually needs to render.
-            let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-            countRequest.predicate = safePredicate
-            countRequest.includesPendingChanges = false
-            let totalCount = (try? context.count(for: countRequest)) ?? 0
-
-            return VirtualScrollMessagePage(messageIDs: messageIDs, totalCount: totalCount)
         }
     }
 
@@ -996,30 +2538,45 @@ final class VirtualScrollState: ObservableObject {
         nonisolated(unsafe) let safePredicate = predicate
 
         return await context.perform {
-            let messages: [Message]
-            if range.isEmpty {
-                messages = []
-            } else {
-                let request = NSFetchRequest<Message>(entityName: "Message")
-                request.predicate = safePredicate
-                request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
-                request.fetchOffset = range.lowerBound
-                request.fetchLimit = range.count
-                request.fetchBatchSize = 20
-                request.includesPendingChanges = true
-                messages = (try? context.fetch(request)) ?? []
+            do {
+                let messages: [Message]
+                if range.isEmpty {
+                    messages = []
+                } else {
+                    let request = NSFetchRequest<Message>(entityName: "Message")
+                    request.predicate = safePredicate
+                    request.sortDescriptors = messageSortDescriptors
+                    request.fetchOffset = range.lowerBound
+                    request.fetchLimit = range.count
+                    request.fetchBatchSize = 20
+                    request.includesPendingChanges = true
+                    messages = try context.fetch(request)
+                }
+
+                let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+                countRequest.predicate = safePredicate
+                countRequest.includesPendingChanges = true
+                let totalCount = try context.count(for: countRequest)
+
+                return VirtualScrollMessagePage(
+                    messageIDs: messages.map(\.objectID),
+                    totalCount: totalCount
+                )
+            } catch {
+                return VirtualScrollMessagePage(
+                    messageIDs: [],
+                    totalCount: 0,
+                    fetchErrorDescription: error.localizedDescription
+                )
             }
-
-            let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-            countRequest.predicate = safePredicate
-            countRequest.includesPendingChanges = true
-            let totalCount = (try? context.count(for: countRequest)) ?? 0
-
-            return VirtualScrollMessagePage(
-                messageIDs: messages.map(\.objectID),
-                totalCount: totalCount
-            )
         }
+    }
+
+    nonisolated private static var messageSortDescriptors: [NSSortDescriptor] {
+        [
+            NSSortDescriptor(key: "internalDate", ascending: true),
+            NSSortDescriptor(key: "id", ascending: true)
+        ]
     }
 }
 

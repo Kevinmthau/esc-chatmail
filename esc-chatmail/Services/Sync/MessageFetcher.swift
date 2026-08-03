@@ -16,6 +16,28 @@ private struct BoundedFetchResult {
     /// Largest server-provided Retry-After (seconds, capped) among rate-limited
     /// failures in this pass — the outer retry loop honors it over synthetic backoff.
     let maxRetryAfterSeconds: TimeInterval?
+    /// Set when Gmail reported the account's quota exhausted during this pass.
+    /// The pass stops issuing requests and the affected IDs appear in no
+    /// failure bucket: quota exhaustion is account-scoped, never a
+    /// per-message verdict.
+    let quotaError: APIError?
+}
+
+/// Outcome of a batch fetch-and-persist pass: fetch failures that must block
+/// cursor advancement, server-side-gone IDs (non-blocking), and the per-ID
+/// persistence report from the persist callback.
+struct MessageBatchOutcome: Sendable {
+    /// Transient-exhausted and non-retriable fetch failures (excluding 404s).
+    let fetchFailedIds: [String]
+    /// The server returned 404 — the message no longer exists remotely.
+    let goneIds: [String]
+    let persistence: MessagePersistenceReport
+
+    static let empty = MessageBatchOutcome(fetchFailedIds: [], goneIds: [], persistence: .empty)
+
+    /// IDs whose outcome must prevent the history cursor from advancing.
+    var blockingFailureIds: [String] { fetchFailedIds + persistence.failedIds }
+    var hasBlockingFailures: Bool { !fetchFailedIds.isEmpty || !persistence.failedIds.isEmpty }
 }
 
 /// Outcome of a single retry pass over previously abandoned messages
@@ -32,6 +54,7 @@ struct AbandonedRetryFetchResult {
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
 final class MessageFetcher: @unchecked Sendable {
     private let apiClient: any GmailAPIClientProtocol
+    private let clock: any SyncClock
 
     /// Maximum number of retry attempts for failed messages
     private let maxRetryAttempts = 3
@@ -41,10 +64,12 @@ final class MessageFetcher: @unchecked Sendable {
 
     @MainActor init() {
         self.apiClient = GmailAPIClient.shared
+        self.clock = SystemSyncClock()
     }
 
-    init(apiClient: any GmailAPIClientProtocol) {
+    init(apiClient: any GmailAPIClientProtocol, clock: any SyncClock = SystemSyncClock()) {
         self.apiClient = apiClient
+        self.clock = clock
     }
 
     /// Checks if an error is retriable (transient network/server issues)
@@ -95,6 +120,7 @@ final class MessageFetcher: @unchecked Sendable {
         var notFoundIds: [String] = []
         var exhaustedRetryIds: [String] = []
         var maxRetryAfterSeconds: TimeInterval?
+        var quotaError: APIError?
 
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             var iterator = ids.makeIterator()
@@ -139,28 +165,43 @@ final class MessageFetcher: @unchecked Sendable {
                 case .success(let message):
                     successfulMessages.append(message)
                 case .failure(let error):
-                    if case APIError.rateLimited(let retryAfter) = error, let retryAfter {
-                        maxRetryAfterSeconds = max(maxRetryAfterSeconds ?? 0, retryAfter)
-                    }
-                    if self.isRetriableError(error) {
-                        // Transient error (timeout, network, 5xx)
-                        if isFinalAttempt {
-                            // We've exhausted retries, but this might succeed on future sync
-                            exhaustedRetryIds.append(id)
-                        } else {
-                            retriableFailedIds.append(id)
+                    if let apiError = error as? APIError, case .quotaExhausted = apiError {
+                        // Account-scoped: every further request this pass is
+                        // doomed, so stop issuing them and give the affected
+                        // IDs no verdict — quota exhaustion must never be
+                        // recorded as a per-message failure.
+                        if quotaError == nil {
+                            quotaError = apiError
+                            group.cancelAll()
                         }
-                    } else if case APIError.notFound = error {
-                        // The server says the message doesn't exist
-                        notFoundIds.append(id)
-                    } else {
-                        // Non-retriable error (4xx, auth, decoding) - truly permanent
-                        permanentlyFailedIds.append(id)
+                    } else if quotaError == nil {
+                        if case APIError.rateLimited(let retryAfter) = error, let retryAfter {
+                            maxRetryAfterSeconds = max(maxRetryAfterSeconds ?? 0, retryAfter)
+                        }
+                        if self.isRetriableError(error) {
+                            // Transient error (timeout, network, 5xx)
+                            if isFinalAttempt {
+                                // We've exhausted retries, but this might succeed on future sync
+                                exhaustedRetryIds.append(id)
+                            } else {
+                                retriableFailedIds.append(id)
+                            }
+                        } else if case APIError.notFound = error {
+                            // The server says the message doesn't exist
+                            notFoundIds.append(id)
+                        } else {
+                            // Non-retriable error (4xx, auth, decoding) - truly permanent
+                            permanentlyFailedIds.append(id)
+                        }
                     }
+                    // Failures arriving after the quota signal are the
+                    // cancellations of in-flight tasks; those IDs also get
+                    // no verdict.
                 }
 
-                // Start next task if there are more IDs
-                if let nextId = iterator.next() {
+                // Start next task if there are more IDs (and the pass wasn't
+                // aborted by quota exhaustion)
+                if quotaError == nil, let nextId = iterator.next() {
                     group.addTask { await fetchOnce(nextId) }
                     activeTasks += 1
                 }
@@ -173,7 +214,8 @@ final class MessageFetcher: @unchecked Sendable {
             permanentlyFailedIds: permanentlyFailedIds,
             notFoundIds: notFoundIds,
             exhaustedRetryIds: exhaustedRetryIds,
-            maxRetryAfterSeconds: maxRetryAfterSeconds
+            maxRetryAfterSeconds: maxRetryAfterSeconds,
+            quotaError: quotaError
         )
     }
 
@@ -190,16 +232,20 @@ final class MessageFetcher: @unchecked Sendable {
     /// expensive per-message processing while keeping writes ordered.
     private func persistInChronologicalOrder(
         _ messages: [GmailMessage],
-        persist: @escaping @Sendable ([GmailMessage]) async -> Void
-    ) async {
-        guard !messages.isEmpty else { return }
-        await persist(chronologicallySorted(messages))
+        persist: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport
+    ) async throws -> MessagePersistenceReport {
+        guard !messages.isEmpty else { return .empty }
+        return try await persist(chronologicallySorted(messages))
     }
 
     /// Makes a single fetch attempt for previously abandoned messages, classifying
     /// each ID so the caller can decide whether to keep retrying it on future syncs.
     /// No in-place retry loop: these IDs have already failed multiple full syncs, so
     /// one attempt per sync is enough.
+    ///
+    /// Quota exhaustion mid-pass yields no outcome for the affected IDs — like
+    /// the cancellation path below, recording it would burn the drain's retry
+    /// budget on attempts that prove nothing about the messages.
     func fetchAbandonedMessages(_ ids: [String]) async -> AbandonedRetryFetchResult {
         guard !ids.isEmpty, !Task.isCancelled else { return .empty }
 
@@ -221,30 +267,47 @@ final class MessageFetcher: @unchecked Sendable {
     /// - Parameters:
     ///   - ids: Array of Gmail message IDs to fetch
     ///   - persist: Callback invoked with each successfully fetched group of messages,
-    ///     sorted into chronological order
-    /// - Returns: Array of message IDs that failed to fetch after retries
+    ///     sorted into chronological order; returns the per-ID persistence report
+    /// - Returns: The batch outcome: blocking fetch failures, server-side-gone
+    ///   IDs (404 — non-blocking), and the merged persistence report
+    /// - Throws: `APIError.quotaExhausted` when Gmail reports the account's
+    ///   quota exhausted — the sync run must abort: the affected IDs get no
+    ///   per-message verdict (in neither the outcome nor the report), so the
+    ///   next scheduled sync retries them after the quota window resets
+    ///   instead of recording permanent failures. Errors thrown by `persist`
+    ///   also propagate.
     func fetchBatch(
         _ ids: [String],
-        persist: @escaping @Sendable ([GmailMessage]) async -> Void
-    ) async -> [String] {
+        persist: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport
+    ) async throws -> MessageBatchOutcome {
         guard !Task.isCancelled else {
             Log.debug("Batch processing cancelled", category: .sync)
-            return ids
+            return MessageBatchOutcome(fetchFailedIds: ids, goneIds: [], persistence: .empty)
         }
 
         var permanentlyFailed: [String] = []
         var exhaustedRetries: [String] = []
+        var goneIds: [String] = []
+        var persistenceReport = MessagePersistenceReport()
 
         // First attempt
         let initialResult = await fetchWithBoundedConcurrency(ids: ids)
         permanentlyFailed.append(contentsOf: initialResult.permanentlyFailedIds)
-        permanentlyFailed.append(contentsOf: initialResult.notFoundIds)
+        goneIds.append(contentsOf: initialResult.notFoundIds)
 
-        for id in initialResult.permanentlyFailedIds + initialResult.notFoundIds {
+        for id in initialResult.permanentlyFailedIds {
             Log.warning("Non-retriable error for message \(Log.hashIdentifier(id))", category: .sync)
         }
 
-        await persistInChronologicalOrder(initialResult.successfulMessages, persist: persist)
+        persistenceReport.merge(
+            try await persistInChronologicalOrder(initialResult.successfulMessages, persist: persist)
+        )
+
+        // Abort after persisting what did succeed: classifying the remainder
+        // would turn an account-scoped condition into per-message verdicts.
+        if let quotaError = initialResult.quotaError {
+            throw quotaError
+        }
 
         var currentFailedIds = initialResult.retriableFailedIds
         var pendingRetryAfter = initialResult.maxRetryAfterSeconds
@@ -261,7 +324,7 @@ final class MessageFetcher: @unchecked Sendable {
             Log.debug("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...", category: .sync)
 
             do {
-                try await Task.sleep(nanoseconds: delay)
+                try await clock.sleep(nanoseconds: delay)
             } catch {
                 // Task was cancelled during sleep
                 break
@@ -276,14 +339,20 @@ final class MessageFetcher: @unchecked Sendable {
                 Log.debug("Successfully fetched message \(Log.hashIdentifier(message.id)) on retry attempt \(attempt)", category: .sync)
             }
 
-            for id in retryResult.permanentlyFailedIds + retryResult.notFoundIds {
+            for id in retryResult.permanentlyFailedIds {
                 Log.warning("Permanently failed to fetch message \(Log.hashIdentifier(id)) after \(attempt) attempts", category: .sync)
             }
 
             permanentlyFailed.append(contentsOf: retryResult.permanentlyFailedIds)
-            permanentlyFailed.append(contentsOf: retryResult.notFoundIds)
+            goneIds.append(contentsOf: retryResult.notFoundIds)
             exhaustedRetries.append(contentsOf: retryResult.exhaustedRetryIds)
-            await persistInChronologicalOrder(retryResult.successfulMessages, persist: persist)
+            persistenceReport.merge(
+                try await persistInChronologicalOrder(retryResult.successfulMessages, persist: persist)
+            )
+
+            if let quotaError = retryResult.quotaError {
+                throw quotaError
+            }
 
             currentFailedIds = retryResult.retriableFailedIds
             pendingRetryAfter = retryResult.maxRetryAfterSeconds
@@ -294,19 +363,25 @@ final class MessageFetcher: @unchecked Sendable {
             Log.info("Messages with transient failures after \(maxRetryAttempts) retries (may succeed on next sync): \(exhaustedRetries.count)", category: .sync)
         }
 
-        // Return permanent failures PLUS exhausted transient failures.
-        // Exhausted transient IDs must be surfaced as failures so upstream sync logic
-        // does not incorrectly treat them as success and advance historyId.
-        let allFailedIds = permanentlyFailed + exhaustedRetries
-
+        // Blocking failures are permanent fetch errors PLUS exhausted transient
+        // failures — both must prevent historyId advancement. Server-side 404s
+        // are reported separately: a message deleted remotely has a terminal
+        // outcome and must not freeze the cursor.
         if !permanentlyFailed.isEmpty {
             Log.warning("Total permanently failed messages (non-retriable errors): \(permanentlyFailed.count)", category: .sync)
         }
         if !exhaustedRetries.isEmpty {
             Log.warning("Total transient failures exhausted retries: \(exhaustedRetries.count)", category: .sync)
         }
+        if !goneIds.isEmpty {
+            Log.info("Messages gone server-side (404): \(goneIds.count)", category: .sync)
+        }
 
-        return allFailedIds
+        return MessageBatchOutcome(
+            fetchFailedIds: permanentlyFailed + exhaustedRetries,
+            goneIds: goneIds,
+            persistence: persistenceReport
+        )
     }
 
     /// Fetches messages from Gmail API using pagination

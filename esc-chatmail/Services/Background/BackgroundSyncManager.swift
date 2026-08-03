@@ -24,7 +24,7 @@ final class BackgroundSyncManager {
 
     // MARK: - Components
 
-    private let taskScheduler: BackgroundTaskScheduler
+    private let taskScheduler: any BackgroundTaskScheduling
     private let stateManager: BackgroundSyncStateManager
     private let errorHandler = BackgroundSyncErrorHandler()
     private let messageProcessor: BackgroundMessageProcessor
@@ -33,7 +33,7 @@ final class BackgroundSyncManager {
     private let syncRunCoordinator: SyncRunCoordinator
 
     init(
-        taskScheduler: BackgroundTaskScheduler = .shared,
+        taskScheduler: any BackgroundTaskScheduling = BackgroundTaskScheduler.shared,
         coreDataStack: CoreDataStack = .shared,
         syncRunCoordinator: SyncRunCoordinator = .shared,
         authSessionProvider: @escaping @MainActor @Sendable () -> AuthSession = { AuthSession.shared },
@@ -95,30 +95,22 @@ final class BackgroundSyncManager {
     /// Uses an atomic flag to ensure `setTaskCompleted` is called exactly once,
     /// preventing a race between normal completion and the expiration handler.
     private func runBackgroundTask(_ task: BGTask, isProcessingTask: Bool) {
-        let completed = OSAllocatedUnfairLock(initialState: false)
-
-        let completeOnce: (Bool) -> Void = { success in
-            let alreadyCompleted = completed.withLock { done -> Bool in
-                if done { return true }
-                done = true
-                return false
-            }
-            guard !alreadyCompleted else { return }
+        let latch = BackgroundTaskCompletionLatch { success in
             task.setTaskCompleted(success: success)
         }
 
         let backgroundTask = Task { [weak self] in
             guard let self = self else {
-                completeOnce(false)
+                latch.complete(success: false)
                 return
             }
             let success = await self.performDeltaSync(isProcessingTask: isProcessingTask)
-            completeOnce(success)
+            latch.complete(success: success)
         }
 
         task.expirationHandler = {
             backgroundTask.cancel()
-            completeOnce(false)
+            latch.complete(success: false)
         }
     }
 

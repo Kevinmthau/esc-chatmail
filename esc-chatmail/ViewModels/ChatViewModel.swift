@@ -2,18 +2,83 @@ import Foundation
 import CoreData
 import Combine
 
+/// Composer-only state kept separate from the thread's broader presentation state.
+///
+/// Views that render the reply composer should observe this object directly. Its
+/// changes are intentionally not forwarded through `ChatViewModel.objectWillChange`
+/// so typing and reply-target updates do not invalidate the message list.
+@MainActor
+final class ChatComposerState: ObservableObject {
+    @Published var replyText: String
+    @Published var replyingTo: Message?
+    @Published var attachments: [Attachment]
+
+    init(
+        replyText: String = "",
+        replyingTo: Message? = nil,
+        attachments: [Attachment] = []
+    ) {
+        self.replyText = replyText
+        self.replyingTo = replyingTo
+        self.attachments = attachments
+    }
+
+    var hasDraftContent: Bool {
+        Self.hasDraftContent(
+            replyText: replyText,
+            hasAttachments: !attachments.isEmpty
+        )
+    }
+
+    var hasDraftContentPublisher: AnyPublisher<Bool, Never> {
+        Publishers.CombineLatest($replyText, $attachments)
+            .map { replyText, attachments in
+                Self.hasDraftContent(
+                    replyText: replyText,
+                    hasAttachments: !attachments.isEmpty
+                )
+            }
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+    }
+
+    static func hasDraftContent(
+        replyText: String,
+        hasAttachments: Bool
+    ) -> Bool {
+        !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            hasAttachments
+    }
+}
+
 /// ViewModel for ChatView - manages chat state and message operations
 @MainActor
 final class ChatViewModel: ObservableObject {
     // MARK: - Published State
 
-    @Published var replyText = ""
-    @Published var replyingTo: Message?
     @Published var forwardComposeContext: ComposeForwardModeContext?
     @Published var destination: ChatDestination?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
     @Published var sendErrorAlert: ChatSendErrorAlert?
+
+    // MARK: - Composer State
+
+    let composerState = ChatComposerState()
+
+    /// Source-compatible access for existing callers. Composer UI should observe
+    /// `composerState` directly rather than the full chat view model.
+    var replyText: String {
+        get { composerState.replyText }
+        set { composerState.replyText = newValue }
+    }
+
+    /// Source-compatible access for existing callers. Composer UI should observe
+    /// `composerState` directly rather than the full chat view model.
+    var replyingTo: Message? {
+        get { composerState.replyingTo }
+        set { composerState.replyingTo = newValue }
+    }
 
     // MARK: - Composed Services
 
@@ -46,11 +111,26 @@ final class ChatViewModel: ObservableObject {
     private let prefetchTaskManager = ViewModelTaskManager()
 
     var isEffectivelyOneToOneConversation: Bool {
+        if conversation.conversationType == .list {
+            return false
+        }
+
         if let effectiveParticipantCount {
             return effectiveParticipantCount <= 1
         }
 
         return conversation.conversationType == .oneToOne
+    }
+
+    var displayNameForNavigation: String? {
+        if conversation.conversationType == .list,
+           let storedDisplayName = conversation.displayName?
+               .trimmingCharacters(in: .whitespacesAndNewlines),
+           !storedDisplayName.isEmpty {
+            return storedDisplayName
+        }
+
+        return resolvedDisplayName
     }
 
     var emailReaderRoute: EmailReaderRoute? {
@@ -118,7 +198,10 @@ final class ChatViewModel: ObservableObject {
 
     func latestVisibleMessage() -> Message? {
         let request = NSFetchRequest<Message>(entityName: "Message")
-        request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
         request.predicate = MessagePredicates.visibleInChat(conversation: conversation)
         request.fetchLimit = 1
         request.fetchBatchSize = 1
@@ -187,18 +270,34 @@ final class ChatViewModel: ObservableObject {
         replyingTo = lastMessage
     }
 
-    /// Updates replyingTo when a new message arrives with a different subject
+    /// Keeps the reply target anchored to this conversation as rows change.
+    ///
+    /// A legacy message can move to a List-Id conversation while this chat is
+    /// open. Replace that invalid target even when the replacement has the same
+    /// subject; otherwise outbound validation rejects the reply. List chats also
+    /// advance across Gmail threads whose subjects happen to match.
     func updateReplyingToIfNewSubject(lastMessage: Message?) {
-        guard let lastMessage = lastMessage else { return }
-
         // If user cleared replyingTo (tapped X), don't auto-update
         guard let currentReplyingTo = replyingTo else { return }
 
-        // If the new message has a different subject, update to it
+        guard isValidReplyTarget(currentReplyingTo) else {
+            replyingTo = lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil }
+            return
+        }
+
+        guard let lastMessage, isValidReplyTarget(lastMessage) else { return }
+
+        // List conversations can combine multiple Gmail threads that happen to
+        // share a subject. Follow the newest thread so reply metadata and quoted
+        // content do not stay anchored to an older list post.
         let currentSubject = currentReplyingTo.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let newSubject = lastMessage.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let listThreadChanged =
+            conversation.conversationType == .list &&
+            !lastMessage.gmThreadId.isEmpty &&
+            currentReplyingTo.gmThreadId != lastMessage.gmThreadId
 
-        if currentSubject != newSubject {
+        if currentSubject != newSubject || listThreadChanged {
             replyingTo = lastMessage
         }
     }
@@ -246,10 +345,25 @@ final class ChatViewModel: ObservableObject {
         destination = nil
     }
 
-    /// Sends a reply with optional attachments
-    func sendReply(with attachments: [Attachment]) async -> Bool {
+    /// Creates the optimistic reply and returns its stable local identity.
+    ///
+    /// The caller uses this identity to make the exact row visible before
+    /// requesting any optional post-send scrolling.
+    func sendReply() async -> OutboundMessageResult? {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return false }
+        let attachments = composerState.attachments
+        guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return nil }
+
+        guard !isConversationDrained else {
+            Log.warning(
+                "Blocked reply send because the anchored conversation drained during rerouting",
+                category: .message
+            )
+            sendErrorAlert = ChatSendErrorAlert(
+                message: "This conversation moved while you were replying. Your draft and attachments are still here."
+            )
+            return nil
+        }
 
         let result: OutboundMessageResult?
         do {
@@ -272,13 +386,48 @@ final class ChatViewModel: ObservableObject {
         } catch {
             Log.error("Failed to create optimistic message for reply", category: .message, error: error)
             sendErrorAlert = ChatSendErrorAlert(message: error.localizedDescription)
-            return false
+            return nil
         }
-        guard result != nil else { return false }
+        guard let result else { return nil }
 
         // Clear composer immediately after optimistic insertion.
         replyText = ""
         replyingTo = nil
+        composerState.attachments = []
+        return result
+    }
+
+    static func isDrainedConversation(
+        hidden: Bool,
+        archivedAt: Date?,
+        lastMessageDate: Date?
+    ) -> Bool {
+        Conversation.isRetainedDrainedShell(
+            hidden: hidden,
+            archivedAt: archivedAt,
+            lastMessageDate: lastMessageDate
+        )
+    }
+
+    private var isConversationDrained: Bool {
+        conversation.isRetainedDrainedShell
+    }
+
+    private func isValidReplyTarget(_ message: Message) -> Bool {
+        guard message.managedObjectContext != nil,
+              !message.isDeleted,
+              message.conversation?.objectID == conversationObjectID else {
+            return false
+        }
+
+        if conversation.conversationType == .list {
+            guard let conversationListId = conversation.listId,
+                  !conversationListId.isEmpty,
+                  message.listId == conversationListId else {
+                return false
+            }
+        }
+
         return true
     }
 
@@ -336,9 +485,27 @@ final class ChatViewModel: ObservableObject {
                 )
             }
 
-            self.resolvedDisplayName = info.formattedDisplayName
+            self.resolvedDisplayName = Self.resolvedDisplayName(
+                conversationType: self.conversation.conversationType,
+                storedDisplayName: self.conversationDisplayNameHint,
+                participantDisplayName: info.formattedDisplayName
+            )
             self.effectiveParticipantCount = info.totalUniqueParticipants
         }
+    }
+
+    static func resolvedDisplayName(
+        conversationType: ConversationType,
+        storedDisplayName: String?,
+        participantDisplayName: String
+    ) -> String {
+        if conversationType == .list,
+           let storedDisplayName = storedDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !storedDisplayName.isEmpty {
+            return storedDisplayName
+        }
+
+        return participantDisplayName
     }
 
     private func makeForwardModeInput(_ message: Message) throws -> ComposeForwardModeContextBuilder.Input {

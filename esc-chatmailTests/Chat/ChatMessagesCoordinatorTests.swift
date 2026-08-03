@@ -19,7 +19,214 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         super.tearDown()
     }
 
-    func testHandleAppear_runsInitialBottomAnchorSequenceAndRefreshesGrouping() async throws {
+    func testTopPresentation_revealsLoadedRowsWithoutLoadingLatestOrScrolling() throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var latestWindowRequests: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            initialPresentationAnchor: .top,
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                latestWindowRequests.append(knownTotalCount)
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        let geometryCheckBeforeAppear = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertTrue(latestWindowRequests.isEmpty)
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertEqual(
+            coordinator.initialAnchorGeometryCheckID,
+            geometryCheckBeforeAppear
+        )
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertTrue(anchorSteps.isEmpty)
+    }
+
+    func testTopPresentation_initialCountPublicationPreservesBeginningWindow() throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var latestWindowRequests: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            initialPresentationAnchor: .top,
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                latestWindowRequests.append(knownTotalCount)
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: [],
+            senderGroupingMessages: [],
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleMessageCountChange(
+            oldCount: 0,
+            newCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            totalMessageCount: messages.count,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: false,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertTrue(latestWindowRequests.isEmpty)
+        XCTAssertTrue(anchorSteps.isEmpty)
+    }
+
+    func testTopPresentation_incomingMessageOnlyFollowsWhenBottomIsVisible() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var latestWindowRequests: [Int?] = []
+        var updatedReplyTargets: [String?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            initialPresentationAnchor: .top,
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                latestWindowRequests.append(knownTotalCount)
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { lastMessage in
+                updatedReplyTargets.append(lastMessage?.id)
+            },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 1,
+            lastMessage: messages[0],
+            visibleMessages: [rows[0]],
+            senderGroupingMessages: [rows[0]],
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+
+        coordinator.handleMessageCountChange(
+            oldCount: 1,
+            newCount: 2,
+            lastMessage: messages[1],
+            visibleMessages: Array(rows.prefix(2)),
+            totalMessageCount: 2,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertTrue(latestWindowRequests.isEmpty)
+        XCTAssertEqual(updatedReplyTargets, [messages[1].id])
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        coordinator.handleMessageCountChange(
+            oldCount: 2,
+            newCount: 3,
+            lastMessage: messages[2],
+            visibleMessages: rows,
+            totalMessageCount: 3,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+
+        XCTAssertEqual(latestWindowRequests, [3, 3])
+        XCTAssertEqual(updatedReplyTargets, [messages[1].id, messages[2].id])
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testHandleAppear_waitsForLayoutConfirmationAndRefreshesGrouping() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "Alice@Example.com",
             "alice@example.com",
@@ -72,6 +279,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             }
         )
 
+        let geometryCheckBeforeAppear = coordinator.initialAnchorGeometryCheckID
         coordinator.handleAppear(
             messageCount: messages.count,
             lastMessage: messages.last,
@@ -84,12 +292,35 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         await waitUntil {
-            coordinator.isReadyToShow &&
-                anchorSteps.count == 5 &&
-                groupingRequests.count == 1
+            loadLatestWindowCount == 1 && groupingRequests.count == 1
         }
 
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertNotEqual(
+            coordinator.initialAnchorGeometryCheckID,
+            geometryCheckBeforeAppear
+        )
+
+        let geometryCheckBeforeScroll = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckBeforeScroll
+        }
+        XCTAssertNotEqual(
+            coordinator.initialAnchorGeometryCheckID,
+            geometryCheckBeforeScroll
+        )
+
+        await confirmInitialBottomAnchor(coordinator)
+
         XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertTrue(coordinator.isReadyToShow)
         XCTAssertEqual(markConversationAsReadCount, 1)
         XCTAssertEqual(initializedReplyTargets, [messages.last?.id])
         XCTAssertEqual(loadResolvedDisplayNameCount, 1)
@@ -105,22 +336,16 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(groupingRequests, [["Alice@Example.com", "bob@example.com"]])
         XCTAssertEqual(
             sleepCalls,
-            [
-                UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000),
-                UInt64(UIConfig.initialScrollDelay * 1_000_000_000),
-                250_000_000,
-                750_000_000,
-                1_500_000_000
-            ]
+            [UInt64(UIConfig.initialScrollDelay * 1_000_000_000)]
         )
         XCTAssertEqual(
-            anchorSteps.map(\.logMessage),
+            anchorSteps,
             [
-                "ChatView initial scroll -> bottom anchor",
-                "ChatView follow-up scroll -> bottom anchor",
-                "ChatView stabilization scroll (0.25s) -> bottom anchor",
-                "ChatView stabilization scroll (0.75s) -> bottom anchor",
-                "ChatView stabilization scroll (1.5s) -> bottom anchor"
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
             ]
         )
         XCTAssertEqual(
@@ -223,20 +448,692 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         await waitUntil {
-            coordinator.isReadyToShow && anchorSteps.count == 5
+            loadLatestWindowCount == 1
+        }
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+        var geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
         }
 
         XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertFalse(coordinator.isReadyToShow)
         XCTAssertEqual(
-            anchorSteps.map(\.logMessage),
+            anchorSteps,
             [
-                "ChatView initial scroll -> bottom anchor",
-                "ChatView follow-up scroll -> bottom anchor",
-                "ChatView stabilization scroll (0.25s) -> bottom anchor",
-                "ChatView stabilization scroll (0.75s) -> bottom anchor",
-                "ChatView stabilization scroll (1.5s) -> bottom anchor"
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout retry -> bottom anchor"
+                )
             ]
         )
+
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+    }
+
+    func testPermanentlyOffscreenInitialAnchorStopsAfterBoundedRetriesAndReveals() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        for _ in 0..<2 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false
+            ) { step in
+                anchorSteps.append(step)
+            }
+            XCTAssertFalse(coordinator.isReadyToShow)
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("Exhausting initial retries must not issue a third scroll")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout retry -> bottom anchor"
+                )
+            ]
+        )
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail("Fallback reveal must not activate post-reveal following")
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("Fallback reveal must make initial anchoring terminal")
+        }
+    }
+
+    func testSynchronousVisibleGeometryDuringScrollPreservesConfirmationTimer() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var sleepCalls: [UInt64] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { nanoseconds in
+                sleepCalls.append(nanoseconds)
+            }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: true
+            ) { _ in
+                XCTFail("Reentrant visible geometry must not request another scroll")
+            }
+        }
+
+        await waitUntil {
+            sleepCalls.count == 1
+                && coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail("Stable visible geometry must not request another scroll")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            sleepCalls,
+            [UInt64(UIConfig.initialScrollDelay * 1_000_000_000)]
+        )
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testVisiblyConfirmedRevealRetriesConsecutiveOffscreenLayoutsUntilVisible() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var sleepCalls: [UInt64] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { nanoseconds in
+                sleepCalls.append(nanoseconds)
+            }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+        sleepCalls.removeAll()
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 120
+        ) { step in
+            anchorSteps.append(step)
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false,
+                contentMinY: 0,
+                contentHeight: 120
+            ) { _ in
+                XCTFail("A reentrant repeated offscreen callback must not scroll again")
+            }
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 160
+        ) { _ in
+            XCTFail("A consecutive resize should be coalesced into the pending geometry check")
+        }
+
+        await waitUntil {
+            anchorSteps.count == 2 && sleepCalls.count == 2
+        }
+
+        XCTAssertEqual(coordinator.initialAnchorGeometryCheckID, geometryCheckID)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout retry -> bottom anchor"
+                )
+            ]
+        )
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -60,
+            contentHeight: 160
+        ) { _ in
+            XCTFail("Returning onscreen must not request a scroll")
+        }
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -60,
+            contentHeight: 200
+        ) { _ in
+            XCTFail("User interaction must cancel post-reveal bottom following")
+        }
+
+        XCTAssertEqual(anchorSteps.count, 2)
+    }
+
+    func testPostRevealBottomFollowDoesNotOverrideNonLayoutScroll() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 100,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("Content moving toward history must be treated as user scrolling")
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 100,
+            contentHeight: 180
+        ) { _ in
+            XCTFail("Cancelled following must not resume after later layout growth")
+        }
+    }
+
+    func testPostRevealBottomFollowRespondsToViewportShrink() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 80
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -20,
+            contentHeight: 100,
+            viewportHeight: 80
+        ) { _ in
+            XCTFail("Returning onscreen after a viewport resize must not request a scroll")
+        }
+
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testPostRevealBottomFollowExpiresAfterGracePeriod() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 120
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -20,
+            contentHeight: 120
+        ) { _ in
+            XCTFail("Returning onscreen must not request a scroll")
+        }
+
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -20,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("Expired post-reveal following must not override later scrolling")
+        }
+
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testPostRevealBottomFollowStopsOnDisappear() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleDisappear()
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("Disappearing must cancel post-reveal bottom following")
+        }
+    }
+
+    func testUserScrollDuringPendingStabilizationCancelsForcedAnchoring() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { _ in
+            XCTFail("A visible anchor should begin confirmation without scrolling")
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleUserScrollInteraction()
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("User interaction must cancel later initial scroll attempts")
+        }
+    }
+
+    func testUserScrollDuringInitialRevealCancelsLatestWindowLoads() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com",
+            "fourth@example.com"
+        ])
+        let visibleRows = messages.prefix(3).map { ChatMessageRowModelMapper.map($0) }
+        let initialLoadStarted = expectation(description: "Initial latest-window load started")
+        let refreshLoadStarted = expectation(description: "Arrival latest-window load started")
+        let loadsCancelled = expectation(description: "Latest-window loads cancelled")
+        loadsCancelled.expectedFulfillmentCount = 2
+        let unexpectedRestart = expectation(
+            description: "User takeover must prevent a later latest-window restart"
+        )
+        unexpectedRestart.isInverted = true
+        var hasUserTakenOver = false
+        var cancelledKnownCounts: [Int?] = []
+        var completedKnownCounts: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                if hasUserTakenOver {
+                    unexpectedRestart.fulfill()
+                    return
+                }
+                if knownTotalCount == nil {
+                    initialLoadStarted.fulfill()
+                } else if knownTotalCount == 4 {
+                    refreshLoadStarted.fulfill()
+                }
+
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    completedKnownCounts.append(knownTotalCount)
+                } catch {
+                    guard Task.isCancelled else { return }
+                    cancelledKnownCounts.append(knownTotalCount)
+                    loadsCancelled.fulfill()
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 3,
+            lastMessage: messages[2],
+            visibleMessages: visibleRows,
+            senderGroupingMessages: visibleRows,
+            totalMessageCount: 3,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [initialLoadStarted], timeout: 1)
+
+        coordinator.handleMessageCountChange(
+            oldCount: 3,
+            newCount: 4,
+            lastMessage: messages[3],
+            visibleMessages: visibleRows,
+            totalMessageCount: 4,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [refreshLoadStarted], timeout: 1)
+
+        coordinator.handleUserScrollInteraction()
+        await fulfillment(of: [loadsCancelled], timeout: 1)
+
+        hasUserTakenOver = true
+        coordinator.handleMessageCountChange(
+            oldCount: 3,
+            newCount: 4,
+            lastMessage: messages[3],
+            visibleMessages: visibleRows,
+            totalMessageCount: 4,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [unexpectedRestart], timeout: 0.1)
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertEqual(
+            cancelledKnownCounts.map { $0 ?? -1 }.sorted(),
+            [-1, 4]
+        )
+        XCTAssertTrue(completedKnownCounts.isEmpty)
+    }
+
+    func testBottomMovingOffscreenDuringStabilizationReanchorsAndRequiresFreshConfirmation() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        let geometryCheckBeforeReanchor = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
+            ]
+        )
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckBeforeReanchor
+        }
+
+        let geometryCheckBeforeConfirmation = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckBeforeConfirmation
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(anchorSteps.count, 1)
     }
 
     func testTransientReappearanceDoesNotRecaptureUnreadOrConsumeHiddenArrival() {
@@ -645,9 +1542,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         await waitUntil {
-            prefetchedMessageBatches.count == 1 && anchorSteps.count == 5
+            prefetchedMessageBatches.count == 1
         }
 
+        XCTAssertTrue(anchorSteps.isEmpty)
         let expectedPrefetchMessages = Array(messages.suffix(30))
         XCTAssertEqual(prefetchedMessageBatches, [expectedPrefetchMessages.map(\.id)])
         XCTAssertEqual(prefetchedSenderEmailBatches, [expectedPrefetchMessages.compactMap(\.senderEmail)])
@@ -743,7 +1641,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 0,
             stabilizeBottomAnchor: true,
             isInitialWindowLoaded: false,
-            isShowingLatestWindow: true
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -933,29 +1832,22 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 2,
             stabilizeBottomAnchor: false,
             isInitialWindowLoaded: true,
-            isShowingLatestWindow: true
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
         ) { step in
             anchorSteps.append(step)
         }
 
         await waitUntil {
-            coordinator.isReadyToShow &&
-                anchorSteps.count == 5 &&
-                latestWindowKnownCounts.contains(2)
+            latestWindowKnownCounts.contains(2)
         }
 
+        await confirmInitialBottomAnchor(coordinator)
+
+        XCTAssertTrue(coordinator.isReadyToShow)
         XCTAssertEqual(updatedReplyTargets, [messages.last?.id])
         XCTAssertEqual(loadResolvedDisplayNameCount, 1)
-        XCTAssertEqual(
-            anchorSteps.map(\.logMessage),
-            [
-                "ChatView initial scroll -> bottom anchor",
-                "ChatView follow-up scroll -> bottom anchor",
-                "ChatView stabilization scroll (0.25s) -> bottom anchor",
-                "ChatView stabilization scroll (0.75s) -> bottom anchor",
-                "ChatView stabilization scroll (1.5s) -> bottom anchor"
-            ]
-        )
+        XCTAssertTrue(anchorSteps.isEmpty)
     }
 
     func testHandleMessageCountChange_duringInitialRevealRefreshesLatestWindowWithNewCount() async throws {
@@ -1011,18 +1903,21 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 3,
             stabilizeBottomAnchor: false,
             isInitialWindowLoaded: true,
-            isShowingLatestWindow: true
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
         ) { step in
             anchorSteps.append(step)
         }
 
         await waitUntil {
-            coordinator.isReadyToShow &&
-                latestWindowKnownCounts.contains(4)
+            latestWindowKnownCounts.contains(4)
         }
 
+        await confirmInitialBottomAnchor(coordinator)
+
+        XCTAssertTrue(coordinator.isReadyToShow)
         XCTAssertEqual(loadResolvedDisplayNameCount, 1)
-        XCTAssertEqual(anchorSteps.count, 5)
+        XCTAssertTrue(anchorSteps.isEmpty)
     }
 
     func testHandleMessageCountChange_afterReadyRequestsAnimatedBottomAnchor() async throws {
@@ -1067,12 +1962,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 1,
             isInitialWindowLoaded: true
         ) { _ in
-            XCTFail("Single-message appear should not schedule bottom anchoring")
+            XCTFail("Single-message appear should not require a bottom scroll")
         }
 
-        await waitUntil {
-            coordinator.isReadyToShow
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         loadLatestWindowCount = 0
         loadResolvedDisplayNameCount = 0
@@ -1085,7 +1978,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 2,
             stabilizeBottomAnchor: false,
             isInitialWindowLoaded: true,
-            isShowingLatestWindow: true
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -1094,8 +1988,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 1
         }
 
-        XCTAssertEqual(loadLatestWindowCount, 1)
-        XCTAssertEqual(latestWindowKnownCounts, [2])
+        XCTAssertEqual(loadLatestWindowCount, 2)
+        XCTAssertEqual(latestWindowKnownCounts, [2, 2])
         XCTAssertEqual(updatedReplyTargets, [messages.last?.id])
         XCTAssertEqual(loadResolvedDisplayNameCount, 1)
         XCTAssertEqual(
@@ -1108,6 +2002,179 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                 )
             ]
         )
+    }
+
+    func testBottomPresentationUserTakeoverRejectsStaleBottomUntilGeometryReconfirms() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let unexpectedLatestLoad = expectation(
+            description: "Incoming message must not reload the latest window"
+        )
+        unexpectedLatestLoad.isInverted = true
+        let firstTakeoverReleaseSleepStarted = expectation(
+            description: "First takeover release settle delay started"
+        )
+        let firstTakeoverReleaseSleepCancelled = expectation(
+            description: "Continued visible scrolling cancelled first release delay"
+        )
+        let replacementTakeoverReleaseSleepStarted = expectation(
+            description: "Replacement takeover release settle delay started"
+        )
+        let replacementTakeoverReleaseSleepCancelled = expectation(
+            description: "Further visible scrolling cancelled replacement release delay"
+        )
+        var isRejectingLatestLoads = false
+        var isTrackingTakeoverReleaseSleeps = false
+        var takeoverReleaseSleepDelays: [UInt64] = []
+        var latestWindowKnownCounts: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                if isRejectingLatestLoads {
+                    unexpectedLatestLoad.fulfill()
+                } else {
+                    latestWindowKnownCounts.append(knownTotalCount)
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { delay in
+                guard isTrackingTakeoverReleaseSleeps else { return }
+                takeoverReleaseSleepDelays.append(delay)
+                let invocation = takeoverReleaseSleepDelays.count
+                guard invocation <= 2 else { return }
+                if invocation == 1 {
+                    firstTakeoverReleaseSleepStarted.fulfill()
+                } else {
+                    replacementTakeoverReleaseSleepStarted.fulfill()
+                }
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                } catch {
+                    guard Task.isCancelled else { return }
+                    if invocation == 1 {
+                        firstTakeoverReleaseSleepCancelled.fulfill()
+                    } else {
+                        replacementTakeoverReleaseSleepCancelled.fulfill()
+                    }
+                }
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 1,
+            lastMessage: messages[0],
+            visibleMessages: [rows[0]],
+            senderGroupingMessages: [rows[0]],
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        latestWindowKnownCounts.removeAll()
+        isRejectingLatestLoads = true
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleMessageCountChange(
+            oldCount: 1,
+            newCount: 2,
+            lastMessage: messages[1],
+            visibleMessages: rows,
+            totalMessageCount: 2,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [unexpectedLatestLoad], timeout: 0.1)
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: true
+        ) { _ in
+            XCTFail("Active user scrolling must keep passive following disabled")
+        }
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        isTrackingTakeoverReleaseSleeps = true
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: false
+        ) { _ in
+            XCTFail("Bottom reconfirmation should wait for geometry to settle")
+        }
+        await fulfillment(of: [firstTakeoverReleaseSleepStarted], timeout: 1)
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: false
+        ) { _ in
+            XCTFail("Continued visible geometry should restart the settle delay")
+        }
+        await fulfillment(
+            of: [
+                firstTakeoverReleaseSleepCancelled,
+                replacementTakeoverReleaseSleepStarted
+            ],
+            timeout: 1
+        )
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        isRejectingLatestLoads = false
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            isUserScrollInteractionActive: false
+        ) { _ in
+            XCTFail("Settled visible geometry should only re-enable passive following")
+        }
+        await fulfillment(of: [replacementTakeoverReleaseSleepCancelled], timeout: 1)
+        await waitUntil {
+            !coordinator.isUserScrollTakeoverActive
+        }
+        XCTAssertEqual(
+            takeoverReleaseSleepDelays,
+            Array(
+                repeating: UInt64(UIConfig.initialScrollDelay * 1_000_000_000),
+                count: 3
+            )
+        )
+        coordinator.handleMessageCountChange(
+            oldCount: 2,
+            newCount: 3,
+            lastMessage: messages[2],
+            visibleMessages: rows,
+            totalMessageCount: 3,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+        XCTAssertEqual(latestWindowKnownCounts, [3, 3])
     }
 
     func testHandleMessageCountChange_afterReadyAwayFromLatestDoesNotRequestBottomAnchor() async throws {
@@ -1151,10 +2218,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 1,
             isInitialWindowLoaded: true
         ) { _ in
-            XCTFail("Single-message appear should not schedule bottom anchoring")
+            XCTFail("Single-message appear should not require a bottom scroll")
         }
 
-        XCTAssertTrue(coordinator.isReadyToShow)
+        await confirmInitialBottomAnchor(coordinator)
         loadResolvedDisplayNameCount = 0
 
         coordinator.handleMessageCountChange(
@@ -1165,7 +2232,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 9,
             stabilizeBottomAnchor: true,
             isInitialWindowLoaded: true,
-            isShowingLatestWindow: false
+            isShowingLatestWindow: false,
+            isBottomAnchorVisible: false
         ) { step in
             anchorSteps.append(step)
         }
@@ -1210,12 +2278,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 1,
             isInitialWindowLoaded: true
         ) { _ in
-            XCTFail("Single-message appear should not schedule bottom anchoring")
+            XCTFail("Single-message appear should not require a bottom scroll")
         }
 
-        await waitUntil {
-            coordinator.isReadyToShow
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         coordinator.handleMessageCountChange(
             oldCount: 1,
@@ -1225,7 +2291,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 2,
             stabilizeBottomAnchor: true,
             isInitialWindowLoaded: true,
-            isShowingLatestWindow: true
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -1234,7 +2301,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 2
         }
 
-        XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertEqual(loadLatestWindowCount, 3)
         XCTAssertEqual(
             anchorSteps,
             [
@@ -1252,7 +2319,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
-    func testHandleReplySendCompletedRequestsLatestWindowAndStabilizedBottomAnchor() async throws {
+    func testHandleReplySendCompletedPublishesTargetBeforeStabilizedBottomAnchor() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
             "second@example.com"
@@ -1260,11 +2327,420 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
         var latestWindowKnownCounts: [Int?] = []
+        var ensuredMessageIDs: [NSManagedObjectID] = []
+        var presentationEvents: [String] = []
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
             loadLatestWindowIfNeeded: { knownTotalCount in
                 latestWindowKnownCounts.append(knownTotalCount)
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                ensuredMessageIDs.append(messageObjectID)
+                presentationEvents.append("target-published")
+                return true
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+
+        await confirmInitialBottomAnchor(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+        latestWindowKnownCounts.removeAll()
+
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplySendCompleted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            presentationEvents.append("anchor")
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        XCTAssertEqual(ensuredMessageIDs, [targetMessageID])
+        XCTAssertTrue(latestWindowKnownCounts.isEmpty)
+        XCTAssertEqual(
+            presentationEvents,
+            ["target-published", "anchor", "anchor"]
+        )
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
+                    animated: false,
+                    logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testHandleReplySendCompletedWaitsForExactTargetPublicationBeforeAnchoring() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsureStarted = expectation(
+            description: "Exact-message publication started"
+        )
+        var mayPublishTarget = false
+        var didPublishTarget = false
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityEnsureStarted.fulfill()
+                while !mayPublishTarget && !Task.isCancelled {
+                    await Task.yield()
+                }
+                guard !Task.isCancelled else { return false }
+                didPublishTarget = true
+                return true
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            XCTAssertTrue(
+                didPublishTarget,
+                "The exact target must publish before any anchor callback"
+            )
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [visibilityEnsureStarted], timeout: 1)
+        XCTAssertFalse(didPublishTarget)
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        mayPublishTarget = true
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+        XCTAssertTrue(didPublishTarget)
+    }
+
+    func testNewUserTakeoverDuringPostSendPublicationSuppressesOnlyAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsureStarted = expectation(
+            description: "Exact-message publication started"
+        )
+        let visibilityEnsureCompleted = expectation(
+            description: "Exact-message publication completed"
+        )
+        let unexpectedAnchor = expectation(
+            description: "A newer user interaction must suppress post-send anchoring"
+        )
+        unexpectedAnchor.isInverted = true
+        var mayPublishTarget = false
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityEnsureStarted.fulfill()
+                while !mayPublishTarget && !Task.isCancelled {
+                    await Task.yield()
+                }
+                guard !Task.isCancelled else { return false }
+                visibilityEnsureCompleted.fulfill()
+                return true
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            unexpectedAnchor.fulfill()
+        }
+
+        await fulfillment(of: [visibilityEnsureStarted], timeout: 1)
+        coordinator.handleUserScrollInteraction()
+        mayPublishTarget = true
+
+        await fulfillment(
+            of: [visibilityEnsureCompleted, unexpectedAnchor],
+            timeout: 0.1
+        )
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+    }
+
+    func testRapidReplyCompletionsKeepBothMandatoryPublicationTasks() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsuresStarted = expectation(
+            description: "Both exact-message publications started"
+        )
+        visibilityEnsuresStarted.expectedFulfillmentCount = 2
+        let visibilityEnsuresCompleted = expectation(
+            description: "Both exact-message publications completed"
+        )
+        visibilityEnsuresCompleted.expectedFulfillmentCount = 2
+        let unexpectedAnchor = expectation(
+            description: "Newer takeover must suppress both optional anchors"
+        )
+        unexpectedAnchor.isInverted = true
+        var mayPublishTargets = false
+        var publishedMessageIDs: [NSManagedObjectID] = []
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                visibilityEnsuresStarted.fulfill()
+                while !mayPublishTargets && !Task.isCancelled {
+                    await Task.yield()
+                }
+                guard !Task.isCancelled else { return false }
+                publishedMessageIDs.append(messageObjectID)
+                visibilityEnsuresCompleted.fulfill()
+                return true
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        for message in messages {
+            coordinator.handleReplySendCompleted(
+                targetMessageID: message.objectID,
+                anchorIntent: anchorIntent,
+                messageCount: messages.count,
+                totalMessageCount: messages.count,
+                isInitialWindowLoaded: true
+            ) { _ in
+                unexpectedAnchor.fulfill()
+            }
+        }
+
+        await fulfillment(of: [visibilityEnsuresStarted], timeout: 1)
+        coordinator.handleUserScrollInteraction()
+        mayPublishTargets = true
+
+        await fulfillment(
+            of: [visibilityEnsuresCompleted, unexpectedAnchor],
+            timeout: 0.1
+        )
+        XCTAssertEqual(Set(publishedMessageIDs), Set(messages.map(\.objectID)))
+    }
+
+    func testFailedPostSendTargetPublicationDoesNotAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsureCompleted = expectation(
+            description: "Exact-message publication was attempted"
+        )
+        let unexpectedAnchor = expectation(
+            description: "An absent target must not be reported as anchored"
+        )
+        unexpectedAnchor.isInverted = true
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityEnsureCompleted.fulfill()
+                return false
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            unexpectedAnchor.fulfill()
+        }
+
+        await fulfillment(
+            of: [visibilityEnsureCompleted, unexpectedAnchor],
+            timeout: 0.1
+        )
+    }
+
+    func testUserTakeoverAfterPostSendPublicationCancelsOptionalAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let visibilityEnsureCompleted = expectation(
+            description: "Exact-message publication completed"
+        )
+        let anchorDelayStarted = expectation(
+            description: "Optional post-send anchor delay started"
+        )
+        let anchorDelayCancelled = expectation(
+            description: "Optional post-send anchor delay was cancelled"
+        )
+        let unexpectedAnchor = expectation(
+            description: "Cancelled optional anchor must not run"
+        )
+        unexpectedAnchor.isInverted = true
+        var shouldBlockAnchorDelay = false
+        var mayFinishAnchorDelay = false
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in
+                guard shouldBlockAnchorDelay else { return }
+                anchorDelayStarted.fulfill()
+                while !mayFinishAnchorDelay && !Task.isCancelled {
+                    await Task.yield()
+                }
+                if Task.isCancelled {
+                    anchorDelayCancelled.fulfill()
+                }
+            },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityEnsureCompleted.fulfill()
+                return true
+            }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        shouldBlockAnchorDelay = true
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            unexpectedAnchor.fulfill()
+        }
+
+        await fulfillment(
+            of: [visibilityEnsureCompleted, anchorDelayStarted],
+            timeout: 1
+        )
+        coordinator.handleUserScrollInteraction()
+        mayFinishAnchorDelay = true
+
+        await fulfillment(
+            of: [anchorDelayCancelled, unexpectedAnchor],
+            timeout: 0.1
+        )
+    }
+
+    func testUserScrollTakeoverSuppressesKeyboardAndFocusAnchorsButNotSend() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let unexpectedPassiveLatestLoad = expectation(
+            description: "Keyboard and focus changes must not reload after user takeover"
+        )
+        unexpectedPassiveLatestLoad.isInverted = true
+        var isRejectingPassiveLatestLoads = false
+        var latestWindowKnownCounts: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                if isRejectingPassiveLatestLoads {
+                    unexpectedPassiveLatestLoad.fulfill()
+                } else {
+                    latestWindowKnownCounts.append(knownTotalCount)
+                }
             },
             markConversationAsReadIfNeeded: {},
             initializeReplyingTo: { _ in },
@@ -1286,12 +2762,44 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: messages.count,
             isInitialWindowLoaded: true
         ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
 
-        await waitUntil {
-            coordinator.isReadyToShow
+        latestWindowKnownCounts.removeAll()
+        isRejectingPassiveLatestLoads = true
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 0,
+            newHeight: 240,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 240,
+            newHeight: 0,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleTextFieldFocusChange(
+            isFocused: false,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
         }
 
+        await fulfillment(of: [unexpectedPassiveLatestLoad], timeout: 0.1)
+        XCTAssertTrue(latestWindowKnownCounts.isEmpty)
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        isRejectingPassiveLatestLoads = false
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
         coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: anchorIntent,
             messageCount: messages.count,
             totalMessageCount: messages.count + 1,
             isInitialWindowLoaded: true
@@ -1302,23 +2810,75 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         await waitUntil {
             anchorSteps.count == 2
         }
+        XCTAssertTrue(latestWindowKnownCounts.isEmpty)
+    }
 
-        XCTAssertEqual(latestWindowKnownCounts.last, messages.count + 1)
-        XCTAssertEqual(
-            anchorSteps,
-            [
-                .init(
-                    delay: UIConfig.contentChangeScrollDelay,
-                    animated: true,
-                    logMessage: "ChatView animated scroll -> bottom anchor"
-                ),
-                .init(
-                    delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
-                    animated: false,
-                    logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
-                )
-            ]
+    func testReplySendCompletionAfterDisappearDoesNotRestartAnchorWork() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let unexpectedPostDisappearLatestLoad = expectation(
+            description: "Late send completion must not reload after disappear"
         )
+        unexpectedPostDisappearLatestLoad.isInverted = true
+        let unexpectedPostDisappearEnsure = expectation(
+            description: "Late send completion must not publish after disappear"
+        )
+        unexpectedPostDisappearEnsure.isInverted = true
+        var isRejectingPostDisappearLoads = false
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in
+                if isRejectingPostDisappearLoads {
+                    unexpectedPostDisappearLatestLoad.fulfill()
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in },
+            ensureVisibleMessage: { _ in
+                unexpectedPostDisappearEnsure.fulfill()
+                return true
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        isRejectingPostDisappearLoads = true
+        coordinator.handleDisappear()
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(
+            of: [unexpectedPostDisappearLatestLoad, unexpectedPostDisappearEnsure],
+            timeout: 0.1
+        )
+
+        XCTAssertTrue(anchorSteps.isEmpty)
     }
 
     func testKeyboardAndFocusChanges_requestExpectedBottomAnchors() async {
@@ -1367,7 +2927,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 1
         }
 
-        XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertEqual(loadLatestWindowCount, 2)
         XCTAssertEqual(
             anchorSteps,
             [
@@ -1394,7 +2954,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 1
         }
 
-        XCTAssertEqual(loadLatestWindowCount, 2)
+        XCTAssertEqual(loadLatestWindowCount, 4)
         XCTAssertEqual(
             anchorSteps,
             [
@@ -1420,7 +2980,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 1
         }
 
-        XCTAssertEqual(loadLatestWindowCount, 3)
+        XCTAssertEqual(loadLatestWindowCount, 6)
         XCTAssertEqual(
             anchorSteps,
             [
@@ -1466,12 +3026,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 1,
             isInitialWindowLoaded: true
         ) { _ in
-            XCTFail("Single-message appear should not schedule bottom anchoring")
+            XCTFail("Single-message appear should not require a bottom scroll")
         }
 
-        await waitUntil {
-            coordinator.isReadyToShow
-        }
+        await confirmInitialBottomAnchor(coordinator)
 
         XCTAssertEqual(loadLatestWindowCount, 0)
 
@@ -1488,7 +3046,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 1
         }
 
-        XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertEqual(loadLatestWindowCount, 2)
         XCTAssertEqual(
             anchorSteps,
             [
@@ -1514,7 +3072,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 1
         }
 
-        XCTAssertEqual(loadLatestWindowCount, 2)
+        XCTAssertEqual(loadLatestWindowCount, 4)
         XCTAssertEqual(
             anchorSteps,
             [
@@ -1572,12 +3130,25 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
 
-        await waitUntil(timeout: 1.0) {
-            coordinator.isReadyToShow
-        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertTrue(anchorSteps.isEmpty)
 
-        XCTAssertTrue(
-            anchorSteps.contains { $0.logMessage == "ChatView initial scroll -> bottom anchor" }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
+            ]
         )
 
         let animatedScrollCount = anchorSteps.filter {
@@ -1592,7 +3163,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: messages.count,
             stabilizeBottomAnchor: true,
             isInitialWindowLoaded: true,
-            isShowingLatestWindow: true
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -1696,7 +3268,14 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
     private func makeUnreadCoordinator(
         markConversationAsReadIfNeeded: @escaping () -> Void,
-        markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void
+        markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void,
+        sleep: @escaping ChatMessagesCoordinator.Sleep = { _ in },
+        now: @escaping ChatMessagesCoordinator.Now = {
+            ProcessInfo.processInfo.systemUptime
+        },
+        ensureVisibleMessage: @escaping ChatMessagesCoordinator.MessageVisibilityEnsurer = {
+            _ in true
+        }
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
             loadLatestWindowIfNeeded: { _ in },
@@ -1710,7 +3289,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
             clearPersonCache: {},
-            sleep: { _ in }
+            sleep: sleep,
+            now: now,
+            ensureVisibleMessage: ensureVisibleMessage
         )
     }
 
@@ -1756,6 +3337,46 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isShowingLatestWindow: true,
             isBottomAnchorVisible: isBottomAnchorVisible
         )
+    }
+
+    private func confirmInitialBottomAnchor(
+        _ coordinator: ChatMessagesCoordinator,
+        contentMinY: CGFloat = 0,
+        contentHeight: CGFloat = 100,
+        viewportHeight: CGFloat = 100,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let geometryCheckBeforeConfirmation = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: contentMinY,
+            contentHeight: contentHeight,
+            viewportHeight: viewportHeight
+        ) { _ in
+            XCTFail(
+                "A visible initial anchor should not request a scroll",
+                file: file,
+                line: line
+            )
+        }
+        await waitUntil(file: file, line: line) {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckBeforeConfirmation
+        }
+        XCTAssertFalse(coordinator.isReadyToShow, file: file, line: line)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: contentMinY,
+            contentHeight: contentHeight,
+            viewportHeight: viewportHeight
+        ) { _ in
+            XCTFail(
+                "A stable visible initial anchor should not request a scroll",
+                file: file,
+                line: line
+            )
+        }
+        XCTAssertTrue(coordinator.isReadyToShow, file: file, line: line)
     }
 
     private func waitUntil(

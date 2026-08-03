@@ -37,6 +37,12 @@ final class SendErrorTests: XCTestCase {
         XCTAssertTrue(error.errorDescription!.lowercased().contains("conversation"))
     }
 
+    func testSendError_replyTargetUnavailable_hasDescription() {
+        let error = GmailSendService.SendError.replyTargetUnavailable
+        XCTAssertNotNil(error.errorDescription)
+        XCTAssertTrue(error.errorDescription!.lowercased().contains("selected"))
+    }
+
     // MARK: - Error Equality Tests
 
     func testSendError_apiError_differentMessages() {
@@ -55,7 +61,8 @@ final class SendErrorTests: XCTestCase {
             .apiError("test"),
             .authenticationFailed,
             .optimisticCreationFailed,
-            .conversationNotFound
+            .conversationNotFound,
+            .replyTargetUnavailable
         ]
 
         for error in errors {

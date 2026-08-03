@@ -28,7 +28,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -49,7 +49,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -70,7 +70,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -92,7 +92,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -115,7 +115,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -137,7 +137,7 @@ final class SendAsReplyFromTests: XCTestCase {
             ]
         )
 
-        let processed = await MessageProcessor().processGmailMessage(
+        let processed = try await MessageProcessor().processGmailMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
@@ -147,7 +147,7 @@ final class SendAsReplyFromTests: XCTestCase {
         XCTAssertEqual(processed?.headers.replyFromAddress, "primary@gmail.com")
     }
 
-    func testReplyMetadata_unconfiguredDeliveredToAddressSurfacesSendAsError() throws {
+    func testReplyMetadata_unconfiguredDeliveredToAddressSurfacesSendAsError() async throws {
         let context = stack.viewContext
         let conversation = makeReplyConversation(in: context)
         let account = AccountBuilder()
@@ -167,8 +167,8 @@ final class SendAsReplyFromTests: XCTestCase {
 
         let builder = makeReplyContextBuilder()
 
-        XCTAssertThrowsError(
-            try builder.buildReplyMetadata(
+        do {
+            _ = try await builder.buildReplyMetadata(
                 .init(
                     conversationObjectID: conversation.objectID,
                     replyingToMessageObjectID: replyingTo.objectID,
@@ -177,7 +177,8 @@ final class SendAsReplyFromTests: XCTestCase {
                     )
                 )
             )
-        ) { error in
+            XCTFail("Expected sendAsAliasUnavailable")
+        } catch {
             guard case GmailSendService.SendError.sendAsAliasUnavailable(let address) = error else {
                 return XCTFail("Expected sendAsAliasUnavailable, got \(error)")
             }
@@ -185,7 +186,7 @@ final class SendAsReplyFromTests: XCTestCase {
         }
     }
 
-    func testReplyMetadata_gmailPlusDeliveredToFallsBackToPrimaryAlias() throws {
+    func testReplyMetadata_gmailPlusDeliveredToFallsBackToPrimaryAlias() async throws {
         let context = stack.viewContext
         let conversation = makeReplyConversation(in: context)
         let account = AccountBuilder()
@@ -203,7 +204,7 @@ final class SendAsReplyFromTests: XCTestCase {
         replyingTo.replyFromAddress = "primary@gmail.com"
         try context.obtainPermanentIDs(for: [conversation, replyingTo])
 
-        let metadata = try makeReplyContextBuilder().buildReplyMetadata(
+        let metadata = try await makeReplyContextBuilder().buildReplyMetadata(
             .init(
                 conversationObjectID: conversation.objectID,
                 replyingToMessageObjectID: replyingTo.objectID,
@@ -275,7 +276,7 @@ final class SendAsReplyFromTests: XCTestCase {
         )
         let persister = MessagePersister(photoPrefetcher: { _ in })
 
-        await persister.saveMessage(
+        try await persister.saveMessage(
             message,
             myAliases: myAliases,
             sendAsAliases: sendAsAliases,
@@ -370,7 +371,8 @@ final class SendAsReplyFromTests: XCTestCase {
             replyHTMLContentLoader: HTMLContentLoader(
                 contentHandler: HTMLContentHandler(),
                 sanitizer: .shared
-            )
+            ),
+            loadUserAliases: { self.myAliases }
         )
     }
 

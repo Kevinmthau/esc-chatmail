@@ -10,6 +10,10 @@ extension Conversation {
     @NSManaged public var type: String
     @NSManaged public var keyHash: String
     @NSManaged public var participantHash: String?
+    /// Normalized List-Id for mailing-list conversations (nil otherwise).
+    /// participantHash for these rows is the one-way "l|" hash; this attribute
+    /// keeps the grouping key recoverable for debugging and future backfill.
+    @NSManaged public var listId: String?
     @NSManaged public var displayName: String?
     @NSManaged public var lastMessageDate: Date?
     @NSManaged public var snippet: String?
@@ -53,5 +57,25 @@ extension Conversation {
     /// Returns true if this conversation is archived (has been dismissed by the user)
     var isArchived: Bool {
         return archivedAt != nil
+    }
+
+    /// A retained source shell left behind after every message reroutes away.
+    ///
+    /// These rows stay durable so pending actions and optimistic-send anchors
+    /// cannot be orphaned, but they are no longer valid reply destinations.
+    var isRetainedDrainedShell: Bool {
+        Self.isRetainedDrainedShell(
+            hidden: hidden,
+            archivedAt: archivedAt,
+            lastMessageDate: lastMessageDate
+        )
+    }
+
+    static func isRetainedDrainedShell(
+        hidden: Bool,
+        archivedAt: Date?,
+        lastMessageDate: Date?
+    ) -> Bool {
+        hidden && archivedAt != nil && lastMessageDate == nil
     }
 }

@@ -34,6 +34,74 @@ final class ConversationIdentityTests: XCTestCase {
         XCTAssertEqual(identity.type, .oneToOne)
     }
 
+    func testMakeConversationIdentity_listIdGroupsByListNamespace() {
+        let headers = [
+            MessageHeader(name: "From", value: "Alice <alice@example.com>"),
+            MessageHeader(name: "To", value: "me@example.com"),
+            MessageHeader(name: "List-Id", value: "Swift Evolution <Swift-Evolution.swift.ORG>")
+        ]
+
+        let identity = makeConversationIdentity(from: headers, myAliases: ["me@example.com"])
+
+        XCTAssertEqual(identity.type, .list)
+        XCTAssertEqual(identity.listId, "swift-evolution.swift.org")
+        XCTAssertEqual(identity.listTitle, "Swift Evolution")
+        XCTAssertEqual(
+            identity.participantHash,
+            calculateListConversationHash(fromNormalizedListId: "swift-evolution.swift.org")
+        )
+        XCTAssertTrue(identity.key.hasPrefix("l|swift-evolution.swift.org|"))
+        XCTAssertEqual(identity.participants, ["alice@example.com"], "rows still seed from the participant set")
+    }
+
+    func testMakeConversationIdentity_sameListIdAcrossDifferentSendersSharesHash() {
+        let first = makeConversationIdentity(
+            from: [
+                MessageHeader(name: "From", value: "alice@example.com"),
+                MessageHeader(name: "To", value: "me@example.com"),
+                MessageHeader(name: "List-Id", value: "<list.example.com>")
+            ],
+            myAliases: ["me@example.com"]
+        )
+        let second = makeConversationIdentity(
+            from: [
+                MessageHeader(name: "From", value: "bob@other.org"),
+                MessageHeader(name: "To", value: "everyone@list.example.com"),
+                MessageHeader(name: "Cc", value: "carol@example.com"),
+                MessageHeader(name: "List-Id", value: "<list.example.com>")
+            ],
+            myAliases: ["me@example.com"]
+        )
+        let otherList = makeConversationIdentity(
+            from: [
+                MessageHeader(name: "From", value: "alice@example.com"),
+                MessageHeader(name: "To", value: "me@example.com"),
+                MessageHeader(name: "List-Id", value: "<other.example.com>")
+            ],
+            myAliases: ["me@example.com"]
+        )
+
+        XCTAssertEqual(first.participantHash, second.participantHash)
+        XCTAssertNotEqual(first.participantHash, otherList.participantHash)
+    }
+
+    func testMakeConversationIdentity_malformedListIdFallsBackToParticipantIdentity() {
+        let plainHeaders = [
+            MessageHeader(name: "From", value: "Alice <alice@example.com>"),
+            MessageHeader(name: "To", value: "me@example.com")
+        ]
+        let malformedListHeaders = plainHeaders + [MessageHeader(name: "List-Id", value: "<>")]
+
+        let plain = makeConversationIdentity(from: plainHeaders, myAliases: ["me@example.com"])
+        let malformed = makeConversationIdentity(from: malformedListHeaders, myAliases: ["me@example.com"])
+
+        XCTAssertNil(malformed.listId)
+        XCTAssertNil(malformed.listTitle)
+        XCTAssertEqual(malformed.participantHash, plain.participantHash)
+        XCTAssertEqual(malformed.type, plain.type)
+        XCTAssertEqual(malformed.participants, plain.participants)
+    }
+
     /// Drift guard between the two participant-set derivations: the header path
     /// (`makeConversationIdentity`, used by the sync router) and the persisted
     /// path (`Message.strictParticipantSetIdentity`, used by the split
@@ -47,6 +115,7 @@ final class ConversationIdentityTests: XCTestCase {
             let cc: [String]
             let bcc: [String]
             let aliases: Set<String>
+            let listId: String?
 
             init(
                 name: String,
@@ -54,7 +123,8 @@ final class ConversationIdentityTests: XCTestCase {
                 to: [String],
                 cc: [String] = [],
                 bcc: [String] = [],
-                aliases: Set<String> = ["me@example.com"]
+                aliases: Set<String> = ["me@example.com"],
+                listId: String? = nil
             ) {
                 self.name = name
                 self.from = from
@@ -62,6 +132,7 @@ final class ConversationIdentityTests: XCTestCase {
                 self.cc = cc
                 self.bcc = bcc
                 self.aliases = aliases
+                self.listId = listId
             }
         }
 
@@ -103,6 +174,31 @@ final class ConversationIdentityTests: XCTestCase {
                 name: "hide-my-email From is dropped by both derivations",
                 from: "Hide My Email <relay123@privaterelay.appleid.com>",
                 to: ["me@example.com"]
+            ),
+            Fixture(
+                name: "list mail keys by List-Id in both derivations",
+                from: "Announcements <announce@lists.example.com>",
+                to: ["me@example.com"],
+                listId: "Project Announcements <announce.lists.example.com>"
+            ),
+            Fixture(
+                name: "bare List-Id keys identically in both derivations",
+                from: "notifications@github.com",
+                to: ["me@example.com"],
+                cc: ["subscribed@noreply.github.com"],
+                listId: "<repo.owner.github.com>"
+            ),
+            Fixture(
+                name: "self-alias From with List-Id still keys by list",
+                from: "Me <me@example.com>",
+                to: ["announce@lists.example.com"],
+                listId: "<announce.lists.example.com>"
+            ),
+            Fixture(
+                name: "hide-my-email From with List-Id keys by list in both derivations",
+                from: "Hide My Email <relay123@privaterelay.appleid.com>",
+                to: ["me@example.com"],
+                listId: "<announce.lists.example.com>"
             )
         ]
 
@@ -121,17 +217,25 @@ final class ConversationIdentityTests: XCTestCase {
             if !fixture.bcc.isEmpty {
                 headers.append(MessageHeader(name: "Bcc", value: fixture.bcc.joined(separator: ", ")))
             }
+            if let listId = fixture.listId {
+                headers.append(MessageHeader(name: "List-Id", value: listId))
+            }
 
             let headerIdentity = makeConversationIdentity(
                 from: headers,
                 myAliases: fixture.aliases
             )
 
-            let message = MessageBuilder()
+            let builder = MessageBuilder()
                 .withId("hash-parity-\(index)")
                 .withDate(Date(timeIntervalSince1970: TimeInterval(1_000 + index)))
                 .withSender(email: EmailNormalizer.extractEmail(from: fixture.from) ?? fixture.from)
-                .build(in: context)
+            if let listId = fixture.listId {
+                // Mirror the persister: the row path reads the stored
+                // normalized id, never the raw header value.
+                _ = builder.withListId(try XCTUnwrap(ParsedListId.parse(listId)).id)
+            }
+            let message = builder.build(in: context)
             _ = try MessageParticipantFactory.create(from: fixture.from, kind: .from, for: message, in: context)
             for recipient in fixture.to {
                 _ = try MessageParticipantFactory.create(from: recipient, kind: .to, for: message, in: context)
@@ -153,6 +257,11 @@ final class ConversationIdentityTests: XCTestCase {
             XCTAssertEqual(
                 messageIdentity?.participantHash,
                 headerIdentity.participantHash,
+                fixture.name
+            )
+            XCTAssertEqual(
+                messageIdentity?.listId,
+                headerIdentity.listId,
                 fixture.name
             )
         }

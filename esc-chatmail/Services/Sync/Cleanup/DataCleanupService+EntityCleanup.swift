@@ -318,3 +318,241 @@ extension DataCleanupService {
         Log.debug("Completed orphaned data cleanup in \(String(format: "%.3f", duration))s", category: .coreData)
     }
 }
+
+// MARK: - Duplicate Person Merge
+
+extension DataCleanupService {
+
+    /// Collapses `Person` rows that share a normalized email onto one survivor.
+    ///
+    /// `Person.email` has no uniqueness constraint, and the conversation
+    /// creation serializer commits new conversation graphs in a dedicated
+    /// context whose store fetch cannot see a Person still pending unsaved in
+    /// the caller's batch — so any batch that opens a conversation for someone
+    /// who already appeared in an earlier message inserts a second row for that
+    /// address. Without this pass the rows are permanent, and `PersonFactory`'s
+    /// fetchLimit-1 lookup picks between them arbitrarily, so the same address
+    /// can resolve to a different display name or avatar from one fetch to the
+    /// next.
+    ///
+    /// Both Person relationships cascade on delete, and a cascade that fired
+    /// before its participations were moved would strand participant-less
+    /// conversations — the exact failure the serializer's commit-the-whole-graph
+    /// design exists to prevent. Core Data defers cascade propagation to
+    /// `processPendingChanges`, so repointing after `delete(loser)` happens to
+    /// work today; participations are moved first anyway, because anything that
+    /// forces a pending-changes pass in between (a fetch, a relationship fault)
+    /// would let the cascade win. That ordering is defensive, not covered by a
+    /// discriminating test — swapping it leaves this suite green. Losers are
+    /// deleted through the graph rather than by NSBatchDeleteRequest, which
+    /// would cascade in the store behind the context's back.
+    func mergeDuplicatePersons(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        await context.perform {
+            let request = Person.fetchRequest()
+            request.fetchBatchSize = 200
+
+            let persons: [Person]
+            do {
+                persons = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch persons for duplicate merge", category: .coreData, error: error)
+                return
+            }
+
+            // Group on the normalized email. Rows written before PersonFactory
+            // normalized its input may differ only by case, and a survivor left
+            // un-normalized would stay invisible to the `email == %@` lookup
+            // this pass exists to stabilize.
+            var rowsByEmail: [String: [Person]] = [:]
+            for person in persons {
+                rowsByEmail[EmailNormalizer.normalize(person.email), default: []].append(person)
+            }
+
+            var mergedEmails: [String] = []
+            var deletedObjectIDs: [NSManagedObjectID] = []
+
+            for (email, rows) in rowsByEmail where rows.count > 1 {
+                guard let survivor = Self.survivingPerson(among: rows, email: email) else { continue }
+                if survivor.email != email {
+                    survivor.email = email
+                }
+
+                for loser in rows where loser !== survivor {
+                    Self.adoptMissingIdentityFields(from: loser, to: survivor, email: email)
+                    Self.repointParticipations(from: loser, to: survivor)
+                    deletedObjectIDs.append(loser.objectID)
+                    context.delete(loser)
+                }
+                mergedEmails.append(email)
+            }
+
+            guard !deletedObjectIDs.isEmpty else { return }
+
+            self.coreDataStack.saveIfNeeded(context: context)
+
+            let changes = [NSDeletedObjectsKey: deletedObjectIDs]
+            NSManagedObjectContext.mergeChanges(
+                fromRemoteContextSave: changes,
+                into: [self.coreDataStack.viewContext]
+            )
+
+            // Cached [email: Person] entries can still point at a deleted loser;
+            // drop them so the next findOrCreate re-fetches the survivor.
+            PersonFactory.resetCache(in: context)
+            PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(emails: mergedEmails)
+
+            let duration = CFAbsoluteTimeGetCurrent() - startTime
+            Log.info(
+                "Merged \(deletedObjectIDs.count) duplicate person rows across \(mergedEmails.count) emails in \(String(format: "%.3f", duration))s",
+                category: .coreData
+            )
+        }
+    }
+
+    /// Picks the row that keeps the richest identity. The objectID tiebreak
+    /// keeps the choice deterministic, so a rerun converges instead of
+    /// ping-ponging the surviving row.
+    private static func survivingPerson(among rows: [Person], email: String) -> Person? {
+        rows.reduce(nil) { best, candidate in
+            guard let best else { return candidate }
+            if EmailNormalizer.isBetterDisplayName(candidate.displayName, than: best.displayName, forEmail: email) {
+                return candidate
+            }
+            if EmailNormalizer.isBetterDisplayName(best.displayName, than: candidate.displayName, forEmail: email) {
+                return best
+            }
+            if (candidate.avatarURL != nil) != (best.avatarURL != nil) {
+                return candidate.avatarURL != nil ? candidate : best
+            }
+            let candidateKey = candidate.objectID.uriRepresentation().absoluteString
+            let bestKey = best.objectID.uriRepresentation().absoluteString
+            return candidateKey < bestKey ? candidate : best
+        }
+    }
+
+    /// Carries across identity fields the survivor lacks, before the loser goes.
+    private static func adoptMissingIdentityFields(from loser: Person, to survivor: Person, email: String) {
+        if EmailNormalizer.isBetterDisplayName(loser.displayName, than: survivor.displayName, forEmail: email) {
+            survivor.displayName = loser.displayName
+        }
+        if survivor.avatarURL == nil, let avatarURL = loser.avatarURL {
+            survivor.avatarURL = avatarURL
+        }
+    }
+
+    /// Moves the loser's participations onto the survivor. A participation the
+    /// survivor already holds for the same conversation (or the same message in
+    /// the same role) is deleted instead of moved: repointing it would list the
+    /// person twice in one conversation.
+    private static func repointParticipations(from loser: Person, to survivor: Person) {
+        let survivorConversations = Set(
+            (survivor.conversationParticipations ?? []).compactMap { $0.conversation?.objectID }
+        )
+        for participation in loser.conversationParticipations ?? [] {
+            if let conversationID = participation.conversation?.objectID,
+               survivorConversations.contains(conversationID) {
+                participation.managedObjectContext?.delete(participation)
+            } else {
+                participation.person = survivor
+            }
+        }
+
+        let survivorMessages = Set(
+            (survivor.messageParticipations ?? []).compactMap { participation -> String? in
+                guard let message = participation.message else { return nil }
+                return Self.messageParticipationKey(message: message, kind: participation.kind)
+            }
+        )
+        for participation in loser.messageParticipations ?? [] {
+            let key = participation.message.map {
+                Self.messageParticipationKey(message: $0, kind: participation.kind)
+            }
+            if let key, survivorMessages.contains(key) {
+                participation.managedObjectContext?.delete(participation)
+            } else {
+                participation.person = survivor
+            }
+        }
+    }
+
+    private static func messageParticipationKey(message: Message, kind: String) -> String {
+        "\(message.objectID.uriRepresentation().absoluteString)|\(kind)"
+    }
+}
+
+// MARK: - Duplicate Label Merge
+
+extension DataCleanupService {
+
+    /// Collapses `Label` rows that share a Gmail label id onto one survivor.
+    ///
+    /// `Label.id` has no uniqueness constraint (pre-v3 entities don't gain
+    /// constraints until v4, after repairs soak), and duplicate rows are worse
+    /// than cosmetic: `LabelPersister` builds id-keyed dictionaries from
+    /// fetched labels, which trapped on duplicates until it switched to
+    /// first-wins collapsing. This pass repairs the store so that collapse is
+    /// a transient shield, not the permanent state.
+    ///
+    /// Unlike Person, `Label.messages` is Nullify — no cascade risk — but the
+    /// message repointing must still precede the delete so no message loses a
+    /// label association mid-merge.
+    func mergeDuplicateLabels(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        await context.perform {
+            let request = Label.fetchRequest()
+            request.fetchBatchSize = 100
+
+            let labels: [Label]
+            do {
+                labels = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch labels for duplicate merge", category: .coreData, error: error)
+                return
+            }
+
+            var rowsById: [String: [Label]] = [:]
+            for label in labels {
+                rowsById[label.id, default: []].append(label)
+            }
+
+            var deletedObjectIDs: [NSManagedObjectID] = []
+
+            for (_, rows) in rowsById where rows.count > 1 {
+                // Deterministic survivor so reruns converge; Gmail's canonical
+                // name arrives via saveLabels upserts either way.
+                guard let survivor = rows.min(by: {
+                    $0.objectID.uriRepresentation().absoluteString
+                        < $1.objectID.uriRepresentation().absoluteString
+                }) else { continue }
+
+                for loser in rows where loser !== survivor {
+                    for message in loser.messages ?? [] {
+                        message.removeFromLabels(loser)
+                        message.addToLabels(survivor)
+                    }
+                    deletedObjectIDs.append(loser.objectID)
+                    context.delete(loser)
+                }
+            }
+
+            guard !deletedObjectIDs.isEmpty else { return }
+
+            self.coreDataStack.saveIfNeeded(context: context)
+
+            let changes = [NSDeletedObjectsKey: deletedObjectIDs]
+            NSManagedObjectContext.mergeChanges(
+                fromRemoteContextSave: changes,
+                into: [self.coreDataStack.viewContext]
+            )
+
+            let duration = CFAbsoluteTimeGetCurrent() - startTime
+            Log.info(
+                "Merged \(deletedObjectIDs.count) duplicate label rows in \(String(format: "%.3f", duration))s",
+                category: .coreData
+            )
+        }
+    }
+}

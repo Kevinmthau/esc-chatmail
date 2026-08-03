@@ -7,6 +7,7 @@ struct ChatView: View {
     @ObservedObject var conversation: Conversation
     @StateObject private var viewModel: ChatViewModel
     @State private var presentedSheetDestination: ChatDestination?
+    @State private var composerHasDraft = false
     private let chatDependencies: ChatDependencies
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
 
@@ -47,6 +48,7 @@ struct ChatView: View {
             conversation: conversation,
             viewModel: viewModel,
             chatDependencies: chatDependencies,
+            isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
             isChatActiveAndUncovered: isChatActiveAndUncovered,
             isTextFieldFocused: $isTextFieldFocused,
             onOpenFullMessage: { messageObjectID, source in
@@ -66,6 +68,11 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity)
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        guard Self.allowsParticipantListPresentation(
+                            conversationType: conversation.conversationType
+                        ) else {
+                            return
+                        }
                         isTextFieldFocused = false
                         viewModel.contactManager.showingParticipantsList = true
                     }
@@ -142,11 +149,22 @@ struct ChatView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+        .allowsHitTesting(!shouldDismissDrainedConversation)
+        .onReceive(viewModel.composerState.hasDraftContentPublisher) { hasDraft in
+            if composerHasDraft != hasDraft {
+                composerHasDraft = hasDraft
+            }
+        }
+        .onChange(of: shouldDismissDrainedConversation, initial: true) { _, shouldDismiss in
+            guard shouldDismiss else { return }
+            isTextFieldFocused = false
+            dismiss()
+        }
     }
 
     private var navigationDisplayName: String {
-        if let resolvedDisplayName = viewModel.resolvedDisplayName {
-            return resolvedDisplayName
+        if let displayNameForNavigation = viewModel.displayNameForNavigation {
+            return displayNameForNavigation
         }
 
         let participantEmails = conversation.participants?
@@ -194,6 +212,36 @@ struct ChatView: View {
             !hasContactAccessPicker &&
             !hasContactActionAlert &&
             !hasSendErrorAlert
+    }
+
+    static func allowsParticipantListPresentation(
+        conversationType: ConversationType
+    ) -> Bool {
+        // List participant rows only seed the conversation from its first
+        // message; presenting them as list membership would be misleading.
+        conversationType != .list
+    }
+
+    static func shouldDismissDrainedConversation(
+        hidden: Bool,
+        archivedAt: Date?,
+        lastMessageDate: Date?,
+        hasDraft: Bool
+    ) -> Bool {
+        ChatViewModel.isDrainedConversation(
+            hidden: hidden,
+            archivedAt: archivedAt,
+            lastMessageDate: lastMessageDate
+        ) && !hasDraft
+    }
+
+    private var shouldDismissDrainedConversation: Bool {
+        Self.shouldDismissDrainedConversation(
+            hidden: conversation.hidden,
+            archivedAt: conversation.archivedAt,
+            lastMessageDate: conversation.lastMessageDate,
+            hasDraft: composerHasDraft
+        )
     }
 
     private var activeDestination: ChatDestination? {

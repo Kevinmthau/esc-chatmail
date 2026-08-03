@@ -1,12 +1,20 @@
 import Foundation
 
-/// Result of batch processing operations
+/// Result of batch processing operations. `successfulCount` counts messages
+/// that actually reached the persistence layer as persisted — not merely
+/// fetched. `failedIds` are blocking fetch failures; persistence failures ride
+/// in `persistence.failedIds`; both gate cursor advancement via `hasFailures`.
 struct BatchProcessingResult {
     let totalProcessed: Int
     let successfulCount: Int
     let failedIds: [String]
+    var goneIds: [String] = []
+    var persistence: MessagePersistenceReport = .empty
 
-    var hasFailures: Bool { !failedIds.isEmpty }
+    var hasFailures: Bool { !failedIds.isEmpty || !persistence.failedIds.isEmpty }
+
+    /// Every ID whose outcome must prevent the history cursor from advancing.
+    var blockingFailureIds: [String] { failedIds + persistence.failedIds }
 }
 
 /// Utility for processing items in batches with progress tracking
@@ -27,23 +35,27 @@ struct BatchProcessor {
         batchSize: Int,
         messageFetcher: MessageFetcher,
         progressHandler: @escaping (Int, Int) async -> Void,
-        messageHandler: @escaping ([GmailMessage]) async -> Void,
+        messageHandler: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport,
         batchCompletion: (() async throws -> Void)? = nil
     ) async throws -> BatchProcessingResult {
         var totalProcessed = 0
-        var totalSuccessful = 0
         var allFailedIds: [String] = []
+        var allGoneIds: [String] = []
+        var persistence = MessagePersistenceReport()
 
         for batch in messageIds.chunked(into: batchSize) {
             try Task.checkCancellation()
 
-            let failedIds = await messageFetcher.fetchBatch(batch) { messages in
-                await messageHandler(messages)
+            // Quota exhaustion propagates and aborts the remaining chunks:
+            // they would all fail identically, and per-message verdicts must
+            // not be recorded for an account-scoped condition.
+            let outcome = try await messageFetcher.fetchBatch(batch) { messages in
+                try await messageHandler(messages)
             }
 
-            let successCount = batch.count - failedIds.count
-            totalSuccessful += successCount
-            allFailedIds.append(contentsOf: failedIds)
+            allFailedIds.append(contentsOf: outcome.fetchFailedIds)
+            allGoneIds.append(contentsOf: outcome.goneIds)
+            persistence.merge(outcome.persistence)
             totalProcessed += batch.count
 
             await progressHandler(totalProcessed, messageIds.count)
@@ -54,8 +66,10 @@ struct BatchProcessor {
 
         return BatchProcessingResult(
             totalProcessed: totalProcessed,
-            successfulCount: totalSuccessful,
-            failedIds: allFailedIds
+            successfulCount: persistence.persistedIds.count,
+            failedIds: allFailedIds,
+            goneIds: allGoneIds,
+            persistence: persistence
         )
     }
 
@@ -64,27 +78,29 @@ struct BatchProcessor {
     ///   - failedIds: IDs that failed in the initial attempt
     ///   - messageFetcher: The fetcher to use
     ///   - messageHandler: Handler for successfully fetched groups of messages,
-    ///     sorted into chronological order
-    /// - Returns: IDs that still failed after retry
+    ///     sorted into chronological order; returns the persistence report
+    /// - Returns: The retry outcome (blocking failures, gone IDs, persistence report)
+    /// - Throws: `APIError.quotaExhausted` — the run must abort rather than
+    ///   record the remaining IDs as failures
     static func retryFailedMessages(
         failedIds: [String],
         messageFetcher: MessageFetcher,
-        messageHandler: @escaping ([GmailMessage]) async -> Void
-    ) async -> [String] {
-        guard !failedIds.isEmpty else { return [] }
+        messageHandler: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport
+    ) async throws -> MessageBatchOutcome {
+        guard !failedIds.isEmpty else { return .empty }
 
         Log.debug("Retrying \(failedIds.count) failed messages...", category: .sync)
 
-        let stillFailedIds = await messageFetcher.fetchBatch(failedIds) { messages in
-            await messageHandler(messages)
+        let outcome = try await messageFetcher.fetchBatch(failedIds) { messages in
+            try await messageHandler(messages)
         }
 
-        if stillFailedIds.isEmpty {
-            Log.debug("All failed messages recovered on retry", category: .sync)
+        if outcome.hasBlockingFailures {
+            Log.warning("\(outcome.blockingFailureIds.count) messages still failed after retry", category: .sync)
         } else {
-            Log.warning("\(stillFailedIds.count) messages permanently failed", category: .sync)
+            Log.debug("All failed messages recovered on retry", category: .sync)
         }
 
-        return stillFailedIds
+        return outcome
     }
 }
