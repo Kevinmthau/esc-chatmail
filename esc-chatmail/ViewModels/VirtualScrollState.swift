@@ -674,6 +674,17 @@ final class VirtualScrollState: ObservableObject {
         }
         let preferPendingConversationMessages =
             forceViewContext || hasPendingInsertedMessagesInConversation
+        // Captured before the load: when the current window already abuts the
+        // tail, a latest reload must extend it rather than collapse it to the
+        // last `visibleItemCount` rows. Collapsing dropped every row above the
+        // viewport after a send, and the subsequent lazy re-expansion prepends
+        // shifted the visible content onto older messages once the post-send
+        // corrective scrolls had already fired. The window abuts the tail when
+        // no rows exist beyond it, or when every row beyond it is a pending
+        // tail insertion (the local-send case: the count was already bumped
+        // for rows the window hasn't published yet). A historical window keeps
+        // the collapse behavior so an explicit jump-to-latest stays cheap.
+        let preservedWindowStartIndex = tailAbuttingWindowStartIndex()
         let loadGeneration = beginWindowLoad(
             intent: .latest(
                 requiredFollowIntentRevision: requiredFollowIntentRevision
@@ -725,7 +736,16 @@ final class VirtualScrollState: ObservableObject {
             )
             return false
         }
-        let startIndex = max(0, totalCount - configuration.visibleItemCount)
+        let collapsedStartIndex = max(0, totalCount - configuration.visibleItemCount)
+        let startIndex: Int
+        if let preservedWindowStartIndex {
+            // Keep the accumulated rows above the viewport, bounded by the
+            // window cap so long sessions do not grow without limit.
+            let cappedStartIndex = max(0, totalCount - configuration.maxWindowSize)
+            startIndex = max(min(preservedWindowStartIndex, collapsedStartIndex), cappedStartIndex)
+        } else {
+            startIndex = collapsedStartIndex
+        }
         guard let loadedBounds = await loadWindow(
             startIndex: startIndex,
             endIndex: totalCount,
@@ -740,10 +760,12 @@ final class VirtualScrollState: ObservableObject {
         }
         guard loadedBounds.generation == windowLoadGeneration else { return false }
         if isCurrentFollowIntent(requiredFollowIntentRevision) {
-            scrollPosition = max(
-                loadedBounds.startIndex,
-                loadedBounds.totalCount - 1
-            )
+            // Mirror publishInitialWindow: anchor the tracked position at the
+            // window head. Parking it at the tail made the window-head row's
+            // onAppear pass markIndexVisible's movement guard, which requested
+            // an older range the fresh window didn't cover and cascaded
+            // prepends that shifted the viewport onto older messages.
+            scrollPosition = loadedBounds.startIndex
         }
         Log.diagnostic(
             .chatView,
@@ -752,6 +774,29 @@ final class VirtualScrollState: ObservableObject {
             category: .ui
         )
         return true
+    }
+
+    /// The current window's start index when the window abuts the dataset
+    /// tail, nil otherwise. Rows beyond the window's end only count as "tail"
+    /// when they are pending tail insertions the window hasn't published yet.
+    private func tailAbuttingWindowStartIndex() -> Int? {
+        guard let window = messageWindow else { return nil }
+
+        let tailGap = totalMessageCount - window.endIndex
+        if tailGap <= 0 {
+            return window.startIndex
+        }
+
+        var pendingInsertedIDs = Set(pendingInsertedMessageEvents.flatMap(\.messageIDs))
+        if let conversationUUID = UUID(uuidString: conversationId) {
+            for object in viewContext.insertedObjects {
+                guard let message = object as? Message,
+                      message.conversation?.id == conversationUUID else { continue }
+                pendingInsertedIDs.insert(message.objectID)
+            }
+        }
+        pendingInsertedIDs.subtract(window.messageIDs)
+        return tailGap <= pendingInsertedIDs.count ? window.startIndex : nil
     }
 
     private func retryWindowAfterDatasetChange(

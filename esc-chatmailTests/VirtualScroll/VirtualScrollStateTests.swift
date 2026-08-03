@@ -432,12 +432,15 @@ final class VirtualScrollStateTests: XCTestCase {
 
         let didLoadLatest = await latestLoad.value
         XCTAssertTrue(didLoadLatest)
+        // The pre-load window covered the whole conversation (tail-abutting),
+        // so the latest reload extends it with the new tail row instead of
+        // collapsing to the last visibleItemCount rows.
         XCTAssertEqual(
             state.visibleMessages.map(\.objectID),
-            Array(messages.dropFirst()).map(\.objectID) + [pendingMessage.objectID]
+            messages.map(\.objectID) + [pendingMessage.objectID]
         )
         XCTAssertEqual(state.totalMessageCount, 5)
-        XCTAssertEqual(state.visibleRangeStartIndex, 1)
+        XCTAssertEqual(state.visibleRangeStartIndex, 0)
         XCTAssertTrue(state.isShowingLatestWindow)
     }
 
@@ -943,11 +946,17 @@ final class VirtualScrollStateTests: XCTestCase {
 
         XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
         XCTAssertEqual(state.totalMessageCount, 5)
-        XCTAssertEqual(state.scrollPosition, 4)
+        // Latest publishes mirror the initial-load convention: the tracked
+        // position anchors at the window head so a head-row onAppear cannot
+        // trigger an older-range reload.
+        XCTAssertEqual(state.scrollPosition, 2)
         let recordedRanges = await ranges.snapshot()
+        // The tail-abutting window start (2) is preserved through the drifted
+        // metadata count, so the drifted request spans 2..<100 before the
+        // rebase lands back on the real 2..<5 window.
         XCTAssertEqual(
             recordedRanges,
-            [0..<0, 2..<5, 0..<0, 97..<100, 2..<5]
+            [0..<0, 2..<5, 0..<0, 2..<100, 2..<5]
         )
     }
 
@@ -1920,7 +1929,9 @@ final class VirtualScrollStateTests: XCTestCase {
 
         await state.loadLatestWindowIfNeeded()
 
-        let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        // The tail-abutting window keeps its accumulated rows and extends by
+        // the pending tail insertion instead of sliding forward.
+        let expectedIDs = Array(messages.suffix(4)).map(\.objectID) + [pendingMessage.objectID]
         await waitUntil {
             state.visibleMessages.map(\.objectID) == expectedIDs &&
                 state.totalMessageCount == 9 &&
@@ -1976,7 +1987,9 @@ final class VirtualScrollStateTests: XCTestCase {
             "A pending tail insertion must preserve sticky-latest intent before its window publishes"
         )
 
-        let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        // The tail-abutting window keeps its accumulated rows and extends by
+        // the pending tail insertion instead of sliding forward.
+        let expectedIDs = Array(messages.suffix(4)).map(\.objectID) + [pendingMessage.objectID]
         await waitUntil {
             insertedEvents.last?.messageIDs == [pendingMessage.objectID] &&
                 refreshedEvents.last?.eventID == insertedEvents.last?.id &&
@@ -1986,6 +1999,123 @@ final class VirtualScrollStateTests: XCTestCase {
                 state.totalMessageCount == 9 &&
                 !state.isLoadingMore
         }
+    }
+
+    func testPostSendLatestReloadPreservesAccumulatedWindowRows() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 12)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 0,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(3)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        // Grow the window upward the way a short scroll toward history does.
+        state.scrollPosition = 12
+        state.markIndexVisible(9)
+        let grownIDs = Array(messages.suffix(6)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == grownIDs && !state.isLoadingMore
+        }
+
+        // A local send inserts an optimistic pending row at the tail. The
+        // latest reload must extend the accumulated window with the new row —
+        // not collapse it back to the last visibleItemCount rows, which
+        // dropped the rows above the viewport and shifted the transcript.
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-post-send-preserved-window",
+            date: Date(timeIntervalSince1970: 12),
+            conversation: conversation
+        )
+
+        let didEnsureTarget = await state.ensureVisibleMessage(pendingMessage.objectID)
+        XCTAssertTrue(didEnsureTarget)
+
+        let expectedIDs = grownIDs + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 13 &&
+                !state.isLoadingMore
+        }
+        XCTAssertEqual(state.visibleRangeStartIndex, 6)
+    }
+
+    func testLatestReloadAnchorsPositionAtWindowHeadWithoutOlderRangeRequests() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let requestedRanges = RangeRecorder()
+        let stack = self.stack!
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            await requestedRanges.record(range)
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        let newMessage = makeMessage(
+            id: "virtual-scroll-latest-head-anchor",
+            date: 8,
+            conversation: conversation
+        )
+        try viewContext.save()
+
+        let expectedIDs = Array(messages.suffix(4)).map(\.objectID) + [newMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+
+        // Latest publishes mirror the initial-load convention: the tracked
+        // position anchors at the window head, so the head row's onAppear is
+        // movement-guard-suppressed and cannot request an older range that
+        // would prepend rows above the viewport.
+        XCTAssertEqual(state.scrollPosition, state.visibleRangeStartIndex)
+
+        let requestCountBeforeHeadAppears = await requestedRanges.snapshot().count
+        state.markIndexVisible(state.visibleRangeStartIndex)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        let finalRequestCount = await requestedRanges.snapshot().count
+        XCTAssertEqual(finalRequestCount, requestCountBeforeHeadAppears)
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
     }
 
     func testInsertedMessageEventPublishesExactIDWhenAggregateCountIsUnchanged() async throws {
@@ -2991,7 +3121,9 @@ final class VirtualScrollStateTests: XCTestCase {
 
         await state.loadLatestWindowIfNeeded(knownTotalCount: 9)
 
-        let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [newMessage.objectID]
+        // The tail-abutting window keeps its accumulated rows and extends by
+        // the inserted tail row instead of sliding forward.
+        let expectedIDs = Array(messages.suffix(4)).map(\.objectID) + [newMessage.objectID]
         await waitUntil {
             state.visibleMessages.map(\.objectID) == expectedIDs &&
                 state.totalMessageCount == 9 &&

@@ -351,7 +351,10 @@ class MessageProcessor: @unchecked Sendable {
         for header in headers {
             switch header.name.lowercased() {
             case "subject":
-                processedHeaders.subject = header.value
+                // Subject is unstructured text: safe to decode the whole
+                // value (unlike address headers, which are parsed first and
+                // decoded per display-name phrase).
+                processedHeaders.subject = RFC2047Decoder.decode(header.value)
             case "from":
                 processedHeaders.from = header.value
                 if let email = emailNormalizer.extractEmail(from: header.value) {

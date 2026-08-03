@@ -657,6 +657,8 @@ final class ConversationRollupUpdaterTests: XCTestCase {
     }
 
     func testUpdateDisplayNameOnly_listKeepsBareListIdFallbackTitle() throws {
+        // Without any message evidence of a single sender, the stable List-Id
+        // placeholder stays.
         let conversation = ConversationBuilder()
             .asList()
             .withListId("thebrowser.substack.com")
@@ -672,6 +674,156 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
 
         XCTAssertEqual(conversation.displayName, "thebrowser.substack.com")
+    }
+
+    func testUpdateDisplayNameOnly_listBareListIdTitleUpgradesToSingleSenderName() throws {
+        // A title equal to the raw List-Id is the bare-header creation
+        // fallback, not a real phrase. Once the list has a single distinct
+        // sender, the sender's From name replaces the machine identifier.
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("tbpn.mail.beehiiv.com")
+            .withDisplayName("tbpn.mail.beehiiv.com")
+            .build(in: context)
+        addConversationParticipant(
+            email: "tbpn@mail.beehiiv.com",
+            displayName: nil,
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("list-single-sender-1")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "TBPN")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "TBPN")
+    }
+
+    func testUpdateDisplayNameOnly_listBareListIdTitleIgnoresOwnRepliesWhenCountingSenders() throws {
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("tbpn.mail.beehiiv.com")
+            .withDisplayName("tbpn.mail.beehiiv.com")
+            .build(in: context)
+        addConversationParticipant(
+            email: "tbpn@mail.beehiiv.com",
+            displayName: nil,
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("list-single-sender-newsletter")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "TBPN")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        MessageBuilder()
+            .withId("list-single-sender-own-reply")
+            .withSender(email: "me@example.com")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "TBPN")
+    }
+
+    func testUpdateDisplayNameOnly_listBareListIdTitleWithMultipleSendersKeepsPlaceholder() throws {
+        // Discussion lists rotate senders; the stable List-Id placeholder
+        // beats a title that would churn with every post.
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("misc.example.groups.io")
+            .withDisplayName("misc.example.groups.io")
+            .build(in: context)
+        addConversationParticipant(
+            email: "alice@example.com",
+            displayName: "Alice Adams",
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("list-multi-sender-1")
+            .withSender(email: "alice@example.com", name: "Alice Adams")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        MessageBuilder()
+            .withId("list-multi-sender-2")
+            .withSender(email: "bob@example.com", name: "Bob Brown")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "misc.example.groups.io")
+    }
+
+    func testUpdateDisplayNameOnly_latestFromHeaderNameWinsOverOlderMultiWordName() throws {
+        // A sender that rebrands ("Technology Brothers" → "TBPN") must show
+        // the current From name; the old multi-word name must not ratchet.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Technology Brothers")
+            .build(in: context)
+        addConversationParticipant(
+            email: "tbpn@mail.beehiiv.com",
+            displayName: "Technology Brothers",
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("rebrand-older")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "Technology Brothers")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        MessageBuilder()
+            .withId("rebrand-newer")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "TBPN")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "TBPN")
+    }
+
+    func testUpdateDisplayNameOnly_olderFullerVariantStillUpgradesShortLatestName() throws {
+        // The recency rule must not regress the "Katie" → "Katie Thau"
+        // upgrade: an older, fuller variant of the same name still wins.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Katie")
+            .build(in: context)
+        addConversationParticipant(
+            email: "katie@example.com",
+            displayName: nil,
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("fuller-older")
+            .withSender(email: "katie@example.com", name: "Katie Thau")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        MessageBuilder()
+            .withId("fuller-newer")
+            .withSender(email: "katie@example.com", name: "Katie")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Katie Thau")
     }
 
     func testUpdateDisplayNameOnly_listWithoutTitleComputesSenderDerivedName() throws {

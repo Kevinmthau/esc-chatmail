@@ -27,22 +27,37 @@ extension EmailDOMQuoteRemover {
         // them as Comment nodes, not Elements.
     ]
 
-    static func removeQuotedContainers(in document: Document) throws {
+    /// Returns the number of removed quote containers/regions so callers can
+    /// tell whether the document actually had container-marked quoted history.
+    @discardableResult
+    static func removeQuotedContainers(in document: Document) throws -> Int {
+        var removedCount = 0
+
         // border-left styled divs are commonly used as quote blocks; match by
         // attribute value substring rather than encoded inline style strings.
         let borderLeftDivs = try document.select("div[style*=border-left]")
         for element in borderLeftDivs.array() {
             try element.remove()
+            removedCount += 1
         }
 
         for selector in quotedContainerSelectors {
             let elements = try document.select(selector)
             for element in elements.array() {
                 try element.remove()
+                removedCount += 1
             }
         }
 
         // Remove `<!-- originalMessage --> … <!-- /originalMessage -->` pairs.
-        removeCommentDelimitedRegions(in: document, openHint: "originalmessage", closeHint: "/originalmessage")
+        if removeCommentDelimitedRegions(
+            in: document,
+            openHint: "originalmessage",
+            closeHint: "/originalmessage"
+        ) {
+            removedCount += 1
+        }
+
+        return removedCount
     }
 }
