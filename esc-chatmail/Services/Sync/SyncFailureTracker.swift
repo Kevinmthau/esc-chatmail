@@ -208,7 +208,14 @@ actor SyncFailureTracker {
         in context: NSManagedObjectContext
     ) async -> HistoryAdvancePlan {
         if !hadFailures {
-            let cleared = await deleteDeferredRows(in: context)
+            guard let cleared = await deleteDeferredRows(in: context) else {
+                // A clean fetch result does not prove the durable failure
+                // ledger is empty. If it cannot be read, advancing would leave
+                // deferred rows permanently outside both the frozen history
+                // window and the abandoned-message drain.
+                log.error("Failed to read failure ledger for clean advance - keeping cursor frozen for retry")
+                return .held
+            }
             if cleared > 0 {
                 log.info("Staged removal of \(cleared) recovered deferred messages")
             }
@@ -300,15 +307,21 @@ actor SyncFailureTracker {
     }
 
     /// Stages deletion of every deferred row in the caller's context.
-    /// - Returns: the number of rows staged for deletion.
-    private func deleteDeferredRows(in context: NSManagedObjectContext) async -> Int {
+    /// - Returns: the number of rows staged for deletion, or `nil` when the
+    ///   ledger could not be read.
+    private func deleteDeferredRows(in context: NSManagedObjectContext) async -> Int? {
         await context.perform {
             let request = AbandonedSyncMessage.fetchRequest()
             request.predicate = NSPredicate(
                 format: "state == %@",
                 AbandonedSyncMessage.State.deferred.rawValue
             )
-            let rows = (try? context.fetch(request)) ?? []
+            let rows: [AbandonedSyncMessage]
+            do {
+                rows = try context.fetch(request)
+            } catch {
+                return nil
+            }
             for row in rows {
                 context.delete(row)
             }

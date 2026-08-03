@@ -335,6 +335,13 @@ final class IncrementalSyncOrchestrator {
                     _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
                     committedModificationTransaction = true
                     await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
+
+                    // The save above durably committed the cursor and staged
+                    // ledger transition. Apply the tracker's matching success
+                    // state before the post-save cancellation check so a
+                    // cancelled run cannot strand newly abandoned rows behind
+                    // a stale in-memory cache.
+                    await failureTracker.commit(advancePlan)
                 },
                 recordReconciliation: {
                     self.recordReconciliationTime()
@@ -349,11 +356,6 @@ final class IncrementalSyncOrchestrator {
                 persistenceTimer,
                 detail: "rollups=\(modifiedConversations.count) names=\(displayNameOnlyConversations.count)"
             )
-
-            // The final save committed the staged ledger rows together with the
-            // cursor; only now may the tracker's success state change. A failed
-            // save throws past this point, leaving counters and rows intact.
-            await failureTracker.commit(advancePlan)
 
             let cleanupTimer = timing.start("incrementalCleanup")
             await dataCleanupService.runIncrementalCleanup()

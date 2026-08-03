@@ -161,6 +161,74 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         )
     }
 
+    /// A clean network run must not advance past durable deferred rows when
+    /// the ledger itself cannot be read. Treating the failed fetch as an empty
+    /// result would make those rows unreachable by either recovery path.
+    func testFailedLedgerReadBlocksCleanAdvance() async throws {
+        let failingContext = try FailingReadStore.makeFailingContext()
+
+        let plan = await tracker.planHistoryAdvance(hadFailures: false, in: failingContext)
+
+        XCTAssertEqual(plan.outcome, .held, "The cursor must stay frozen when clean-run ledger cleanup cannot be planned")
+    }
+
+    /// Once the cursor and deferred→abandoned rows are durably saved, task
+    /// cancellation must not skip the matching tracker commit. Reconciliation
+    /// bookkeeping remains cancellation-sensitive because it is not part of
+    /// the durable sync transaction.
+    func testPostSaveCancellationStillCommitsAbandonmentPlan() async throws {
+        let abandonedNotification = expectation(forNotification: .syncMessagesAbandoned, object: nil) { note in
+            (note.userInfo?["count"] as? Int) == 1
+        }
+        let saveCompleted = expectation(description: "durable save completed")
+        let saveGate = SyncPersistenceCancellationGate()
+
+        try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures, failedIds: ["stuck-1"])
+        let hatchRun = coreDataStack.newBackgroundContext()
+        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: hatchRun)
+        XCTAssertEqual(plan.outcome, .advancedAbandoning(count: 1))
+
+        var didRecordReconciliation = false
+        let task = Task {
+            try await IncrementalSyncOrchestrator.finalizePersistence(
+                labelReconciliationOutcome: .completed,
+                save: {
+                    try await self.coreDataStack.saveAsync(context: hatchRun)
+                    saveCompleted.fulfill()
+                    await saveGate.wait()
+                },
+                commit: {
+                    await self.tracker.commit(plan)
+                },
+                recordReconciliation: {
+                    didRecordReconciliation = true
+                }
+            )
+        }
+
+        await fulfillment(of: [saveCompleted], timeout: 5)
+        task.cancel()
+        await saveGate.open()
+
+        do {
+            try await task.value
+            XCTFail("Expected cancellation after the durable save")
+        } catch is CancellationError {
+            // Expected after the non-cancellable commit closure finishes.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        await fulfillment(of: [abandonedNotification], timeout: 5)
+        XCTAssertFalse(didRecordReconciliation)
+        let consecutiveFailureCount = await tracker.consecutiveFailureCount
+        XCTAssertEqual(consecutiveFailureCount, 0)
+
+        let rows = try await fetchAbandonedRows()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.abandoned.rawValue)
+    }
+
     /// A failed ledger read during recordFailure still counts the strike but
     /// stages nothing — so a later hatch, reading through a WORKING context,
     /// must hold rather than abandon a stale (or empty) deferred set: the
@@ -268,5 +336,24 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
                 )
             }
         }
+    }
+}
+
+private actor SyncPersistenceCancellationGate {
+    private var isOpen = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pendingContinuations = continuations
+        continuations.removeAll()
+        pendingContinuations.forEach { $0.resume() }
     }
 }
