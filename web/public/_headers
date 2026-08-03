@@ -1,0 +1,29 @@
+# Site-wide policy. Note the Google sources are PATH-PREFIXED, so every GIS
+# endpoint the app actually uses has to be listed:
+#   - /gsi/           token client + its iframes and XHRs
+#   - /o/oauth2/      sign-out revocation (google.accounts.oauth2.revoke posts
+#                     to accounts.google.com/o/oauth2/revoke, which is NOT
+#                     under /gsi/ — without it, sign-out silently leaves the
+#                     grant live at Google; pinned by src/auth/authHeaders.test.ts)
+#   - /gsi/style      stylesheet GIS injects ('unsafe-inline' does not cover
+#                     an external <link>)
+/*
+  Cross-Origin-Opener-Policy: same-origin-allow-popups
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; frame-src 'self' https://accounts.google.com/gsi/ https://accounts.google.com/o/oauth2/; connect-src 'self' https://accounts.google.com/gsi/ https://accounts.google.com/o/oauth2/ https://gmail.googleapis.com https://oauth2.googleapis.com; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; base-uri 'none'; object-src 'none'; frame-ancestors 'none'
+
+# The email frame must NOT inherit the site-wide CSP: _headers rules
+# accumulate, and a second Content-Security-Policy header is enforced as the
+# INTERSECTION of both policies — the site policy's `img-src 'self' data:
+# blob:` would block remote email images and its `frame-ancestors 'none'`
+# would refuse the reader iframe outright. Cloudflare Pages applies matched
+# rules in file order and processes `! Header` removals before the same
+# rule's own sets, so this block detaches the wildcard CSP and then sets the
+# frame's exact policy (mirrors the meta CSP baked into email-frame.html,
+# plus frame-ancestors, which is header-only). Pinned by
+# src/features/reader/emailFrameHeaders.test.ts.
+/email-frame.html
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'none'; img-src https: http: data: blob:; style-src 'unsafe-inline'; script-src 'self'; frame-ancestors 'self'

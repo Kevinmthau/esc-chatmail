@@ -7,8 +7,10 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    paths-ignore: ['web/**', '.github/workflows/web.yml']
   push:
     branches: [main]
+    paths-ignore: ['web/**', '.github/workflows/web.yml']
   workflow_dispatch:
 
 concurrency:
