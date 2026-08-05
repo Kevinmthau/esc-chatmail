@@ -539,4 +539,112 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
 
         await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
     }
+
+    /// The success-commit contract through the FULL entry point: `performSync`
+    /// itself must commit the staged advance plan after its final save —
+    /// resetting the strike counter, stamping the success time, and clearing
+    /// recovered deferred rows — with no tracker bookkeeping done by the
+    /// caller. The `handleSyncCompletion` tests above perform the caller's
+    /// obligations themselves, so only this test guards the orchestrator's
+    /// post-save `failureTracker.commit(advancePlan)` call; without it, a later
+    /// incremental run's escape hatch would inherit the stale strikes and could
+    /// abandon messages on its first failure instead of its third.
+    @MainActor
+    func testPerformSync_cleanRunAfterPriorFailuresCommitsSuccessState() async throws {
+        let profile = GmailProfile(
+            emailAddress: "initial-sync-test@example.com",
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "history-300"
+        )
+
+        let apiClient = MockGmailAPIClient()
+        apiClient.profileResponse = profile
+        apiClient.labelsResponse = [
+            GmailLabel(
+                id: "INBOX",
+                name: "Inbox",
+                messageListVisibility: nil,
+                labelListVisibility: nil,
+                type: "system"
+            )
+        ]
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-clean", threadId: "t-clean")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageResponses["m-clean"] = GmailMessageBuilder()
+            .withId("m-clean")
+            .withThreadId("t-clean")
+            .withLabels(["INBOX"])
+            .withFrom("sender@example.com", name: "Sender")
+            .withTo([profile.emailAddress])
+            .withSubject("Clean run")
+            .withSnippet("All good")
+            .build()
+
+        let conversationManager = ConversationManager(
+            currentUserEmail: { profile.emailAddress }
+        )
+        let messagePersister = MessagePersister(
+            coreDataStack: coreDataStack,
+            saveHTML: { _, _ in nil },
+            conversationManager: conversationManager
+        )
+        let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        let sut = InitialSyncOrchestrator(
+            messageFetcher: MessageFetcher(apiClient: apiClient, clock: FakeSyncClock()),
+            messagePersister: messagePersister,
+            conversationManager: conversationManager,
+            dataCleanupService: DataCleanupService(
+                coreDataStack: coreDataStack,
+                conversationManager: conversationManager,
+                migrationFlags: InMemoryMigrationFlagStore(),
+                identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
+            ),
+            attachmentDownloader: AttachmentDownloader(apiClient: apiClient),
+            coreDataStack: coreDataStack,
+            failureTracker: failureTracker,
+            performanceLogger: .shared
+        )
+
+        // A previous failing attempt left a strike and a durable deferred row.
+        let previousRun = coreDataStack.newBackgroundContext()
+        await failureTracker.recordFailure(fetchFailedIds: ["stale-1"], in: previousRun)
+        try await coreDataStack.saveAsync(context: previousRun)
+        let seededFailureCount = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(seededFailureCount, 1, "Positive control: the prior strike must be seeded")
+
+        let result = try await sut.performSync { _, _ in }
+
+        XCTAssertFalse(result.hadWarnings)
+
+        let consecutiveFailureCount = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(
+            consecutiveFailureCount, 0,
+            "A clean run must commit its advance plan and reset the strike counter"
+        )
+        let lastSuccessfulSyncTime = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNotNil(
+            lastSuccessfulSyncTime,
+            "A clean run must commit its advance plan and stamp the success time"
+        )
+
+        let context = coreDataStack.newBackgroundContext()
+        let staleRowCount: Int = await context.perform {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "AbandonedSyncMessage")
+            request.includesPendingChanges = false
+            return (try? context.count(for: request)) ?? -1
+        }
+        XCTAssertEqual(staleRowCount, 0, "The clean run's save must clear the recovered deferred row")
+
+        let historyId: String? = await context.perform {
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            request.includesPendingChanges = false
+            return (try? context.fetch(request).first)?.historyId
+        }
+        XCTAssertEqual(historyId, profile.historyId)
+    }
 }
