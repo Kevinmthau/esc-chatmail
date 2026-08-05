@@ -1061,6 +1061,40 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(html.contains("href=\"ftp://files.example.com/shared/report.csv\""))
     }
 
+    func testLoadContent_plainTextFallbackBottomPostedReply_rendersRecoveredTextExactlyOnce() async {
+        let messageId = "html-loader-plain-bottom-posted-\(UUID().uuidString)"
+        let bodyText = """
+        On Aug 1, 2026, at 9:00 AM, Olga Smith <olga@example.com> wrote:
+
+        > Are you free for lunch tomorrow?
+        > We could try the new place.
+
+        Yes! Tomorrow at noon works great for me.
+        """
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: bodyText,
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+
+        guard case .plainTextFallback = result.source else {
+            XCTFail("Expected plainTextFallback source")
+            return
+        }
+
+        let html = result.html ?? ""
+        // The recovered reply must render once as the main content, not
+        // again inside the collapsed quote behind "See More".
+        let replyOccurrences = html.components(separatedBy: "Yes! Tomorrow at noon works great for me.").count - 1
+        XCTAssertEqual(replyOccurrences, 1)
+        XCTAssertTrue(html.contains("<summary>See More</summary>"))
+        XCTAssertTrue(html.contains("Are you free for lunch tomorrow?"))
+        XCTAssertTrue(html.contains("We could try the new place."))
+    }
+
     func testLoadContent_plainTextFallback_rawEmailSourceWithPreviewPadding_stillShowsContent() async {
         let messageId = "html-loader-raw-source-\(UUID().uuidString)"
         let bodyText = """

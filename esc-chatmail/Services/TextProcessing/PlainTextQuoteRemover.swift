@@ -123,7 +123,19 @@ enum PlainTextQuoteRemover {
         // Extract quoted content before truncating
         if earliestQuoteIndex < cleanText.count {
             let endIndex = cleanText.index(cleanText.startIndex, offsetBy: earliestQuoteIndex)
-            let quotedText = String(cleanText[endIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            var quotedText = String(cleanText[endIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            cleanText = String(cleanText[..<endIndex])
+
+            // Bottom-posted reply rescue: when the message STARTS with the
+            // quote (nothing before it), the author's text sits after the
+            // ">"-prefixed block. Truncation alone would return an empty
+            // bubble for a message that has real content. The rescue must
+            // run before the quoted part is captured so recovered lines
+            // move out of the quoted region instead of appearing in both.
+            if cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                (cleanText, quotedText) = bottomPostedRescue(inQuotedRegion: quotedText)
+            }
 
             // Clean up the quoted text (remove quote markers like ">") and get nesting level
             let (cleanedQuote, nestingLevel) = cleanQuotedText(quotedText)
@@ -133,16 +145,6 @@ enum PlainTextQuoteRemover {
                     attribution: quoteAttribution,
                     nestingLevel: nestingLevel
                 ))
-            }
-
-            cleanText = String(cleanText[..<endIndex])
-
-            // Bottom-posted reply rescue: when the message STARTS with the
-            // quote (nothing before it), the author's text sits after the
-            // ">"-prefixed block. Truncation alone would return an empty
-            // bubble for a message that has real content.
-            if cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                cleanText = bottomPostedContent(inQuotedRegion: quotedText)
             }
         }
 
@@ -166,15 +168,26 @@ enum PlainTextQuoteRemover {
 
     /// Recovers a bottom-posted reply's own text from a quote-first region:
     /// the non-">"-prefixed lines that FOLLOW the last ">"-prefixed line.
+    /// Returns the recovered content plus the quoted region with those lines
+    /// removed, so recovered text renders once (as the bubble), never twice.
     /// Requires an actual ">" block — without markers there is no reliable
     /// boundary between quoted history and new text, so nothing is recovered.
     /// Attribution/header/forward-marker lines never count as content.
-    private static func bottomPostedContent(inQuotedRegion quotedRegion: String) -> String {
+    /// Known limitation: for interleaved inline replies ("> question" /
+    /// "answer" pairs) only the segment after the LAST ">" line is recovered;
+    /// earlier answers stay inside the quoted region, next to the lines they
+    /// answer. A bare mid-quote line is more often a soft-wrapped
+    /// continuation of the quoted text than new writing, so hoisting every
+    /// interleaved segment would risk putting the quoted author's words in
+    /// the reply bubble.
+    private static func bottomPostedRescue(
+        inQuotedRegion quotedRegion: String
+    ) -> (content: String, remainingQuotedRegion: String) {
         let lines = quotedRegion.components(separatedBy: .newlines)
         guard let lastQuoteMarkerLineIndex = lines.lastIndex(where: {
             $0.trimmingCharacters(in: .whitespaces).hasPrefix(">")
         }) else {
-            return ""
+            return ("", quotedRegion)
         }
 
         let trailingLines = lines[(lastQuoteMarkerLineIndex + 1)...].filter { line in
@@ -194,9 +207,16 @@ enum PlainTextQuoteRemover {
             return true
         }
 
-        return trailingLines
+        let content = trailingLines
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else {
+            return ("", quotedRegion)
+        }
+
+        let remainingQuotedRegion = lines[...lastQuoteMarkerLineIndex]
+            .joined(separator: "\n")
+        return (content, remainingQuotedRegion)
     }
 
     /// Finds the earliest match of any quote indicator pattern

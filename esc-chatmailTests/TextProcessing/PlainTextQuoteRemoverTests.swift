@@ -227,6 +227,47 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Yes! Tomorrow at noon works great for me.\nSee you there.")
     }
 
+    func testExtractQuotes_bottomPostedReply_recoveredTextNotDuplicatedInQuotedPart() {
+        let text = """
+        On Aug 1, 2026, at 9:00 AM, Olga Smith <olga@example.com> wrote:
+
+        > Are you free for lunch tomorrow?
+        > We could try the new place.
+
+        Yes! Tomorrow at noon works great for me.
+        """
+        let result = PlainTextQuoteRemover.extractQuotes(from: text)
+        XCTAssertEqual(result.mainContent, "Yes! Tomorrow at noon works great for me.")
+        XCTAssertEqual(result.quotedParts.count, 1)
+        let quoted = result.quotedParts.first?.text ?? ""
+        XCTAssertTrue(quoted.contains("Are you free for lunch tomorrow?"))
+        XCTAssertTrue(quoted.contains("We could try the new place."))
+        XCTAssertFalse(quoted.contains("Yes! Tomorrow at noon works great for me."))
+    }
+
+    func testExtractQuotes_interleavedInlineReplies_recoversOnlyTrailingSegment() {
+        // Documented limitation: only the segment after the LAST ">" line is
+        // recovered as the reply bubble. Earlier inline answers stay inside
+        // the quoted part, interleaved next to the lines they answer, and
+        // must not also leak into the recovered main content.
+        let text = """
+        On Aug 1, 2026, at 9:00 AM, Olga Smith <olga@example.com> wrote:
+
+        > Are you free Tuesday?
+        Tuesday works for me.
+        > Should we invite Sam?
+        Yes, definitely invite Sam.
+        """
+        let result = PlainTextQuoteRemover.extractQuotes(from: text)
+        XCTAssertEqual(result.mainContent, "Yes, definitely invite Sam.")
+        XCTAssertEqual(result.quotedParts.count, 1)
+        let quoted = result.quotedParts.first?.text ?? ""
+        XCTAssertTrue(quoted.contains("Are you free Tuesday?"))
+        XCTAssertTrue(quoted.contains("Tuesday works for me."))
+        XCTAssertTrue(quoted.contains("Should we invite Sam?"))
+        XCTAssertFalse(quoted.contains("Yes, definitely invite Sam."))
+    }
+
     func testRemoveQuotes_quoteOnlyMessage_remainsEmpty() {
         let text = """
         On Aug 1, 2026, at 9:00 AM, Olga Smith <olga@example.com> wrote:
