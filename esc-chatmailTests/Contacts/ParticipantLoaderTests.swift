@@ -343,6 +343,218 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(info.formattedDisplayName, "TBPN")
     }
 
+    func testLoadParticipants_olderFullerVariantStillUpgradesShortLatestName() async throws {
+        // The newest-first rule must not regress the "Katie" → "Katie Thau"
+        // upgrade through the fetch path: an older, fuller variant of the
+        // same name still wins over the short current one.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Katie")
+            .withParticipantHash(calculateParticipantHash(from: ["katie@example.com"]))
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("katie@example.com")
+            .withDisplayName(nil)
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        _ = MessageBuilder()
+            .withId("participant-loader-fuller-older")
+            .withSender(email: "katie@example.com", name: "Katie Thau")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("participant-loader-fuller-newer")
+            .withSender(email: "katie@example.com", name: "Katie")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.formattedDisplayName, "Katie Thau")
+    }
+
+    func testLoadParticipants_rebrandAcrossSenderEmailCaseVariantsResolvesNewestName() async throws {
+        // The newest occurrence of a header name must be found across raw
+        // sender-address case variants of the same normalized email — the
+        // rebranded name wins even though its newest message used a variant
+        // spelling of the address.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Old Brand")
+            .withParticipantHash(calculateParticipantHash(from: ["brand@example.com"]))
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("brand@example.com")
+            .withDisplayName("Old Brand")
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        _ = MessageBuilder()
+            .withId("participant-loader-variant-oldest")
+            .withSender(email: "brand@example.com", name: "Old Brand")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("participant-loader-variant-middle")
+            .withSender(email: "brand@example.com", name: "NewBrand")
+            .withDate(Date(timeIntervalSince1970: 150))
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("participant-loader-variant-newest")
+            .withSender(email: "Brand@Example.com", name: "NewBrand")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.formattedDisplayName, "NewBrand")
+    }
+
+    func testLoadParticipants_nameRevertedToEarlierVariantResolvesNewestOccurrence() async throws {
+        // A name's rank is its NEWEST occurrence: a sender that reverts to an
+        // earlier name ("Brand One" → "Brand Two" → back to "Brand One") must
+        // resolve to the reverted-to name, not the middle one.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Brand One")
+            .withParticipantHash(calculateParticipantHash(from: ["revert@example.com"]))
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("revert@example.com")
+            .withDisplayName(nil)
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        _ = MessageBuilder()
+            .withId("participant-loader-revert-oldest")
+            .withSender(email: "revert@example.com", name: "Brand One")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("participant-loader-revert-middle")
+            .withSender(email: "revert@example.com", name: "Brand Two")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("participant-loader-revert-newest")
+            .withSender(email: "revert@example.com", name: "Brand One")
+            .withDate(Date(timeIntervalSince1970: 300))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.formattedDisplayName, "Brand One")
+    }
+
+    func testLoadParticipants_equalDateHeaderNamesTieBreakOnMessageId() async throws {
+        // Two distinct From names with identical internalDates: the higher
+        // message id counts as newest, keeping the winner deterministic.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Tie")
+            .withParticipantHash(calculateParticipantHash(from: ["tie@example.com"]))
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("tie@example.com")
+            .withDisplayName(nil)
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        _ = MessageBuilder()
+            .withId("participant-loader-tie-a")
+            .withSender(email: "tie@example.com", name: "Alpha")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("participant-loader-tie-b")
+            .withSender(email: "tie@example.com", name: "Beta")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.formattedDisplayName, "Beta")
+    }
+
     func testLoadParticipants_preservesExplicitBrandNameMatchingEmailLocalPart() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("Unknown Contact")

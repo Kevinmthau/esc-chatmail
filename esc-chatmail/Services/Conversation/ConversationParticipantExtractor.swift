@@ -86,21 +86,22 @@ enum ConversationParticipantExtractor {
         )
         guard !participantEmailSet.isEmpty else { return [:] }
 
-        // Newest-first so the most recent From header wins; an older, fuller
-        // variant of the same name may still upgrade it (see
-        // EmailNormalizer.mergeNewestFirstHeaderDisplayName).
+        // Fetch distinct (senderEmail, senderName) header pairs, not one row
+        // per message: dictionary fetches ignore fetchBatchSize, so a per-row
+        // fetch materializes an NSDictionary for every message of the thread
+        // on the caller's queue — the main-queue view context when list rows
+        // load. The name signal only needs each distinct pair; DISTINCT keeps
+        // the per-message work inside SQLite. (In-memory stores ignore
+        // returnsDistinctResults and return per-row duplicates; the Set below
+        // dedupes either way.)
         let request = NSFetchRequest<NSDictionary>(entityName: "Message")
         request.resultType = .dictionaryResultType
-        request.propertiesToFetch = ["senderEmail", "senderName", "internalDate"]
+        request.propertiesToFetch = ["senderEmail", "senderName"]
+        request.returnsDistinctResults = true
         request.predicate = NSPredicate(
             format: "conversation == %@ AND senderEmail != nil AND senderName != nil",
             conversation
         )
-        request.sortDescriptors = [
-            NSSortDescriptor(key: "internalDate", ascending: false),
-            NSSortDescriptor(key: "id", ascending: false)
-        ]
-        request.fetchBatchSize = 50
 
         let rows: [NSDictionary]
         do {
@@ -110,25 +111,111 @@ enum ConversationParticipantExtractor {
             return [:]
         }
 
-        var displayNames: [String: String] = [:]
+        var rawPairs = Set<RawHeaderPair>()
         for row in rows {
-            guard let senderEmail = row["senderEmail"] as? String else { continue }
-            let normalizedEmail = EmailNormalizer.normalize(senderEmail)
+            guard let senderEmail = row["senderEmail"] as? String,
+                  let senderName = row["senderName"] as? String else { continue }
+            rawPairs.insert(RawHeaderPair(senderEmail: senderEmail, senderName: senderName))
+        }
+
+        // Group raw pairs into sanitized name candidates per normalized email.
+        // Several raw pairs can collapse into one candidate (address case
+        // variants, whitespace in the name).
+        var rawPairsByCandidate: [String: [String: [RawHeaderPair]]] = [:]
+        for pair in rawPairs {
+            let normalizedEmail = EmailNormalizer.normalize(pair.senderEmail)
             guard participantEmailSet.contains(normalizedEmail),
                   let displayName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
-                    row["senderName"] as? String,
+                    pair.senderName,
                     forEmail: normalizedEmail
                   ) else {
                 continue
             }
+            rawPairsByCandidate[normalizedEmail, default: [:]][displayName, default: []].append(pair)
+        }
 
-            displayNames[normalizedEmail] = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
-                displayName,
-                into: displayNames[normalizedEmail],
-                forEmail: normalizedEmail
-            )
+        var displayNames: [String: String] = [:]
+        for (email, candidates) in rawPairsByCandidate {
+            if candidates.count == 1, let onlyName = candidates.keys.first {
+                displayNames[email] = onlyName
+                continue
+            }
+
+            // Contested: the sender used several distinct names (a rebrand).
+            // Newest-first so the most recent From header wins; an older,
+            // fuller variant of the same name may still upgrade it (see
+            // EmailNormalizer.mergeNewestFirstHeaderDisplayName). Each
+            // candidate's rank is its newest occurrence across its raw pairs,
+            // resolved with fetchLimit-1 lookups so the (rare) contested case
+            // still avoids materializing the whole thread.
+            let ranked = candidates.compactMap { name, pairs -> EmailNormalizer.HeaderDisplayNameCandidate? in
+                var newest: (date: Date, id: String)?
+                for pair in pairs {
+                    guard let occurrence = newestOccurrence(of: pair, in: conversation, context: context) else {
+                        continue
+                    }
+                    if newest == nil
+                        || occurrence.date > newest!.date
+                        || (occurrence.date == newest!.date && occurrence.id > newest!.id) {
+                        newest = occurrence
+                    }
+                }
+                guard let newest else { return nil }
+                return EmailNormalizer.HeaderDisplayNameCandidate(
+                    displayName: name,
+                    newestInternalDate: newest.date,
+                    newestMessageID: newest.id
+                )
+            }
+
+            if let winner = EmailNormalizer.resolveNewestFirstHeaderDisplayName(from: ranked, forEmail: email) {
+                displayNames[email] = winner
+            }
         }
 
         return displayNames
+    }
+
+    private struct RawHeaderPair: Hashable {
+        let senderEmail: String
+        let senderName: String
+    }
+
+    /// The newest (internalDate, id) of the messages carrying one exact raw
+    /// header pair, matching the ordering a full newest-first scan would see.
+    private static func newestOccurrence(
+        of pair: RawHeaderPair,
+        in conversation: Conversation,
+        context: NSManagedObjectContext
+    ) -> (date: Date, id: String)? {
+        let request = NSFetchRequest<NSDictionary>(entityName: "Message")
+        request.resultType = .dictionaryResultType
+        request.propertiesToFetch = ["internalDate", "id"]
+        request.predicate = NSPredicate(
+            format: "conversation == %@ AND senderEmail == %@ AND senderName == %@",
+            conversation,
+            pair.senderEmail,
+            pair.senderName
+        )
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
+        request.fetchLimit = 1
+
+        let rows: [NSDictionary]
+        do {
+            rows = try context.fetch(request)
+        } catch {
+            Log.error("Failed to fetch newest header name occurrence", category: .coreData, error: error)
+            return nil
+        }
+
+        guard let row = rows.first,
+              let date = row["internalDate"] as? Date,
+              let id = row["id"] as? String else {
+            return nil
+        }
+        return (date, id)
     }
 }

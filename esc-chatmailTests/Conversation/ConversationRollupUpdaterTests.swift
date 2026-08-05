@@ -826,6 +826,36 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "Katie Thau")
     }
 
+    func testUpdateDisplayNameOnly_equalDateHeaderNamesTieBreakOnMessageId() throws {
+        // Two distinct From names with identical internalDates: the higher
+        // message id counts as newest, keeping the winner deterministic.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Tie")
+            .build(in: context)
+        addConversationParticipant(
+            email: "tie@example.com",
+            displayName: nil,
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("tie-a")
+            .withSender(email: "tie@example.com", name: "Alpha")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        MessageBuilder()
+            .withId("tie-b")
+            .withSender(email: "tie@example.com", name: "Beta")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Beta")
+    }
+
     func testUpdateDisplayNameOnly_listWithoutTitleComputesSenderDerivedName() throws {
         // No List-Id phrase was available at creation: the normal participant
         // computation must fill the title in.
