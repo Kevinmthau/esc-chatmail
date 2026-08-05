@@ -104,6 +104,40 @@ describe('useEmailHtml', () => {
     expect(getAttachmentMock).not.toHaveBeenCalled()
   })
 
+  it('resolves cid blobs referenced only through srcset and background carriers', async () => {
+    const messageId = 'msg-carriers'
+    await db.bodies.put({
+      messageId,
+      html:
+        '<img src="https://x.example/fallback.png" srcset="cid:hero@x 2x">' +
+        '<table><tbody><tr><td background="cid:bg@x">cell</td></tr></tbody></table>',
+    })
+    await db.attachments.bulkPut([
+      attachmentRow({
+        id: `${messageId}:0.1`,
+        messageId,
+        contentId: 'hero@x',
+        gmailAttachmentId: 'att-hero',
+        state: 'downloaded',
+      }),
+      attachmentRow({
+        id: `${messageId}:0.2`,
+        messageId,
+        contentId: 'bg@x',
+        gmailAttachmentId: 'att-bg',
+        state: 'downloaded',
+      }),
+    ])
+    await putBlob(db, `${messageId}:0.1`, new Blob(['hero'], { type: 'image/png' }))
+    await putBlob(db, `${messageId}:0.2`, new Blob(['bg'], { type: 'image/png' }))
+
+    const { result } = renderHook(() => useEmailHtml(messageId, 'full'))
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    expect(result.current.cidBlobs).toHaveProperty('hero@x')
+    expect(result.current.cidBlobs).toHaveProperty('bg@x')
+    expect(getAttachmentMock).not.toHaveBeenCalled()
+  })
+
   it('downloads missing attachment bytes, stores the blob and marks it downloaded', async () => {
     const messageId = 'msg-download'
     await db.bodies.put({ messageId, html: '<img src="cid:photo@x"><p>Body</p>' })

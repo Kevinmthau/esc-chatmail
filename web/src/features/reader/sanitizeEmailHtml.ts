@@ -9,7 +9,11 @@ export type EmailRenderMode = 'preview' | 'full'
 
 export interface SanitizedEmailHtml {
   html: string
-  /** Content-IDs referenced by inline images, angle brackets stripped. */
+  /**
+   * Content-IDs referenced by any inline carrier — img src, srcset candidate
+   * lists, legacy background attributes, url(cid:) in inline styles — with
+   * angle brackets stripped.
+   */
   cids: string[]
 }
 
@@ -69,6 +73,13 @@ function normalizeCid(rawCid: string): string {
   return rawCid.replace(/[<>]/g, '').trim()
 }
 
+/**
+ * url(cid:...) inside CSS text, quoted or bare. The cid capture stops at the
+ * closing quote/paren/whitespace, mirroring iOS's CIDScanTerminators.css.
+ * Keep in sync with the copy in public/email-frame.js.
+ */
+const CSS_CID_URL_PATTERN = /url\(\s*(['"]?)cid:([^'")\s]*)\1\s*\)/gi
+
 export async function sanitizeEmailHtml(
   rawHtml: string,
   opts: { mode: EmailRenderMode },
@@ -92,9 +103,19 @@ export async function sanitizeEmailHtml(
   const root = doc.documentElement
   if (root === null) throw new Error('sanitizeEmailHtml: sanitized document has no root')
 
-  // Collect + normalize cid: image references. Images whose cid is empty
-  // after normalization can never resolve; drop their src outright.
+  // Collect + normalize cid: references. ALLOWED_URI_REGEXP admits cid: on
+  // EVERY URI attribute DOMPurify keeps — not just img src — so collection
+  // must cover the same carriers the frame rewrites: img src, srcset
+  // candidate lists, legacy background attributes, and url(cid:) in inline
+  // styles (iOS parity: EmailDocument.referencedInlineContentIDs). A cid that
+  // is empty after normalization can never resolve; the img src is dropped
+  // outright, while the other carriers keep their raw value — the frame
+  // normalizes again at rewrite time and strips whatever stays unresolved.
   const cids: string[] = []
+  const collect = (rawCid: string): void => {
+    const cid = normalizeCid(rawCid)
+    if (cid.length > 0 && !cids.includes(cid)) cids.push(cid)
+  }
   for (const img of Array.from(root.querySelectorAll('img'))) {
     const src = img.getAttribute('src') ?? ''
     if (!/^cid:/i.test(src)) continue
@@ -104,7 +125,22 @@ export async function sanitizeEmailHtml(
       continue
     }
     img.setAttribute('src', `cid:${cid}`)
-    if (!cids.includes(cid)) cids.push(cid)
+    collect(cid)
+  }
+  for (const el of Array.from(root.querySelectorAll('[srcset]'))) {
+    for (const candidate of (el.getAttribute('srcset') ?? '').split(',')) {
+      const url = candidate.trim().split(/\s+/, 1)[0] ?? ''
+      if (/^cid:/i.test(url)) collect(url.slice(4))
+    }
+  }
+  for (const el of Array.from(root.querySelectorAll('[background]'))) {
+    const background = el.getAttribute('background') ?? ''
+    if (/^cid:/i.test(background)) collect(background.slice(4))
+  }
+  for (const el of Array.from(root.querySelectorAll('[style]'))) {
+    for (const match of (el.getAttribute('style') ?? '').matchAll(CSS_CID_URL_PATTERN)) {
+      collect(match[2] ?? '')
+    }
   }
 
   // Every link opens outside the frame and never leaks referrer/opener.

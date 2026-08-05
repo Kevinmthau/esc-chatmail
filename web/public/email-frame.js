@@ -48,19 +48,85 @@
     return urlByCid
   }
 
-  function rewriteCidImages(doc, urlByCid) {
+  function normalizeCid(rawCid) {
+    return rawCid.replace(/[<>]/g, '').trim()
+  }
+
+  // url(cid:...) inside CSS text, quoted or bare. Keep in sync with
+  // CSS_CID_URL_PATTERN in sanitizeEmailHtml.ts.
+  var CSS_CID_URL_PATTERN = /url\(\s*(['"]?)cid:([^'")\s]*)\1\s*\)/gi
+
+  // Rewrites one srcset candidate list. Returns null when no candidate is a
+  // cid: URL (leave the attribute untouched); '' when every candidate was an
+  // unresolved cid (remove the attribute, so a rewritten sibling src can win
+  // instead of an empty srcset shadowing it); else the rebuilt list. Non-cid
+  // pieces are kept verbatim and re-joined with ',' so a data: URI split
+  // apart by the naive comma split round-trips intact.
+  function rewriteSrcset(srcset, urlByCid) {
+    var pieces = srcset.split(',')
+    var kept = []
+    var sawCid = false
+    for (var i = 0; i < pieces.length; i++) {
+      var candidate = pieces[i].trim()
+      if (candidate.slice(0, 4).toLowerCase() !== 'cid:') {
+        kept.push(pieces[i])
+        continue
+      }
+      sawCid = true
+      var parts = candidate.split(/\s+/)
+      var mapped = urlByCid[normalizeCid(parts[0].slice(4))]
+      if (!mapped) continue // unresolvable candidate — drop it
+      parts[0] = mapped
+      kept.push(parts.join(' '))
+    }
+    return sawCid ? kept.join(',') : null
+  }
+
+  function rewriteStyleCidUrls(style, urlByCid) {
+    return style.replace(CSS_CID_URL_PATTERN, function (match, quote, rawCid) {
+      var mapped = urlByCid[normalizeCid(rawCid)]
+      // `none` keeps the declaration parseable (background/background-image
+      // and friends all accept it) with nothing left dangling.
+      return mapped ? 'url("' + mapped + '")' : 'none'
+    })
+  }
+
+  function rewriteCidReferences(doc, urlByCid) {
     var images = doc.querySelectorAll('img')
     for (var i = 0; i < images.length; i++) {
       var src = images[i].getAttribute('src') || ''
       if (src.slice(0, 4).toLowerCase() !== 'cid:') continue
-      var cid = src.slice(4).replace(/[<>]/g, '').trim()
-      var mapped = urlByCid[cid]
+      var mapped = urlByCid[normalizeCid(src.slice(4))]
       if (mapped) {
         images[i].setAttribute('src', mapped)
       } else {
         // Unresolvable inline image — drop the src so nothing dangles.
         images[i].removeAttribute('src')
       }
+    }
+
+    var srcsetHosts = doc.querySelectorAll('[srcset]')
+    for (i = 0; i < srcsetHosts.length; i++) {
+      var srcset = rewriteSrcset(srcsetHosts[i].getAttribute('srcset') || '', urlByCid)
+      if (srcset === null) continue
+      if (srcset === '') srcsetHosts[i].removeAttribute('srcset')
+      else srcsetHosts[i].setAttribute('srcset', srcset)
+    }
+
+    var backgroundHosts = doc.querySelectorAll('[background]')
+    for (i = 0; i < backgroundHosts.length; i++) {
+      var background = backgroundHosts[i].getAttribute('background') || ''
+      if (background.slice(0, 4).toLowerCase() !== 'cid:') continue
+      var mappedBackground = urlByCid[normalizeCid(background.slice(4))]
+      if (mappedBackground) backgroundHosts[i].setAttribute('background', mappedBackground)
+      else backgroundHosts[i].removeAttribute('background')
+    }
+
+    var styledHosts = doc.querySelectorAll('[style]')
+    for (i = 0; i < styledHosts.length; i++) {
+      var style = styledHosts[i].getAttribute('style') || ''
+      if (style.toLowerCase().indexOf('cid:') === -1) continue
+      styledHosts[i].setAttribute('style', rewriteStyleCidUrls(style, urlByCid))
     }
   }
 
@@ -70,7 +136,7 @@
     var urlByCid = mintObjectUrls(cidBlobs)
 
     var doc = new DOMParser().parseFromString(html, 'text/html')
-    rewriteCidImages(doc, urlByCid)
+    rewriteCidReferences(doc, urlByCid)
 
     var incoming = doc.documentElement
       ? Array.prototype.slice.call(doc.documentElement.childNodes)
