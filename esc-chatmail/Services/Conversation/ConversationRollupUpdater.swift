@@ -584,16 +584,12 @@ struct ConversationRollupUpdater: Sendable {
 
         // Newest-first so the most recent From header wins; an older, fuller
         // variant of the same name may still upgrade it (see
-        // EmailNormalizer.mergeNewestFirstHeaderDisplayName).
-        let orderedMessages = messages.sorted {
-            if $0.internalDate != $1.internalDate {
-                return $0.internalDate > $1.internalDate
-            }
-            return $0.id > $1.id
-        }
-
-        var displayNames: [String: String] = [:]
-        for message in orderedMessages {
+        // EmailNormalizer.mergeNewestFirstHeaderDisplayName). One unordered
+        // pass records each distinct sanitized name's newest occurrence;
+        // ranking those candidates reproduces a full newest-first scan
+        // without sorting a large thread's entire message set.
+        var candidatesByEmail: [String: [String: (date: Date, id: String)]] = [:]
+        for message in messages {
             guard let senderEmail = message.senderEmail else { continue }
             let normalizedEmail = EmailNormalizer.normalize(senderEmail)
             guard !normalizedEmail.isEmpty,
@@ -604,11 +600,26 @@ struct ConversationRollupUpdater: Sendable {
                 continue
             }
 
-            displayNames[normalizedEmail] = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
-                displayName,
-                into: displayNames[normalizedEmail],
-                forEmail: normalizedEmail
-            )
+            let newest = candidatesByEmail[normalizedEmail]?[displayName]
+            if newest == nil
+                || message.internalDate > newest!.date
+                || (message.internalDate == newest!.date && message.id > newest!.id) {
+                candidatesByEmail[normalizedEmail, default: [:]][displayName] = (message.internalDate, message.id)
+            }
+        }
+
+        var displayNames: [String: String] = [:]
+        for (email, candidates) in candidatesByEmail {
+            let ranked = candidates.map { name, newest in
+                EmailNormalizer.HeaderDisplayNameCandidate(
+                    displayName: name,
+                    newestInternalDate: newest.date,
+                    newestMessageID: newest.id
+                )
+            }
+            if let winner = EmailNormalizer.resolveNewestFirstHeaderDisplayName(from: ranked, forEmail: email) {
+                displayNames[email] = winner
+            }
         }
 
         return displayNames

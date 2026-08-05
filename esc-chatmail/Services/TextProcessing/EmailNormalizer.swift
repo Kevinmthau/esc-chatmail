@@ -201,6 +201,42 @@ class EmailNormalizer {
         return olderCandidate
     }
 
+    /// A distinct sanitized header From name for one sender, stamped with the
+    /// newest message occurrence that carried it, for newest-first ranking.
+    struct HeaderDisplayNameCandidate {
+        let displayName: String
+        let newestInternalDate: Date
+        let newestMessageID: String
+    }
+
+    /// Picks the winning header display name from a sender's distinct name
+    /// candidates by ordering them newest-first (newest occurrence date, then
+    /// message id) and folding through `mergeNewestFirstHeaderDisplayName`.
+    /// Equivalent to scanning every message newest-first: rows past a name's
+    /// first (newest) occurrence only re-merge the same candidate, which
+    /// cannot change the winner.
+    static func resolveNewestFirstHeaderDisplayName(
+        from candidates: [HeaderDisplayNameCandidate],
+        forEmail email: String
+    ) -> String? {
+        let ordered = candidates.sorted {
+            if $0.newestInternalDate != $1.newestInternalDate {
+                return $0.newestInternalDate > $1.newestInternalDate
+            }
+            return $0.newestMessageID > $1.newestMessageID
+        }
+
+        var winner: String?
+        for candidate in ordered {
+            winner = mergeNewestFirstHeaderDisplayName(
+                candidate.displayName,
+                into: winner,
+                forEmail: email
+            )
+        }
+        return winner
+    }
+
     /// True when every comparison token of `name` appears among `other`'s
     /// tokens — i.e. `other` is a fuller variant of the same name.
     static func isDisplayNameTokenSubset(_ name: String, of other: String) -> Bool {
