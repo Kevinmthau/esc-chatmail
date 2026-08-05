@@ -73,6 +73,14 @@ function toForwardableFragment(sanitizedDocument: string): string {
     const rewritten = style.replace(CSS_CID_URL_PATTERN, 'none')
     if (rewritten !== style) el.setAttribute('style', rewritten)
   }
+  // The fifth carrier: a <style> block inside <body> ships with the fragment
+  // (only head styles are viewer chrome), so its url(cid:) gets the same
+  // rewrite.
+  for (const styleEl of Array.from(body.querySelectorAll('style'))) {
+    const css = styleEl.textContent ?? ''
+    const rewritten = css.replace(CSS_CID_URL_PATTERN, 'none')
+    if (rewritten !== css) styleEl.textContent = rewritten
+  }
   return body.innerHTML
 }
 

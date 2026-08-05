@@ -101,6 +101,18 @@ describe('sanitizeEmailHtml', () => {
     expect(cids).toEqual(['paper@x', 'tile@x'])
   })
 
+  // No angle-bracket variant here: DOMPurify's raw-text guard removes any
+  // <style> whose text contains markup-like chars, so `url(cid:<x>)` inside a
+  // style block never survives sanitization in the first place.
+  it('collects cid references from url(cid:) in <style> element text', async () => {
+    const { cids } = await sanitizeEmailHtml(
+      '<html><head><style>.h { background: url(cid:head@x) }</style></head><body>' +
+        '<style>.b { background-image: url("cid:body@x") }</style><p>x</p></body></html>',
+      { mode: 'full' },
+    )
+    expect(cids).toEqual(['head@x', 'body@x'])
+  })
+
   it('ignores cids that are empty after normalization on the extra carriers', async () => {
     const { cids } = await sanitizeEmailHtml(
       '<img srcset="cid: 1x, cid:<> 2x">' +
