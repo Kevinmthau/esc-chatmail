@@ -78,7 +78,7 @@ function normalizeCid(rawCid: string): string {
  * closing quote/paren/whitespace, mirroring iOS's CIDScanTerminators.css.
  * Keep in sync with the copy in public/email-frame.js.
  */
-const CSS_CID_URL_PATTERN = /url\(\s*(['"]?)cid:([^'")\s]*)\1\s*\)/gi
+export const CSS_CID_URL_PATTERN = /url\(\s*(['"]?)cid:([^'")\s]*)\1\s*\)/gi
 
 export async function sanitizeEmailHtml(
   rawHtml: string,

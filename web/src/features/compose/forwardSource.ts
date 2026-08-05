@@ -17,7 +17,7 @@ import {
   prefixSubjectForForward,
   type ForwardHeaderFields,
 } from '@/outbox/forwardMetadata'
-import { sanitizeEmailHtml } from '@/features/reader/sanitizeEmailHtml'
+import { CSS_CID_URL_PATTERN, sanitizeEmailHtml } from '@/features/reader/sanitizeEmailHtml'
 
 export interface ForwardDraft {
   sourceMessageId: string
@@ -64,6 +64,14 @@ function toForwardableFragment(sanitizedDocument: string): string {
   }
   for (const el of Array.from(body.querySelectorAll('[background]'))) {
     if (/^cid:/i.test(el.getAttribute('background') ?? '')) el.removeAttribute('background')
+  }
+  // url(cid:) inside inline styles is the fourth carrier. `none` keeps the
+  // declaration parseable (background/background-image and friends all accept
+  // it), matching the frame's unresolved-cid rewrite in email-frame.js.
+  for (const el of Array.from(body.querySelectorAll('[style]'))) {
+    const style = el.getAttribute('style') ?? ''
+    const rewritten = style.replace(CSS_CID_URL_PATTERN, 'none')
+    if (rewritten !== style) el.setAttribute('style', rewritten)
   }
   return body.innerHTML
 }
