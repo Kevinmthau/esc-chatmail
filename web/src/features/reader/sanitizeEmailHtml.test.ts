@@ -70,6 +70,46 @@ describe('sanitizeEmailHtml', () => {
     expect(srcs).toEqual(['cid:logo@example', 'cid:photo@example', 'cid:logo@example'])
   })
 
+  // ALLOWED_URI_REGEXP admits cid: on every kept URI attribute, so inline
+  // parts can be referenced by more than img src. Collection must see every
+  // carrier the frame rewrites, or the referenced attachment is never
+  // downloaded and the image renders blank (a srcset shadows even a resolved
+  // sibling src in modern browsers).
+  it('collects cid references from srcset candidate lists', async () => {
+    const { cids } = await sanitizeEmailHtml(
+      '<img src="cid:logo@x" srcset="cid:<logo@x> 1x, cid:logo-2x@x 2x, https://x.example/f.png 3x">',
+      { mode: 'full' },
+    )
+    expect(cids).toEqual(['logo@x', 'logo-2x@x'])
+  })
+
+  it('collects cid references from legacy background attributes', async () => {
+    const { html, cids } = await sanitizeEmailHtml(
+      '<table><tbody><tr><td background="cid:bg@x">cell</td></tr></tbody></table>',
+      { mode: 'full' },
+    )
+    expect(cids).toEqual(['bg@x'])
+    expect(parse(html).querySelector('td')?.getAttribute('background')).toBe('cid:bg@x')
+  })
+
+  it('collects cid references from url(cid:) in inline styles', async () => {
+    const { cids } = await sanitizeEmailHtml(
+      '<div style="background-image: url(cid:paper@x)">a</div>' +
+        '<div style="background: #fff url(&quot;cid:tile@x&quot;) repeat">b</div>',
+      { mode: 'full' },
+    )
+    expect(cids).toEqual(['paper@x', 'tile@x'])
+  })
+
+  it('ignores cids that are empty after normalization on the extra carriers', async () => {
+    const { cids } = await sanitizeEmailHtml(
+      '<img srcset="cid: 1x, cid:<> 2x">' +
+        '<table><tbody><tr><td background="cid:">x</td></tr></tbody></table>',
+      { mode: 'full' },
+    )
+    expect(cids).toEqual([])
+  })
+
   it('forces target=_blank and rel=noopener noreferrer on every anchor', async () => {
     const { html } = await sanitizeEmailHtml(
       '<a href="https://a.example">a</a><a href="https://b.example" target="_self" rel="opener">b</a>',
