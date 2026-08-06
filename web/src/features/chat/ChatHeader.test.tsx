@@ -6,9 +6,9 @@ import { ChatHeader } from './ChatHeader'
 // The header only needs a resolved conversation and a participant count; both
 // live hooks are stubbed so the test exercises the navigation wiring.
 vi.mock('@/live/hooks', () => ({
+  useAccountLiveQuery: () => 1,
   useConversation: () => ({ id: 'c1', type: 'dm', displayName: 'Ben Ortiz' }),
 }))
-vi.mock('dexie-react-hooks', () => ({ useLiveQuery: () => 1 }))
 vi.mock('@/data/actions', () => ({
   archiveConversation: vi.fn(async () => {}),
   reportSpam: vi.fn(async () => {}),

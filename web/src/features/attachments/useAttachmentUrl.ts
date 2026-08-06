@@ -3,8 +3,7 @@
 // and the URL is revoked when the last consumer unmounts.
 
 import { useEffect, useState } from 'react'
-import { useLiveQuery } from 'dexie-react-hooks'
-import { getDB } from '@/db/schema'
+import { useAccountLiveQuery } from '@/live/hooks'
 
 interface CacheEntry {
   url: string
@@ -46,8 +45,8 @@ function releaseUrl(key: string, url: string): void {
 export function useAttachmentUrl(attachmentId: string | null): string | null {
   // Read the row directly (db/blobs.getBlob touches lastAccessAt, which would
   // retrigger this liveQuery forever).
-  const blobRow = useLiveQuery(
-    () => (attachmentId === null ? undefined : getDB().blobs.get(attachmentId)),
+  const blobRow = useAccountLiveQuery(
+    (db) => (attachmentId === null ? undefined : db.blobs.get(attachmentId)),
     [attachmentId],
   )
   // useLiveQuery keeps the PREVIOUS emission across a deps change, so right

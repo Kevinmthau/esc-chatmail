@@ -97,6 +97,11 @@ export function getDB(): ChatmailDB {
   return current
 }
 
+/** The current account database, or null while signed out / between accounts. */
+export function getDBIfAvailable(): ChatmailDB | null {
+  return current
+}
+
 export function setDBForTests(db: ChatmailDB | null): void {
   current = db
 }

@@ -25,7 +25,7 @@ export interface GmailFetchOptions {
  * Perform an authenticated Gmail API request.
  *
  * @param path Path relative to the Gmail v1 base (leading slash optional),
- *             or a full http(s) URL which is used as-is.
+ *             or an absolute URL under that exact HTTPS API base.
  * @throws AuthRequiredError when no token can be produced, or the replayed
  *         request still returns 401.
  * @throws RateLimitError on 429 (Retry-After parsed, capped at 60s).
@@ -87,8 +87,26 @@ async function doFetch(
 }
 
 function resolveUrl(path: string): string {
-  if (path.startsWith('https://') || path.startsWith('http://')) return path
-  return path.startsWith('/') ? `${GMAIL_API_BASE}${path}` : `${GMAIL_API_BASE}/${path}`
+  const base = new URL(`${GMAIL_API_BASE}/`)
+  const isAbsolute = /^[a-z][a-z\d+.-]*:/i.test(path) || path.startsWith('//')
+
+  let resolved: URL
+  try {
+    resolved = isAbsolute
+      ? new URL(path, base)
+      : new URL(path.startsWith('/') ? path.slice(1) : path, base)
+  } catch {
+    throw new TypeError('Invalid Gmail API URL')
+  }
+
+  const basePath = base.pathname.replace(/\/$/, '')
+  const isWithinApiBase =
+    resolved.pathname === basePath || resolved.pathname.startsWith(`${basePath}/`)
+  if (resolved.protocol !== 'https:' || resolved.origin !== base.origin || !isWithinApiBase) {
+    throw new TypeError('Refusing to send Gmail credentials outside the Gmail API base')
+  }
+
+  return resolved.href
 }
 
 /**

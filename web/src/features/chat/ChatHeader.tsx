@@ -3,19 +3,17 @@
 // menu with Archive / Report Spam (both navigate back to the list).
 
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useLiveQuery } from 'dexie-react-hooks'
 import { Avatar } from '@/components/ui/Avatar'
 import { IconButton } from '@/components/ui/IconButton'
 import { Menu, MenuItem } from '@/components/ui/Menu'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { archiveConversation, reportSpam } from '@/data/actions'
-import { getDB } from '@/db/schema'
-import { useConversation } from '@/live/hooks'
+import { useAccountLiveQuery, useConversation } from '@/live/hooks'
 
 export function ChatHeader({ conversationId }: { conversationId: string }) {
   const conversation = useConversation(conversationId)
-  const participantCount = useLiveQuery(
-    () => getDB().convoParticipants.where('conversationId').equals(conversationId).count(),
+  const participantCount = useAccountLiveQuery(
+    (db) => db.convoParticipants.where('conversationId').equals(conversationId).count(),
     [conversationId],
   )
   const search = useSearch({ strict: false })

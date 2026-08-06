@@ -4,13 +4,13 @@
 // and capped by a wall-clock budget so a stalled image cannot block the body.
 
 import { useCallback, useEffect, useState } from 'react'
-import { useLiveQuery } from 'dexie-react-hooks'
 import { BlobQuotaExceededError, getBlob, putBlob } from '@/db/blobs'
 import { getDB, type ChatmailDB } from '@/db/schema'
 import type { AttachmentRow } from '@/db/types'
 import { getAttachment } from '@/gmail/endpoints'
 import type { TokenBroker } from '@/gmail/gmailFetch'
 import { sha256Hex } from '@/identity/hash'
+import { useAccountLiveQuery } from '@/live/hooks'
 import { queryMessageBody } from '@/live/queries'
 import { base64UrlDecodeToBytes } from '@/mime/decode'
 import {
@@ -238,7 +238,7 @@ export function useEmailHtml(messageId: string, mode: EmailRenderMode): EmailHtm
   const [result, setResult] = useState<HookResult | null>(null)
 
   // undefined while the live query resolves; null when the message has no HTML body.
-  const bodyHtml = useLiveQuery(() => queryMessageBody(getDB(), messageId), [messageId])
+  const bodyHtml = useAccountLiveQuery((db) => queryMessageBody(db, messageId), [messageId])
 
   const expectedKey = `${messageId}|${mode}|${attempt}`
 

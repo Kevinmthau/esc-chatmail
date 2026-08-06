@@ -1,7 +1,5 @@
-import { useLiveQuery } from 'dexie-react-hooks'
 import { useId } from 'react'
-import { getDB } from '@/db/schema'
-import type { AccountRow } from '@/db/types'
+import { useAccountLiveQuery } from '@/live/hooks'
 import { defaultAlias, isAcceptedForSending } from '@/sync/aliases'
 
 /**
@@ -17,16 +15,8 @@ export function AliasPicker({
   onChange: (email: string) => void
 }) {
   const selectId = useId()
-  const account = useLiveQuery<AccountRow | null, null>(
-    async () => {
-      try {
-        return (await getDB().accounts.toCollection().first()) ?? null
-      } catch {
-        return null // No account DB open yet.
-      }
-    },
-    [],
-    null,
+  const account = useAccountLiveQuery(
+    async (db) => (await db.accounts.toCollection().first()) ?? null,
   )
 
   const sendable = (account?.sendAsAliases ?? []).filter(isAcceptedForSending)

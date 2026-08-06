@@ -4,9 +4,8 @@
 // verdict is known.
 
 import { useMemo } from 'react'
-import { useLiveQuery } from 'dexie-react-hooks'
-import { getDB } from '@/db/schema'
 import type { MessageRow } from '@/db/types'
+import { useAccountLiveQuery } from '@/live/hooks'
 import { queryMessageBody } from '@/live/queries'
 import { htmlCompatibilityFallback } from '@/mime/bubble'
 
@@ -28,13 +27,9 @@ export function clearRichContentCacheForTests(): void {
 
 export function useRichHtmlContent(message: MessageRow): boolean {
   const needsBody = message.hasHtmlBody === 1 && !richContentCache.has(message.id)
-  const bodyHtml = useLiveQuery(() => {
+  const bodyHtml = useAccountLiveQuery((db) => {
     if (!needsBody) return null
-    try {
-      return queryMessageBody(getDB(), message.id)
-    } catch {
-      return null
-    }
+    return queryMessageBody(db, message.id)
   }, [message.id, needsBody])
 
   return useMemo(() => {

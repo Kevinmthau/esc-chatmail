@@ -80,6 +80,38 @@ describe('gmailFetch', () => {
     expect(fetchImpl.mock.calls[0]![0]).toBe(`${GMAIL_API_BASE}/users/me/labels`)
   })
 
+  it('accepts an absolute Gmail v1 paging URL and preserves its query', async () => {
+    const broker = stubBroker('tok-1')
+    const fetchImpl = mockFetch(() => json(200, {}))
+    const pagingUrl = `${GMAIL_API_BASE}/users/me/messages?pageToken=next%2Bpage&maxResults=100`
+
+    await gmailFetch(broker, pagingUrl, undefined, { fetchImpl })
+
+    expect(fetchImpl.mock.calls[0]![0]).toBe(pagingUrl)
+    expect(authHeader(fetchImpl.mock.calls[0]![1])).toBe('Bearer tok-1')
+  })
+
+  it.each([
+    'https://attacker.example/gmail/v1/users/me/profile',
+    'http://gmail.googleapis.com/gmail/v1/users/me/profile',
+    'https://gmail.googleapis.com.evil.example/gmail/v1/users/me/profile',
+    'https://gmail.googleapis.com/drive/v3/files',
+    '//attacker.example/gmail/v1/users/me/profile',
+  ])('rejects a non-Gmail absolute URL before acquiring a token: %s', async (url) => {
+    const getToken = vi.fn(() => Promise.resolve('tok-1'))
+    const broker: TokenBroker = {
+      getToken,
+      refreshAfter: () => Promise.resolve('tok-2'),
+    }
+    const fetchImpl = mockFetch(() => json(200, {}))
+
+    await expect(gmailFetch(broker, url, undefined, { fetchImpl })).rejects.toThrow(
+      'Refusing to send Gmail credentials outside the Gmail API base',
+    )
+    expect(getToken).not.toHaveBeenCalled()
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
   it('preserves caller headers while adding Authorization', async () => {
     const broker = stubBroker('tok-1')
     const fetchImpl = mockFetch(() => json(200, {}))

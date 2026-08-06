@@ -4,12 +4,11 @@
 // body never touches innerHTML).
 
 import { useNavigate } from '@tanstack/react-router'
-import { useLiveQuery } from 'dexie-react-hooks'
 import type { ReactNode } from 'react'
 import { IconButton } from '@/components/ui/IconButton'
 import { Modal } from '@/components/ui/Modal'
 import { Skeleton } from '@/components/ui/Skeleton'
-import { getDB } from '@/db/schema'
+import { useAccountLiveQuery } from '@/live/hooks'
 import { EmailFrame } from './EmailFrame'
 import { useEmailHtml } from './useEmailHtml'
 
@@ -36,7 +35,7 @@ export function ReaderDialog({ messageId }: ReaderDialogProps) {
 }
 
 function ReaderContent({ messageId, onClose }: { messageId: string; onClose: () => void }) {
-  const message = useLiveQuery(() => getDB().messages.get(messageId), [messageId])
+  const message = useAccountLiveQuery((db) => db.messages.get(messageId), [messageId])
   const email = useEmailHtml(messageId, 'full')
 
   return (

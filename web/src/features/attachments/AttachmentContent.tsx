@@ -11,10 +11,10 @@
 // yet.
 
 import { useState } from 'react'
-import { useLiveQuery } from 'dexie-react-hooks'
 import { getDB } from '@/db/schema'
 import type { AttachmentRow } from '@/db/types'
 import { cn } from '@/lib/cn'
+import { useAccountLiveQuery } from '@/live/hooks'
 import { isCalendarInviteAttachment } from '@/mime/calendarInvite'
 import { isLocalAttachmentId } from '@/outbox/outboundAttachments'
 import { Lightbox } from './Lightbox'
@@ -36,8 +36,8 @@ export function AttachmentContent({
    */
   hideCalendarInviteAttachments?: boolean
 }) {
-  const rows = useLiveQuery(
-    () => getDB().attachments.where('messageId').equals(messageId).toArray(),
+  const rows = useAccountLiveQuery(
+    (db) => db.attachments.where('messageId').equals(messageId).toArray(),
     [messageId],
   )
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
