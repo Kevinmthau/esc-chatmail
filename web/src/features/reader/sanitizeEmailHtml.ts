@@ -11,8 +11,8 @@ export interface SanitizedEmailHtml {
   html: string
   /**
    * Content-IDs referenced by any inline carrier — img src, srcset candidate
-   * lists, legacy background attributes, url(cid:) in inline styles — with
-   * angle brackets stripped.
+   * lists, legacy background attributes, url(cid:) in inline styles and in
+   * <style> element text — with angle brackets stripped.
    */
   cids: string[]
 }
@@ -104,13 +104,15 @@ export async function sanitizeEmailHtml(
   if (root === null) throw new Error('sanitizeEmailHtml: sanitized document has no root')
 
   // Collect + normalize cid: references. ALLOWED_URI_REGEXP admits cid: on
-  // EVERY URI attribute DOMPurify keeps — not just img src — so collection
-  // must cover the same carriers the frame rewrites: img src, srcset
-  // candidate lists, legacy background attributes, and url(cid:) in inline
-  // styles (iOS parity: EmailDocument.referencedInlineContentIDs). A cid that
-  // is empty after normalization can never resolve; the img src is dropped
-  // outright, while the other carriers keep their raw value — the frame
-  // normalizes again at rewrite time and strips whatever stays unresolved.
+  // EVERY URI attribute DOMPurify keeps — not just img src — and DOMPurify
+  // deliberately keeps <style> blocks, so collection must cover the same
+  // carriers the frame rewrites: img src, srcset candidate lists, legacy
+  // background attributes, and url(cid:) in inline styles and <style> text
+  // (iOS parity: EmailDocument.referencedInlineContentIDs regex-scans the
+  // serialized subtree, which includes <style> text). A cid that is empty
+  // after normalization can never resolve; the img src is dropped outright,
+  // while the other carriers keep their raw value — the frame normalizes
+  // again at rewrite time and strips whatever stays unresolved.
   const cids: string[] = []
   const collect = (rawCid: string): void => {
     const cid = normalizeCid(rawCid)
@@ -139,6 +141,11 @@ export async function sanitizeEmailHtml(
   }
   for (const el of Array.from(root.querySelectorAll('[style]'))) {
     for (const match of (el.getAttribute('style') ?? '').matchAll(CSS_CID_URL_PATTERN)) {
+      collect(match[2] ?? '')
+    }
+  }
+  for (const styleEl of Array.from(root.querySelectorAll('style'))) {
+    for (const match of (styleEl.textContent ?? '').matchAll(CSS_CID_URL_PATTERN)) {
       collect(match[2] ?? '')
     }
   }

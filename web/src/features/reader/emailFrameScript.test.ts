@@ -1,6 +1,6 @@
 // Behavior tests for public/email-frame.js — the render path that rewrites
-// cid: carriers (img src, srcset, background, inline-style url()) to object
-// URLs minted from the posted Blobs.
+// cid: carriers (img src, srcset, background, url() in inline styles and
+// <style> text) to object URLs minted from the posted Blobs.
 //
 // The script is a plain IIFE written for the sandboxed frame document, so it
 // is evaluated once into this file's happy-dom globals and driven through its
@@ -110,5 +110,18 @@ describe('email-frame render', () => {
     const divs = Array.from(document.querySelectorAll('div'))
     expect(divs[0]?.getAttribute('style')).toBe('background-image: url("blob:mock-1")')
     expect(divs[1]?.getAttribute('style')).toBe('background: #001 none repeat')
+  })
+
+  it('rewrites url(cid:) in <style> element text and blanks unresolved references', () => {
+    renderInFrame(
+      '<html><head><style>.a { background: url(cid:paper@x) }</style></head><body>' +
+        "<style>.b { background: #001 url('cid:missing@x') repeat }</style><p>x</p></body></html>",
+      ['paper@x'],
+    )
+    const css = Array.from(document.querySelectorAll('style'))
+      .map((style) => style.textContent ?? '')
+      .join('\n')
+    expect(css).toContain('.a { background: url("blob:mock-1") }')
+    expect(css).toContain('.b { background: #001 none repeat }')
   })
 })

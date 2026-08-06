@@ -196,6 +196,23 @@ describe('buildForwardDraft', () => {
     expect(fragment).toContain('color: red')
   })
 
+  it('rewrites url(cid:) in body <style> blocks to none, keeping the block', async () => {
+    await seedMessage({ id: 'm1', conversationId: 'c1', hasHtmlBody: 1 })
+    await db.bodies.add({
+      messageId: 'm1',
+      html:
+        '<html><body><style>.tile { background: #fff url("cid:tile@x") repeat; color: red }</style>' +
+        '<p class="tile">styled</p></body></html>',
+    })
+    const fragment = (await buildForwardDraft(db, 'm1'))?.sanitizedContentHtml ?? ''
+    expect(fragment).toContain('styled')
+    // The block itself ships (rewritten), not dropped.
+    expect(fragment).toContain('<style>')
+    expect(fragment).not.toContain('cid:')
+    expect(fragment).toContain('none repeat')
+    expect(fragment).toContain('color: red')
+  })
+
   it('counts attachments this send cannot carry', async () => {
     await seedMessage({ id: 'm1', conversationId: 'c1', hasAttachments: 1 })
     await db.attachments.bulkAdd([

@@ -128,6 +128,13 @@
       if (style.toLowerCase().indexOf('cid:') === -1) continue
       styledHosts[i].setAttribute('style', rewriteStyleCidUrls(style, urlByCid))
     }
+
+    var styleBlocks = doc.querySelectorAll('style')
+    for (i = 0; i < styleBlocks.length; i++) {
+      var css = styleBlocks[i].textContent || ''
+      if (css.toLowerCase().indexOf('cid:') === -1) continue
+      styleBlocks[i].textContent = rewriteStyleCidUrls(css, urlByCid)
+    }
   }
 
   function render(html, cidBlobs) {
