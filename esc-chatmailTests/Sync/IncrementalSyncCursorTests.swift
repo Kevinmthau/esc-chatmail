@@ -590,6 +590,47 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertNotNil(lastSuccess)
     }
 
+    /// The pre-scan watermark: recovery must capture the profile cursor
+    /// BEFORE enumerating the mailbox. Messages arriving mid-scan sort after
+    /// a pre-scan watermark and stay covered by the next incremental sync; a
+    /// post-scan capture stamps the cursor past arrivals the enumeration
+    /// never saw, permanently skipping their deletions and label changes.
+    @MainActor
+    func testRecoveryCapturesProfileWatermarkBeforeEnumerating() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec", threadId: "t-m-rec")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageResponses["m-rec"] = makeFullMessage(id: "m-rec")
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let order = apiClient.endpointCallOrder
+        guard let profileIndex = order.firstIndex(of: "getProfile"),
+              let firstListIndex = order.firstIndex(of: "listMessages") else {
+            XCTFail("Recovery must call both getProfile and listMessages; saw \(order)")
+            return
+        }
+        XCTAssertLessThan(
+            profileIndex, firstListIndex,
+            "The watermark must be captured before the enumeration begins"
+        )
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777", "The cursor advances to the pre-scan watermark")
+    }
+
     /// A recovery run with fetch failures freezes the cursor at its prior
     /// value and commits the failing IDs as durable deferred rows in the same
     /// save — no success state leaks.

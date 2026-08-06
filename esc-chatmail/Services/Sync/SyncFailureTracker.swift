@@ -19,18 +19,26 @@ import CoreData
 ///   abandoned-message drain.
 /// - `abandoned` (or `nil` on legacy rows): the cursor has advanced past the
 ///   message; only the drain can recover it.
-/// `nextRetryAt` stays unconsumed here — retry pacing belongs to the resumable
-/// executor work.
+/// `nextRetryAt` paces the drain: stamped with an exponential backoff when a
+/// drain attempt fails, so a persistent outage does not burn the bounded
+/// retry budget in a handful of back-to-back syncs. A `nil` value (fresh
+/// abandonment, legacy rows) is immediately eligible.
 actor SyncFailureTracker {
     static let shared = SyncFailureTracker()
 
     private let defaults: UserDefaults
     private let coreDataStack: CoreDataStack
+    private let clock: any SyncClock
     private let log = LogCategory.sync.logger
 
-    init(defaults: UserDefaults = .standard, coreDataStack: CoreDataStack = .shared) {
+    init(
+        defaults: UserDefaults = .standard,
+        coreDataStack: CoreDataStack = .shared,
+        clock: any SyncClock = SystemSyncClock()
+    ) {
         self.defaults = defaults
         self.coreDataStack = coreDataStack
+        self.clock = clock
     }
 
     /// Latched when `recordFailure` could not stage the current failing set
@@ -368,30 +376,55 @@ actor SyncFailureTracker {
 
         await resetLegacyRetryCountsIfNeeded()
 
+        let now = clock.now()
         let context = coreDataStack.newBackgroundContext()
-        let ids: [String]? = await context.perform {
+        let outcome: (ids: [String], pacedRowsExist: Bool)? = await context.perform {
             let request = AbandonedSyncMessage.fetchRequest()
+            // The nil disjuncts are load-bearing on SQLite: NULL never
+            // compares true, so dropping them silently hides legacy rows
+            // (state) and fresh abandonments (nextRetryAt).
             request.predicate = NSPredicate(
-                format: "retryCount < %d AND (state == nil OR state != %@)",
+                format: "retryCount < %d AND (state == nil OR state != %@) AND (nextRetryAt == nil OR nextRetryAt <= %@)",
                 SyncConfig.maxAbandonedMessageRetries,
-                AbandonedSyncMessage.State.deferred.rawValue
+                AbandonedSyncMessage.State.deferred.rawValue,
+                now as NSDate
             )
             request.sortDescriptors = [NSSortDescriptor(key: "abandonedAt", ascending: true)]
             request.fetchLimit = limit
 
             do {
-                return try context.fetch(request).map(\.gmailMessageId)
+                let ids = try context.fetch(request).map(\.gmailMessageId)
+                if !ids.isEmpty {
+                    return (ids, false)
+                }
+                // Distinguish "table is drained" from "rows exist but are
+                // paced into the future": only the former may latch the
+                // skip-the-fetch fast path, or paced rows would never be
+                // offered again once their backoff elapses.
+                let pacedRequest = AbandonedSyncMessage.fetchRequest()
+                pacedRequest.predicate = NSPredicate(
+                    format: "retryCount < %d AND (state == nil OR state != %@)",
+                    SyncConfig.maxAbandonedMessageRetries,
+                    AbandonedSyncMessage.State.deferred.rawValue
+                )
+                let pacedCount = try context.count(for: pacedRequest)
+                return ([], pacedCount > 0)
             } catch {
                 Log.error("Failed to fetch retryable abandoned sync messages", category: .sync, error: error)
                 return nil
             }
         }
 
-        // Only cache on a successful fetch — an error must not latch "empty".
-        if let ids {
-            mayHaveRetryableAbandonedMessages = !ids.isEmpty
+        // Only cache on a successful fetch — an error must not latch "empty",
+        // and neither may an empty result that only reflects pacing.
+        if let outcome {
+            if !outcome.ids.isEmpty {
+                mayHaveRetryableAbandonedMessages = true
+            } else {
+                mayHaveRetryableAbandonedMessages = outcome.pacedRowsExist ? nil : false
+            }
         }
-        return ids ?? []
+        return outcome?.ids ?? []
     }
 
     /// One-time reset of retryCount on records written before the retry drain
@@ -454,6 +487,7 @@ actor SyncFailureTracker {
 
         mayHaveRetryableAbandonedMessages = nil
 
+        let now = clock.now()
         await context.perform {
             let request = AbandonedSyncMessage.fetchRequest()
             request.predicate = NSPredicate(format: "gmailMessageId IN %@", resolvedIds + failedIds)
@@ -470,6 +504,12 @@ actor SyncFailureTracker {
                             context.delete(record)
                         } else {
                             record.retryCount = retryCount
+                            // Pace the next attempt: without a backoff, a
+                            // persistent outage burns the whole bounded
+                            // budget across a handful of back-to-back syncs.
+                            record.nextRetryAt = now.addingTimeInterval(
+                                Self.retryBackoffInterval(forRetryCount: Int(retryCount))
+                            )
                         }
                     }
                 }
@@ -477,5 +517,15 @@ actor SyncFailureTracker {
                 Log.error("Failed to stage abandoned retry outcome", category: .sync, error: error)
             }
         }
+    }
+
+    /// Exponential drain backoff: 15 min after the first failed attempt,
+    /// quadrupling per attempt, capped at 12 hours. Fresh abandonments carry
+    /// `nextRetryAt == nil` and stay immediately eligible — pacing starts
+    /// only after a drain attempt has actually failed.
+    nonisolated static func retryBackoffInterval(forRetryCount retryCount: Int) -> TimeInterval {
+        let exponent = max(0, retryCount - 1)
+        let interval = SyncConfig.abandonedRetryBackoffBase * pow(4, Double(exponent))
+        return min(interval, SyncConfig.abandonedRetryBackoffCap)
     }
 }

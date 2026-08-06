@@ -496,6 +496,14 @@ final class IncrementalSyncOrchestrator {
         progressHandler(0.1, "Recovering missed messages...")
 
         do {
+            // Pre-scan watermark: capture the profile cursor BEFORE
+            // enumerating. Messages arriving mid-scan sort after this
+            // watermark, so the next incremental sync (starting from it)
+            // still covers them. A post-scan profile would stamp a cursor
+            // past arrivals the enumeration never saw, skipping them until
+            // reconciliation — and never repairing their deletions/labels.
+            let profile = try await messageFetcher.getProfile()
+
             let result = try await MessageListPaginator.fetchAndProcess(
                 query: query,
                 messageFetcher: messageFetcher
@@ -552,9 +560,9 @@ final class IncrementalSyncOrchestrator {
                 )
             }
 
-            // Get current historyId from Gmail profile and only advance when failure policy allows it.
-            // This prevents data loss when recovery fetched only a partial set of messages.
-            let profile = try await messageFetcher.getProfile()
+            // Advance only to the PRE-SCAN watermark and only when failure
+            // policy allows it — this prevents data loss when recovery
+            // fetched a partial set of messages.
             let advancePlan = await failureTracker.planHistoryAdvance(
                 hadFailures: result.hasFailures,
                 in: context

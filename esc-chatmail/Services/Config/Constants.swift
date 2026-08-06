@@ -120,6 +120,12 @@ struct SyncConfig {
     /// Maximum number of abandoned messages drained (one attempt each) per incremental sync
     static let maxAbandonedMessagesPerSync = 50
 
+    /// Base drain backoff after an abandoned message's first failed retry (15 minutes)
+    static let abandonedRetryBackoffBase: TimeInterval = 900
+
+    /// Ceiling on the drain backoff between abandoned-message retries (12 hours)
+    static let abandonedRetryBackoffCap: TimeInterval = 43_200
+
     /// UserDefaults key for tracking consecutive sync failures
     static let consecutiveFailuresKey = "syncConsecutiveFailures"
 

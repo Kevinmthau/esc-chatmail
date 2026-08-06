@@ -118,6 +118,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     private(set) var listHistoryLastStartId: String?
     private(set) var listHistoryLastPageToken: String?
     private(set) var listHistoryLastMaxResults: Int?
+    /// Cross-endpoint call order ("getProfile"/"listMessages"), for pinning
+    /// sequencing contracts such as the pre-scan recovery watermark.
+    private(set) var endpointCallOrder: [String] = []
 
     private(set) var getAttachmentCallCount = 0
     private(set) var getAttachmentCalls: [(messageId: String, attachmentId: String)] = []
@@ -194,6 +197,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listHistoryLastStartId = nil
             listHistoryLastPageToken = nil
             listHistoryLastMaxResults = nil
+            endpointCallOrder = []
             getAttachmentCallCount = 0
             getAttachmentCalls = []
 
@@ -209,6 +213,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listMessagesLastQuery = query
             listMessagesLastMaxResults = maxResults
             listMessagesLastPageToken = pageToken
+            endpointCallOrder.append("listMessages")
             return artificialDelay
         }
 
@@ -373,6 +378,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     func getProfile() async throws -> GmailProfile {
         let delay = withStateLock {
             getProfileCallCount += 1
+            endpointCallOrder.append("getProfile")
             return artificialDelay
         }
 
