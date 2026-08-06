@@ -17,6 +17,7 @@ final class StubURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var _script: [Response] = []
     private static var _requestCount = 0
+    private static var _requestURLs: [URL] = []
 
     static var script: [Response] {
         get { lock.withLock { _script } }
@@ -27,10 +28,17 @@ final class StubURLProtocol: URLProtocol {
         lock.withLock { _requestCount }
     }
 
+    /// URLs of every request served, in arrival order — lets tests pin query
+    /// items on real client-built requests.
+    static var requestURLs: [URL] {
+        lock.withLock { _requestURLs }
+    }
+
     static func reset() {
         lock.withLock {
             _script = []
             _requestCount = 0
+            _requestURLs = []
         }
     }
 
@@ -41,9 +49,12 @@ final class StubURLProtocol: URLProtocol {
         return URLSession(configuration: configuration)
     }
 
-    private static func nextResponse() -> Response? {
+    private static func nextResponse(for url: URL?) -> Response? {
         lock.withLock {
             _requestCount += 1
+            if let url {
+                _requestURLs.append(url)
+            }
             guard !_script.isEmpty else { return nil }
             return _script.count > 1 ? _script.removeFirst() : _script[0]
         }
@@ -53,7 +64,7 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let url = request.url, let response = Self.nextResponse() else {
+        guard let url = request.url, let response = Self.nextResponse(for: request.url) else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }

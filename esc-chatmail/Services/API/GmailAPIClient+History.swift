@@ -6,10 +6,14 @@ extension GmailAPIClient {
 
     /// Lists history changes since a given history ID.
     /// Uses retry logic with circuit breaker, converting 404 to historyIdExpired.
-    nonisolated func listHistory(startHistoryId: String, pageToken: String? = nil) async throws -> HistoryResponse {
+    /// `maxResults` caps history records per page; `nil` uses the server default.
+    nonisolated func listHistory(startHistoryId: String, pageToken: String? = nil, maxResults: Int? = nil) async throws -> HistoryResponse {
         var queryItems = [URLQueryItem(name: "startHistoryId", value: startHistoryId)]
         if let pageToken = pageToken {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
+        }
+        if let maxResults = maxResults {
+            queryItems.append(URLQueryItem(name: "maxResults", value: String(maxResults)))
         }
         let url = try buildURL(endpoint: APIEndpoints.history(), queryItems: queryItems)
         let request = try await authenticatedRequest(url: url)

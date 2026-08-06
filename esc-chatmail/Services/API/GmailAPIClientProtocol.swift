@@ -51,7 +51,10 @@ protocol GmailAPIClientProtocol: AnyObject, Sendable {
     // MARK: - History API
 
     /// Lists history changes since a given history ID.
-    func listHistory(startHistoryId: String, pageToken: String?) async throws -> HistoryResponse
+    /// - Parameter maxResults: Caps history RECORDS per page (not messages —
+    ///   one record can still fan out into many message fetches). `nil` uses
+    ///   the server default.
+    func listHistory(startHistoryId: String, pageToken: String?, maxResults: Int?) async throws -> HistoryResponse
 
     // MARK: - Attachments API
 
@@ -88,7 +91,7 @@ extension GmailAPIClientProtocol {
         try await sendMessage(rawMessage: rawMessage, threadId: threadId)
     }
 
-    func listHistory(startHistoryId: String, pageToken: String? = nil) async throws -> HistoryResponse {
-        try await listHistory(startHistoryId: startHistoryId, pageToken: pageToken)
+    func listHistory(startHistoryId: String, pageToken: String? = nil, maxResults: Int? = nil) async throws -> HistoryResponse {
+        try await listHistory(startHistoryId: startHistoryId, pageToken: pageToken, maxResults: maxResults)
     }
 }

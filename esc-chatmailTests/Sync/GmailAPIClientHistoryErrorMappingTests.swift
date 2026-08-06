@@ -29,6 +29,32 @@ final class GmailAPIClientHistoryErrorMappingTests: XCTestCase {
 
     private static let historyResponseBody = Data(#"{"historyId":"99"}"#.utf8)
 
+    // MARK: - Request shape
+
+    func testListHistoryAppendsMaxResultsQueryItemOnlyWhenProvided() async throws {
+        StubURLProtocol.script = [.data(200, Self.historyResponseBody)]
+
+        _ = try await client.listHistory(startHistoryId: "1", maxResults: 40)
+        _ = try await client.listHistory(startHistoryId: "1")
+
+        let urls = StubURLProtocol.requestURLs
+        XCTAssertEqual(urls.count, 2)
+        let cappedItems = URLComponents(
+            url: urls[0],
+            resolvingAgainstBaseURL: false
+        )?.queryItems ?? []
+        XCTAssertTrue(cappedItems.contains(URLQueryItem(name: "maxResults", value: "40")))
+        XCTAssertTrue(cappedItems.contains(URLQueryItem(name: "startHistoryId", value: "1")))
+        let defaultItems = URLComponents(
+            url: urls[1],
+            resolvingAgainstBaseURL: false
+        )?.queryItems ?? []
+        XCTAssertFalse(
+            defaultItems.contains { $0.name == "maxResults" },
+            "A nil cap must leave the server default in effect"
+        )
+    }
+
     // MARK: - Unified 429 semantics (CX4)
 
     func testHistoryFinalAttempt429_carriesRetryAfterWithoutSleepingOrRecordingBackoff() async {
