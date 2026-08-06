@@ -2902,6 +2902,269 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
     }
 
+    func testFirstSendIntoEmptyConversationDoesNotStarveRestartedReveal() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        handleEmptyAppear(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+
+        // The first send into the empty conversation: the publication task
+        // completes, then the 0 -> 1 count change restarts the initial reveal.
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: 1,
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        coordinator.handleMessageCountChange(
+            oldCount: 0,
+            newCount: 1,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            totalMessageCount: 1,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        // The restarted reveal must still be able to confirm and complete; a
+        // lingering post-send bottom follow would swallow these geometry
+        // updates before the pending reveal machine could run.
+        await confirmInitialBottomAnchor(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+    }
+
+    func testSendPublicationAfterRevealRestartDoesNotRearmBottomFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let currentTime: TimeInterval = 1_000
+        var mayPublishTarget = false
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime },
+            ensureVisibleMessage: { _ in
+                while !mayPublishTarget && !Task.isCancelled {
+                    await Task.yield()
+                }
+                return !Task.isCancelled
+            }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        handleEmptyAppear(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: 1,
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        // The 0 -> 1 count change restarts the initial reveal while the
+        // publication is still in flight.
+        coordinator.handleMessageCountChange(
+            oldCount: 0,
+            newCount: 1,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            totalMessageCount: 1,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        mayPublishTarget = true
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        // The publication completed after the restart; it must not have armed
+        // a follow over the pending reveal.
+        await confirmInitialBottomAnchor(coordinator)
+        XCTAssertTrue(coordinator.isReadyToShow)
+    }
+
+    func testDisappearClearsRearmedBottomFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("Expired initial grace must not follow late growth")
+        }
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        coordinator.handleDisappear()
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 700
+        ) { _ in
+            XCTFail("Disappearing must cancel a send's re-armed bottom follow")
+        }
+        XCTAssertEqual(anchorSteps.count, 2)
+    }
+
+    func testSecondReplySendRefreshesBottomFollowGrace() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("Expired initial grace must not follow late growth")
+        }
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages[0].objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        currentTime += 2.0
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages[1].objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 2,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 4
+        }
+
+        // Past the first send's grace but inside the second's: growth while
+        // the anchor is offscreen must still re-anchor.
+        currentTime += 2.0
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 700
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 6
+        }
+        XCTAssertEqual(
+            Array(anchorSteps.suffix(2)),
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout retry -> bottom anchor"
+                )
+            ]
+        )
+    }
+
     func testUserTakeoverAfterPostSendPublicationCancelsOptionalAnchor() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com"

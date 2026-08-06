@@ -101,6 +101,92 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(message.senderName, "Alias Example")
     }
 
+    /// End-to-end pin of the issue-#151 trigger: an optimistic reply whose
+    /// From identity round-trips through the real MIME header format must
+    /// compare equal when the sent echo is persisted, even for names the
+    /// header quotes and escapes — otherwise every send posts a display-info
+    /// refresh that resets (and briefly collapses) every visible bubble.
+    func testSentEchoMatchingOptimisticIdentityDoesNotPostDisplayInfoChange() async throws {
+        let myEmail = "me@example.com"
+        let quotedName = "Kevin \"KT\" Thau"
+        let authSession = makeTestAuthSession(userEmail: myEmail, userName: quotedName)
+        let sendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            authSession: authSession
+        )
+        let context = coreDataStack.viewContext
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["friend@example.com"],
+            body: "hello",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
+            )
+        )
+        try context.save()
+        let optimisticMessage = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Plans"
+        headers.from = MimeBuilder.formatFromHeader(email: myEmail, name: quotedName)
+        headers.to = [EmailAddress(email: "friend@example.com", displayName: nil)]
+        headers.isFromMe = true
+
+        let processedMessage = ProcessedMessage(
+            id: optimisticMessage.id,
+            gmThreadId: optimisticMessage.gmThreadId,
+            snippet: optimisticMessage.snippet,
+            cleanedSnippet: optimisticMessage.cleanedSnippet,
+            internalDate: optimisticMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: optimisticMessage.bodyText,
+            labelIds: ["SENT"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let unexpectedNotification = expectation(
+            description: "a matching sent echo must not post a self display-info change"
+        )
+        unexpectedNotification.isInverted = true
+        let observer = NotificationCenter.default.addObserver(
+            forName: .personDisplayInfoDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            if PersonDisplayInfoChangeNotification.emails(from: notification)
+                .contains(myEmail) {
+                unexpectedNotification.fulfill()
+            }
+        }
+        defer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
+        let persister = MessagePersister(photoPrefetcher: { _ in })
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        // Deterministic check: a mismatching identity is STAGED synchronously
+        // in the context's userInfo before any save-driven async post.
+        let stagedEmails = context.userInfo["personDisplayInfoDidChange.pendingEmails"] as? [String] ?? []
+        XCTAssertFalse(
+            stagedEmails.contains(myEmail),
+            "The sent echo staged a self display-info change: \(stagedEmails)"
+        )
+        try context.save()
+        await fulfillment(of: [unexpectedNotification], timeout: 0.5)
+    }
+
     private func makeTestAuthSession(
         userEmail: String?,
         userName: String?

@@ -102,8 +102,19 @@ extension GmailSendService {
         // Mirror the From identity the outgoing MIME will carry. Leaving these
         // nil makes the sent message's sync echo read as a sender-header change,
         // which posts a display-info refresh that resets every visible bubble.
-        message.senderEmail = senderEmail ?? authSession.userEmail
-        message.senderName = senderName ?? authSession.userName
+        // The name is stored through the same format-then-parse round trip the
+        // echo takes (quoting, RFC 2047 encoding, quote-stripping), so what is
+        // stored here is byte-equal to what the persister parses back.
+        let resolvedSenderEmail = senderEmail ?? authSession.userEmail
+        message.senderEmail = resolvedSenderEmail
+        if let resolvedSenderEmail {
+            message.senderName = EmailNormalizer.extractDisplayName(
+                from: MimeBuilder.formatFromHeader(
+                    email: resolvedSenderEmail,
+                    name: senderName ?? authSession.userName
+                )
+            )
+        }
         // Anchored list replies must carry the same durable identity as their
         // conversation immediately. Otherwise selecting the optimistic bubble
         // for a follow-up reply fails the exact-list safety check until sync

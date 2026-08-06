@@ -1367,6 +1367,13 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(didUpdate)
         XCTAssertEqual(optimisticMessage.senderEmail, myEmail)
         XCTAssertEqual(optimisticMessage.senderName, "Me Example")
+        // Deterministic check: a mismatching identity is STAGED synchronously
+        // in the context's userInfo before any save-driven async post.
+        let stagedEmails = context.userInfo["personDisplayInfoDidChange.pendingEmails"] as? [String] ?? []
+        XCTAssertFalse(
+            stagedEmails.contains(myEmail),
+            "The sent echo staged a self display-info change: \(stagedEmails)"
+        )
         try context.save()
         await fulfillment(of: [unexpectedNotification], timeout: 0.5)
     }
