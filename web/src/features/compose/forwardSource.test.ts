@@ -178,6 +178,24 @@ describe('buildForwardDraft', () => {
     expect(fragment).not.toContain('cid:')
   })
 
+  it('rewrites url(cid:) in inline styles to none, keeping the rest of the style', async () => {
+    await seedMessage({ id: 'm1', conversationId: 'c1', hasHtmlBody: 1 })
+    await db.bodies.add({
+      messageId: 'm1',
+      html:
+        '<html><body><div style="background-image: url(cid:paper@x); color: red">bare</div>' +
+        '<p style="background: #fff url(&quot;cid:tile@x&quot;) repeat">quoted</p>' +
+        '</body></html>',
+    })
+    const fragment = (await buildForwardDraft(db, 'm1'))?.sanitizedContentHtml ?? ''
+    expect(fragment).toContain('bare')
+    expect(fragment).toContain('quoted')
+    expect(fragment).not.toContain('cid:')
+    // The declaration stays parseable and its neighbors survive.
+    expect(fragment).toContain('none')
+    expect(fragment).toContain('color: red')
+  })
+
   it('counts attachments this send cannot carry', async () => {
     await seedMessage({ id: 'm1', conversationId: 'c1', hasAttachments: 1 })
     await db.attachments.bulkAdd([
