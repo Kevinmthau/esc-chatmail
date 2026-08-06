@@ -35,6 +35,11 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         historyId: "12345"
     )
 
+    /// Optional FIFO queue of getProfile() responses, consumed before
+    /// `profileResponse` — lets tests discriminate WHICH of several profile
+    /// captures fed a cursor.
+    var profileResponses: [GmailProfile] = []
+
     /// Response for listLabels() calls
     var labelsResponse: [GmailLabel] = []
 
@@ -154,6 +159,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             modifyMessageResponse = nil
             sendMessageResponse = SendMessageResponse(id: "sent-message-id", threadId: "sent-thread-id")
             profileResponse = GmailProfile(emailAddress: "test@example.com", messagesTotal: 100, threadsTotal: 50, historyId: "12345")
+            profileResponses = []
             labelsResponse = []
             sendAsResponse = []
             historyResponse = HistoryResponse(history: nil, nextPageToken: nil, historyId: "12345")
@@ -390,6 +396,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             if let error = getProfileError {
                 getProfileError = nil
                 throw error
+            }
+            if !profileResponses.isEmpty {
+                return profileResponses.removeFirst()
             }
             return profileResponse
         }

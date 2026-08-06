@@ -164,6 +164,11 @@ actor SyncFailureTracker {
                 row.failureClass = classById[id]?.rawValue
                 row.sourceHistoryId = sourceHistoryId
                 row.abandonedAt = trackedAt
+                // A row re-captured as deferred re-enters the frozen-window
+                // lifecycle; any drain pacing from a previous abandonment is
+                // void. Without this, a later re-abandonment would hide the
+                // row from the drain until the stale backoff elapsed.
+                row.nextRetryAt = nil
             }
             return true
         }

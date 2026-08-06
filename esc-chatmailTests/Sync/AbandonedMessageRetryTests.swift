@@ -210,6 +210,33 @@ final class AbandonedMessageRetryTests: XCTestCase {
         )
     }
 
+    /// Composite lifecycle pin: an abandoned row paced into the future can be
+    /// re-captured as deferred (its id reappears in a failing window) and
+    /// later re-abandoned by the escape hatch. The deferred capture must void
+    /// the stale pacing, or the freshly re-abandoned row would hide from the
+    /// drain until the residual backoff elapsed.
+    func testReabandonedRowIsImmediatelyEligibleAfterDeferredRoundTrip() async throws {
+        try await seedAbandonedMessage(
+            id: "round-trip",
+            retryCount: 1,
+            nextRetryAt: clock.now().addingTimeInterval(SyncConfig.abandonedRetryBackoffCap)
+        )
+        defaults.set(SyncConfig.maxConsecutiveSyncFailures - 1, forKey: SyncConfig.consecutiveFailuresKey)
+
+        let context = coreDataStack.newBackgroundContext()
+        await sut.recordFailure(fetchFailedIds: ["round-trip"], in: context)
+        let plan = await sut.planHistoryAdvance(hadFailures: true, in: context)
+        XCTAssertTrue(plan.shouldAdvance, "The seeded counter must arm the escape hatch")
+        try await coreDataStack.saveAsync(context: context)
+        await sut.commit(plan)
+
+        let ids = await sut.fetchRetryableAbandonedMessageIds()
+        XCTAssertEqual(
+            ids, ["round-trip"],
+            "A re-abandoned row must be immediately drain-eligible; stale pacing must not survive the deferred round-trip"
+        )
+    }
+
     func testRetryBackoffIntervalIsExponentialAndCapped() {
         XCTAssertEqual(SyncFailureTracker.retryBackoffInterval(forRetryCount: 1), 900)
         XCTAssertEqual(SyncFailureTracker.retryBackoffInterval(forRetryCount: 2), 3_600)
