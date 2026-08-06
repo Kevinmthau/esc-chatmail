@@ -135,6 +135,8 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
         chatPreviewText: String?,
+        senderEmail: String?,
+        senderName: String?,
         optimisticConversation: OptimisticConversationReference?
     ) async throws -> OptimisticSendHandle
 
@@ -199,6 +201,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             threadId: preparedSend.threadId,
             attachments: preparedSend.attachments,
             chatPreviewText: preparedSend.chatPreviewText,
+            senderEmail: preparedSend.replyMetadata?.fromEmail,
+            senderName: preparedSend.replyMetadata?.fromName,
             optimisticConversation: preparedSend.optimisticConversation
         )
         let optimisticMessageID = optimisticSendHandle.optimisticMessageID

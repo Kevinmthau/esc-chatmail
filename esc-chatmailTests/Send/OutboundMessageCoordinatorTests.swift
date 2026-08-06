@@ -54,6 +54,10 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.recipients, ["to@example.com"])
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Hello world")
         XCTAssertNil(snapshot.createOptimisticCalls.first?.subject)
+        // Compose sends carry no reply metadata; the send service falls back
+        // to the session's own From identity for the optimistic message.
+        XCTAssertNil(snapshot.createOptimisticCalls.first?.senderEmail)
+        XCTAssertNil(snapshot.createOptimisticCalls.first?.senderName)
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.participantHashValue, "participant-hash-1")
         XCTAssertEqual(snapshot.sendNewCalls.count, 1)
         XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Hello world")
@@ -151,6 +155,63 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
         XCTAssertEqual(mutationTracker.trackedConversationReferences, [queuedSubmission.conversationReference])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
+    }
+
+    func testSend_replyPassesFromIdentityToOptimisticMessage() async throws {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let syncPerformer = MockCoordinatorSyncPerformer()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: syncPerformer,
+            authSession: makeTestAuthSession(
+                userEmail: "me@example.com",
+                userName: "Me Example"
+            )
+        )
+        let completionExpectation = expectation(description: "reply send completes")
+
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let replyingTo = MessageBuilder()
+            .withId("message-identity-1")
+            .withThreadId("thread-identity-123")
+            .withSubject("Original Subject")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withBody("Original body")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo])
+
+        let submission = try await coordinator.send(
+            .reply(
+                .init(
+                    context: .init(
+                        conversationObjectID: conversation.objectID,
+                        replyingToMessageObjectID: replyingTo.objectID,
+                        optimisticConversation: .existingConversation(
+                            ConversationReference(objectID: conversation.objectID)
+                        )
+                    ),
+                    body: "Reply body",
+                    attachments: []
+                )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: { _ in completionExpectation.fulfill() },
+                onFailure: nil
+            )
+        )
+
+        XCTAssertNotNil(submission)
+        await fulfillment(of: [completionExpectation], timeout: 1.0)
+
+        // The optimistic message must mirror the exact From identity the MIME
+        // will carry, so the sent message's sync echo does not register as a
+        // sender-header change (which refreshes every visible bubble).
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.senderEmail, "me@example.com")
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.senderName, "Me Example")
     }
 
     func testSend_replyUsesLatestConversationAndMessageValuesAfterRequestCreation() async throws {
@@ -460,7 +521,10 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         return conversation
     }
 
-    private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {
+    private func makeTestAuthSession(
+        userEmail: String? = nil,
+        userName: String? = nil
+    ) -> AuthSession {
         let authSession = AuthSession(
             tokenManagerProvider: { MockTokenManager() },
             keychainService: MockKeychainService(),
@@ -471,6 +535,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             clearAttachmentCache: {}
         )
         authSession.userEmail = userEmail
+        authSession.userName = userName
         return authSession
     }
 }
@@ -491,6 +556,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let subject: String?
         let threadId: String?
         let chatPreviewText: String?
+        let senderEmail: String?
+        let senderName: String?
         let optimisticConversation: OptimisticConversationReference?
         let attachmentReferences: [LocalAttachmentReference]
     }
@@ -560,6 +627,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
         chatPreviewText: String?,
+        senderEmail: String?,
+        senderName: String?,
         optimisticConversation: OptimisticConversationReference?
     ) async throws -> OptimisticSendHandle {
         queue.sync {
@@ -570,6 +639,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     subject: subject,
                     threadId: threadId,
                     chatPreviewText: chatPreviewText,
+                    senderEmail: senderEmail,
+                    senderName: senderName,
                     optimisticConversation: optimisticConversation,
                     attachmentReferences: attachments.map(\.localAttachmentReference)
                 )

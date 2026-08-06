@@ -2646,6 +2646,262 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testReplySendCompletionRearmsBottomFollowForLateContentGrowth() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        // The initial post-reveal grace has expired by the time a user reads,
+        // types, and sends; late growth must be ignored at this point.
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("Expired initial grace must not follow late growth")
+        }
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        // Content growing while the bottom anchor is offscreen — a bubble
+        // re-resolving its body after the send — must now re-anchor.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 700
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 4
+        }
+        XCTAssertEqual(
+            Array(anchorSteps.suffix(2)),
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout retry -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testUserScrollAfterReplySendCancelsRearmedBottomFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("Expired initial grace must not follow late growth")
+        }
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 700
+        ) { _ in
+            XCTFail("User scrolling after a send must cancel the re-armed follow")
+        }
+        XCTAssertEqual(anchorSteps.count, 2)
+    }
+
+    func testRearmedBottomFollowExpiresAfterGracePeriod() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("Expired initial grace must not follow late growth")
+        }
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 700
+        ) { _ in
+            XCTFail("The re-armed follow must expire after its grace period")
+        }
+        XCTAssertEqual(anchorSteps.count, 2)
+    }
+
+    func testFailedPostSendPublicationDoesNotRearmBottomFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let visibilityEnsureCompleted = expectation(
+            description: "Exact-message publication was attempted"
+        )
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime },
+            ensureVisibleMessage: { _ in
+                visibilityEnsureCompleted.fulfill()
+                return false
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+        currentTime += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("Expired initial grace must not follow late growth")
+        }
+
+        coordinator.handleReplySendCompleted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: coordinator.capturePostSendAnchorIntent(),
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("An unpublished target must not anchor")
+        }
+        await fulfillment(of: [visibilityEnsureCompleted], timeout: 1)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 700
+        ) { _ in
+            XCTFail("A failed publication must not re-arm bottom following")
+        }
+    }
+
     func testUserTakeoverAfterPostSendPublicationCancelsOptionalAnchor() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com"

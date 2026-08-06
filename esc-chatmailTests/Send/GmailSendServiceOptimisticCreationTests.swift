@@ -53,6 +53,74 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(fetched.attachmentsArray.compactMap(\.id), ["local_attachment_1"])
     }
 
+    func testCreateOptimisticMessage_mirrorsSessionSenderIdentityByDefault() async throws {
+        let authSession = makeTestAuthSession(
+            userEmail: "me@example.com",
+            userName: "Me Example"
+        )
+        let sendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            authSession: authSession
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["friend@example.com"],
+            body: "hello",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
+            )
+        )
+
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(message.senderEmail, "me@example.com")
+        XCTAssertEqual(message.senderName, "Me Example")
+    }
+
+    func testCreateOptimisticMessage_prefersExplicitSenderIdentityOverSession() async throws {
+        let authSession = makeTestAuthSession(
+            userEmail: "me@example.com",
+            userName: "Me Example"
+        )
+        let sendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            authSession: authSession
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["friend@example.com"],
+            body: "hello",
+            senderEmail: "alias@example.com",
+            senderName: "Alias Example",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
+            )
+        )
+
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(message.senderEmail, "alias@example.com")
+        XCTAssertEqual(message.senderName, "Alias Example")
+    }
+
+    private func makeTestAuthSession(
+        userEmail: String?,
+        userName: String?
+    ) -> AuthSession {
+        let authSession = AuthSession(
+            tokenManagerProvider: { MockTokenManager() },
+            keychainService: MockKeychainService(),
+            userDefaults: UserDefaults(
+                suiteName: "GmailSendServiceOptimisticCreationTests.\(UUID().uuidString)"
+            )!,
+            clearConversationCaches: {},
+            cleanupDownloads: {},
+            resetCoreDataStore: {},
+            clearAttachmentCache: {}
+        )
+        authSession.userEmail = userEmail
+        authSession.userName = userName
+        return authSession
+    }
+
     func testCreateOptimisticMessage_populatesChatPreviewTextFromComposedBody() async throws {
         let body = """
         First paragraph.

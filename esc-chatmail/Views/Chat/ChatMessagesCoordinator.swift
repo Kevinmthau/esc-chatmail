@@ -821,6 +821,15 @@ final class ChatMessagesCoordinator: ObservableObject {
                 reloadLatestWindow: false,
                 scrollAction: scrollAction
             )
+            // The send's corrective scrolls finish well before the transcript
+            // stops changing height: bubble content re-resolves asynchronously
+            // and the sent row is rewritten when its sync echo lands. Re-arm
+            // the bottom-follow grace so late growth while the anchor is
+            // offscreen re-anchors instead of stranding the viewport above
+            // the new reply. User scrolling still cancels the follow.
+            self.postRevealBottomFollowState = .following(
+                deadline: self.now() + Self.postRevealBottomFollowGracePeriod
+            )
         }
     }
 
