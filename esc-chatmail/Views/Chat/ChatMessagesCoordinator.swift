@@ -589,6 +589,10 @@ final class ChatMessagesCoordinator: ObservableObject {
             } else {
                 isReadyToShow = false
                 initialRevealState = .waitingForRows
+                // The restarted reveal owns anchoring; an armed bottom follow
+                // would intercept every geometry update before the pending
+                // reveal machine could run.
+                postRevealBottomFollowState = .inactive
                 if initialPresentationAnchor == .bottom && isInitialWindowLoaded {
                     requestLatestWindowIfNeeded(knownTotalCount: newCount)
                 }
@@ -821,6 +825,21 @@ final class ChatMessagesCoordinator: ObservableObject {
                 reloadLatestWindow: false,
                 scrollAction: scrollAction
             )
+            // The send's corrective scrolls finish well before the transcript
+            // stops changing height: bubble content re-resolves asynchronously
+            // and the sent row is rewritten when its sync echo lands. Re-arm
+            // the bottom-follow grace so late growth while the anchor is
+            // offscreen re-anchors instead of stranding the viewport above
+            // the new reply. User scrolling still cancels the follow.
+            // A restarted initial reveal (first send into an empty
+            // conversation) owns anchoring until it completes and arms its
+            // own follow; arming over it would intercept every geometry
+            // update and keep the reveal from finishing.
+            if self.isReadyToShow {
+                self.postRevealBottomFollowState = .following(
+                    deadline: self.now() + Self.postRevealBottomFollowGracePeriod
+                )
+            }
         }
     }
 

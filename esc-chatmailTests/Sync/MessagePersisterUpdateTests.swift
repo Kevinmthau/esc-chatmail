@@ -1290,6 +1290,94 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(notificationRecorder.notifiedEmails, [senderEmail])
     }
 
+    /// The optimistic send path mirrors the outgoing MIME's From identity so
+    /// the sent message's sync echo compares equal here. This pins the
+    /// load-bearing half of that contract: an echo whose From matches the
+    /// stored sender fields must not post a display-info change, which would
+    /// refresh (and briefly collapse) every visible chat bubble right after
+    /// a send.
+    func testUpdateExistingMessage_sentEchoWithMirroredFromIdentityDoesNotPostDisplayInfoChange() async throws {
+        let myEmail = "me@example.com"
+        let friendEmail = "friend@example.com"
+        let conversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [friendEmail]))
+            .withDisplayName("Friend")
+            .build(in: context)
+        let friend = PersonBuilder.emailOnly(friendEmail, in: context)
+        addConversationParticipant(person: friend, to: conversation)
+        let optimisticMessage = MessageBuilder()
+            .withId("sent-echo-mirrored-identity-message")
+            .withThreadId("sent-echo-mirrored-identity-thread")
+            .withSender(email: myEmail, name: "Me Example")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Plans"
+        headers.from = "Me Example <\(myEmail)>"
+        headers.to = [EmailAddress(email: friendEmail, displayName: nil)]
+        headers.isFromMe = true
+
+        let processedMessage = ProcessedMessage(
+            id: optimisticMessage.id,
+            gmThreadId: optimisticMessage.gmThreadId,
+            snippet: optimisticMessage.snippet,
+            cleanedSnippet: optimisticMessage.cleanedSnippet,
+            internalDate: optimisticMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: optimisticMessage.bodyText,
+            labelIds: ["SENT"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let unexpectedNotification = expectation(
+            description: "a matching sent echo must not post a self display-info change"
+        )
+        unexpectedNotification.isInverted = true
+        let notificationRecorder = PersonDisplayInfoNotificationRecorder()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .personDisplayInfoDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            if notificationRecorder.record(
+                notification: notification,
+                senderEmail: myEmail
+            ) != .unrelated {
+                unexpectedNotification.fulfill()
+            }
+        }
+        defer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        notificationRecorder.markSaved()
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(optimisticMessage.senderEmail, myEmail)
+        XCTAssertEqual(optimisticMessage.senderName, "Me Example")
+        // Deterministic check: a mismatching identity is STAGED synchronously
+        // in the context's userInfo before any save-driven async post.
+        let stagedEmails = context.userInfo["personDisplayInfoDidChange.pendingEmails"] as? [String] ?? []
+        XCTAssertFalse(
+            stagedEmails.contains(myEmail),
+            "The sent echo staged a self display-info change: \(stagedEmails)"
+        )
+        try context.save()
+        await fulfillment(of: [unexpectedNotification], timeout: 0.5)
+    }
+
     func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_createsNewConversation() async throws {
         let threadId = "thread-join-123"
         let existingConversation = ConversationBuilder()
