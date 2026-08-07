@@ -31,6 +31,10 @@ final class IncrementalSyncOrchestrator {
     private let failureTracker: SyncFailureTracker
     private let aliasRefreshPolicy: SendAsAliasRefreshPolicy
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
+    /// Creates the run's sync context. Injectable so tests can drive a full
+    /// orchestrator run through a save-scripted context and pin what a failed
+    /// final save must NOT commit (cursor, tracker success state, ledger rows).
+    private let makeSyncContext: () -> NSManagedObjectContext
     private let log = LogCategory.sync.logger
 
     private var myAliases: Set<String> = []
@@ -74,7 +78,8 @@ final class IncrementalSyncOrchestrator {
         coreDataStack: CoreDataStack,
         failureTracker: SyncFailureTracker = .shared,
         aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy(),
-        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        makeSyncContext: (() -> NSManagedObjectContext)? = nil
     ) {
         self.messageFetcher = messageFetcher
         self.messagePersister = messagePersister
@@ -86,6 +91,7 @@ final class IncrementalSyncOrchestrator {
         self.failureTracker = failureTracker
         self.aliasRefreshPolicy = aliasRefreshPolicy
         self.rollupMutationSerializer = rollupMutationSerializer
+        self.makeSyncContext = makeSyncContext ?? { coreDataStack.newBackgroundContext() }
     }
 
     // MARK: - Public API
@@ -128,7 +134,7 @@ final class IncrementalSyncOrchestrator {
         log.info("Starting incremental sync with historyId: \(historyId)")
         let setupTimer = timing.start("setup")
 
-        let context = coreDataStack.newBackgroundContext()
+        let context = makeSyncContext()
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
         var committedModificationTransaction = false
         sendAsAliases = await refreshSendAsAliases(accountEmail: accountData.email, in: context)
@@ -478,7 +484,7 @@ final class IncrementalSyncOrchestrator {
     ) async throws {
         log.info("Starting history recovery sync")
 
-        let context = coreDataStack.newBackgroundContext()
+        let context = makeSyncContext()
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
         var committedModificationTransaction = false
         let labelIds = await messagePersister.prefetchLabelIds(in: context)

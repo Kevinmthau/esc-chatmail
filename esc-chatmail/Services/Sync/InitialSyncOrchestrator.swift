@@ -44,6 +44,10 @@ final class InitialSyncOrchestrator {
     private let failureTracker: SyncFailureTracker
     private let performanceLogger: CoreDataPerformanceLogger
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
+    /// Creates the run's sync context. Injectable so tests can drive a full
+    /// orchestrator run through a save-scripted context and pin what a failed
+    /// final save must NOT commit (cursor, tracker success state, ledger rows).
+    private let makeSyncContext: () -> NSManagedObjectContext
     private let log = LogCategory.sync.logger
 
     private var myAliases: Set<String> = []
@@ -60,7 +64,8 @@ final class InitialSyncOrchestrator {
         coreDataStack: CoreDataStack,
         failureTracker: SyncFailureTracker = .shared,
         performanceLogger: CoreDataPerformanceLogger = .shared,
-        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        makeSyncContext: (() -> NSManagedObjectContext)? = nil
     ) {
         self.messageFetcher = messageFetcher
         self.messagePersister = messagePersister
@@ -71,6 +76,7 @@ final class InitialSyncOrchestrator {
         self.failureTracker = failureTracker
         self.performanceLogger = performanceLogger
         self.rollupMutationSerializer = rollupMutationSerializer
+        self.makeSyncContext = makeSyncContext ?? { coreDataStack.newBackgroundContext() }
     }
 
     // MARK: - Public API
@@ -85,7 +91,7 @@ final class InitialSyncOrchestrator {
         var timing = SyncTimingRecorder(syncType: "initial", runStartedAt: syncStartTime)
         let signpostID = performanceLogger.beginOperation("InitialSync")
 
-        let context = coreDataStack.newBackgroundContext()
+        let context = makeSyncContext()
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
         var committedModificationTransaction = false
 

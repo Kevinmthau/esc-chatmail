@@ -324,6 +324,122 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
     }
 
+    /// PR #143's accepted gap, closed by the makeSyncContext seam: through a
+    /// REAL orchestrator run, a failed final save must commit nothing — the
+    /// cursor stays at its stored value and the tracker's success state is
+    /// untouched, because `commit(plan)` only runs after a successful save.
+    /// The deletion record forces the atomic (no-intermediate-saves) mode so
+    /// the final save is the run's only save attempt.
+    @MainActor
+    func testFailedFinalSaveLeavesCursorAndTrackerSuccessStateUntouched() async throws {
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: nil,
+                            messagesDeleted: [
+                                HistoryMessageDeleted(
+                                    message: MessageListItem(id: "m-unknown", threadId: "t-unknown")
+                                )
+                            ],
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        let failingContext = makeFailingSaveContext()
+
+        let sut = makeOrchestrator(makeSyncContext: { failingContext })
+        do {
+            _ = try await sut.performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("A failed final save must abort the run")
+        } catch {
+            // Expected: the scripted save failure surfaces as a thrown error.
+        }
+
+        XCTAssertGreaterThanOrEqual(failingContext.saveAttempts, 1, "Positive control: the final save must have been attempted")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(
+            historyId, Self.startingHistoryId,
+            "A cursor staged into a context whose save failed must not reach the store"
+        )
+        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNil(lastSuccess, "commit(plan) must not run after a failed save")
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(consecutive, 0, "A clean run records no failure even when its save fails")
+    }
+
+    /// The failure-side mirror of testFailingRunCommitsDeferredLedgerRowsWithFrozenCursor:
+    /// when the final save fails, the staged deferred rows die with the
+    /// context (nothing reaches the store), while the consecutive-failure
+    /// counter keeps its documented conservative mid-run bump.
+    @MainActor
+    func testFailedFinalSaveDiscardsStagedDeferredRows() async throws {
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-bad"))],
+                            messagesDeleted: [
+                                HistoryMessageDeleted(
+                                    message: MessageListItem(id: "m-unknown", threadId: "t-unknown")
+                                )
+                            ],
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        apiClient.getMessageErrors["m-bad"] = APIError.timeout
+        let failingContext = makeFailingSaveContext()
+
+        let sut = makeOrchestrator(makeSyncContext: { failingContext })
+        do {
+            _ = try await sut.performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("A failed final save must abort the run")
+        } catch {
+            // Expected: the scripted save failure surfaces as a thrown error.
+        }
+
+        XCTAssertGreaterThanOrEqual(failingContext.saveAttempts, 1, "Positive control: the final save must have been attempted")
+        let rows = await fetchLedgerRows()
+        XCTAssertTrue(
+            rows.isEmpty,
+            "Deferred rows staged into a failed save must die with the context"
+        )
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let consecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(
+            consecutive, 1,
+            "The counter's mid-run bump is deliberately conservative and survives a failed save"
+        )
+        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNil(lastSuccess)
+    }
+
     /// The escape hatch's atomicity contract: at the threshold, the cursor
     /// advance and the deferred→abandoned transition commit in one save, and
     /// the counters reset only afterwards.
@@ -531,7 +647,10 @@ final class IncrementalSyncCursorTests: XCTestCase {
     }
 
     @MainActor
-    private func makeOrchestrator(conversationCreationError: Error? = nil) -> IncrementalSyncOrchestrator {
+    private func makeOrchestrator(
+        conversationCreationError: Error? = nil,
+        makeSyncContext: (() -> NSManagedObjectContext)? = nil
+    ) -> IncrementalSyncOrchestrator {
         let conversationManager: ConversationManager
         if let conversationCreationError {
             conversationManager = ConversationManager(
@@ -567,8 +686,20 @@ final class IncrementalSyncCursorTests: XCTestCase {
                 failureTracker: failureTracker
             ),
             coreDataStack: coreDataStack,
-            failureTracker: failureTracker
+            failureTracker: failureTracker,
+            makeSyncContext: makeSyncContext
         )
+    }
+
+    /// A save-scripted sync context attached to the test store, so a full
+    /// orchestrator run stages real work and then fails at `context.save()`.
+    private func makeFailingSaveContext() -> ScriptedSaveContext {
+        let context = ScriptedSaveContext(
+            error: NSError(domain: NSCocoaErrorDomain, code: NSManagedObjectContextLockingError)
+        )
+        context.persistentStoreCoordinator = testStack.persistentContainer.persistentStoreCoordinator
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        return context
     }
 
     /// Minimal message stub as it appears inside a history record (id + labels

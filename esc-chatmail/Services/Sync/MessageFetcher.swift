@@ -409,14 +409,17 @@ final class MessageFetcher: @unchecked Sendable {
     /// - Parameters:
     ///   - startHistoryId: Starting history ID
     ///   - pageToken: Optional page token for pagination
+    ///   - maxResults: Optional cap on history records per page (nil = server default)
     /// - Returns: Tuple of history records, latest history ID, and next page token
     func listHistory(
         startHistoryId: String,
-        pageToken: String? = nil
+        pageToken: String? = nil,
+        maxResults: Int? = nil
     ) async throws -> (history: [HistoryRecord]?, historyId: String?, nextPageToken: String?) {
         let response = try await apiClient.listHistory(
             startHistoryId: startHistoryId,
-            pageToken: pageToken
+            pageToken: pageToken,
+            maxResults: maxResults
         )
 
         return (response.history, response.historyId, response.nextPageToken)

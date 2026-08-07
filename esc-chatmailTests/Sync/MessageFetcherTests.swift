@@ -34,6 +34,22 @@ final class MessageFetcherTests: XCTestCase {
         XCTAssertEqual(clock.sleeps.count, 3, "One backoff sleep per retry attempt")
     }
 
+    // MARK: - History listing
+
+    func testListHistoryPassesMaxResultsThroughToTheClient() async throws {
+        let mockAPI = MockGmailAPIClient()
+        let fetcher = MessageFetcher(apiClient: mockAPI, clock: FakeSyncClock())
+
+        _ = try await fetcher.listHistory(startHistoryId: "100", maxResults: 25)
+        XCTAssertEqual(mockAPI.listHistoryLastMaxResults, 25)
+
+        _ = try await fetcher.listHistory(startHistoryId: "100")
+        XCTAssertNil(
+            mockAPI.listHistoryLastMaxResults,
+            "Omitting the cap must leave the server default in effect"
+        )
+    }
+
     // MARK: - Quota exhaustion
 
     func testFetchBatch_quotaExhaustionThrowsInsteadOfRecordingPerMessageFailures() async {
