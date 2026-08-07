@@ -9,11 +9,17 @@ struct BackgroundSyncContinuationState: Codable, Equatable {
     }
 
     let mode: Mode
-    let pageToken: String
+    /// The page where the next chunk begins. Partial-sync checkpoints may use
+    /// `nil` to represent the first page before enumeration has started.
+    let pageToken: String?
     let startHistoryId: String?
     let query: String?
     let maxResults: Int?
     let accountEmail: String?
+    /// Mailbox cursor captured before a partial-sync scan begins. It is
+    /// carried across every continuation page and committed only after the
+    /// scan and message processing complete without failures.
+    let watermarkHistoryId: String?
 
     static func history(startHistoryId: String, pageToken: String, accountEmail: String? = nil) -> Self {
         Self(
@@ -22,23 +28,37 @@ struct BackgroundSyncContinuationState: Codable, Equatable {
             startHistoryId: startHistoryId,
             query: nil,
             maxResults: nil,
-            accountEmail: accountEmail
+            accountEmail: accountEmail,
+            watermarkHistoryId: nil
         )
     }
 
-    static func partial(query: String, pageToken: String, maxResults: Int, accountEmail: String? = nil) -> Self {
+    static func partial(
+        query: String,
+        pageToken: String?,
+        maxResults: Int,
+        startHistoryId: String?,
+        watermarkHistoryId: String,
+        accountEmail: String? = nil
+    ) -> Self {
         Self(
             mode: .partial,
             pageToken: pageToken,
-            startHistoryId: nil,
+            // For partial recovery this is the cursor still stored locally
+            // while the scan is in progress. It may be an expired non-nil
+            // cursor, so compatibility cannot assume partial sync means nil.
+            startHistoryId: startHistoryId,
             query: query,
             maxResults: maxResults,
-            accountEmail: accountEmail
+            accountEmail: accountEmail,
+            watermarkHistoryId: watermarkHistoryId
         )
     }
 
     func isCompatible(storedHistoryId: String?, currentAccountEmail: String?) -> Bool {
-        guard let accountEmail, accountEmail == currentAccountEmail else {
+        guard let accountEmail,
+              let currentAccountEmail,
+              accountEmail.caseInsensitiveCompare(currentAccountEmail) == .orderedSame else {
             return false
         }
 
@@ -46,7 +66,11 @@ struct BackgroundSyncContinuationState: Codable, Equatable {
         case .history:
             return startHistoryId == storedHistoryId
         case .partial:
-            return storedHistoryId == nil
+            // Legacy partial continuations have no watermark and cannot safely
+            // resume: restart them so the replacement scan captures one before
+            // its first page. Otherwise require the source cursor to remain
+            // unchanged until the terminal save installs the watermark.
+            return watermarkHistoryId != nil && startHistoryId == storedHistoryId
         }
     }
 }

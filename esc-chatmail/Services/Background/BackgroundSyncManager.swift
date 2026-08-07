@@ -31,10 +31,12 @@ final class BackgroundSyncManager {
     private let authSessionProvider: @MainActor @Sendable () -> AuthSession
     private let apiClientProvider: @MainActor @Sendable () -> GmailAPIClientProtocol
     private let syncRunCoordinator: SyncRunCoordinator
+    private let defaults: UserDefaults
 
     init(
         taskScheduler: any BackgroundTaskScheduling = BackgroundTaskScheduler.shared,
         coreDataStack: CoreDataStack = .shared,
+        defaults: UserDefaults = .standard,
         syncRunCoordinator: SyncRunCoordinator = .shared,
         authSessionProvider: @escaping @MainActor @Sendable () -> AuthSession = { AuthSession.shared },
         apiClientProvider: @escaping @MainActor @Sendable () -> GmailAPIClientProtocol = { GmailAPIClient.shared },
@@ -43,7 +45,10 @@ final class BackgroundSyncManager {
         }
     ) {
         self.taskScheduler = taskScheduler
-        self.stateManager = BackgroundSyncStateManager(coreDataStack: coreDataStack)
+        self.stateManager = BackgroundSyncStateManager(
+            coreDataStack: coreDataStack,
+            defaults: defaults
+        )
         self.messageProcessor = BackgroundMessageProcessor(
             coreDataStack: coreDataStack,
             apiClientProvider: apiClientProvider,
@@ -52,6 +57,7 @@ final class BackgroundSyncManager {
         self.authSessionProvider = authSessionProvider
         self.apiClientProvider = apiClientProvider
         self.syncRunCoordinator = syncRunCoordinator
+        self.defaults = defaults
 
         setupTaskHandlers()
     }
@@ -154,7 +160,8 @@ final class BackgroundSyncManager {
                 } else {
                     switch continuationState.mode {
                     case .history:
-                        guard let startHistoryId = continuationState.startHistoryId else {
+                        guard let startHistoryId = continuationState.startHistoryId,
+                              let pageToken = continuationState.pageToken else {
                             stateManager.clearContinuationState()
                             Log.warning("Cleared invalid background history continuation state", category: .background)
                             break
@@ -162,13 +169,15 @@ final class BackgroundSyncManager {
 
                         return await performHistorySync(
                             startHistoryId: startHistoryId,
-                            initialPageToken: continuationState.pageToken,
+                            initialPageToken: pageToken,
                             isProcessingTask: isProcessingTask,
                             accountEmail: currentAccountEmail
                         )
 
                     case .partial:
-                        guard let query = continuationState.query, let maxResults = continuationState.maxResults else {
+                        guard let query = continuationState.query,
+                              let maxResults = continuationState.maxResults,
+                              let watermarkHistoryId = continuationState.watermarkHistoryId else {
                             stateManager.clearContinuationState()
                             Log.warning("Cleared invalid background partial continuation state", category: .background)
                             break
@@ -178,8 +187,10 @@ final class BackgroundSyncManager {
                             query: query,
                             initialPageToken: continuationState.pageToken,
                             maxResults: maxResults,
+                            startHistoryId: continuationState.startHistoryId,
+                            watermarkHistoryId: watermarkHistoryId,
                             isProcessingTask: isProcessingTask,
-                            accountEmail: currentAccountEmail
+                            accountEmail: continuationState.accountEmail
                         )
                     }
                 }
@@ -193,6 +204,7 @@ final class BackgroundSyncManager {
                 )
             } else {
                 return await performPartialSync(
+                    startHistoryId: nil,
                     isProcessingTask: isProcessingTask,
                     accountEmail: currentAccountEmail
                 )
@@ -309,6 +321,7 @@ final class BackgroundSyncManager {
         case .partialSync:
             stateManager.clearContinuationState()
             return await performPartialSync(
+                startHistoryId: startHistoryId,
                 isProcessingTask: isProcessingTask,
                 accountEmail: accountEmail
             )
@@ -338,10 +351,14 @@ final class BackgroundSyncManager {
         }
     }
 
-    private func performPartialSync(
+    /// Performs a bounded partial mailbox scan. Internal so orchestration tests
+    /// can pin the pre-scan watermark and continuation contracts end to end.
+    func performPartialSync(
         query: String? = nil,
         initialPageToken: String? = nil,
         maxResults: Int? = nil,
+        startHistoryId: String? = nil,
+        watermarkHistoryId: String? = nil,
         isProcessingTask: Bool,
         accountEmail: String?
     ) async -> Bool {
@@ -352,11 +369,55 @@ final class BackgroundSyncManager {
 
             let query = query ?? buildPartialSyncQuery()
 
+            // Capture the replacement cursor before the first mailbox page.
+            // Changes after this point are therefore newer than the cursor and
+            // remain visible to the next history sync even if pagination does
+            // not include them. A resumed scan reuses the original watermark;
+            // taking a new one would recreate the post-scan gap across tasks.
+            let syncWatermark: (historyId: String, accountEmail: String)
+            if let watermarkHistoryId {
+                guard let accountEmail else {
+                    Log.error("Partial sync continuation is missing its account scope", category: .background)
+                    stateManager.clearContinuationState()
+                    handleSyncError()
+                    return false
+                }
+                syncWatermark = (watermarkHistoryId, accountEmail)
+            } else {
+                let profile = try await apiClient.getProfile()
+                if let accountEmail,
+                   accountEmail.caseInsensitiveCompare(profile.emailAddress) != .orderedSame {
+                    Log.error(
+                        "Aborting background partial sync because the authenticated profile does not match the current account",
+                        category: .background
+                    )
+                    handleSyncError()
+                    return false
+                }
+                syncWatermark = (profile.historyId, profile.emailAddress)
+            }
+
+            // Save the chunk's starting position before any enumeration or
+            // message persistence. If the task fails or expires after saving
+            // only part of the chunk, the next attempt reuses this watermark
+            // and safely replays the same pages instead of opening a gap.
+            let inProgressCheckpoint = BackgroundSyncContinuationState.partial(
+                query: query,
+                pageToken: initialPageToken,
+                maxResults: maxResults,
+                startHistoryId: startHistoryId,
+                watermarkHistoryId: syncWatermark.historyId,
+                accountEmail: syncWatermark.accountEmail
+            )
+            try stateManager.storeContinuationState(inProgressCheckpoint)
+            try Task.checkCancellation()
+
             var allMessageIds: Set<String> = []
             var pageToken: String? = initialPageToken
             var pageCount = 0
 
             repeat {
+                try Task.checkCancellation()
                 let response = try await apiClient.listMessages(
                     pageToken: pageToken,
                     maxResults: maxResults,
@@ -385,16 +446,15 @@ final class BackgroundSyncManager {
                     query: query,
                     pageToken: pageToken,
                     maxResults: maxResults,
-                    accountEmail: accountEmail
+                    startHistoryId: startHistoryId,
+                    watermarkHistoryId: syncWatermark.historyId,
+                    accountEmail: syncWatermark.accountEmail
                 )
             }()
-            let profile = continuationState != nil || processingResult.hadFetchFailures
-                ? nil
-                : try await apiClient.getProfile()
             let disposition = Self.completionDisposition(
                 catchUpState: continuationState,
                 hadFetchFailures: processingResult.hadFetchFailures,
-                latestHistoryId: profile?.historyId
+                latestHistoryId: syncWatermark.historyId
             )
 
             if continuationState != nil, didTruncateMessagePagination {
@@ -416,10 +476,17 @@ final class BackgroundSyncManager {
                 )
             }
 
+            // An expired BGTask must not commit a terminal cursor or advance
+            // its checkpoint after the system has requested cancellation.
+            try Task.checkCancellation()
+
             return await finalizeBackgroundSync(
                 disposition,
-                accountEmail: profile?.emailAddress ?? accountEmail
+                accountEmail: syncWatermark.accountEmail
             )
+        } catch is CancellationError {
+            Log.info("Partial sync cancelled; keeping its in-progress checkpoint", category: .background)
+            return false
         } catch {
             Log.error("Partial sync error", category: .background, error: error)
             handleSyncError()
@@ -428,7 +495,7 @@ final class BackgroundSyncManager {
     }
 
     private func buildPartialSyncQuery() -> String {
-        let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
+        let installTimestamp = defaults.double(forKey: "installTimestamp")
 
         if installTimestamp > 0 {
             let cutoffTimestamp = Int(installTimestamp) - 300 // 5 min buffer

@@ -54,12 +54,14 @@ final class BackgroundSyncStateManagerTests: XCTestCase {
         XCTAssertEqual(accountCount, 1)
     }
 
-    func testContinuationState_roundTripsThroughDefaults() throws {
+    func testContinuationState_roundTripsInitialPartialCheckpointThroughDefaults() throws {
         let stateManager = makeStateManager()
         let continuationState = BackgroundSyncContinuationState.partial(
             query: "after:123 -label:spam",
-            pageToken: "page-2",
+            pageToken: nil,
             maxResults: 50,
+            startHistoryId: "history-expired",
+            watermarkHistoryId: "history-watermark",
             accountEmail: "test@example.com"
         )
 
@@ -77,6 +79,8 @@ final class BackgroundSyncStateManagerTests: XCTestCase {
             query: "after:123 -label:spam",
             pageToken: "page-2",
             maxResults: 50,
+            startHistoryId: "history-expired",
+            watermarkHistoryId: "history-watermark",
             accountEmail: "test@example.com"
         )
         try makeStateManager().storeContinuationState(continuationState)
@@ -84,6 +88,36 @@ final class BackgroundSyncStateManagerTests: XCTestCase {
         BackgroundSyncStateManager.clearContinuationState(in: defaults)
 
         XCTAssertNil(makeStateManager().getContinuationState())
+    }
+
+    func testLegacyPartialContinuation_decodesWithoutWatermarkButIsIncompatible() throws {
+        let legacyJSON = #"""
+        {
+          "mode": "partial",
+          "pageToken": "page-2",
+          "startHistoryId": "history-expired",
+          "query": "after:123 -label:spam",
+          "maxResults": 50,
+          "accountEmail": "test@example.com"
+        }
+        """#
+        defaults.set(
+            try XCTUnwrap(legacyJSON.data(using: .utf8)),
+            forKey: "backgroundSync.continuationState"
+        )
+
+        let continuationState = try XCTUnwrap(makeStateManager().getContinuationState())
+
+        XCTAssertEqual(continuationState.mode, .partial)
+        XCTAssertEqual(continuationState.pageToken, "page-2")
+        XCTAssertEqual(continuationState.startHistoryId, "history-expired")
+        XCTAssertNil(continuationState.watermarkHistoryId)
+        XCTAssertFalse(
+            continuationState.isCompatible(
+                storedHistoryId: "history-expired",
+                currentAccountEmail: "test@example.com"
+            )
+        )
     }
 
     private func makeStateManager() -> BackgroundSyncStateManager {
