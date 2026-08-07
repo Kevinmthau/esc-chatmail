@@ -8,8 +8,11 @@ import CoreData
 /// Rows are staged into the sync run's own context by `SyncFailureTracker`
 /// and commit with the run's final save — atomically with the history cursor.
 ///
-/// `nextRetryAt` is reserved for drain retry pacing (resumable-executor work)
-/// and has no consumers yet.
+/// `nextRetryAt` paces the abandoned-message drain: `nil` (fresh
+/// abandonments, deferred rows, legacy rows) is immediately eligible; a
+/// failed drain attempt stamps an exponential backoff via
+/// `SyncFailureTracker.stageAbandonedRetryOutcome`, enforced in the drain
+/// predicate. Re-capturing a row as deferred clears it.
 extension AbandonedSyncMessage {
     @NSManaged public var id: UUID
     @NSManaged public var gmailMessageId: String

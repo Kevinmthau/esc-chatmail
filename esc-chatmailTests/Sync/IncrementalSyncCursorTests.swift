@@ -356,6 +356,21 @@ final class IncrementalSyncCursorTests: XCTestCase {
             )
         ])
         let failingContext = makeFailingSaveContext()
+        // Pin the atomic-mode premise itself: the failing save must be the
+        // FINAL save — the only one carrying the staged cursor. If the
+        // deletion policy ever stops forcing whole-run atomicity, an earlier
+        // intermediate save (no Account change staged) would fail first and
+        // this flag stays false.
+        let sawStagedCursorAtSaveTime = LockedFlag()
+        failingContext.onSaveAttempt = { [weak failingContext] _ in
+            guard let failingContext else { return }
+            let staged = failingContext.updatedObjects.contains { object in
+                (object as? Account)?.changedValues().keys.contains("historyId") == true
+            }
+            if staged {
+                sawStagedCursorAtSaveTime.set()
+            }
+        }
 
         let sut = makeOrchestrator(makeSyncContext: { failingContext })
         do {
@@ -369,6 +384,10 @@ final class IncrementalSyncCursorTests: XCTestCase {
         }
 
         XCTAssertGreaterThanOrEqual(failingContext.saveAttempts, 1, "Positive control: the final save must have been attempted")
+        XCTAssertTrue(
+            sawStagedCursorAtSaveTime.value,
+            "The failing save must be the final save — the one carrying the staged cursor"
+        )
         let historyId = await fetchAccountHistoryId()
         XCTAssertEqual(
             historyId, Self.startingHistoryId,
@@ -590,6 +609,148 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertNotNil(lastSuccess)
     }
 
+    /// The pre-scan watermark: recovery must capture the profile cursor
+    /// BEFORE enumerating the mailbox. Messages arriving mid-scan sort after
+    /// a pre-scan watermark and stay covered by the next incremental sync; a
+    /// post-scan capture stamps the cursor past arrivals the enumeration
+    /// never saw, permanently skipping their deletions and label changes.
+    @MainActor
+    func testRecoveryCapturesProfileWatermarkBeforeEnumerating() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec", threadId: "t-m-rec")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageResponses["m-rec"] = makeFullMessage(id: "m-rec")
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
+
+        // Sequenced profiles: only a capture made BEFORE the enumeration can
+        // observe "7777" — any later capture sees "8888", so the cursor value
+        // itself discriminates which capture was stamped.
+        apiClient.profileResponses = [
+            GmailProfile(
+                emailAddress: Self.myEmail,
+                messagesTotal: 1,
+                threadsTotal: 1,
+                historyId: "7777"
+            )
+        ]
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "8888"
+        )
+
+        let sut = makeOrchestrator()
+        _ = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let order = apiClient.endpointCallOrder
+        guard let profileIndex = order.firstIndex(of: "getProfile"),
+              let firstListIndex = order.firstIndex(of: "listMessages") else {
+            XCTFail("Recovery must call both getProfile and listMessages; saw \(order)")
+            return
+        }
+        XCTAssertLessThan(
+            profileIndex, firstListIndex,
+            "The watermark must be captured before the enumeration begins"
+        )
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777", "The cursor advances to the FIRST (pre-scan) profile capture")
+    }
+
+    /// The chosen tradeoff of the pre-scan watermark: a profile outage now
+    /// aborts recovery before any enumeration work instead of after saving
+    /// pages — zero progress, cursor frozen, retried on the next trigger.
+    @MainActor
+    func testRecoveryProfileFailureAbortsBeforeEnumeration() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.getProfileError = APIError.timeout
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec", threadId: "t-m-rec")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+
+        let sut = makeOrchestrator()
+        do {
+            _ = try await sut.performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("A watermark failure must abort the recovery")
+        } catch {
+            // Expected.
+        }
+
+        XCTAssertEqual(
+            apiClient.listMessagesCallCount, 0,
+            "The enumeration must not start without a watermark"
+        )
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNil(lastSuccess)
+    }
+
+    /// The recovery-path mirror of the incremental failed-final-save tests:
+    /// per-page saves land durably (attempt 1 succeeds — the recovered
+    /// message survives), but the failing FINAL save must keep the cursor
+    /// frozen and the tracker's success state untouched.
+    @MainActor
+    func testFailedRecoveryFinalSaveKeepsCursorFrozenAfterDurablePages() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec", threadId: "t-m-rec")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageResponses["m-rec"] = makeFullMessage(id: "m-rec")
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
+        let failingContext = ScriptedSaveContext(
+            error: NSError(domain: NSCocoaErrorDomain, code: NSManagedObjectContextLockingError),
+            failingFromAttempt: 2
+        )
+        failingContext.persistentStoreCoordinator = testStack.persistentContainer.persistentStoreCoordinator
+        failingContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+        let sut = makeOrchestrator(makeSyncContext: { failingContext })
+        do {
+            _ = try await sut.performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("A failed recovery final save must abort the run")
+        } catch {
+            // Expected.
+        }
+
+        XCTAssertGreaterThanOrEqual(failingContext.saveAttempts, 2, "Positive control: page save then final save")
+        let recovered = await messageExists(id: "m-rec")
+        XCTAssertTrue(recovered, "The per-page save landed durably before the final save failed")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(
+            historyId, Self.startingHistoryId,
+            "The pre-scan watermark staged into a failed save must not reach the store"
+        )
+        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNil(lastSuccess, "commit(plan) must not run after a failed recovery save")
+    }
+
     /// A recovery run with fetch failures freezes the cursor at its prior
     /// value and commits the failing IDs as durable deferred rows in the same
     /// save — no success state leaks.
@@ -783,6 +944,25 @@ final class IncrementalSyncCursorTests: XCTestCase {
                 )
             )
         ]
+    }
+
+    /// Thread-safe latch settable from a @Sendable save callback running on a
+    /// Core Data context queue.
+    private final class LockedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _value = false
+
+        var value: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return _value
+        }
+
+        func set() {
+            lock.lock()
+            defer { lock.unlock() }
+            _value = true
+        }
     }
 
     private struct LedgerRow {

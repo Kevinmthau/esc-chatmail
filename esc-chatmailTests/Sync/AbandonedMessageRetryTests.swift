@@ -10,6 +10,7 @@ final class AbandonedMessageRetryTests: XCTestCase {
     private var coreDataStack: CoreDataStack!
     private var defaults: UserDefaults!
     private var suiteName: String!
+    private var clock: FakeSyncClock!
     private var sut: SyncFailureTracker!
 
     override func setUp() async throws {
@@ -26,12 +27,14 @@ final class AbandonedMessageRetryTests: XCTestCase {
         // These tests target post-migration behavior; the legacy retryCount reset
         // is exercised explicitly in the migration test below.
         defaults.set(true, forKey: SyncConfig.abandonedRetryCountResetKey)
-        sut = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        clock = FakeSyncClock()
+        sut = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack, clock: clock)
     }
 
     override func tearDown() async throws {
         defaults.removePersistentDomain(forName: suiteName)
         sut = nil
+        clock = nil
         defaults = nil
         suiteName = nil
         coreDataStack = nil
@@ -45,7 +48,8 @@ final class AbandonedMessageRetryTests: XCTestCase {
         id: String,
         retryCount: Int16 = 0,
         abandonedAt: Date = Date(),
-        state: String? = nil
+        state: String? = nil,
+        nextRetryAt: Date? = nil
     ) async throws {
         let context = coreDataStack.newBackgroundContext()
         try await context.perform {
@@ -56,7 +60,17 @@ final class AbandonedMessageRetryTests: XCTestCase {
             record.setValue(retryCount, forKey: "retryCount")
             record.setValue("test", forKey: "reason")
             record.setValue(state, forKey: "state")
+            record.setValue(nextRetryAt, forKey: "nextRetryAt")
             try context.save()
+        }
+    }
+
+    private func storedNextRetryAt(id: String) async throws -> Date? {
+        let context = coreDataStack.newBackgroundContext()
+        return try await context.perform {
+            let request = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
+            request.predicate = NSPredicate(format: "gmailMessageId == %@", id)
+            return try context.fetch(request).first?.value(forKey: "nextRetryAt") as? Date
         }
     }
 
@@ -149,6 +163,91 @@ final class AbandonedMessageRetryTests: XCTestCase {
 
     // MARK: - stageAbandonedRetryOutcome
 
+    // MARK: - nextRetryAt pacing
+
+    func testRecordOutcome_failedRetryStampsPacedNextRetryAt() async throws {
+        try await seedAbandonedMessage(id: "paced")
+
+        try await applyRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ["paced"])
+
+        let stamped = try await storedNextRetryAt(id: "paced")
+        XCTAssertEqual(
+            stamped,
+            clock.now().addingTimeInterval(SyncConfig.abandonedRetryBackoffBase),
+            "The first failed drain attempt paces the next one by the base backoff"
+        )
+    }
+
+    /// Dual pin: paced rows are excluded until their backoff elapses, AND a
+    /// paced-empty fetch must not latch the skip-the-fetch fast path closed —
+    /// otherwise the row would never be offered again once eligible.
+    func testFetchRetryable_excludesPacedRowsUntilBackoffElapses() async throws {
+        try await seedAbandonedMessage(
+            id: "paced",
+            retryCount: 1,
+            nextRetryAt: clock.now().addingTimeInterval(SyncConfig.abandonedRetryBackoffBase)
+        )
+
+        let before = await sut.fetchRetryableAbandonedMessageIds()
+        XCTAssertEqual(before, [], "A row inside its backoff window must not be offered")
+
+        clock.advance(by: SyncConfig.abandonedRetryBackoffBase + 1)
+        let after = await sut.fetchRetryableAbandonedMessageIds()
+        XCTAssertEqual(
+            after, ["paced"],
+            "An elapsed backoff must re-offer the row — pacing must not latch the fast path closed"
+        )
+    }
+
+    func testFetchRetryable_nilNextRetryAtRemainsImmediatelyEligible() async throws {
+        try await seedAbandonedMessage(id: "fresh")
+
+        let ids = await sut.fetchRetryableAbandonedMessageIds()
+
+        XCTAssertEqual(
+            ids, ["fresh"],
+            "Fresh abandonments and legacy rows carry nil nextRetryAt; the nil disjunct is load-bearing on SQLite"
+        )
+    }
+
+    /// Composite lifecycle pin: an abandoned row paced into the future can be
+    /// re-captured as deferred (its id reappears in a failing window) and
+    /// later re-abandoned by the escape hatch. The deferred capture must void
+    /// the stale pacing, or the freshly re-abandoned row would hide from the
+    /// drain until the residual backoff elapsed.
+    func testReabandonedRowIsImmediatelyEligibleAfterDeferredRoundTrip() async throws {
+        try await seedAbandonedMessage(
+            id: "round-trip",
+            retryCount: 1,
+            nextRetryAt: clock.now().addingTimeInterval(SyncConfig.abandonedRetryBackoffCap)
+        )
+        defaults.set(SyncConfig.maxConsecutiveSyncFailures - 1, forKey: SyncConfig.consecutiveFailuresKey)
+
+        let context = coreDataStack.newBackgroundContext()
+        await sut.recordFailure(fetchFailedIds: ["round-trip"], in: context)
+        let plan = await sut.planHistoryAdvance(hadFailures: true, in: context)
+        XCTAssertTrue(plan.shouldAdvance, "The seeded counter must arm the escape hatch")
+        try await coreDataStack.saveAsync(context: context)
+        await sut.commit(plan)
+
+        let ids = await sut.fetchRetryableAbandonedMessageIds()
+        XCTAssertEqual(
+            ids, ["round-trip"],
+            "A re-abandoned row must be immediately drain-eligible; stale pacing must not survive the deferred round-trip"
+        )
+    }
+
+    func testRetryBackoffIntervalIsExponentialAndCapped() {
+        XCTAssertEqual(SyncFailureTracker.retryBackoffInterval(forRetryCount: 1), 900)
+        XCTAssertEqual(SyncFailureTracker.retryBackoffInterval(forRetryCount: 2), 3_600)
+        XCTAssertEqual(SyncFailureTracker.retryBackoffInterval(forRetryCount: 3), 14_400)
+        XCTAssertEqual(SyncFailureTracker.retryBackoffInterval(forRetryCount: 4), 43_200)
+        XCTAssertEqual(
+            SyncFailureTracker.retryBackoffInterval(forRetryCount: 10), 43_200,
+            "The backoff must stay capped"
+        )
+    }
+
     func testStageOutcome_isStagedOnly_storeUntouchedUntilCallerSaves() async throws {
         // The outcome must commit with the caller's save — atomically with the
         // recovered messages — so a failed save leaves every record for the
@@ -199,10 +298,15 @@ final class AbandonedMessageRetryTests: XCTestCase {
     func testRecordOutcome_failureAgesOutAfterMaxRetries() async throws {
         try await seedAbandonedMessage(id: "flaky")
 
-        for _ in 0..<SyncConfig.maxAbandonedMessageRetries {
+        for attempt in 0..<SyncConfig.maxAbandonedMessageRetries {
             let ids = await sut.fetchRetryableAbandonedMessageIds()
             XCTAssertEqual(ids, ["flaky"])
             try await applyRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ids)
+            // Each failed attempt paces the next one; the drain that ages the
+            // row out only sees it again after its backoff elapses.
+            clock.advance(
+                by: SyncFailureTracker.retryBackoffInterval(forRetryCount: attempt + 1) + 1
+            )
         }
 
         let ids = await sut.fetchRetryableAbandonedMessageIds()
