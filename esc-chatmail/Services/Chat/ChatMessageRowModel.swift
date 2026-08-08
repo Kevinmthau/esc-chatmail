@@ -294,6 +294,13 @@ enum ChatMessageRowModelMapper {
         let senderPerson = senderParticipant?.person
         let headerSenderEmail = normalizedSenderEmail(message.senderEmail)
         let effectiveSenderEmail = resolvedSenderEmail(for: message, senderPerson: senderPerson)
+        let effectiveSenderPerson: Person? = senderPerson.flatMap { person in
+            guard let effectiveSenderEmail,
+                  EmailNormalizer.normalize(person.email) == EmailNormalizer.normalize(effectiveSenderEmail) else {
+                return nil
+            }
+            return person
+        }
 
         return ChatMessageRowModel(
             id: message.id,
@@ -312,9 +319,9 @@ enum ChatMessageRowModelMapper {
             senderEmail: headerSenderEmail,
             effectiveSenderEmail: effectiveSenderEmail,
             senderGroupingKeyInput: effectiveSenderEmail,
-            senderInfoEmail: senderPerson?.email,
-            senderInfoDisplayName: senderPerson?.displayName,
-            senderInfoAvatarURL: senderPerson?.avatarURL,
+            senderInfoEmail: effectiveSenderEmail,
+            senderInfoDisplayName: effectiveSenderPerson?.displayName,
+            senderInfoAvatarURL: effectiveSenderPerson?.avatarURL,
             isNewsletter: message.isNewsletter,
             hasHTMLSource: message.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
@@ -333,10 +340,10 @@ enum ChatMessageRowModelMapper {
                 cleanedSnippet: message.cleanedSnippet,
                 snippet: message.snippet,
                 hasHTMLSource: message.hasHTMLSource,
-                senderEmail: senderPerson?.email,
-                senderDisplayName: senderPerson?.displayName,
+                senderEmail: effectiveSenderEmail,
+                senderDisplayName: effectiveSenderPerson?.displayName,
                 senderHeaderDisplayName: message.senderName,
-                senderAvatarURL: senderPerson?.avatarURL
+                senderAvatarURL: effectiveSenderPerson?.avatarURL
             )
         )
     }

@@ -136,6 +136,12 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
+    func testListConversationSkipsParticipantDisplayNameLoad() {
+        XCTAssertFalse(ChatViewModel.shouldLoadResolvedDisplayName(conversationType: .list))
+        XCTAssertTrue(ChatViewModel.shouldLoadResolvedDisplayName(conversationType: .oneToOne))
+        XCTAssertTrue(ChatViewModel.shouldLoadResolvedDisplayName(conversationType: .group))
+    }
+
     func testListNavigationDisplayNameTracksLiveStoredTitle() {
         let deps = makeDependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com")

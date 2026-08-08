@@ -471,25 +471,26 @@ struct ConversationRollupUpdater: Sendable {
         // creation and has no relation to the (varying) participant rows. Keep
         // a stored title that isn't address-derived; otherwise fall through so
         // sender-derived names fill in and address-y placeholders self-correct.
-        // A title equal to the raw List-Id is the creation-time fallback for
-        // bare `List-Id: <id>` headers, not a real phrase — upgrade it to the
-        // sender's From name once a single distinct sender is known, so a
-        // newsletter shows its brand ("TBPN") instead of a machine identifier.
+        // An identifier-derived title is either the creation-time fallback for
+        // a bare `List-Id: <id>` header or a provider phrase that embeds the same
+        // opaque identifier. Upgrade it to the sender's From name once a single
+        // distinct sender is known, so a newsletter shows its brand ("TBPN")
+        // instead of provider metadata.
         if conversation.conversationType == .list {
             let sanitizedStoredTitle = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
                 conversation.displayName,
                 participantEmails: participantEmails
             )
-            let storedTitleIsRawListId = isRawListIdTitle(
+            let storedTitleIsIdentifierDerived = ParsedListId.isIdentifierDerivedDisplayTitle(
                 conversation.displayName,
                 listId: conversation.listId
             )
 
-            if sanitizedStoredTitle != nil, !storedTitleIsRawListId {
+            if sanitizedStoredTitle != nil, !storedTitleIsIdentifierDerived {
                 return
             }
 
-            if storedTitleIsRawListId {
+            if storedTitleIsIdentifierDerived {
                 if let senderName = singleSenderDisplayName(
                     for: conversation,
                     normalizedMyEmail: normalizedMyEmail,
@@ -520,23 +521,6 @@ struct ConversationRollupUpdater: Sendable {
         )
         guard conversation.displayName != finalDisplayName else { return }
         conversation.displayName = finalDisplayName
-    }
-
-    /// True when a list conversation's stored title is just the raw List-Id
-    /// identifier — the creation-time fallback for bare `List-Id: <id>`
-    /// headers — rather than a human display phrase.
-    static func isRawListIdTitle(_ title: String?, listId: String?) -> Bool {
-        guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let listId = listId?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !title.isEmpty,
-              !listId.isEmpty else {
-            return false
-        }
-        return title.caseInsensitiveCompare(listId) == .orderedSame
-    }
-
-    private func isRawListIdTitle(_ title: String?, listId: String?) -> Bool {
-        Self.isRawListIdTitle(title, listId: listId)
     }
 
     /// Resolves the From display name of a list conversation's single distinct

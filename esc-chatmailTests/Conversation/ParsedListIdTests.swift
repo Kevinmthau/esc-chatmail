@@ -23,6 +23,29 @@ final class ParsedListIdTests: XCTestCase {
         XCTAssertEqual(parsed, ParsedListId(id: "repo.owner.github.com", title: "owner/repo"))
     }
 
+    func testParse_mailchimpIdentifierPhraseIsNotUsedAsDisplayTitle() {
+        let parsed = ParsedListId.parse(
+            "d90192af1525703adec3d3919mc list <d90192af1525703adec3d3919.657565.list-id.mcsv.net>"
+        )
+
+        XCTAssertEqual(parsed?.id, "d90192af1525703adec3d3919.657565.list-id.mcsv.net")
+        XCTAssertNil(parsed?.title)
+    }
+
+    func testParse_digitHeavyHumanPhraseRelatedToListIdIsPreserved() {
+        let parsed = ParsedListId.parse(
+            "Formula 1 2024 Round 12 Highlights <formula1-2024-round12-highlights.community.example>"
+        )
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(
+                id: "formula1-2024-round12-highlights.community.example",
+                title: "Formula 1 2024 Round 12 Highlights"
+            )
+        )
+    }
+
     func testParse_normalizesCaseAndWhitespace() {
         let parsed = ParsedListId.parse("  News  < LIST.Example.COM >  ")
         XCTAssertEqual(parsed, ParsedListId(id: "list.example.com", title: "News"))

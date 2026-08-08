@@ -74,8 +74,9 @@ struct EmailContentSection: View {
         let bodyTextFingerprint = contentFingerprint(for: message.bodyText)
         let cleanedSnippetFingerprint = contentFingerprint(for: message.cleanedSnippet)
         let subjectFingerprint = contentFingerprint(for: message.subject)
-        let senderFingerprint = contentFingerprint(for: message.senderEmail)
-        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextFingerprint)|\(cleanedSnippetFingerprint)|\(subjectFingerprint)|\(senderFingerprint)|\(isDarkMode)|\(message.htmlDisplayCleanupMode.rawValue)|source:\(htmlSourceSignature ?? "unknown")"
+        let senderEmailFingerprint = contentFingerprint(for: message.senderEmail)
+        let senderNameFingerprint = contentFingerprint(for: message.senderName)
+        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextFingerprint)|\(cleanedSnippetFingerprint)|\(subjectFingerprint)|\(senderEmailFingerprint)|\(senderNameFingerprint)|\(isDarkMode)|\(message.htmlDisplayCleanupMode.rawValue)|source:\(htmlSourceSignature ?? "unknown")"
     }
 
     static func makePreviewHTMLCacheKey(

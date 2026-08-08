@@ -24,7 +24,7 @@ enum ConversationFilter: String, CaseIterable {
 /// Composes specialized services for search, selection, and filtering
 @MainActor
 final class ConversationListViewModel: ObservableObject {
-    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
+    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV6"
     /// Completion marker only — the preview repair re-runs every launch and no
     /// longer skips when this flag is already set.
     static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV2"
@@ -308,7 +308,7 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func refreshConversationNames() {
-        // V5: refresh stored conversation display names only. Rollup metadata stays sync-owned.
+        // V6: refresh stored conversation display names only. Rollup metadata stays sync-owned.
         let hasRefreshedKey = Self.conversationNameRefreshMigrationKey
         let migrationFlags = storage.migrationFlags
         guard !migrationFlags.bool(forKey: hasRefreshedKey) else { return }
@@ -323,7 +323,7 @@ final class ConversationListViewModel: ObservableObject {
             await conversationManager.updateAllConversationDisplayNames(in: context)
             guard storage.saveIfNeeded(context) else { return }
             migrationFlags.set(true, forKey: hasRefreshedKey)
-            Log.info("Refreshed conversation display names (V5)", category: .conversation)
+            Log.info("Refreshed conversation display names (V6)", category: .conversation)
         }
     }
 

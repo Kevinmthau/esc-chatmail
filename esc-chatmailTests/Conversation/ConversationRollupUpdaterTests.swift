@@ -639,21 +639,27 @@ final class ConversationRollupUpdaterTests: XCTestCase {
     func testUpdateDisplayNameOnly_listKeepsStoredPhraseTitle() throws {
         // The List-Id display phrase seeded at creation must not be replaced
         // by sender-derived names — list senders vary per message.
+        let storedTitle = "Formula 1 2024 Round 12 Highlights"
         let conversation = ConversationBuilder()
             .asList()
-            .withListId("swift-evolution.swift.org")
-            .withDisplayName("Swift Evolution")
+            .withListId("formula1-2024-round12-highlights.community.example")
+            .withDisplayName(storedTitle)
             .build(in: context)
         addConversationParticipant(
-            email: "newsletter@thebrowser.com",
-            displayName: "The Browser Editors",
+            email: "newsletter@example.com",
+            displayName: "Formula One Editors",
             to: conversation
         )
+        MessageBuilder()
+            .withId("digit-heavy-human-list-title")
+            .withSender(email: "newsletter@example.com", name: "Formula One Editors")
+            .inConversation(conversation)
+            .build(in: context)
         try context.save()
 
         updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
 
-        XCTAssertEqual(conversation.displayName, "Swift Evolution")
+        XCTAssertEqual(conversation.displayName, storedTitle)
     }
 
     func testUpdateDisplayNameOnly_listKeepsBareListIdFallbackTitle() throws {
@@ -701,6 +707,56 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
 
         XCTAssertEqual(conversation.displayName, "TBPN")
+    }
+
+    func testUpdateDisplayNameOnly_listMailchimpIdentifierPhraseUpgradesToSingleSenderName() throws {
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("d90192af1525703adec3d3919.657565.list-id.mcsv.net")
+            .withDisplayName("d90192af1525703adec3d3919mc list")
+            .build(in: context)
+        addConversationParticipant(
+            email: "info@bedfordplayhouse.org",
+            displayName: nil,
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("mailchimp-list-single-sender")
+            .withSender(email: "info@bedfordplayhouse.org", name: "Bedford Playhouse")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Bedford Playhouse")
+    }
+
+    func testUpdateDisplayNameOnly_listMailchimpIdentifierPhraseDoesNotChurnAcrossMultipleSenders() throws {
+        let machineTitle = "d90192af1525703adec3d3919mc list"
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("d90192af1525703adec3d3919.657565.list-id.mcsv.net")
+            .withDisplayName(machineTitle)
+            .build(in: context)
+        MessageBuilder()
+            .withId("mailchimp-list-sender-1")
+            .withSender(email: "first@example.com", name: "First Sender")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        MessageBuilder()
+            .withId("mailchimp-list-sender-2")
+            .withSender(email: "second@example.com", name: "Second Sender")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, machineTitle)
     }
 
     func testUpdateDisplayNameOnly_listBareListIdTitleIgnoresOwnRepliesWhenCountingSenders() throws {

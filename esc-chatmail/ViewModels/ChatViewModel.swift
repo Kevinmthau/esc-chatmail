@@ -464,6 +464,15 @@ final class ChatViewModel: ObservableObject {
     /// Loads the resolved display name for the conversation participants.
     /// Call from ChatView on appear.
     func loadResolvedDisplayName() {
+        // List rows and navigation deliberately use the persisted list title.
+        // Resolving participants here cannot affect either surface and would
+        // repeat header/contact/photo work for every opened newsletter chat.
+        guard Self.shouldLoadResolvedDisplayName(
+            conversationType: conversation.conversationType
+        ) else {
+            return
+        }
+
         prefetchTaskManager.run("displayName") { [weak self] in
             guard let self = self,
                   let myEmail = self.authSession.userEmail else { return }
@@ -492,6 +501,10 @@ final class ChatViewModel: ObservableObject {
             )
             self.effectiveParticipantCount = info.totalUniqueParticipants
         }
+    }
+
+    static func shouldLoadResolvedDisplayName(conversationType: ConversationType) -> Bool {
+        conversationType != .list
     }
 
     static func resolvedDisplayName(

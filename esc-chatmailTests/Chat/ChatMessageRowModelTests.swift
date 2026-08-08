@@ -135,4 +135,20 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertFalse(row.isSendingLocalAttachments)
         XCTAssertNil(row.makeSenderRequest())
     }
+
+    func testMap_buildsSenderRequestFromHeaderWhenFromParticipantIsMissing() throws {
+        let message = MessageBuilder()
+            .withId("row-model-header-sender")
+            .withSender(email: "sender@example.com", name: "Header Sender")
+            .build(in: viewContext)
+        try viewContext.obtainPermanentIDs(for: [message])
+        try viewContext.save()
+
+        let row = ChatMessageRowModelMapper.map(message)
+        let request = try XCTUnwrap(row.makeSenderRequest())
+
+        XCTAssertEqual(request.email, "sender@example.com")
+        XCTAssertEqual(request.headerDisplayName, "Header Sender")
+        XCTAssertNil(request.personDisplayName)
+    }
 }

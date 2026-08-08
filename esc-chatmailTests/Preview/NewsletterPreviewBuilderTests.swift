@@ -903,6 +903,30 @@ final class EmailContentSectionTests: XCTestCase {
         XCTAssertNotEqual(initialKey, updatedKey)
     }
 
+    func testMakeLoadKeyIncludesSenderName() {
+        let context = testStack.viewContext
+        let message = MessageBuilder()
+            .withId("message-id")
+            .withSubject("Subject")
+            .withSender(email: "sender@example.com", name: "Original Sender")
+            .build(in: context)
+
+        let initialKey = EmailContentSection.makeLoadKey(
+            for: ChatMessageRowModelMapper.map(message),
+            isDarkMode: false,
+            htmlSourceSignature: "sha256:test-source"
+        )
+
+        message.senderName = "Updated Sender"
+        let updatedKey = EmailContentSection.makeLoadKey(
+            for: ChatMessageRowModelMapper.map(message),
+            isDarkMode: false,
+            htmlSourceSignature: "sha256:test-source"
+        )
+
+        XCTAssertNotEqual(initialKey, updatedKey)
+    }
+
     func testMakeLoadKeyIncludesDarkMode() {
         let context = testStack.viewContext
         let message = MessageBuilder()
