@@ -25,15 +25,18 @@ final class MessageActions: ObservableObject {
     private let pendingActionsManager: any PendingActionsManagerProtocol
     private let unreadInboxMessageCounter: UnreadInboxMessageCounter
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
+    private let syncRunCoordinator: SyncRunCoordinator
 
     init(
         coreDataStack: any MessageActionsCoreDataStacking,
         pendingActionsManager: any PendingActionsManagerProtocol,
-        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        syncRunCoordinator: SyncRunCoordinator = .shared
     ) {
         self.coreDataStack = coreDataStack
         self.pendingActionsManager = pendingActionsManager
         self.rollupMutationSerializer = rollupMutationSerializer
+        self.syncRunCoordinator = syncRunCoordinator
         self.unreadInboxMessageCounter = { context, conversation in
             try Self.countUnreadInboxMessages(in: context, conversation: conversation)
         }
@@ -43,57 +46,106 @@ final class MessageActions: ObservableObject {
         coreDataStack: any MessageActionsCoreDataStacking,
         pendingActionsManager: any PendingActionsManagerProtocol,
         unreadInboxMessageCounter: @escaping UnreadInboxMessageCounter,
-        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        syncRunCoordinator: SyncRunCoordinator = .shared
     ) {
         self.coreDataStack = coreDataStack
         self.pendingActionsManager = pendingActionsManager
         self.unreadInboxMessageCounter = unreadInboxMessageCounter
         self.rollupMutationSerializer = rollupMutationSerializer
+        self.syncRunCoordinator = syncRunCoordinator
+    }
+
+    /// Takes a non-exclusive account-work lease before any optimistic mutation
+    /// can suspend or save, then holds it through durable pending-action
+    /// enqueue. The lease does not wait for an in-progress sync run, so a user
+    /// action never queues behind initial sync, but an account transition still
+    /// cannot interleave: the lease is refused once teardown starts, and
+    /// teardown waits for an outstanding lease before replacing the store.
+    ///
+    /// Because nothing on this path parks on the exclusive boundary any more,
+    /// a cancelled caller task (`ViewModelTaskManager` same-key cancel, or
+    /// `cancelAll()` on disappear) can no longer discard the user's action.
+    private func performAccountWork(
+        _ operation: (SyncRun) async -> Void
+    ) async {
+        guard let request = await syncRunCoordinator.makeAccountWorkRequest(),
+              let syncRun = await syncRunCoordinator.acquireAccountWorkLease(
+                  kind: .pendingActions,
+                  for: request
+              ) else {
+            return
+        }
+
+        await operation(syncRun)
+        await syncRunCoordinator.endRun(syncRun)
     }
 
     // MARK: - Mark Read/Unread
 
     func markAsRead(message: Message) async {
-        await updateReadState(
-            messageID: message.objectID,
-            conversationID: message.conversation?.objectID,
-            isUnread: false,
-            actionType: .markRead
-        )
+        await performAccountWork { syncRun in
+            await self.updateReadState(
+                messageID: message.objectID,
+                conversationID: message.conversation?.objectID,
+                isUnread: false,
+                actionType: .markRead,
+                within: syncRun
+            )
+        }
     }
 
     func markAsUnread(message: Message) async {
-        await updateReadState(
-            messageID: message.objectID,
-            conversationID: message.conversation?.objectID,
-            isUnread: true,
-            actionType: .markUnread
-        )
+        await performAccountWork { syncRun in
+            await self.updateReadState(
+                messageID: message.objectID,
+                conversationID: message.conversation?.objectID,
+                isUnread: true,
+                actionType: .markUnread,
+                within: syncRun
+            )
+        }
     }
 
     func markConversationAsUnread(conversation: Conversation) async {
-        let conversationID = conversation.objectID
-        let conversationKey = conversationID.uriRepresentation().absoluteString
-        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
-            guard let self,
-                  let messageId = await self.performMarkConversationAsUnread(
-                    conversationID: conversationID
-                  ) else {
-                return
+        await performAccountWork { syncRun in
+            let conversationID = conversation.objectID
+            let conversationKey = conversationID.uriRepresentation().absoluteString
+            await self.rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+                guard let self,
+                      let messageId = await self.performMarkConversationAsUnread(
+                        conversationID: conversationID
+                      ) else {
+                    return
+                }
+                await self.queueReadStateAction(
+                    type: .markUnread,
+                    messageId: messageId,
+                    within: syncRun
+                )
             }
-            await self.queueReadStateAction(type: .markUnread, messageId: messageId)
         }
     }
 
     func markConversationAsRead(conversation: Conversation) async {
-        let context = coreDataStack.viewContext
-        let unreadInboxMessageIDs = snapshotUnreadInboxMessageObjectIDs(for: conversation, context: context)
-        guard !unreadInboxMessageIDs.isEmpty else { return }
+        await performAccountWork { syncRun in
+            let context = self.coreDataStack.viewContext
+            let unreadInboxMessageIDs = self.snapshotUnreadInboxMessageObjectIDs(
+                for: conversation,
+                context: context
+            )
+            guard !unreadInboxMessageIDs.isEmpty else { return }
 
-        await markMessagesAsReadBatch(
-            messageIDs: unreadInboxMessageIDs,
-            conversationID: conversation.objectID
-        )
+            let conversationID = conversation.objectID
+            let conversationKey = conversationID.uriRepresentation().absoluteString
+            await self.rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+                await self?.performMarkMessagesAsReadBatch(
+                    messageIDs: unreadInboxMessageIDs,
+                    conversationID: conversationID,
+                    within: syncRun
+                )
+            }
+        }
     }
 
     /// Snapshots the unread message IDs that should be cleared when a chat opens.
@@ -136,7 +188,8 @@ final class MessageActions: ObservableObject {
         messageID: NSManagedObjectID,
         conversationID: NSManagedObjectID?,
         isUnread: Bool,
-        actionType: PendingAction.ActionType
+        actionType: PendingAction.ActionType,
+        within syncRun: SyncRun
     ) async {
         guard let conversationID else { return }
         let conversationKey = conversationID.uriRepresentation().absoluteString
@@ -150,7 +203,11 @@ final class MessageActions: ObservableObject {
                   ) else {
                 return
             }
-            await self.queueReadStateAction(type: actionType, messageId: messageId)
+            await self.queueReadStateAction(
+                type: actionType,
+                messageId: messageId,
+                within: syncRun
+            )
         }
     }
 
@@ -211,46 +268,56 @@ final class MessageActions: ObservableObject {
 
     /// Mark message as read using ObjectID - safe to call from background threads
     func markAsRead(messageID: NSManagedObjectID) async {
-        let context = coreDataStack.newBackgroundContext()
-        let conversationID: NSManagedObjectID? = await context.perform {
-            context.refreshAllObjects()
-            guard let message = try? context.existingObject(with: messageID) as? Message else {
-                return nil
+        await performAccountWork { syncRun in
+            let context = self.coreDataStack.newBackgroundContext()
+            let conversationID: NSManagedObjectID? = await context.perform {
+                context.refreshAllObjects()
+                guard let message = try? context.existingObject(with: messageID) as? Message else {
+                    return nil
+                }
+                return message.conversation?.objectID
             }
-            return message.conversation?.objectID
-        }
 
-        guard let conversationID else { return }
-        let conversationKey = conversationID.uriRepresentation().absoluteString
-        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
-            guard let self,
-                  let gmailMessageId = await self.performReadStateMutation(
-                    messageID: messageID,
-                    conversationID: conversationID,
-                    isUnread: false,
-                    actionType: .markRead
-                  ) else {
-                return
+            guard let conversationID else { return }
+            let conversationKey = conversationID.uriRepresentation().absoluteString
+            await self.rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+                guard let self,
+                      let gmailMessageId = await self.performReadStateMutation(
+                        messageID: messageID,
+                        conversationID: conversationID,
+                        isUnread: false,
+                        actionType: .markRead
+                      ) else {
+                    return
+                }
+                await self.queueReadStateAction(
+                    type: .markRead,
+                    messageId: gmailMessageId,
+                    within: syncRun
+                )
             }
-            await self.queueReadStateAction(type: .markRead, messageId: gmailMessageId)
         }
     }
 
     /// Batch mark messages as read - prevents race condition with new messages
     /// Uses a single transaction to ensure atomic update of conversation unread count
     func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], conversationID: NSManagedObjectID) async {
-        let conversationKey = conversationID.uriRepresentation().absoluteString
-        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
-            await self?.performMarkMessagesAsReadBatch(
-                messageIDs: messageIDs,
-                conversationID: conversationID
-            )
+        await performAccountWork { syncRun in
+            let conversationKey = conversationID.uriRepresentation().absoluteString
+            await self.rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+                await self?.performMarkMessagesAsReadBatch(
+                    messageIDs: messageIDs,
+                    conversationID: conversationID,
+                    within: syncRun
+                )
+            }
         }
     }
 
     private func performMarkMessagesAsReadBatch(
         messageIDs: [NSManagedObjectID],
-        conversationID: NSManagedObjectID
+        conversationID: NSManagedObjectID,
+        within syncRun: SyncRun
     ) async {
         let context = coreDataStack.newBackgroundContext()
         let unreadInboxMessageCounter = self.unreadInboxMessageCounter
@@ -310,14 +377,16 @@ final class MessageActions: ObservableObject {
             await pendingActionsManager.queueConversationAction(
                 type: .markRead,
                 sourceConversationId: sourceConversationId,
-                messageIds: batchResult.messageIds
+                messageIds: batchResult.messageIds,
+                within: syncRun
             )
         } else {
             for messageId in batchResult.messageIds {
                 await pendingActionsManager.queueAction(
                     type: .markRead,
                     messageId: messageId,
-                    payload: nil
+                    payload: nil,
+                    within: syncRun
                 )
             }
         }
@@ -325,97 +394,105 @@ final class MessageActions: ObservableObject {
 
     private func queueReadStateAction(
         type: PendingAction.ActionType,
-        messageId: String
+        messageId: String,
+        within syncRun: SyncRun
     ) async {
         guard !messageId.isEmpty else { return }
         await pendingActionsManager.queueAction(
             type: type,
             messageId: messageId,
-            payload: nil
+            payload: nil,
+            within: syncRun
         )
     }
 
     // MARK: - Archive
 
     func archive(message: Message) async {
-        guard let labels = message.labels else { return }
-        let inboxLabel = labels.first { $0.id == "INBOX" }
-        guard let inboxLabel = inboxLabel else { return }
+        await performAccountWork { syncRun in
+            guard let labels = message.labels else { return }
+            let inboxLabel = labels.first { $0.id == "INBOX" }
+            guard let inboxLabel else { return }
 
-        // Update local state and mark as locally modified for conflict detection
-        message.removeFromLabels(inboxLabel)
-        message.localModifiedAt = Date()
-        let saved = coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
+            // Update local state and mark as locally modified for conflict detection
+            message.removeFromLabels(inboxLabel)
+            message.localModifiedAt = Date()
+            let saved = self.coreDataStack.saveIfNeeded(context: self.coreDataStack.viewContext)
 
-        if let conversation = message.conversation {
-            updateConversationInboxStatus(conversation)
-        }
+            if let conversation = message.conversation {
+                self.updateConversationInboxStatus(conversation)
+            }
 
-        guard saved else {
-            Log.error("Not queuing archive for message \(message.id): local save failed", category: .message)
-            return
-        }
+            guard saved else {
+                Log.error("Not queuing archive for message \(message.id): local save failed", category: .message)
+                return
+            }
 
-        // Queue sync to Gmail (remove INBOX label)
-        let messageId = message.id
-        if !messageId.isEmpty {
-            await pendingActionsManager.queueAction(
-                type: .archive,
-                messageId: messageId,
-                payload: nil
-            )
+            // Queue sync to Gmail (remove INBOX label)
+            let messageId = message.id
+            if !messageId.isEmpty {
+                await self.pendingActionsManager.queueAction(
+                    type: .archive,
+                    messageId: messageId,
+                    payload: nil,
+                    within: syncRun
+                )
+            }
         }
     }
 
     func archiveConversation(conversation: Conversation) async {
-        Log.debug("archiveConversation called for '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
+        await performAccountWork { syncRun in
+            Log.debug("archiveConversation called for '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
 
-        guard let messages = conversation.messages, !messages.isEmpty else {
-            Log.warning("No messages in conversation '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
-            return
-        }
+            guard let messages = conversation.messages, !messages.isEmpty else {
+                Log.warning("No messages in conversation '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
+                return
+            }
 
-        Log.debug("Found \(messages.count) messages to archive", category: .message)
+            Log.debug("Found \(messages.count) messages to archive", category: .message)
 
-        // Update local state
-        let context = coreDataStack.viewContext
-        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: "archive")
-        Log.debug("INBOX label found: \(inboxLabel != nil)", category: .message)
+            // Update local state
+            let context = self.coreDataStack.viewContext
+            let inboxLabel = self.fetchLabel(id: "INBOX", in: context, operation: "archive")
+            Log.debug("INBOX label found: \(inboxLabel != nil)", category: .message)
 
-        // Collect message IDs for syncing and mark as locally modified
-        let modificationDate = Date()
-        let mutationResult = applyArchiveLocalChanges(
-            to: messages,
-            inboxLabel: inboxLabel,
-            modificationDate: modificationDate
-        )
-        let messageIds = mutationResult.messageIds
-        let removedCount = mutationResult.affectedMessageCount
-
-        // CRITICAL: Set archivedAt to mark this conversation as archived
-        // This ensures that future emails from these participants create a NEW conversation
-        let archiveDate = Date()
-        conversation.archivedAt = archiveDate
-        Log.debug("Set archivedAt to \(archiveDate)", category: .message)
-
-        let saved = coreDataStack.saveIfNeeded(context: context)
-        Log.debug("Removed INBOX label from \(removedCount) messages, saved context", category: .message)
-
-        updateConversationInboxStatus(conversation)
-        Log.debug("Updated conversation inbox status - hasInbox: \(conversation.hasInbox)", category: .message)
-
-        guard saved else {
-            Log.error("Not queuing archiveConversation for '\(conversation.id)': local save failed", category: .message)
-            return
-        }
-
-        // Queue sync to Gmail
-        if !messageIds.isEmpty {
-            await pendingActionsManager.queueConversationAction(
-                type: .archiveConversation,
-                sourceConversationId: conversation.id,
-                messageIds: messageIds
+            // Collect message IDs for syncing and mark as locally modified
+            let modificationDate = Date()
+            let mutationResult = self.applyArchiveLocalChanges(
+                to: messages,
+                inboxLabel: inboxLabel,
+                modificationDate: modificationDate
             )
+            let messageIds = mutationResult.messageIds
+            let removedCount = mutationResult.affectedMessageCount
+
+            // CRITICAL: Set archivedAt to mark this conversation as archived
+            // This ensures that future emails from these participants create a NEW conversation
+            let archiveDate = Date()
+            conversation.archivedAt = archiveDate
+            Log.debug("Set archivedAt to \(archiveDate)", category: .message)
+
+            let saved = self.coreDataStack.saveIfNeeded(context: context)
+            Log.debug("Removed INBOX label from \(removedCount) messages, saved context", category: .message)
+
+            self.updateConversationInboxStatus(conversation)
+            Log.debug("Updated conversation inbox status - hasInbox: \(conversation.hasInbox)", category: .message)
+
+            guard saved else {
+                Log.error("Not queuing archiveConversation for '\(conversation.id)': local save failed", category: .message)
+                return
+            }
+
+            // Queue sync to Gmail
+            if !messageIds.isEmpty {
+                await self.pendingActionsManager.queueConversationAction(
+                    type: .archiveConversation,
+                    sourceConversationId: conversation.id,
+                    messageIds: messageIds,
+                    within: syncRun
+                )
+            }
         }
     }
 
@@ -423,52 +500,55 @@ final class MessageActions: ObservableObject {
     /// - Parameter conversations: The conversations to archive
     /// - Note: Performs a single Core Data save and queues a single pending action.
     func archiveConversations(conversations: [Conversation]) async {
-        guard !conversations.isEmpty else { return }
+        await performAccountWork { syncRun in
+            guard !conversations.isEmpty else { return }
 
-        Log.info("Batch archiving \(conversations.count) conversations", category: .message)
+            Log.info("Batch archiving \(conversations.count) conversations", category: .message)
 
-        let context = coreDataStack.viewContext
+            let context = self.coreDataStack.viewContext
 
-        // Fetch INBOX label once
-        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: "batch archive")
-        guard let inboxLabel = inboxLabel else {
-            Log.warning("INBOX label not found, cannot archive", category: .message)
-            return
-        }
+            // Fetch INBOX label once
+            let inboxLabel = self.fetchLabel(id: "INBOX", in: context, operation: "batch archive")
+            guard let inboxLabel else {
+                Log.warning("INBOX label not found, cannot archive", category: .message)
+                return
+            }
 
-        // Collect all message IDs and update local state in memory
-        var allMessageIds: [String] = []
-        let modificationDate = Date()
+            // Collect all message IDs and update local state in memory
+            var allMessageIds: [String] = []
+            let modificationDate = Date()
 
-        for conversation in conversations {
-            guard let messages = conversation.messages else { continue }
+            for conversation in conversations {
+                guard let messages = conversation.messages else { continue }
 
-            allMessageIds.append(contentsOf: applyArchiveLocalChanges(
-                to: messages,
-                inboxLabel: inboxLabel,
-                modificationDate: modificationDate
-            ).messageIds)
+                allMessageIds.append(contentsOf: self.applyArchiveLocalChanges(
+                    to: messages,
+                    inboxLabel: inboxLabel,
+                    modificationDate: modificationDate
+                ).messageIds)
 
-            applyArchivedConversationRollup(to: conversation, at: modificationDate)
-        }
+                self.applyArchivedConversationRollup(to: conversation, at: modificationDate)
+            }
 
-        // Single Core Data save for all changes
-        let saved = coreDataStack.saveIfNeeded(context: context)
-        Log.info("Batch archived \(conversations.count) conversations (\(allMessageIds.count) messages)", category: .message)
+            // Single Core Data save for all changes
+            let saved = self.coreDataStack.saveIfNeeded(context: context)
+            Log.info("Batch archived \(conversations.count) conversations (\(allMessageIds.count) messages)", category: .message)
 
-        guard saved else {
-            Log.error("Not queuing batch archiveConversation: local save failed", category: .message)
-            return
-        }
+            guard saved else {
+                Log.error("Not queuing batch archiveConversation: local save failed", category: .message)
+                return
+            }
 
-        // Queue single pending action with all message IDs
-        guard let firstConversation = conversations.first else { return }
-        if !allMessageIds.isEmpty {
-            await pendingActionsManager.queueConversationAction(
-                type: .archiveConversation,
-                sourceConversationId: firstConversation.id,
-                messageIds: allMessageIds
-            )
+            // Queue single pending action with all message IDs
+            guard let firstConversation = conversations.first else { return }
+            if !allMessageIds.isEmpty {
+                await self.pendingActionsManager.queueConversationAction(
+                    type: .archiveConversation,
+                    sourceConversationId: firstConversation.id,
+                    messageIds: allMessageIds,
+                    within: syncRun
+                )
+            }
         }
     }
 
@@ -476,50 +556,53 @@ final class MessageActions: ObservableObject {
     /// - Parameter conversations: The conversations to report as spam
     /// - Note: Performs a single Core Data save and queues a single pending action.
     func reportSpamConversations(conversations: [Conversation]) async {
-        guard !conversations.isEmpty else { return }
+        await performAccountWork { syncRun in
+            guard !conversations.isEmpty else { return }
 
-        Log.info("Batch reporting \(conversations.count) conversations as spam", category: .message)
+            Log.info("Batch reporting \(conversations.count) conversations as spam", category: .message)
 
-        let context = coreDataStack.viewContext
+            let context = self.coreDataStack.viewContext
 
-        // Fetch INBOX label for removal and SPAM label for addition
-        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: "batch spam")
-        let spamLabel = fetchLabel(id: "SPAM", in: context, operation: "batch spam")
+            // Fetch INBOX label for removal and SPAM label for addition
+            let inboxLabel = self.fetchLabel(id: "INBOX", in: context, operation: "batch spam")
+            let spamLabel = self.fetchLabel(id: "SPAM", in: context, operation: "batch spam")
 
-        // Collect all message IDs and update local state in memory
-        var allMessageIds: [String] = []
-        let modificationDate = Date()
+            // Collect all message IDs and update local state in memory
+            var allMessageIds: [String] = []
+            let modificationDate = Date()
 
-        for conversation in conversations {
-            guard let messages = conversation.messages else { continue }
+            for conversation in conversations {
+                guard let messages = conversation.messages else { continue }
 
-            allMessageIds.append(contentsOf: applySpamLocalChanges(
-                to: messages,
-                inboxLabel: inboxLabel,
-                spamLabel: spamLabel,
-                modificationDate: modificationDate
-            ))
+                allMessageIds.append(contentsOf: self.applySpamLocalChanges(
+                    to: messages,
+                    inboxLabel: inboxLabel,
+                    spamLabel: spamLabel,
+                    modificationDate: modificationDate
+                ))
 
-            applyArchivedConversationRollup(to: conversation, at: modificationDate)
-        }
+                self.applyArchivedConversationRollup(to: conversation, at: modificationDate)
+            }
 
-        // Single Core Data save for all changes
-        let saved = coreDataStack.saveIfNeeded(context: context)
-        Log.info("Batch reported \(conversations.count) conversations as spam (\(allMessageIds.count) messages)", category: .message)
+            // Single Core Data save for all changes
+            let saved = self.coreDataStack.saveIfNeeded(context: context)
+            Log.info("Batch reported \(conversations.count) conversations as spam (\(allMessageIds.count) messages)", category: .message)
 
-        guard saved else {
-            Log.error("Not queuing batch reportSpam: local save failed", category: .message)
-            return
-        }
+            guard saved else {
+                Log.error("Not queuing batch reportSpam: local save failed", category: .message)
+                return
+            }
 
-        // Queue single pending action with all message IDs
-        guard let firstConversation = conversations.first else { return }
-        if !allMessageIds.isEmpty {
-            await pendingActionsManager.queueConversationAction(
-                type: .reportSpam,
-                sourceConversationId: firstConversation.id,
-                messageIds: allMessageIds
-            )
+            // Queue single pending action with all message IDs
+            guard let firstConversation = conversations.first else { return }
+            if !allMessageIds.isEmpty {
+                await self.pendingActionsManager.queueConversationAction(
+                    type: .reportSpam,
+                    sourceConversationId: firstConversation.id,
+                    messageIds: allMessageIds,
+                    within: syncRun
+                )
+            }
         }
     }
 
@@ -527,67 +610,76 @@ final class MessageActions: ObservableObject {
     /// Also archives the conversation locally to remove it from the chat list.
     /// - Parameter conversation: The conversation to report as spam
     func reportSpamConversation(conversation: Conversation) async {
-        Log.debug("reportSpamConversation called for '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
+        await performAccountWork { syncRun in
+            Log.debug("reportSpamConversation called for '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
 
-        guard let messages = conversation.messages, !messages.isEmpty else {
-            Log.warning("No messages in conversation '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
-            return
-        }
+            guard let messages = conversation.messages, !messages.isEmpty else {
+                Log.warning("No messages in conversation '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
+                return
+            }
 
-        Log.debug("Found \(messages.count) messages to report as spam", category: .message)
+            Log.debug("Found \(messages.count) messages to report as spam", category: .message)
 
-        let context = coreDataStack.viewContext
+            let context = self.coreDataStack.viewContext
 
-        // Fetch INBOX label for removal and SPAM label for addition
-        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: "spam")
-        let spamLabel = fetchLabel(id: "SPAM", in: context, operation: "spam")
+            // Fetch INBOX label for removal and SPAM label for addition
+            let inboxLabel = self.fetchLabel(id: "INBOX", in: context, operation: "spam")
+            let spamLabel = self.fetchLabel(id: "SPAM", in: context, operation: "spam")
 
-        // Collect message IDs, remove INBOX label locally, add SPAM label, and mark as locally modified
-        let modificationDate = Date()
-        let messageIds = applySpamLocalChanges(
-            to: messages,
-            inboxLabel: inboxLabel,
-            spamLabel: spamLabel,
-            modificationDate: modificationDate
-        )
-
-        // Archive the conversation locally and update rollup fields to prevent un-archiving
-        applyArchivedConversationRollup(to: conversation, at: modificationDate)
-
-        let saved = coreDataStack.saveIfNeeded(context: context)
-        Log.debug("Marked \(messageIds.count) messages for spam, removed INBOX labels, archived conversation", category: .message)
-
-        guard saved else {
-            Log.error("Not queuing reportSpam for '\(conversation.id)': local save failed", category: .message)
-            return
-        }
-
-        // Queue sync to Gmail
-        if !messageIds.isEmpty {
-            await pendingActionsManager.queueConversationAction(
-                type: .reportSpam,
-                sourceConversationId: conversation.id,
-                messageIds: messageIds
+            // Collect message IDs, remove INBOX label locally, add SPAM label, and mark as locally modified
+            let modificationDate = Date()
+            let messageIds = self.applySpamLocalChanges(
+                to: messages,
+                inboxLabel: inboxLabel,
+                spamLabel: spamLabel,
+                modificationDate: modificationDate
             )
+
+            // Archive the conversation locally and update rollup fields to prevent un-archiving
+            self.applyArchivedConversationRollup(to: conversation, at: modificationDate)
+
+            let saved = self.coreDataStack.saveIfNeeded(context: context)
+            Log.debug("Marked \(messageIds.count) messages for spam, removed INBOX labels, archived conversation", category: .message)
+
+            guard saved else {
+                Log.error("Not queuing reportSpam for '\(conversation.id)': local save failed", category: .message)
+                return
+            }
+
+            // Queue sync to Gmail
+            if !messageIds.isEmpty {
+                await self.pendingActionsManager.queueConversationAction(
+                    type: .reportSpam,
+                    sourceConversationId: conversation.id,
+                    messageIds: messageIds,
+                    within: syncRun
+                )
+            }
         }
     }
 
     // MARK: - Star/Unstar
 
     func star(message: Message) async {
-        await updateStarState(
-            message: message,
-            isStarred: true,
-            actionType: .star
-        )
+        await performAccountWork { syncRun in
+            await self.updateStarState(
+                message: message,
+                isStarred: true,
+                actionType: .star,
+                within: syncRun
+            )
+        }
     }
 
     func unstar(message: Message) async {
-        await updateStarState(
-            message: message,
-            isStarred: false,
-            actionType: .unstar
-        )
+        await performAccountWork { syncRun in
+            await self.updateStarState(
+                message: message,
+                isStarred: false,
+                actionType: .unstar,
+                within: syncRun
+            )
+        }
     }
 
     // MARK: - Helpers
@@ -745,7 +837,8 @@ final class MessageActions: ObservableObject {
     private func updateStarState(
         message: Message,
         isStarred: Bool,
-        actionType: PendingAction.ActionType
+        actionType: PendingAction.ActionType,
+        within syncRun: SyncRun
     ) async {
         let existingStarLabel = message.labels?.first(where: { $0.id == "STARRED" })
         let alreadyInDesiredState = existingStarLabel != nil
@@ -777,7 +870,8 @@ final class MessageActions: ObservableObject {
             await pendingActionsManager.queueAction(
                 type: actionType,
                 messageId: messageId,
-                payload: nil
+                payload: nil,
+                within: syncRun
             )
         }
     }

@@ -377,18 +377,396 @@ final class PendingActionsManagerTests: XCTestCase {
         XCTAssertEqual(bgCount, 1, "Saved changes should be visible after save")
     }
 
-    // MARK: - Quota exhaustion
+    // MARK: - Account transition isolation
+
+    func testQueueActionWaitsBehindSyncAndPersistsWhenAccountDoesNotTransition() async throws {
+        let coordinator = SyncRunCoordinator()
+        guard let blockingRun = await coordinator.beginRun(kind: .foregroundIncremental) else {
+            return XCTFail("Expected foreground sync to own the boundary")
+        }
+        guard let request = await coordinator.makeAccountWorkRequest() else {
+            return XCTFail("Expected an account-work request while sync is active")
+        }
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            networkMonitor: NeverConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator
+        )
+
+        let enqueueTask = Task {
+            await manager.queueAction(
+                type: .markRead,
+                messageId: "waits-for-sync",
+                accountWorkRequest: request
+            )
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertEqual(try pendingActionCount(), 0)
+
+        await coordinator.endRun(blockingRun)
+        await enqueueTask.value
+
+        XCTAssertEqual(try pendingActionCount(), 1)
+    }
+
+    func testQueueActionBlockedBehindSyncAbortsAfterAccountTransition() async throws {
+        let coordinator = SyncRunCoordinator()
+        guard let blockingRun = await coordinator.beginRun(kind: .foregroundIncremental) else {
+            return XCTFail("Expected foreground sync to own the boundary")
+        }
+        guard let oldAccountRequest = await coordinator.makeAccountWorkRequest() else {
+            return XCTFail("Expected an account-work request while sync is active")
+        }
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            networkMonitor: NeverConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator
+        )
+
+        let enqueueTask = Task {
+            await manager.queueAction(
+                type: .archive,
+                messageId: "old-account-message",
+                accountWorkRequest: oldAccountRequest
+            )
+        }
+        let transitionTask = Task {
+            await coordinator.beginQuiescence()
+        }
+
+        var transitionStarted = false
+        for _ in 0..<100 {
+            if await coordinator.makeAccountWorkRequest() == nil {
+                transitionStarted = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(transitionStarted, "Expected account transition to close the boundary")
+
+        await coordinator.endRun(blockingRun)
+        await transitionTask.value
+        await coordinator.endQuiescence()
+        await enqueueTask.value
+
+        XCTAssertEqual(
+            try pendingActionCount(),
+            0,
+            "A request stamped for the old account must not write into the reset store"
+        )
+    }
+
+    func testProcessingBlockedBehindSyncResumesAgainstCurrentStoreAfterAccountTransition() async throws {
+        let coordinator = SyncRunCoordinator()
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        guard let blockingRun = await coordinator.beginRun(kind: .foregroundIncremental) else {
+            return XCTFail("Expected foreground sync to own the boundary")
+        }
+        let executor = RecordingActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator,
+            lifecycleHooks: PendingActionLifecycleHooks(
+                scheduledProcessingDidWaitForRun: {
+                    await lifecycleProbe.recordScheduledProcessingWait()
+                },
+                scheduledProcessingWillCreateInitialContext: {
+                    await lifecycleProbe.recordScheduledProcessingContextCreation()
+                }
+            )
+        )
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("old-account-action")
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let processingTask = Task {
+            await manager.processAllPendingActions()
+        }
+        // Observe this exact scheduled scanner waiting. Initialization recovery
+        // uses a different acquisition path and cannot satisfy this probe.
+        await lifecycleProbe.waitUntilScheduledProcessingWaits()
+
+        let transitionTask = Task {
+            await coordinator.beginQuiescence()
+        }
+        var transitionStarted = false
+        for _ in 0..<100 {
+            if await coordinator.makeAccountWorkRequest() == nil {
+                transitionStarted = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(transitionStarted, "Expected account transition to close the boundary")
+
+        await coordinator.endRun(blockingRun)
+        await transitionTask.value
+
+        // Replace the account-scoped rows while teardown owns the boundary,
+        // then advance the probe's store generation. The scanner hook sits
+        // immediately before its first context creation, so observing the new
+        // generation proves no scanner context/fetch crossed the old boundary.
+        let staleActions = try context.fetch(PendingAction.fetchRequest())
+        staleActions.forEach(context.delete)
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("current-account-action")
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+        await lifecycleProbe.replaceStoreGeneration()
+
+        await coordinator.endQuiescence()
+        await processingTask.value
+
+        XCTAssertEqual(executor.executedMessageIds, ["current-account-action"])
+        let contextCreationGenerations = await lifecycleProbe.contextCreationGenerations
+        XCTAssertEqual(
+            contextCreationGenerations,
+            [.replacement],
+            "The scheduled scanner must create its first context only after store replacement"
+        )
+    }
+
+    func testPendingActionCountRequestedBeforeAccountTransitionDoesNotReadReplacementStore() async throws {
+        let coordinator = SyncRunCoordinator()
+        guard let blockingRun = await coordinator.beginRun(kind: .foregroundIncremental),
+              let oldAccountRequest = await coordinator.makeAccountWorkRequest() else {
+            return XCTFail("Expected a foreground run and account-work request")
+        }
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            networkMonitor: NeverConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator
+        )
+
+        let countTask = Task {
+            await manager.pendingActionCount(accountWorkRequest: oldAccountRequest)
+        }
+        await coordinator.waitUntilWorkIsWaiting()
+
+        let transitionTask = Task { await coordinator.beginQuiescence() }
+        await waitUntilAccountTransitionStarts(coordinator)
+        await coordinator.endRun(blockingRun)
+        await transitionTask.value
+
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("replacement-account-action")
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await coordinator.endQuiescence()
+
+        let staleCount = await countTask.value
+
+        XCTAssertEqual(
+            staleCount,
+            0,
+            "A stale live query must not observe rows from the replacement account"
+        )
+    }
+
+    func testCancelRequestedBeforeAccountTransitionDoesNotDeleteReplacementAction() async throws {
+        let coordinator = SyncRunCoordinator()
+        guard let blockingRun = await coordinator.beginRun(kind: .foregroundIncremental),
+              let oldAccountRequest = await coordinator.makeAccountWorkRequest() else {
+            return XCTFail("Expected a foreground run and account-work request")
+        }
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            networkMonitor: NeverConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator
+        )
+
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("same-message-id")
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let cancelTask = Task {
+            await manager.cancelPendingAction(
+                forMessageId: "same-message-id",
+                type: .markRead,
+                accountWorkRequest: oldAccountRequest
+            )
+        }
+        await coordinator.waitUntilWorkIsWaiting()
+
+        let transitionTask = Task { await coordinator.beginQuiescence() }
+        await waitUntilAccountTransitionStarts(coordinator)
+        await coordinator.endRun(blockingRun)
+        await transitionTask.value
+
+        let oldActions = try context.fetch(PendingAction.fetchRequest())
+        oldActions.forEach(context.delete)
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("same-message-id")
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await coordinator.endQuiescence()
+        await cancelTask.value
+
+        let actions = try context.fetch(PendingAction.fetchRequest())
+        XCTAssertEqual(actions.map(\.messageId), ["same-message-id"])
+    }
+
+    func testDismissAllRequestedBeforeAccountTransitionDoesNotDeleteReplacementAbandonedActions() async throws {
+        let coordinator = SyncRunCoordinator()
+        guard let blockingRun = await coordinator.beginRun(kind: .foregroundIncremental),
+              let oldAccountRequest = await coordinator.makeAccountWorkRequest() else {
+            return XCTFail("Expected a foreground run and account-work request")
+        }
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            networkMonitor: NeverConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator
+        )
+
+        let dismissTask = Task {
+            await manager.dismissAllAbandonedActions(accountWorkRequest: oldAccountRequest)
+        }
+        await coordinator.waitUntilWorkIsWaiting()
+
+        let transitionTask = Task { await coordinator.beginQuiescence() }
+        await waitUntilAccountTransitionStarts(coordinator)
+        await coordinator.endRun(blockingRun)
+        await transitionTask.value
+
+        _ = PendingActionBuilder()
+            .archive()
+            .forMessage("replacement-abandoned-action")
+            .withStatus("abandoned")
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await coordinator.endQuiescence()
+        await dismissTask.value
+
+        let actions = try context.fetch(PendingAction.fetchRequest())
+        XCTAssertEqual(actions.map(\.messageId), ["replacement-abandoned-action"])
+        XCTAssertEqual(actions.map(\.status), ["abandoned"])
+    }
+
+    private func pendingActionCount() throws -> Int {
+        context.refreshAllObjects()
+        return try context.count(for: PendingAction.fetchRequest())
+    }
+
+    private func waitUntilAccountTransitionStarts(
+        _ coordinator: SyncRunCoordinator,
+        timeout: TimeInterval = 2.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if await coordinator.makeAccountWorkRequest() == nil {
+                return
+            }
+            await Task.yield()
+        }
+
+        XCTFail("Timed out waiting for account transition", file: file, line: line)
+    }
+
+    // MARK: - Account-scoped API failures
+
+    func testScheduledProcessing_authenticationErrorStopsRunWithoutVerdicts() async throws {
+        try await assertAccountScopedFailureStopsRunWithoutVerdicts(
+            APIError.authenticationError
+        )
+    }
+
+    func testScheduledProcessing_credentialsRevokedStopsRunWithoutVerdicts() async throws {
+        try await assertAccountScopedFailureStopsRunWithoutVerdicts(
+            APIError.credentialsRevoked
+        )
+    }
+
+    private func assertAccountScopedFailureStopsRunWithoutVerdicts(
+        _ error: APIError,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let executor = AccountScopedFailureOnceActionExecutor(error: error)
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("existing-action")
+            .pending()
+            .withRetryCount(4)
+            .createdMinutesAgo(1)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await manager.queueAction(type: .archive, messageId: "remaining-action")
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertEqual(
+            executor.executedMessageIds,
+            ["existing-action"],
+            "An account-scoped failure must stop before processing the remaining queue",
+            file: file,
+            line: line
+        )
+
+        context.refreshAllObjects()
+        let request = PendingAction.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
+        let actions = try context.fetch(request)
+        XCTAssertEqual(
+            actions.map(\.status),
+            ["pending", "pending"],
+            "Authentication state is not a verdict on either user action",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            actions.map(\.retryCount),
+            [4, 0],
+            "Authentication failures must not consume retry budget",
+            file: file,
+            line: line
+        )
+    }
 
     /// Quota exhaustion is account-scoped: it must stop the processing run
     /// with the failing action requeued untouched, instead of abandoning it
     /// and burning every remaining action's retry budget on doomed requests.
     func testProcessAllPendingActions_quotaExhaustionStopsRunWithoutVerdicts() async throws {
         let executor = QuotaExhaustedActionExecutor()
+        let retryRecorder = QuotaRetryScheduleRecorder()
         let manager = PendingActionsManager(
             coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
             actionExecutor: executor,
             networkMonitor: AlwaysConnectedNetworkMonitor(),
-            syncRunCoordinator: SyncRunCoordinator()
+            syncRunCoordinator: SyncRunCoordinator(),
+            quotaRetrySleeper: { delay in
+                await retryRecorder.recordAndCancel(delay: delay)
+            }
         )
 
         _ = PendingActionBuilder().markAsRead().forMessage("m1").pending().createdMinutesAgo(2).build(in: context)
@@ -396,11 +774,14 @@ final class PendingActionsManagerTests: XCTestCase {
         try testStack.saveViewContext()
 
         await manager.processAllPendingActions()
+        await retryRecorder.waitUntilScheduled()
 
         XCTAssertEqual(
             executor.executeCallCount, 1,
             "Quota exhaustion must stop the run - remaining actions would fail identically"
         )
+        let scheduledDelays = await retryRecorder.scheduledDelays
+        XCTAssertEqual(scheduledDelays, [15 * 60])
 
         context.refreshAllObjects()
         let request = PendingAction.fetchRequest()
@@ -409,9 +790,394 @@ final class PendingActionsManagerTests: XCTestCase {
         XCTAssertEqual(actions.map(\.status), ["pending", "pending"], "Quota exhaustion is not a verdict on the actions")
         XCTAssertEqual(actions.map(\.retryCount), [0, 0], "Quota exhaustion must not burn retry budget toward abandonment")
     }
+
+    func testScheduledProcessing_quotaExhaustionDoesNotHotLoop() async throws {
+        let executor = QuotaExhaustedActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+
+        await manager.queueAction(type: .markRead, messageId: "scheduled-quota-action")
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertEqual(
+            executor.executeCallCount,
+            1,
+            "A quota-requeued row must not immediately reschedule itself"
+        )
+        context.refreshAllObjects()
+        let action = try XCTUnwrap(context.fetch(PendingAction.fetchRequest()).first)
+        XCTAssertEqual(action.status, "pending")
+        XCTAssertEqual(action.retryCount, 0)
+    }
+
+    func testScheduledProcessing_quotaExhaustionRetriesAfterBackoff() async throws {
+        let sleeper = ControlledQuotaRetrySleeper()
+        let executor = QuotaOnceThenSuccessActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            quotaRetryBaseDelay: 120,
+            quotaRetryMaximumDelay: 480,
+            quotaRetrySleeper: { delay in
+                await sleeper.sleep(for: delay)
+            }
+        )
+
+        await manager.queueAction(type: .markRead, messageId: "quota-retry-action")
+        await manager.waitUntilScheduledProcessingIsIdle()
+        await sleeper.waitUntilScheduled()
+
+        let delays = await sleeper.scheduledDelays
+        let firstAttemptMessageIds = await executor.executedMessageIds
+        XCTAssertEqual(delays, [120])
+        XCTAssertEqual(firstAttemptMessageIds, ["quota-retry-action"])
+
+        await sleeper.resume()
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            let attemptCount = await executor.executedMessageIds.count
+            if attemptCount >= 2 { break }
+            await Task.yield()
+        }
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        let finalMessageIds = await executor.executedMessageIds
+        XCTAssertEqual(
+            finalMessageIds,
+            ["quota-retry-action", "quota-retry-action"]
+        )
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
+    func testQuotaRetryDelay_usesExponentialBackoffWithCap() {
+        XCTAssertEqual(
+            PendingActionsManager.quotaRetryDelay(
+                forAttempt: 0,
+                baseDelay: 120,
+                maximumDelay: 480
+            ),
+            120
+        )
+        XCTAssertEqual(
+            PendingActionsManager.quotaRetryDelay(
+                forAttempt: 1,
+                baseDelay: 120,
+                maximumDelay: 480
+            ),
+            240
+        )
+        XCTAssertEqual(
+            PendingActionsManager.quotaRetryDelay(
+                forAttempt: 8,
+                baseDelay: 120,
+                maximumDelay: 480
+            ),
+            480
+        )
+    }
+
+    func testAccountTransitionResetsQuotaRetryBackoff() async throws {
+        let executor = QuotaExhaustedActionExecutor()
+        let retryRecorder = QuotaRetryScheduleRecorder()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            quotaRetryBaseDelay: 120,
+            quotaRetryMaximumDelay: 480,
+            quotaRetrySleeper: { delay in
+                await retryRecorder.recordAndCancel(delay: delay)
+            }
+        )
+
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("account-scoped-quota")
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await manager.processAllPendingActions()
+        await retryRecorder.waitUntilScheduled(count: 1)
+        await manager.resetQuotaRetryStateForAccountTransition()
+        await manager.processAllPendingActions()
+        await retryRecorder.waitUntilScheduled(count: 2)
+
+        let delays = await retryRecorder.scheduledDelays
+        XCTAssertEqual(
+            delays,
+            [120, 120],
+            "A new account must start at the base retry delay"
+        )
+    }
+
+    func testScheduledProcessing_quotaExhaustionDefersConcurrentEnqueueUntilBackoff() async throws {
+        let coordinator = SyncRunCoordinator()
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        let sleeper = ControlledQuotaRetrySleeper()
+        let executor = QuotaOnceThenSuccessActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator,
+            lifecycleHooks: PendingActionLifecycleHooks(
+                scheduledProcessingDidReleaseRun: {
+                    await lifecycleProbe.pauseAfterFirstScheduledProcessingRun()
+                }
+            ),
+            quotaRetryBaseDelay: 120,
+            quotaRetryMaximumDelay: 480,
+            quotaRetrySleeper: { delay in
+                await sleeper.sleep(for: delay)
+            }
+        )
+
+        await manager.queueAction(type: .markRead, messageId: "first-action")
+        await lifecycleProbe.waitUntilFirstScheduledProcessingRunPauses()
+
+        // The processing run has released the single-flight lease, but its
+        // quota outcome has not cleared pendingProcessTask yet. This enqueue's
+        // schedule request must be remembered without bypassing quota backoff.
+        await manager.queueAction(type: .archive, messageId: "concurrent-action")
+        await lifecycleProbe.resumeFirstScheduledProcessingRun()
+        await manager.waitUntilScheduledProcessingIsIdle()
+        await sleeper.waitUntilScheduled()
+
+        let messageIdsBeforeBackoff = await executor.executedMessageIds
+        let scheduledDelaysBeforeBackoff = await sleeper.scheduledDelays
+        XCTAssertEqual(
+            messageIdsBeforeBackoff,
+            ["first-action"],
+            "A concurrent enqueue must not trigger an immediate quota retry"
+        )
+        XCTAssertEqual(
+            scheduledDelaysBeforeBackoff,
+            [120],
+            "Concurrent work must retain exactly one bounded quota retry"
+        )
+
+        context.refreshAllObjects()
+        let pendingBeforeBackoff = try context.fetch(PendingAction.fetchRequest())
+        XCTAssertEqual(pendingBeforeBackoff.count, 2)
+        XCTAssertTrue(pendingBeforeBackoff.allSatisfy { $0.status == "pending" })
+        XCTAssertTrue(pendingBeforeBackoff.allSatisfy { $0.retryCount == 0 })
+
+        await sleeper.resume()
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            let attemptCount = await executor.executedMessageIds.count
+            if attemptCount >= 3 { break }
+            await Task.yield()
+        }
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        let finalMessageIds = await executor.executedMessageIds
+        let finalScheduledDelays = await sleeper.scheduledDelays
+        XCTAssertEqual(
+            finalMessageIds,
+            ["first-action", "first-action", "concurrent-action"]
+        )
+        XCTAssertEqual(finalScheduledDelays, [120])
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
+    func testScheduledProcessing_quotaExhaustionOfflineReconnectStillWaitsForBackoff() async throws {
+        let networkMonitor = ControllableNetworkMonitor(isConnected: true)
+        let sleeper = ControlledQuotaRetrySleeper()
+        let executor = QuotaOnceThenSuccessActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: networkMonitor,
+            syncRunCoordinator: SyncRunCoordinator(),
+            lifecycleHooks: PendingActionLifecycleHooks(
+                scheduledProcessingDidReleaseRun: {
+                    if await executor.executedMessageIds.count == 1 {
+                        networkMonitor.setConnected(false)
+                    }
+                }
+            ),
+            quotaRetryBaseDelay: 120,
+            quotaRetryMaximumDelay: 480,
+            quotaRetrySleeper: { delay in
+                await sleeper.sleep(for: delay)
+            }
+        )
+
+        await manager.queueAction(type: .markRead, messageId: "offline-quota-action")
+        await manager.waitUntilScheduledProcessingIsIdle()
+        await sleeper.waitUntilScheduled()
+
+        let attemptsBeforeReconnect = await executor.executedMessageIds
+        let delaysBeforeReconnect = await sleeper.scheduledDelays
+        XCTAssertFalse(networkMonitor.isConnected)
+        XCTAssertEqual(attemptsBeforeReconnect, ["offline-quota-action"])
+        XCTAssertEqual(delaysBeforeReconnect, [120])
+
+        networkMonitor.setConnected(true)
+        // Drain an explicit request too, proving both the reconnect callback
+        // and a concurrent caller remain behind the same quota timer.
+        await manager.processAllPendingActions()
+
+        let attemptsAfterReconnect = await executor.executedMessageIds
+        let delaysAfterReconnect = await sleeper.scheduledDelays
+        XCTAssertEqual(
+            attemptsAfterReconnect,
+            ["offline-quota-action"],
+            "Reconnect before quota expiry must not execute immediately"
+        )
+        XCTAssertEqual(
+            delaysAfterReconnect,
+            [120],
+            "Reconnect must preserve exactly one quota retry"
+        )
+
+        await sleeper.resume()
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            let attemptCount = await executor.executedMessageIds.count
+            if attemptCount >= 2 { break }
+            await Task.yield()
+        }
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        let finalAttempts = await executor.executedMessageIds
+        let finalDelays = await sleeper.scheduledDelays
+        XCTAssertEqual(
+            finalAttempts,
+            ["offline-quota-action", "offline-quota-action"]
+        )
+        XCTAssertEqual(finalDelays, [120])
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
+    func testQuiescenceCancelsSuspendedScheduledExecutorThenProcessingResumes() async throws {
+        let coordinator = SyncRunCoordinator()
+        let executor = SuspendedCancellableActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator
+        )
+
+        await manager.queueAction(type: .archive, messageId: "cancel-during-teardown")
+        await executor.waitUntilStarted()
+
+        await coordinator.beginQuiescence()
+
+        let wasCancelled = await executor.wasCancelled
+        let activeRunKind = await coordinator.activeRunKind()
+        let accountWorkRequest = await coordinator.makeAccountWorkRequest()
+        XCTAssertTrue(wasCancelled)
+        XCTAssertNil(activeRunKind)
+        XCTAssertNil(accountWorkRequest)
+
+        context.refreshAllObjects()
+        let action = try XCTUnwrap(context.fetch(PendingAction.fetchRequest()).first)
+        XCTAssertEqual(action.status, "pending")
+        XCTAssertEqual(action.retryCount, 0)
+
+        await coordinator.endQuiescence()
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        let executeCallCount = await executor.executeCallCount
+        XCTAssertEqual(executeCallCount, 2)
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
+    func testRetryAbandonedActionReleasesMutationRunBeforeProcessing() async throws {
+        let coordinator = SyncRunCoordinator()
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        let executor = LeaseObservingActionExecutor(
+            coordinator: coordinator,
+            lifecycleProbe: lifecycleProbe
+        )
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator,
+            lifecycleHooks: PendingActionLifecycleHooks(
+                retryMutationDidResetAction: { syncRun in
+                    await lifecycleProbe.recordRetryMutationRun(syncRun)
+                }
+            )
+        )
+        let abandonedAction = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("retry-after-release")
+            .withStatus("abandoned")
+            .withRetryCount(5)
+            .build(in: context)
+        try testStack.saveViewContext()
+        let objectID = abandonedAction.objectID
+
+        await manager.retryAbandonedAction(objectID: objectID)
+
+        let activeRunKind = await coordinator.activeRunKind()
+        let executedMessageIds = await executor.executedMessageIds
+        let mutationRunWasActiveAtExecutorEntry = await executor.mutationRunWasActiveAtEntry
+        XCTAssertEqual(executedMessageIds, ["retry-after-release"])
+        XCTAssertEqual(
+            mutationRunWasActiveAtExecutorEntry,
+            false,
+            "The reset mutation lease must be released before executor entry"
+        )
+        XCTAssertNil(activeRunKind)
+    }
 }
 
-// MARK: - Quota test doubles
+// MARK: - Account-scoped failure test doubles
+
+private final class AccountScopedFailureOnceActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private let error: APIError
+    private var _executedMessageIds: [String] = []
+
+    init(error: APIError) {
+        self.error = error
+    }
+
+    var executedMessageIds: [String] {
+        lock.withLock { _executedMessageIds }
+    }
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        let shouldThrow = lock.withLock {
+            if let messageId {
+                _executedMessageIds.append(messageId)
+            }
+            return _executedMessageIds.count == 1
+        }
+
+        if shouldThrow {
+            throw error
+        }
+    }
+}
 
 private final class QuotaExhaustedActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
     private let lock = NSLock()
@@ -432,9 +1198,271 @@ private final class QuotaExhaustedActionExecutor: ActionExecutorProtocol, @unche
     }
 }
 
+private actor QuotaOnceThenSuccessActionExecutor: ActionExecutorProtocol {
+    private(set) var executedMessageIds: [String] = []
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        if let messageId {
+            executedMessageIds.append(messageId)
+        }
+        if executedMessageIds.count == 1 {
+            throw APIError.quotaExhausted("Daily Limit Exceeded")
+        }
+    }
+}
+
+private actor ControlledQuotaRetrySleeper {
+    private(set) var scheduledDelays: [TimeInterval] = []
+    private var didSchedule = false
+    private var scheduleWaiters: [CheckedContinuation<Void, Never>] = []
+    private var sleepContinuation: CheckedContinuation<Bool, Never>?
+
+    func sleep(for delay: TimeInterval) async -> Bool {
+        scheduledDelays.append(delay)
+        didSchedule = true
+        let waiters = scheduleWaiters
+        scheduleWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        return await withCheckedContinuation { continuation in
+            sleepContinuation = continuation
+        }
+    }
+
+    func waitUntilScheduled() async {
+        guard !didSchedule else { return }
+        await withCheckedContinuation { continuation in
+            scheduleWaiters.append(continuation)
+        }
+    }
+
+    func resume() {
+        sleepContinuation?.resume(returning: true)
+        sleepContinuation = nil
+    }
+}
+
+private actor QuotaRetryScheduleRecorder {
+    private(set) var scheduledDelays: [TimeInterval] = []
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func recordAndCancel(delay: TimeInterval) -> Bool {
+        scheduledDelays.append(delay)
+        let currentWaiters = waiters
+        waiters.removeAll(keepingCapacity: false)
+        currentWaiters.forEach { $0.resume() }
+        return false
+    }
+
+    func waitUntilScheduled(count: Int = 1) async {
+        guard scheduledDelays.count < count else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+}
+
+private final class RecordingActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _executedMessageIds: [String] = []
+
+    var executedMessageIds: [String] {
+        lock.withLock { _executedMessageIds }
+    }
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        if let messageId {
+            lock.withLock { _executedMessageIds.append(messageId) }
+        }
+    }
+}
+
+private actor LeaseObservingActionExecutor: ActionExecutorProtocol {
+    private let coordinator: SyncRunCoordinator
+    private let lifecycleProbe: PendingActionLifecycleProbe
+
+    private(set) var executedMessageIds: [String] = []
+    private(set) var mutationRunWasActiveAtEntry: Bool?
+
+    init(
+        coordinator: SyncRunCoordinator,
+        lifecycleProbe: PendingActionLifecycleProbe
+    ) {
+        self.coordinator = coordinator
+        self.lifecycleProbe = lifecycleProbe
+    }
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        guard let mutationRun = await lifecycleProbe.retryMutationRun else {
+            return
+        }
+
+        mutationRunWasActiveAtEntry = await coordinator.isActiveRun(mutationRun)
+        if let messageId {
+            executedMessageIds.append(messageId)
+        }
+    }
+}
+
+private actor PendingActionLifecycleProbe {
+    enum StoreGeneration: Equatable {
+        case original
+        case replacement
+    }
+
+    private var storeGeneration: StoreGeneration = .original
+    private var didObserveScheduledProcessingWait = false
+    private var scheduledProcessingWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didPauseAfterFirstScheduledProcessingRun = false
+    private var firstScheduledProcessingRunPauseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstScheduledProcessingRunResumeContinuation: CheckedContinuation<Void, Never>?
+    private(set) var contextCreationGenerations: [StoreGeneration] = []
+    private(set) var retryMutationRun: SyncRun?
+
+    func recordScheduledProcessingWait() {
+        didObserveScheduledProcessingWait = true
+        let waiters = scheduledProcessingWaiters
+        scheduledProcessingWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+    }
+
+    func waitUntilScheduledProcessingWaits() async {
+        guard !didObserveScheduledProcessingWait else { return }
+        await withCheckedContinuation { continuation in
+            scheduledProcessingWaiters.append(continuation)
+        }
+    }
+
+    func replaceStoreGeneration() {
+        storeGeneration = .replacement
+    }
+
+    func recordScheduledProcessingContextCreation() {
+        contextCreationGenerations.append(storeGeneration)
+    }
+
+    func recordRetryMutationRun(_ syncRun: SyncRun) {
+        retryMutationRun = syncRun
+    }
+
+    func pauseAfterFirstScheduledProcessingRun() async {
+        guard !didPauseAfterFirstScheduledProcessingRun else { return }
+        didPauseAfterFirstScheduledProcessingRun = true
+
+        let waiters = firstScheduledProcessingRunPauseWaiters
+        firstScheduledProcessingRunPauseWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        await withCheckedContinuation { continuation in
+            firstScheduledProcessingRunResumeContinuation = continuation
+        }
+    }
+
+    func waitUntilFirstScheduledProcessingRunPauses() async {
+        guard !didPauseAfterFirstScheduledProcessingRun else { return }
+        await withCheckedContinuation { continuation in
+            firstScheduledProcessingRunPauseWaiters.append(continuation)
+        }
+    }
+
+    func resumeFirstScheduledProcessingRun() {
+        firstScheduledProcessingRunResumeContinuation?.resume()
+        firstScheduledProcessingRunResumeContinuation = nil
+    }
+}
+
+private actor SuspendedCancellableActionExecutor: ActionExecutorProtocol {
+    private var didStart = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var wasCancelled = false
+    private(set) var executeCallCount = 0
+
+    func waitUntilStarted() async {
+        guard !didStart else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        executeCallCount += 1
+        guard executeCallCount == 1 else { return }
+
+        didStart = true
+        let waiters = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        do {
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+        } catch is CancellationError {
+            wasCancelled = true
+            throw CancellationError()
+        }
+    }
+}
+
 private final class AlwaysConnectedNetworkMonitor: NetworkMonitorProtocol {
     var isConnected: Bool { true }
     var onConnectivityChange: ((Bool) -> Void)?
     func start() {}
     func stop() {}
+}
+
+private final class NeverConnectedNetworkMonitor: NetworkMonitorProtocol {
+    var isConnected: Bool { false }
+    var onConnectivityChange: ((Bool) -> Void)?
+    func start() {}
+    func stop() {}
+}
+
+private final class ControllableNetworkMonitor: NetworkMonitorProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var connected: Bool
+    private var connectivityHandler: ((Bool) -> Void)?
+
+    init(isConnected: Bool) {
+        connected = isConnected
+    }
+
+    var isConnected: Bool {
+        lock.withLock { connected }
+    }
+
+    var onConnectivityChange: ((Bool) -> Void)? {
+        get { lock.withLock { connectivityHandler } }
+        set { lock.withLock { connectivityHandler = newValue } }
+    }
+
+    func start() {}
+    func stop() {}
+
+    func setConnected(_ isConnected: Bool) {
+        let handler = lock.withLock { () -> ((Bool) -> Void)? in
+            guard connected != isConnected else { return nil }
+            connected = isConnected
+            return connectivityHandler
+        }
+        handler?(isConnected)
+    }
 }

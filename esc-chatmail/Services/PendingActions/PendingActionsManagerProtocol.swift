@@ -13,6 +13,16 @@ protocol PendingActionsManagerProtocol: Actor {
     ///   - payload: Optional additional data for the action
     func queueAction(type: PendingAction.ActionType, messageId: String, payload: [String: Any]?) async
 
+    /// Queues an action while the caller owns the shared account-work run.
+    /// This keeps an optimistic local mutation and its durable enqueue inside
+    /// one teardown boundary without recursively acquiring the coordinator.
+    func queueAction(
+        type: PendingAction.ActionType,
+        messageId: String,
+        payload: [String: Any]?,
+        within syncRun: SyncRun
+    ) async
+
     /// Queues an action for an entire conversation (multiple messages).
     /// - Parameters:
     ///   - type: The type of action to perform
@@ -20,6 +30,14 @@ protocol PendingActionsManagerProtocol: Actor {
     ///     Execution for batch actions is driven by `messageIds`.
     ///   - messageIds: The Gmail message IDs in the conversation
     func queueConversationAction(type: PendingAction.ActionType, sourceConversationId: UUID, messageIds: [String]) async
+
+    /// Conversation-action counterpart to `queueAction(...within:)`.
+    func queueConversationAction(
+        type: PendingAction.ActionType,
+        sourceConversationId: UUID,
+        messageIds: [String],
+        within syncRun: SyncRun
+    ) async
 
     /// Processes all pending actions that are ready to be synced.
     /// Called automatically when network becomes available.
@@ -64,4 +82,28 @@ protocol PendingActionsManagerProtocol: Actor {
 
     /// Dismisses (deletes) all abandoned actions permanently.
     func dismissAllAbandonedActions() async
+}
+
+extension PendingActionsManagerProtocol {
+    func queueAction(
+        type: PendingAction.ActionType,
+        messageId: String,
+        payload: [String: Any]?,
+        within _: SyncRun
+    ) async {
+        await queueAction(type: type, messageId: messageId, payload: payload)
+    }
+
+    func queueConversationAction(
+        type: PendingAction.ActionType,
+        sourceConversationId: UUID,
+        messageIds: [String],
+        within _: SyncRun
+    ) async {
+        await queueConversationAction(
+            type: type,
+            sourceConversationId: sourceConversationId,
+            messageIds: messageIds
+        )
+    }
 }

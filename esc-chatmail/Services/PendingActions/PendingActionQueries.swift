@@ -3,13 +3,44 @@ import CoreData
 
 /// Extension containing query methods for PendingActionsManager.
 ///
-/// These methods provide read-only access to pending action state without
-/// modifying any data. They're used by UI and other services to check
-/// pending action status.
+/// Caller-initiated reads and mutations are generation-stamped so work that
+/// was requested for an old account cannot resume against a replacement
+/// persistent store after teardown.
 extension PendingActionsManager {
+
+    private func withPendingActionRun<Result>(
+        for accountWorkRequest: AccountWorkRequest,
+        operation: (SyncRun) async -> Result
+    ) async -> Result? {
+        guard let syncRun = await syncRunCoordinator.acquireRun(
+            kind: .pendingActions,
+            for: accountWorkRequest
+        ) else {
+            return nil
+        }
+
+        let result = await operation(syncRun)
+        await syncRunCoordinator.endRun(syncRun)
+        return result
+    }
 
     /// Returns the count of pending or failed actions that haven't exceeded retry limit.
     public func pendingActionCount() async -> Int {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return 0
+        }
+        return await pendingActionCount(accountWorkRequest: accountWorkRequest)
+    }
+
+    func pendingActionCount(accountWorkRequest: AccountWorkRequest) async -> Int {
+        await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            await self.pendingActionCount(within: syncRun)
+        } ?? 0
+    }
+
+    private func pendingActionCount(within syncRun: SyncRun) async -> Int {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return 0 }
+
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             let request = NSFetchRequest<NSNumber>(entityName: "PendingAction")
@@ -27,6 +58,37 @@ extension PendingActionsManager {
 
     /// Checks if there's a pending action for a specific message and type.
     public func hasPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async -> Bool {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return false
+        }
+        return await hasPendingAction(
+            forMessageId: messageId,
+            type: type,
+            accountWorkRequest: accountWorkRequest
+        )
+    }
+
+    func hasPendingAction(
+        forMessageId messageId: String,
+        type: PendingAction.ActionType,
+        accountWorkRequest: AccountWorkRequest
+    ) async -> Bool {
+        await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            await self.hasPendingAction(
+                forMessageId: messageId,
+                type: type,
+                within: syncRun
+            )
+        } ?? false
+    }
+
+    private func hasPendingAction(
+        forMessageId messageId: String,
+        type: PendingAction.ActionType,
+        within syncRun: SyncRun
+    ) async -> Bool {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return false }
+
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
@@ -58,6 +120,37 @@ extension PendingActionsManager {
 
     /// Cancels a pending action for a specific message and type.
     public func cancelPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return
+        }
+        await cancelPendingAction(
+            forMessageId: messageId,
+            type: type,
+            accountWorkRequest: accountWorkRequest
+        )
+    }
+
+    func cancelPendingAction(
+        forMessageId messageId: String,
+        type: PendingAction.ActionType,
+        accountWorkRequest: AccountWorkRequest
+    ) async {
+        _ = await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            await self.cancelPendingAction(
+                forMessageId: messageId,
+                type: type,
+                within: syncRun
+            )
+        }
+    }
+
+    private func cancelPendingAction(
+        forMessageId messageId: String,
+        type: PendingAction.ActionType,
+        within syncRun: SyncRun
+    ) async {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return }
+
         await MainActor.run {
             let context = coreDataStack.viewContext
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
@@ -82,6 +175,21 @@ extension PendingActionsManager {
 
     /// Returns the count of permanently failed (abandoned) actions.
     public func abandonedActionCount() async -> Int {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return 0
+        }
+        return await abandonedActionCount(accountWorkRequest: accountWorkRequest)
+    }
+
+    func abandonedActionCount(accountWorkRequest: AccountWorkRequest) async -> Int {
+        await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            await self.abandonedActionCount(within: syncRun)
+        } ?? 0
+    }
+
+    private func abandonedActionCount(within syncRun: SyncRun) async -> Int {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return 0 }
+
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             let request = NSFetchRequest<NSNumber>(entityName: "PendingAction")
@@ -99,6 +207,25 @@ extension PendingActionsManager {
 
     /// Returns all permanently failed (abandoned) actions.
     public func fetchAbandonedActions() async -> [AbandonedActionInfo] {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return []
+        }
+        return await fetchAbandonedActions(accountWorkRequest: accountWorkRequest)
+    }
+
+    func fetchAbandonedActions(
+        accountWorkRequest: AccountWorkRequest
+    ) async -> [AbandonedActionInfo] {
+        await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            await self.fetchAbandonedActions(within: syncRun)
+        } ?? []
+    }
+
+    private func fetchAbandonedActions(
+        within syncRun: SyncRun
+    ) async -> [AbandonedActionInfo] {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return [] }
+
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
@@ -130,30 +257,85 @@ extension PendingActionsManager {
 
     /// Retries an abandoned action by resetting its status and retry count.
     public func retryAbandonedAction(objectID: NSManagedObjectID) async {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return
+        }
+        await retryAbandonedAction(
+            objectID: objectID,
+            accountWorkRequest: accountWorkRequest
+        )
+    }
+
+    func retryAbandonedAction(
+        objectID: NSManagedObjectID,
+        accountWorkRequest: AccountWorkRequest
+    ) async {
+        let didReset = await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            let didReset = await self.resetAbandonedAction(
+                objectID: objectID,
+                within: syncRun
+            )
+            if didReset {
+                await self.lifecycleHooks.retryMutationDidResetAction?(syncRun)
+            }
+            return didReset
+        } ?? false
+
+        // Processing acquires its own cancellable run. Start it only after the
+        // mutation lease has been released to avoid recursive acquisition.
+        if didReset {
+            await processAllPendingActions()
+        }
+    }
+
+    private func resetAbandonedAction(
+        objectID: NSManagedObjectID,
+        within syncRun: SyncRun
+    ) async -> Bool {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return false }
+
         let context = coreDataStack.newBackgroundContext()
-        await context.perform {
+        return await context.perform {
             do {
                 guard let action = try context.existingObject(with: objectID) as? PendingAction else {
                     Log.warning("Abandoned action not found for retry", category: .sync)
-                    return
+                    return false
                 }
                 action.setValue("pending", forKey: "status")
                 action.setValue(Int16(0), forKey: "retryCount")
                 try context.save()
                 Log.info("Abandoned action reset for retry", category: .sync)
+                return true
             } catch {
                 Log.error("Failed to retry abandoned action", category: .sync, error: error)
+                return false
             }
         }
-
-        // Trigger processing of pending actions
-        await processAllPendingActions()
     }
 
     /// Retries all abandoned actions by resetting their status and retry count.
     public func retryAllAbandonedActions() async {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return
+        }
+        await retryAllAbandonedActions(accountWorkRequest: accountWorkRequest)
+    }
+
+    func retryAllAbandonedActions(accountWorkRequest: AccountWorkRequest) async {
+        let didReset = await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            await self.resetAllAbandonedActions(within: syncRun)
+        } ?? false
+
+        if didReset {
+            await processAllPendingActions()
+        }
+    }
+
+    private func resetAllAbandonedActions(within syncRun: SyncRun) async -> Bool {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return false }
+
         let context = coreDataStack.newBackgroundContext()
-        await context.perform {
+        return await context.perform {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
             request.predicate = NSPredicate(format: "status == %@", "abandoned")
 
@@ -165,17 +347,40 @@ extension PendingActionsManager {
                 }
                 try context.save()
                 Log.info("Reset \(actions.count) abandoned actions for retry", category: .sync)
+                return true
             } catch {
                 Log.error("Failed to retry all abandoned actions", category: .sync, error: error)
+                return false
             }
         }
-
-        // Trigger processing of pending actions
-        await processAllPendingActions()
     }
 
     /// Dismisses (deletes) an abandoned action permanently.
     public func dismissAbandonedAction(objectID: NSManagedObjectID) async {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return
+        }
+        await dismissAbandonedAction(
+            objectID: objectID,
+            accountWorkRequest: accountWorkRequest
+        )
+    }
+
+    func dismissAbandonedAction(
+        objectID: NSManagedObjectID,
+        accountWorkRequest: AccountWorkRequest
+    ) async {
+        _ = await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            await self.dismissAbandonedAction(objectID: objectID, within: syncRun)
+        }
+    }
+
+    private func dismissAbandonedAction(
+        objectID: NSManagedObjectID,
+        within syncRun: SyncRun
+    ) async {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return }
+
         let context = coreDataStack.newBackgroundContext()
         await context.perform {
             do {
@@ -194,6 +399,21 @@ extension PendingActionsManager {
 
     /// Dismisses (deletes) all abandoned actions permanently.
     public func dismissAllAbandonedActions() async {
+        guard let accountWorkRequest = await syncRunCoordinator.makeAccountWorkRequest() else {
+            return
+        }
+        await dismissAllAbandonedActions(accountWorkRequest: accountWorkRequest)
+    }
+
+    func dismissAllAbandonedActions(accountWorkRequest: AccountWorkRequest) async {
+        _ = await withPendingActionRun(for: accountWorkRequest) { syncRun in
+            await self.dismissAllAbandonedActions(within: syncRun)
+        }
+    }
+
+    private func dismissAllAbandonedActions(within syncRun: SyncRun) async {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return }
+
         let context = coreDataStack.newBackgroundContext()
         await context.perform {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")

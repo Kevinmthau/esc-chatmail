@@ -2,12 +2,20 @@ import Foundation
 import CoreData
 
 /// Whether the pending-action processing loop may continue after an action's
-/// outcome. `.stopRun` means the failure is account-scoped (Gmail quota
-/// exhausted): every remaining action would fail identically, burning its
-/// retry budget toward abandonment for a condition no action caused.
+/// outcome. `.stopRun` means the failure is account-scoped (authentication,
+/// revoked credentials, or Gmail quota exhaustion): every remaining action
+/// would fail identically, burning its retry budget toward abandonment for a
+/// condition no action caused.
 enum PendingActionRunDisposition {
     case continueRun
-    case stopRun
+    case stopRun(PendingActionRunStopReason)
+}
+
+enum PendingActionRunStopReason {
+    case authenticationError
+    case credentialsRevoked
+    case quotaExhausted
+    case cancelled
 }
 
 /// Extension containing action processing logic for PendingActionsManager.
@@ -18,14 +26,14 @@ extension PendingActionsManager {
 
     /// Resets stuck processing actions to failed so they can be retried.
     func recoverStuckProcessingActions() async {
-        guard await hasStuckProcessingActions() else { return }
-
-        let syncRun = await acquirePendingActionRun()
-        _ = await recoverStuckProcessingActionsUnlocked()
+        guard let syncRun = await acquirePendingActionRun() else { return }
+        _ = await recoverStuckProcessingActions(within: syncRun)
         await syncRunCoordinator.endRun(syncRun)
     }
 
-    func recoverStuckProcessingActionsUnlocked() async -> Bool {
+    func recoverStuckProcessingActions(within syncRun: SyncRun) async -> Bool {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return false }
+
         let context = coreDataStack.newBackgroundContext()
         let cutoffDate = Date().addingTimeInterval(-processingStaleInterval)
 
@@ -55,7 +63,9 @@ extension PendingActionsManager {
         }
     }
 
-    func hasActionsNeedingProcessing() async -> Bool {
+    func hasActionsNeedingProcessing(within syncRun: SyncRun) async -> Bool {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else { return false }
+
         let context = coreDataStack.newBackgroundContext()
         let cutoffDate = Date().addingTimeInterval(-processingStaleInterval)
         let maxRetries = self.maxRetries
@@ -66,24 +76,6 @@ extension PendingActionsManager {
                 maxRetries: maxRetries,
                 staleProcessingCutoff: cutoffDate
             )
-        }
-    }
-
-    func hasStuckProcessingActions() async -> Bool {
-        let context = coreDataStack.newBackgroundContext()
-        let cutoffDate = Date().addingTimeInterval(-processingStaleInterval)
-
-        return await context.perform {
-            let request = NSFetchRequest<NSFetchRequestResult>(entityName: "PendingAction")
-            request.predicate = Self.stuckProcessingPredicate(staleProcessingCutoff: cutoffDate)
-            request.fetchLimit = 1
-
-            do {
-                return (try context.count(for: request)) > 0
-            } catch {
-                Log.error("Failed to count stuck pending actions", category: .sync, error: error)
-                return false
-            }
         }
     }
 
@@ -194,14 +186,23 @@ extension PendingActionsManager {
         } catch {
             Log.error("Failed to process action: \(error)", category: .sync)
 
-            if let apiError = error as? APIError, case .quotaExhausted = apiError {
+            if error is CancellationError || Task.isCancelled {
+                // Account teardown cancels the registered processing task.
+                // Cancellation is not a verdict on the user's action and must
+                // not consume retry budget.
+                await updateActionStatus(objectID: objectID, status: "pending", context: context)
+                return .stopRun(.cancelled)
+            }
+
+            if let apiError = error as? APIError,
+               let stopReason = pendingActionRunStopReason(for: apiError) {
                 // Account-scoped, not a verdict on this action: requeue it
                 // untouched (no retry-budget burn, no abandonment) and stop
-                // the run; a later cycle retries after the quota window
-                // resets.
-                Log.warning("Gmail quota exhausted - requeueing action and stopping the pending-action run", category: .sync)
+                // the run. Authentication recovery or a later quota cycle
+                // can retry it under a usable account session.
+                Log.warning("Gmail account unavailable - requeueing action and stopping the pending-action run", category: .sync)
                 await updateActionStatus(objectID: objectID, status: "pending", context: context)
-                return .stopRun
+                return .stopRun(stopReason)
             }
 
             let shouldRetry = shouldRetryError(error)
@@ -222,10 +223,23 @@ extension PendingActionsManager {
                 // - After 3rd failure (retryCount was 2): 2^2 * base = 8s, etc.
                 let delay = baseRetryDelay * pow(2.0, Double(retryCount))
                 guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000)) else {
-                    return .stopRun
+                    return .stopRun(.cancelled)
                 }
             }
             return .continueRun
+        }
+    }
+
+    private func pendingActionRunStopReason(for error: APIError) -> PendingActionRunStopReason? {
+        switch error {
+        case .authenticationError:
+            return .authenticationError
+        case .credentialsRevoked:
+            return .credentialsRevoked
+        case .quotaExhausted:
+            return .quotaExhausted
+        default:
+            return nil
         }
     }
 

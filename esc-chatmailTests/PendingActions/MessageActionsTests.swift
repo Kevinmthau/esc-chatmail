@@ -10,6 +10,7 @@ final class MessageActionsTests: XCTestCase {
     private var pendingActionsManager: MockPendingActionsManager!
     private var messageActions: MessageActions!
     private var rollupMutationSerializer: ConversationRollupMutationSerializer!
+    private var syncRunCoordinator: SyncRunCoordinator!
     private var context: NSManagedObjectContext!
 
     override func setUp() {
@@ -17,10 +18,12 @@ final class MessageActionsTests: XCTestCase {
         coreDataStack = TestCoreDataStack()
         pendingActionsManager = MockPendingActionsManager()
         rollupMutationSerializer = ConversationRollupMutationSerializer()
+        syncRunCoordinator = SyncRunCoordinator()
         messageActions = MessageActions(
             coreDataStack: coreDataStack,
             pendingActionsManager: pendingActionsManager,
-            rollupMutationSerializer: rollupMutationSerializer
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
         )
         context = coreDataStack.viewContext
     }
@@ -29,6 +32,7 @@ final class MessageActionsTests: XCTestCase {
         context = nil
         messageActions = nil
         rollupMutationSerializer = nil
+        syncRunCoordinator = nil
         pendingActionsManager = nil
         coreDataStack = nil
         super.tearDown()
@@ -85,6 +89,152 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertTrue(queuedActions.isEmpty)
     }
 
+    /// Revert-check: fails (deadlocks until the XCTest timeout) if
+    /// `MessageActions.performAccountWork` goes back to
+    /// `SyncRunCoordinator.acquireRun(kind:for:)`. `acquireRun` parks on the
+    /// single-flight boundary, which the held foreground run owns for the whole
+    /// test, so `star(message:)` would never return. The non-exclusive
+    /// `acquireAccountWorkLease(kind:for:)` grants immediately.
+    func testStarCompletesWhileForegroundSyncRunIsActive() async throws {
+        let starredLabel = LabelBuilder().starred().build(in: context)
+        let message = MessageBuilder()
+            .withId("star-during-sync")
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        guard let blockingRun = await syncRunCoordinator.beginRun(kind: .foregroundIncremental) else {
+            return XCTFail("Expected a foreground run to hold the exclusive boundary")
+        }
+
+        // Deliberately un-wrapped and un-released: the local mutation must
+        // complete while the unrelated sync run still owns the boundary.
+        await messageActions.star(message: message)
+
+        XCTAssertTrue(message.labels?.contains(starredLabel) == true)
+        XCTAssertNotNil(message.localModifiedAt)
+
+        let queuedActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queuedActions.map { $0.messageId }, ["star-during-sync"])
+        XCTAssertEqual(queuedActions.map { $0.type }, [.star])
+
+        await syncRunCoordinator.endRun(blockingRun)
+    }
+
+    /// Revert-check: fails if `acquireAccountWorkLease` drops its `!isQuiescing`
+    /// guard (or if `performAccountWork` stops consulting the coordinator at
+    /// all). Once account teardown owns the boundary, no optimistic mutation may
+    /// touch the store that is about to be replaced.
+    func testStarRequestedDuringAccountTransitionDoesNotMutateOrQueue() async throws {
+        let starredLabel = LabelBuilder().starred().build(in: context)
+        let message = MessageBuilder()
+            .withId("stale-star-during-sign-out")
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        // Nothing holds the boundary, so teardown acquires it immediately.
+        await syncRunCoordinator.beginQuiescence()
+
+        await messageActions.star(message: message)
+
+        XCTAssertFalse(message.labels?.contains(starredLabel) == true)
+        XCTAssertNil(message.localModifiedAt)
+        let queuedActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertTrue(queuedActions.isEmpty)
+
+        await syncRunCoordinator.endQuiescence()
+    }
+
+    /// Revert-check: fails if `beginQuiescence()` stops draining non-exclusive
+    /// leases (i.e. if its `while activeRun != nil || !accountWorkLeases.isEmpty`
+    /// loop loses the lease half, or if `endRun` stops calling
+    /// `resumeBoundaryDrainWaitersIfDrained()` for a lease). Teardown would then
+    /// return while a message action is still mid-mutation.
+    func testAccountTransitionWaitsForInFlightMessageActionLease() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(0)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("lease-held-during-sign-out")
+            .read()
+            .inConversation(conversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        let gatingManager = BlockingReadStatePendingActionsManager()
+        let actions = MessageActions(
+            coreDataStack: coreDataStack,
+            pendingActionsManager: gatingManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+
+        let actionTask = Task {
+            await actions.markAsUnread(message: message)
+        }
+        // The gate opens inside `queueAction`, which runs while the account-work
+        // lease is still held.
+        await gatingManager.waitUntilMarkUnreadQueueStarts()
+
+        let transitionCompleted = AccountBoundaryFlag()
+        let transitionTask = Task {
+            await self.syncRunCoordinator.beginQuiescence()
+            transitionCompleted.set()
+        }
+        await waitUntilAccountTransitionStarts()
+
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(
+            transitionCompleted.isSet,
+            "Account teardown must wait for an outstanding account-work lease"
+        )
+
+        await gatingManager.releaseMarkUnreadQueue()
+        await actionTask.value
+        await transitionTask.value
+        XCTAssertTrue(transitionCompleted.isSet)
+
+        await syncRunCoordinator.endQuiescence()
+    }
+
+    /// Revert-check: fails if `acquireAccountWorkLease` regains the
+    /// `!Task.isCancelled` guard that `acquireRun` has (or if
+    /// `performAccountWork` reverts to `acquireRun`, which both checks
+    /// cancellation and parks behind the held foreground run). A UI action from
+    /// a cancelled SwiftUI task must still apply and enqueue.
+    func testArchiveConversationSurvivesCallerCancellationDuringSync() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("archive-during-sync")
+            .inConversation(conversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        guard let blockingRun = await syncRunCoordinator.beginRun(kind: .foregroundIncremental) else {
+            return XCTFail("Expected a foreground run to hold the exclusive boundary")
+        }
+
+        let task = Task { @MainActor in
+            await self.messageActions.archiveConversation(conversation: conversation)
+        }
+        task.cancel()
+        await task.value
+
+        XCTAssertNotNil(conversation.archivedAt)
+        let queuedConversationActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queuedConversationActions.map { $0.type }, [.archiveConversation])
+
+        await syncRunCoordinator.endRun(blockingRun)
+    }
+
     func testStar_doesNotQueuePendingActionWhenLocalSaveFails() async throws {
         _ = LabelBuilder().starred().build(in: context)
         let message = MessageBuilder()
@@ -95,7 +245,8 @@ final class MessageActionsTests: XCTestCase {
         let failingStack = FailingSaveCoreDataStack(wrapping: coreDataStack)
         let actions = MessageActions(
             coreDataStack: failingStack,
-            pendingActionsManager: pendingActionsManager
+            pendingActionsManager: pendingActionsManager,
+            syncRunCoordinator: syncRunCoordinator
         )
 
         await actions.star(message: message)
@@ -348,7 +499,8 @@ final class MessageActionsTests: XCTestCase {
         let actions = MessageActions(
             coreDataStack: coreDataStack,
             pendingActionsManager: orderingManager,
-            rollupMutationSerializer: serializer
+            rollupMutationSerializer: serializer,
+            syncRunCoordinator: syncRunCoordinator
         )
         let messageObjectID = message.objectID
         let conversationObjectID = conversation.objectID
@@ -635,7 +787,8 @@ final class MessageActionsTests: XCTestCase {
             pendingActionsManager: pendingActionsManager,
             unreadInboxMessageCounter: { _, _ in
                 throw MessageActionsTestError.unreadCountFailed
-            }
+            },
+            syncRunCoordinator: syncRunCoordinator
         )
         let messageIDs = failingActions.snapshotUnreadInboxMessageObjectIDs(
             conversationID: conversation.id
@@ -670,6 +823,42 @@ final class MessageActionsTests: XCTestCase {
         }
 
         XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+
+    private func waitUntilAccountTransitionStarts(
+        timeout: TimeInterval = 2.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if await syncRunCoordinator.makeAccountWorkRequest() == nil {
+                return
+            }
+            await Task.yield()
+        }
+
+        XCTFail("Timed out waiting for account transition", file: file, line: line)
+    }
+}
+
+/// Minimal cross-task boolean so a test can assert that account teardown has
+/// *not* completed yet without introducing a data race on a captured `var`.
+private final class AccountBoundaryFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
     }
 }
 
