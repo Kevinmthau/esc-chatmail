@@ -6,13 +6,29 @@ struct ChatReplyBar: View {
     @Binding var replyingTo: Message?
     @Binding var attachments: [Attachment]
     let conversation: Conversation
+    let isSending: Bool
     let onSend: () async -> Bool
     var focusBinding: FocusState<Bool>.Binding
-    @State private var isSending = false
+    @State private var isProcessingAttachments = false
     @Environment(\.managedObjectContext) private var viewContext
     
     var canSend: Bool {
-        (!replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && !isSending
+        Self.isSendEnabled(
+            replyText: replyText,
+            hasAttachments: !attachments.isEmpty,
+            isSending: isSending,
+            isProcessingAttachments: isProcessingAttachments
+        )
+    }
+
+    static func isSendEnabled(
+        replyText: String,
+        hasAttachments: Bool,
+        isSending: Bool,
+        isProcessingAttachments: Bool
+    ) -> Bool {
+        let hasContent = !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments
+        return hasContent && !isSending && !isProcessingAttachments
     }
     
     var body: some View {
@@ -28,7 +44,10 @@ struct ChatReplyBar: View {
             }
             
             HStack(alignment: .bottom, spacing: 8) {
-                AttachmentPicker(attachments: $attachments)
+                AttachmentPicker(
+                    attachments: $attachments,
+                    isProcessing: $isProcessingAttachments
+                )
                 
                 textField
                 
@@ -38,6 +57,7 @@ struct ChatReplyBar: View {
             .padding(.vertical, 8)
             .background(Color(UIColor.systemBackground))
         }
+        .disabled(isSending)
     }
     
     @ViewBuilder
@@ -89,9 +109,7 @@ struct ChatReplyBar: View {
         SendButton(isEnabled: canSend, isSending: isSending) {
             if canSend {
                 Task {
-                    isSending = true
                     _ = await onSend()
-                    isSending = false
                 }
             }
         }
@@ -150,16 +168,21 @@ struct AttachmentThumbnail: View {
             .offset(x: 4, y: -4)
         }
         .onAppear {
-            thumbnailLoader.load(attachmentId: attachment.id, previewPath: attachment.previewURL)
+            thumbnailLoader.load(
+                attachmentId: attachment.id,
+                messageId: attachment.message?.id,
+                previewPath: attachment.previewURL
+            )
         }
         .onDisappear {
             thumbnailLoader.cancel()
         }
         .onChange(of: attachment.previewURL) { _, newValue in
-            if newValue != nil && thumbnailLoader.image == nil {
-                thumbnailLoader.reset()
-                thumbnailLoader.load(attachmentId: attachment.id, previewPath: newValue)
-            }
+            thumbnailLoader.load(
+                attachmentId: attachment.id,
+                messageId: attachment.message?.id,
+                previewPath: newValue
+            )
         }
     }
 }

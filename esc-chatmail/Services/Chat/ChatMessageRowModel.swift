@@ -217,6 +217,7 @@ struct ChatMessageRowModel: Equatable {
     let attachments: [ChatMessageAttachmentModel]
     let isSendingLocalAttachments: Bool
     let hasFailedLocalAttachmentUploads: Bool
+    let outboundSendDeliveryState: OutboundSendDeliveryState
     let forwardedDisplaySubject: String?
     let outgoingForwardedDisplayContent: ForwardedMessageDisplayContent?
     /// Precomputed so MessageBubble body recomputation does not hash message text.
@@ -289,6 +290,17 @@ struct ChatMessageRowModel: Equatable {
 enum ChatMessageRowModelMapper {
     @MainActor
     static func map(_ message: Message) -> ChatMessageRowModel {
+        map(
+            message,
+            outboundSendDeliveryState: OutboundSendDeliveryState.resolve(for: message)
+        )
+    }
+
+    @MainActor
+    private static func map(
+        _ message: Message,
+        outboundSendDeliveryState: OutboundSendDeliveryState
+    ) -> ChatMessageRowModel {
         let senderParticipant = message.participants?
             .first(where: { $0.participantKind == .from })
         let senderPerson = senderParticipant?.person
@@ -331,6 +343,7 @@ enum ChatMessageRowModelMapper {
             attachments: message.attachmentsArray.map(map),
             isSendingLocalAttachments: message.isSendingLocalAttachments,
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads,
+            outboundSendDeliveryState: outboundSendDeliveryState,
             forwardedDisplaySubject: message.forwardedDisplaySubject,
             outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent,
             loadSignatureComponents: MessageBubbleLoadSignatureComponents(
@@ -350,7 +363,96 @@ enum ChatMessageRowModelMapper {
 
     @MainActor
     static func map(_ messages: [Message]) -> [ChatMessageRowModel] {
-        messages.map(map)
+        map(messages) { context, optimisticMessageIDs in
+            let request = OutboundSendMutationRecord.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "id IN %@",
+                Array(optimisticMessageIDs)
+            )
+            request.fetchBatchSize = optimisticMessageIDs.count
+            request.includesPendingChanges = true
+            return try context.fetch(request)
+        }
+    }
+
+    /// Testable batch seam: production passes one fetch per managed-object
+    /// context, regardless of how many optimistic rows are in the window.
+    @MainActor
+    static func map(
+        _ messages: [Message],
+        fetchOutboundSendMutationRecords: (
+            _ context: NSManagedObjectContext,
+            _ optimisticMessageIDs: Set<String>
+        ) throws -> [OutboundSendMutationRecord]
+    ) -> [ChatMessageRowModel] {
+        struct CandidateGroup {
+            let context: NSManagedObjectContext
+            var messages: [Message]
+            var optimisticMessageIDs: Set<String>
+        }
+
+        var groups: [ObjectIdentifier: CandidateGroup] = [:]
+        for message in messages {
+            guard let optimisticMessageID = OutboundSendDeliveryState
+                .localOptimisticMessageID(for: message),
+                  let context = message.managedObjectContext else {
+                continue
+            }
+
+            let contextID = ObjectIdentifier(context)
+            if var group = groups[contextID] {
+                group.messages.append(message)
+                group.optimisticMessageIDs.insert(optimisticMessageID)
+                groups[contextID] = group
+            } else {
+                groups[contextID] = CandidateGroup(
+                    context: context,
+                    messages: [message],
+                    optimisticMessageIDs: [optimisticMessageID]
+                )
+            }
+        }
+
+        var statesByMessageObjectID: [
+            NSManagedObjectID: OutboundSendDeliveryState
+        ] = [:]
+        for group in groups.values {
+            let records: [OutboundSendMutationRecord]
+            do {
+                records = try fetchOutboundSendMutationRecords(
+                    group.context,
+                    group.optimisticMessageIDs
+                )
+            } catch {
+                Log.error(
+                    "Failed to batch-fetch outbound send delivery states",
+                    category: .coreData,
+                    error: error
+                )
+                continue
+            }
+
+            var recordsByID: [String: OutboundSendMutationRecord] = [:]
+            for record in records where recordsByID[record.id] == nil {
+                recordsByID[record.id] = record
+            }
+            for message in group.messages {
+                guard let record = recordsByID[message.id] else { continue }
+                statesByMessageObjectID[message.objectID] =
+                    OutboundSendRemoteState.deliveryState(
+                        messageID: record.remoteCommittedMessageId,
+                        threadID: record.remoteCommittedThreadId
+                    )
+            }
+        }
+
+        return messages.map { message in
+            map(
+                message,
+                outboundSendDeliveryState:
+                    statesByMessageObjectID[message.objectID] ?? .none
+            )
+        }
     }
 
     private static func map(_ attachment: Attachment) -> ChatMessageAttachmentModel {

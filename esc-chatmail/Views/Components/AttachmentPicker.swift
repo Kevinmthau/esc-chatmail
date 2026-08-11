@@ -3,14 +3,33 @@ import PhotosUI
 import UniformTypeIdentifiers
 import CoreData
 
+private struct PickerPendingAttachmentWrite {
+    var originalPath: String?
+    var previewPath: String?
+}
+
+enum AttachmentImportFinalizationResult: Equatable {
+    case finalized
+    case placeholderRemoved
+    case cancelled
+
+    static func resolve(didFinalize: Bool, generationIsActive: Bool) -> Self {
+        if didFinalize {
+            return .finalized
+        }
+        return generationIsActive ? .placeholderRemoved : .cancelled
+    }
+}
+
 struct AttachmentPicker: View {
     @Binding var attachments: [Attachment]
+    @Binding var isProcessing: Bool
     @Environment(\.managedObjectContext) private var viewContext
     @State private var showPhotoPicker = false
     @State private var showDocumentPicker = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
-    @State private var isProcessing = false
     @State private var photoProcessingTask: Task<Void, Never>?
+    @State private var photoProcessingID: UUID?
     
     let maxAttachmentSize: Int64 = 25 * 1024 * 1024 // 25 MB
     
@@ -39,25 +58,46 @@ struct AttachmentPicker: View {
             matching: .images
         )
         .onChange(of: selectedPhotoItems) { oldValue, newValue in
+            guard !newValue.isEmpty else { return }
             photoProcessingTask?.cancel()
-            photoProcessingTask = Task {
-                await processPhotoSelections(newValue)
+            let processingID = UUID()
+            photoProcessingID = processingID
+            isProcessing = true
+            photoProcessingTask = AttachmentAccountWorkRegistry.shared.startOperation { generation in
+                await processPhotoSelections(
+                    newValue,
+                    generation: generation,
+                    processingID: processingID
+                )
+            }
+            if photoProcessingTask == nil {
+                finishPhotoProcessing(processingID: processingID)
             }
         }
         .onDisappear {
             photoProcessingTask?.cancel()
         }
         .sheet(isPresented: $showDocumentPicker) {
-            DocumentPicker(attachments: $attachments)
+            DocumentPicker(
+                attachments: $attachments,
+                onProcessingChanged: { isProcessing = $0 }
+            )
         }
     }
     
-    private func processPhotoSelections(_ items: [PhotosPickerItem]) async {
-        isProcessing = true
-        defer { isProcessing = false }
+    private func processPhotoSelections(
+        _ items: [PhotosPickerItem],
+        generation: AttachmentAccountWorkGeneration,
+        processingID: UUID
+    ) async {
+        defer { finishPhotoProcessing(processingID: processingID) }
+        guard generation.isActive else { return }
+        var pendingWrites: [String: PickerPendingAttachmentWrite] = [:]
         
         for item in items {
+            guard generation.isActive else { break }
             guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+            guard generation.isActive else { break }
             
             // Process image
             let (processedData, size) = ImageProcessor.processImage(data: data)
@@ -73,24 +113,41 @@ struct AttachmentPicker: View {
             let ext = AttachmentPaths.fileExtension(for: "image/jpeg")
             let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: ext)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: localId)
+            pendingWrites[localId] = PickerPendingAttachmentWrite(
+                originalPath: originalPath,
+                previewPath: nil
+            )
             
             // Save files
-            guard AttachmentPaths.saveData(finalData, to: originalPath) else { continue }
+            guard generation.isActive else { break }
+            guard AttachmentPaths.saveData(finalData, to: originalPath) else {
+                AttachmentPaths.deleteFile(at: originalPath)
+                pendingWrites.removeValue(forKey: localId)
+                continue
+            }
             
             // Generate preview
+            var savedPreviewPath: String?
             if let thumbnailData = ImageProcessor.generateThumbnail(from: finalData, mimeType: "image/jpeg") {
-                _ = AttachmentPaths.saveData(thumbnailData, to: previewPath)
+                pendingWrites[localId]?.previewPath = previewPath
+                if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
+                    savedPreviewPath = previewPath
+                } else {
+                    AttachmentPaths.deleteFile(at: previewPath)
+                    pendingWrites[localId]?.previewPath = nil
+                }
             }
             
             // Create attachment entity
-            await MainActor.run {
+            let didAppend = await MainActor.run { () -> Bool in
+                guard generation.isActive else { return false }
                 let attachment = Attachment(context: viewContext)
                 attachment.setValue(localId, forKey: "id")
                 attachment.setValue("photo_\(Date().timeIntervalSince1970).jpg", forKey: "filename")
                 attachment.setValue("image/jpeg", forKey: "mimeType")
                 attachment.setValue(Int64(finalData.count), forKey: "byteSize")
                 attachment.setValue(originalPath, forKey: "localURL")
-                attachment.setValue(previewPath, forKey: "previewURL")
+                attachment.setValue(savedPreviewPath, forKey: "previewURL")
                 attachment.setValue("queued", forKey: "stateRaw")
                 
                 if let size = size {
@@ -99,10 +156,30 @@ struct AttachmentPicker: View {
                 }
                 
                 attachments.append(attachment)
+                return true
+            }
+            if didAppend {
+                pendingWrites.removeValue(forKey: localId)
+            } else {
+                break
             }
         }
+
+        for write in pendingWrites.values {
+            AttachmentPaths.deleteFile(at: write.originalPath)
+            AttachmentPaths.deleteFile(at: write.previewPath)
+        }
         
-        selectedPhotoItems = []
+        if generation.isActive {
+            selectedPhotoItems = []
+        }
+    }
+
+    private func finishPhotoProcessing(processingID: UUID) {
+        guard photoProcessingID == processingID else { return }
+        photoProcessingID = nil
+        photoProcessingTask = nil
+        isProcessing = false
     }
 }
 
@@ -110,6 +187,15 @@ struct DocumentPicker: UIViewControllerRepresentable {
     @Binding var attachments: [Attachment]
     @Environment(\.presentationMode) var presentationMode
     @Environment(\.managedObjectContext) private var viewContext
+    let onProcessingChanged: @MainActor (Bool) -> Void
+
+    init(
+        attachments: Binding<[Attachment]>,
+        onProcessingChanged: @escaping @MainActor (Bool) -> Void = { _ in }
+    ) {
+        self._attachments = attachments
+        self.onProcessingChanged = onProcessingChanged
+    }
     
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [
@@ -130,6 +216,7 @@ struct DocumentPicker: UIViewControllerRepresentable {
         Coordinator(self)
     }
     
+    @MainActor
     class Coordinator: NSObject, UIDocumentPickerDelegate {
         let parent: DocumentPicker
         
@@ -138,8 +225,19 @@ struct DocumentPicker: UIViewControllerRepresentable {
         }
         
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            Task {
-                await processDocuments(urls)
+            parent.onProcessingChanged(true)
+            // The representable is dismissed immediately below, so the
+            // registered operation must retain its coordinator until selected
+            // documents finish importing. Account teardown still owns its
+            // cancellation and drain through the registry.
+            let operation = AttachmentAccountWorkRegistry.shared.startDetachedOperation { [self] generation in
+                await processDocuments(urls, generation: generation)
+                await MainActor.run {
+                    parent.onProcessingChanged(false)
+                }
+            }
+            if operation == nil {
+                parent.onProcessingChanged(false)
             }
             parent.presentationMode.wrappedValue.dismiss()
         }
@@ -148,8 +246,14 @@ struct DocumentPicker: UIViewControllerRepresentable {
             parent.presentationMode.wrappedValue.dismiss()
         }
         
-        private func processDocuments(_ urls: [URL]) async {
-            for url in urls {
+        private nonisolated func processDocuments(
+            _ urls: [URL],
+            generation: AttachmentAccountWorkGeneration
+        ) async {
+            var pendingWrites: [String: PickerPendingAttachmentWrite] = [:]
+
+            documentLoop: for url in urls {
+                guard generation.isActive else { break }
                 guard url.startAccessingSecurityScopedResource() else { continue }
                 defer { url.stopAccessingSecurityScopedResource() }
 
@@ -161,19 +265,27 @@ struct DocumentPicker: UIViewControllerRepresentable {
                 let previewPath = AttachmentPaths.previewPath(idOrUUID: localId)
 
                 // Add placeholder immediately so all selected files appear right away.
-                await MainActor.run {
+                let didAddPlaceholder = await MainActor.run { () -> Bool in
+                    guard generation.isActive else { return false }
                     let attachment = Attachment(context: parent.viewContext)
                     attachment.id = localId
                     attachment.filename = filename
                     attachment.mimeType = mimeType
                     attachment.stateRaw = Attachment.State.queued.rawValue
                     parent.attachments.append(attachment)
+                    return true
                 }
+                guard didAddPlaceholder else { break }
+                pendingWrites[localId] = PickerPendingAttachmentWrite()
 
                 guard let data = try? Data(contentsOf: url) else {
-                    removeAttachmentPlaceholder(localId: localId)
+                    await cleanupPendingWrite(
+                        pendingWrites.removeValue(forKey: localId),
+                        localId: localId
+                    )
                     continue
                 }
+                guard generation.isActive else { break }
 
                 // Process based on type
                 var processedData = data
@@ -199,33 +311,77 @@ struct DocumentPicker: UIViewControllerRepresentable {
                 }
 
                 // Save files
+                pendingWrites[localId]?.originalPath = originalPath
+                guard generation.isActive else { break }
                 guard AttachmentPaths.saveData(processedData, to: originalPath) else {
-                    removeAttachmentPlaceholder(localId: localId)
+                    await cleanupPendingWrite(
+                        pendingWrites.removeValue(forKey: localId),
+                        localId: localId
+                    )
                     continue
                 }
 
                 // Generate preview
                 var savedPreviewPath: String?
                 if let thumbnailData = ImageProcessor.generateThumbnail(from: processedData, mimeType: mimeType) {
+                    pendingWrites[localId]?.previewPath = previewPath
                     if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
                         savedPreviewPath = previewPath
+                    } else {
+                        AttachmentPaths.deleteFile(at: previewPath)
+                        pendingWrites[localId]?.previewPath = nil
                     }
                 }
 
                 // Fill in finalized metadata for the placeholder attachment.
-                await MainActor.run {
+                let finalizedByteSize = Int64(processedData.count)
+                let finalizedPreviewPath = savedPreviewPath
+                let finalizedWidth = width ?? 0
+                let finalizedHeight = height ?? 0
+                let finalizedPageCount = pageCount ?? 0
+                let didFinalize = await MainActor.run { () -> Bool in
+                    guard generation.isActive else { return false }
                     guard let attachment = parent.attachments.first(where: { $0.id == localId }) else {
-                        return
+                        return false
                     }
 
-                    attachment.byteSize = Int64(processedData.count)
+                    attachment.byteSize = finalizedByteSize
                     attachment.localURL = originalPath
-                    attachment.previewURL = savedPreviewPath
-                    attachment.width = width ?? 0
-                    attachment.height = height ?? 0
-                    attachment.pageCount = pageCount ?? 0
+                    attachment.previewURL = finalizedPreviewPath
+                    attachment.width = finalizedWidth
+                    attachment.height = finalizedHeight
+                    attachment.pageCount = finalizedPageCount
+                    return true
+                }
+                switch AttachmentImportFinalizationResult.resolve(
+                    didFinalize: didFinalize,
+                    generationIsActive: generation.isActive
+                ) {
+                case .finalized:
+                    pendingWrites.removeValue(forKey: localId)
+                case .placeholderRemoved:
+                    await cleanupPendingWrite(
+                        pendingWrites.removeValue(forKey: localId),
+                        localId: localId
+                    )
+                    continue documentLoop
+                case .cancelled:
+                    break documentLoop
                 }
             }
+
+            for (localId, write) in pendingWrites {
+                await cleanupPendingWrite(write, localId: localId)
+            }
+        }
+
+        private nonisolated func cleanupPendingWrite(
+            _ write: PickerPendingAttachmentWrite?,
+            localId: String
+        ) async {
+            AttachmentPaths.deleteFile(at: write?.originalPath)
+            AttachmentPaths.deleteFile(at: write?.previewPath)
+            await removeAttachmentPlaceholder(localId: localId)
         }
 
         @MainActor
@@ -239,7 +395,7 @@ struct DocumentPicker: UIViewControllerRepresentable {
             parent.viewContext.delete(attachment)
         }
 
-        private func mimeType(for pathExtension: String) -> String {
+        private nonisolated func mimeType(for pathExtension: String) -> String {
             switch pathExtension.lowercased() {
             case "pdf": return "application/pdf"
             case "jpg", "jpeg": return "image/jpeg"

@@ -1491,8 +1491,8 @@ final class VirtualScrollState: ObservableObject {
     private func handleViewContextChange(_ notification: Notification) {
         // objectsDidChange fires for every merged sync save while a chat is
         // open. Bail out on type checks alone before any pass below faults
-        // objects: only Message/Attachment changes and Person display-name
-        // updates can affect this window.
+        // objects: only Message/Attachment changes, outbound delivery markers,
+        // and Person display-name updates can affect this window.
         guard Self.isRelevantChatContextChange(notification.userInfo) else { return }
 
         let insertedMessageIDs = visibleInsertedMessageIDsForCurrentConversation(
@@ -1919,6 +1919,22 @@ final class VirtualScrollState: ObservableObject {
             affectedMessageIDs.insert(messageID)
         }
 
+        let changedOutboundSendIDs = Set(contextObjects(
+            forKeys: [NSInsertedObjectsKey, NSUpdatedObjectsKey, NSRefreshedObjectsKey],
+            in: notification
+        ).compactMap { object in
+            (object as? OutboundSendMutationRecord)?.id
+        })
+        if !changedOutboundSendIDs.isEmpty {
+            for messageID in cachedMessageIDs {
+                guard let row = resolveCachedRow(for: messageID),
+                      changedOutboundSendIDs.contains(row.id) else {
+                    continue
+                }
+                affectedMessageIDs.insert(messageID)
+            }
+        }
+
         let changedPersonEmails = Set(contextObjects(
             forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
             in: notification
@@ -2099,7 +2115,9 @@ final class VirtualScrollState: ObservableObject {
             guard let objects = userInfo[key] as? Set<NSManagedObject> else { continue }
             let includesPersons = personKeys.contains(key)
             for object in objects {
-                if object is Message || object is Attachment {
+                if object is Message ||
+                    object is Attachment ||
+                    object is OutboundSendMutationRecord {
                     return true
                 }
                 if includesPersons, object is Person {
@@ -2380,10 +2398,11 @@ final class VirtualScrollState: ObservableObject {
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
 
         let fetchedMessages = try viewContext.fetch(request)
+        let fetchedRows = ChatMessageRowModelMapper.map(fetchedMessages)
         let resolvedRows: [NSManagedObjectID: ChatMessageRowModel] = Dictionary(
-            uniqueKeysWithValues: fetchedMessages.compactMap { message in
+            uniqueKeysWithValues: zip(fetchedMessages, fetchedRows).compactMap { message, row in
                 guard !message.isDeleted else { return nil }
-                return (message.objectID, ChatMessageRowModelMapper.map(message))
+                return (message.objectID, row)
             }
         )
 
@@ -2444,7 +2463,29 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func resolveCachedRows(for messageIDs: [NSManagedObjectID]) -> [ChatMessageRowModel] {
-        messageIDs.compactMap(resolveCachedRow)
+        let uncachedMessageIDs = messageIDs.filter {
+            resolvedRowsByID[$0] == nil
+        }
+        if !uncachedMessageIDs.isEmpty {
+            do {
+                _ = try resolveRowsOnViewContextThrowing(
+                    for: uncachedMessageIDs
+                )
+            } catch {
+                Log.error(
+                    "Failed to batch-resolve cached chat rows",
+                    category: .coreData,
+                    error: error
+                )
+                // Preserve the prior best-effort behavior on an exceptional
+                // batch failure; the normal scroll path remains batched.
+                for objectID in uncachedMessageIDs {
+                    _ = resolveCachedRow(for: objectID)
+                }
+            }
+        }
+
+        return messageIDs.compactMap { resolvedRowsByID[$0] }
     }
 
     private func resolveCachedRow(for objectID: NSManagedObjectID) -> ChatMessageRowModel? {

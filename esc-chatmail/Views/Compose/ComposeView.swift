@@ -127,6 +127,7 @@ struct ComposeView: View {
                 recipientSection.autocompleteOverlay
             }
             .accessibilityIdentifier("ComposeViewRoot")
+            .disabled(viewModel.isSending)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if !usesIMessagePresentation {
@@ -139,6 +140,7 @@ struct ComposeView: View {
                         Button("Cancel") {
                             dismiss()
                         }
+                        .disabled(viewModel.isSending)
                     }
 
                     ToolbarItem(placement: .navigationBarTrailing) {
@@ -155,6 +157,7 @@ struct ComposeView: View {
                 }
             }
         }
+        .interactiveDismissDisabled(viewModel.isSending)
         .alert("Error", isPresented: $viewModel.showError) {
             Button("OK") { }
         } message: {

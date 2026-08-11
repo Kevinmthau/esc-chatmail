@@ -1,6 +1,11 @@
 import SwiftUI
 import PhotosUI
 
+private struct ComposePendingAttachmentWrite {
+    var originalPath: String?
+    var previewPath: String?
+}
+
 /// Message-style input bar with attachment buttons, text field, and send button
 struct ComposeInputBar: View {
     enum Style {
@@ -18,8 +23,9 @@ struct ComposeInputBar: View {
     @State private var showDocumentPicker = false
     @State private var showAttachmentOptions = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
-    @State private var isProcessing = false
     @State private var photoProcessingTask: Task<Void, Never>?
+    @State private var photoProcessingID: UUID?
+    @State private var documentProcessingID = UUID()
 
     private let maxAttachmentSize: Int64 = 25 * 1024 * 1024 // 25 MB
     private var iMessageButtonBackground: Color {
@@ -90,7 +96,7 @@ struct ComposeInputBar: View {
                         .foregroundColor(.secondary)
                         .frame(width: 34, height: 38)
                 } else {
-                    SendButton(isEnabled: viewModel.canSend && !isProcessing, isSending: viewModel.isSending) {
+                    SendButton(isEnabled: viewModel.canSend, isSending: viewModel.isSending) {
                         Task {
                             if await viewModel.send() {
                                 onSendSuccess()
@@ -104,6 +110,7 @@ struct ComposeInputBar: View {
             .padding(.bottom, style == .iMessage ? 10 : 8)
             .background(Color(.systemBackground))
         }
+        .disabled(viewModel.isSending)
         .photosPicker(
             isPresented: $showPhotoPicker,
             selection: $selectedPhotoItems,
@@ -111,9 +118,20 @@ struct ComposeInputBar: View {
             matching: .images
         )
         .onChange(of: selectedPhotoItems) { oldValue, newValue in
+            guard !newValue.isEmpty else { return }
             photoProcessingTask?.cancel()
-            photoProcessingTask = Task {
-                await processPhotoSelections(newValue)
+            let processingID = UUID()
+            photoProcessingID = processingID
+            viewModel.setAttachmentImportInProgress(true, id: processingID)
+            photoProcessingTask = AttachmentAccountWorkRegistry.shared.startOperation { generation in
+                await processPhotoSelections(
+                    newValue,
+                    generation: generation,
+                    processingID: processingID
+                )
+            }
+            if photoProcessingTask == nil {
+                finishPhotoProcessing(processingID: processingID)
             }
         }
         .onDisappear {
@@ -123,7 +141,12 @@ struct ComposeInputBar: View {
             DocumentPicker(attachments: Binding(
                 get: { viewModel.attachmentManager.attachments },
                 set: { viewModel.attachmentManager.attachments = $0 }
-            ))
+            ), onProcessingChanged: { isProcessing in
+                viewModel.setAttachmentImportInProgress(
+                    isProcessing,
+                    id: documentProcessingID
+                )
+            })
         }
         .confirmationDialog("Add Attachment", isPresented: $showAttachmentOptions) {
             Button("Photo Library") {
@@ -143,7 +166,7 @@ struct ComposeInputBar: View {
                 .font(.system(size: 20))
                 .foregroundColor(.blue)
         }
-        .disabled(isProcessing)
+        .disabled(viewModel.isImportingAttachments || viewModel.isSending)
         .accessibilityLabel("Attach photo")
 
         Button(action: { showDocumentPicker = true }) {
@@ -151,7 +174,7 @@ struct ComposeInputBar: View {
                 .font(.system(size: 20))
                 .foregroundColor(.blue)
         }
-        .disabled(isProcessing)
+        .disabled(viewModel.isImportingAttachments || viewModel.isSending)
         .accessibilityLabel("Attach document")
     }
 
@@ -173,17 +196,21 @@ struct ComposeInputBar: View {
                         )
                 )
         }
-        .disabled(isProcessing)
+        .disabled(viewModel.isImportingAttachments || viewModel.isSending)
         .accessibilityLabel("Add attachment")
     }
 
-    private func processPhotoSelections(_ items: [PhotosPickerItem]) async {
-        guard !items.isEmpty else { return }
-        isProcessing = true
-        defer { isProcessing = false }
+    private func processPhotoSelections(
+        _ items: [PhotosPickerItem],
+        generation: AttachmentAccountWorkGeneration,
+        processingID: UUID
+    ) async {
+        defer { finishPhotoProcessing(processingID: processingID) }
+        guard !items.isEmpty, generation.isActive else { return }
 
         let placeholderIds = await MainActor.run { () -> [String] in
-            items.enumerated().map { index, _ in
+            guard generation.isActive else { return [] }
+            return items.enumerated().map { index, _ in
                 let localId = "local_\(UUID().uuidString)"
                 let attachment = Attachment(context: viewContext)
                 attachment.id = localId
@@ -194,23 +221,33 @@ struct ComposeInputBar: View {
                 return localId
             }
         }
+        var pendingWrites = Dictionary(
+            uniqueKeysWithValues: placeholderIds.map {
+                ($0, ComposePendingAttachmentWrite())
+            }
+        )
 
-        for (item, localId) in zip(items, placeholderIds) {
+        photoLoop: for (item, localId) in zip(items, placeholderIds) {
+            guard generation.isActive else { break }
             guard let data = try? await item.loadTransferable(type: Data.self) else {
                 removeAttachmentPlaceholder(localId: localId)
+                pendingWrites.removeValue(forKey: localId)
                 continue
             }
+            guard generation.isActive else { break }
 
             // Process image
             let (processedData, size) = ImageProcessor.processImage(data: data)
             guard let finalData = processedData else {
                 removeAttachmentPlaceholder(localId: localId)
+                pendingWrites.removeValue(forKey: localId)
                 continue
             }
 
             // Check size limit
             if finalData.count > maxAttachmentSize {
                 removeAttachmentPlaceholder(localId: localId)
+                pendingWrites.removeValue(forKey: localId)
                 continue
             }
 
@@ -218,25 +255,34 @@ struct ComposeInputBar: View {
             let ext = AttachmentPaths.fileExtension(for: "image/jpeg")
             let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: ext)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: localId)
+            pendingWrites[localId]?.originalPath = originalPath
 
             // Save files
+            guard generation.isActive else { break }
             guard AttachmentPaths.saveData(finalData, to: originalPath) else {
+                AttachmentPaths.deleteFile(at: originalPath)
                 removeAttachmentPlaceholder(localId: localId)
+                pendingWrites.removeValue(forKey: localId)
                 continue
             }
 
             // Generate preview
             var savedPreviewPath: String?
             if let thumbnailData = ImageProcessor.generateThumbnail(from: finalData, mimeType: "image/jpeg") {
+                pendingWrites[localId]?.previewPath = previewPath
                 if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
                     savedPreviewPath = previewPath
+                } else {
+                    AttachmentPaths.deleteFile(at: previewPath)
+                    pendingWrites[localId]?.previewPath = nil
                 }
             }
 
             // Update placeholder attachment with finalized metadata.
-            await MainActor.run {
+            let didFinalize = await MainActor.run { () -> Bool in
+                guard generation.isActive else { return false }
                 guard let attachment = viewModel.attachments.first(where: { $0.id == localId }) else {
-                    return
+                    return false
                 }
 
                 attachment.byteSize = Int64(finalData.count)
@@ -247,10 +293,43 @@ struct ComposeInputBar: View {
                     attachment.width = Int16(clamping: Int(size.width.rounded()))
                     attachment.height = Int16(clamping: Int(size.height.rounded()))
                 }
+                return true
+            }
+            switch AttachmentImportFinalizationResult.resolve(
+                didFinalize: didFinalize,
+                generationIsActive: generation.isActive
+            ) {
+            case .finalized:
+                pendingWrites.removeValue(forKey: localId)
+            case .placeholderRemoved:
+                let write = pendingWrites.removeValue(forKey: localId)
+                AttachmentPaths.deleteFile(at: write?.originalPath)
+                AttachmentPaths.deleteFile(at: write?.previewPath)
+                continue photoLoop
+            case .cancelled:
+                break photoLoop
             }
         }
 
-        selectedPhotoItems = []
+        // Cancellation may arrive after placeholders or files were created.
+        // Unwind all unresolved artifacts before the registered operation
+        // returns so account teardown's drain covers this cleanup as well.
+        for (localId, write) in pendingWrites {
+            AttachmentPaths.deleteFile(at: write.originalPath)
+            AttachmentPaths.deleteFile(at: write.previewPath)
+            removeAttachmentPlaceholder(localId: localId)
+        }
+
+        if generation.isActive {
+            selectedPhotoItems = []
+        }
+    }
+
+    private func finishPhotoProcessing(processingID: UUID) {
+        viewModel.setAttachmentImportInProgress(false, id: processingID)
+        guard photoProcessingID == processingID else { return }
+        photoProcessingID = nil
+        photoProcessingTask = nil
     }
 
     @MainActor

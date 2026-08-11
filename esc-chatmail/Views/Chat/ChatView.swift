@@ -8,6 +8,8 @@ struct ChatView: View {
     @StateObject private var viewModel: ChatViewModel
     @State private var presentedSheetDestination: ChatDestination?
     @State private var composerHasDraft = false
+    // Mirror only send ownership so typing does not invalidate the full thread.
+    @State private var replySendIsInFlight = false
     private let chatDependencies: ChatDependencies
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
 
@@ -61,6 +63,8 @@ struct ChatView: View {
         )
         .navigationTitle(navigationDisplayName)
         .navigationBarTitleDisplayMode(.inline)
+        // This screen owns the only draft copy until transmission admission.
+        .navigationBarBackButtonHidden(!allowsConversationExit)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Text(navigationDisplayName)
@@ -80,22 +84,17 @@ struct ChatView: View {
 
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Menu {
-                    Button(action: {
-                        viewModel.archiveConversation()
-                        dismiss()
-                    }) {
+                    Button(action: archiveConversationAndDismiss) {
                         SwiftUI.Label("Archive", systemImage: "archivebox")
                     }
 
-                    Button(action: {
-                        viewModel.reportSpam()
-                        dismiss()
-                    }) {
+                    Button(action: reportSpamAndDismiss) {
                         SwiftUI.Label("Report Spam", systemImage: "exclamationmark.triangle")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
+                .disabled(!allowsConversationExit)
             }
         }
         .sheet(item: activeDestinationBinding, onDismiss: {
@@ -144,7 +143,7 @@ struct ChatView: View {
         }
         .alert(item: $viewModel.sendErrorAlert) { alert in
             Alert(
-                title: Text("Couldn’t Send Reply"),
+                title: Text(alert.title),
                 message: Text(alert.message),
                 dismissButton: .default(Text("OK"))
             )
@@ -153,6 +152,11 @@ struct ChatView: View {
         .onReceive(viewModel.composerState.hasDraftContentPublisher) { hasDraft in
             if composerHasDraft != hasDraft {
                 composerHasDraft = hasDraft
+            }
+        }
+        .onReceive(viewModel.composerState.$isSending) { isSending in
+            if replySendIsInFlight != isSending {
+                replySendIsInFlight = isSending
             }
         }
         .onChange(of: shouldDismissDrainedConversation, initial: true) { _, shouldDismiss in
@@ -222,17 +226,26 @@ struct ChatView: View {
         conversationType != .list
     }
 
+    static func allowsConversationExit(isSending: Bool) -> Bool {
+        !isSending
+    }
+
     static func shouldDismissDrainedConversation(
         hidden: Bool,
         archivedAt: Date?,
         lastMessageDate: Date?,
-        hasDraft: Bool
+        hasDraft: Bool,
+        isSending: Bool
     ) -> Bool {
         ChatViewModel.isDrainedConversation(
             hidden: hidden,
             archivedAt: archivedAt,
             lastMessageDate: lastMessageDate
-        ) && !hasDraft
+        ) && !hasDraft && allowsConversationExit(isSending: isSending)
+    }
+
+    private var allowsConversationExit: Bool {
+        Self.allowsConversationExit(isSending: replySendIsInFlight)
     }
 
     private var shouldDismissDrainedConversation: Bool {
@@ -240,8 +253,27 @@ struct ChatView: View {
             hidden: conversation.hidden,
             archivedAt: conversation.archivedAt,
             lastMessageDate: conversation.lastMessageDate,
-            hasDraft: composerHasDraft
+            hasDraft: composerHasDraft,
+            isSending: replySendIsInFlight
         )
+    }
+
+    private func archiveConversationAndDismiss() {
+        guard Self.allowsConversationExit(
+            isSending: viewModel.composerState.isSending
+        ) else { return }
+
+        viewModel.archiveConversation()
+        dismiss()
+    }
+
+    private func reportSpamAndDismiss() {
+        guard Self.allowsConversationExit(
+            isSending: viewModel.composerState.isSending
+        ) else { return }
+
+        viewModel.reportSpam()
+        dismiss()
     }
 
     private var activeDestination: ChatDestination? {

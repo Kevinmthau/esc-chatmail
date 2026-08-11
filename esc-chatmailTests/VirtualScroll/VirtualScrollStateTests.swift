@@ -3227,6 +3227,74 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    func testVisibleMessages_refreshWhenOutboundDeliveryMarkerChanges() async throws {
+        let optimisticID = UUID().uuidString
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let message = MessageBuilder()
+            .withId(optimisticID)
+            .withBody("Preserve this body")
+            .withDate(Date(timeIntervalSince1970: 1))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        message.messageId = MimeBuilder.messageId(
+            forOptimisticMessageID: optimisticID
+        )
+        try viewContext.save()
+
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: VirtualScrollConfiguration(
+                visibleItemCount: 1,
+                bufferSize: 0,
+                pageSize: 1,
+                preloadThreshold: 1
+            ),
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.visibleMessages.first?.outboundSendDeliveryState == OutboundSendDeliveryState.none &&
+                !state.isLoadingMore
+        }
+
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = optimisticID
+        record.createdAt = Date()
+        try viewContext.save()
+
+        await waitUntil {
+            state.visibleMessages.first?.outboundSendDeliveryState == .sending
+        }
+
+        record.remoteCommittedMessageId = OutboundSendRemoteState.inFlightMessageID
+        try viewContext.save()
+
+        await waitUntil {
+            state.visibleMessages.first?.outboundSendDeliveryState == .sending
+        }
+
+        record.remoteCommittedMessageId = OutboundSendRemoteState.ambiguousMessageID
+        try viewContext.save()
+
+        await waitUntil {
+            state.visibleMessages.first?.outboundSendDeliveryState == .deliveryUnknown
+        }
+
+        record.remoteCommittedMessageId = OutboundSendRemoteState.notSentMessageID
+        try viewContext.save()
+
+        await waitUntil {
+            state.visibleMessages.first?.outboundSendDeliveryState == .notSent
+        }
+    }
+
     func testReloadedWindow_keepsPendingOptimisticMessageVisible() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 8)
         let configuration = VirtualScrollConfiguration(
@@ -3523,6 +3591,13 @@ final class VirtualScrollStateTests: XCTestCase {
         ))
         XCTAssertTrue(VirtualScrollState.isRelevantChatContextChange(
             [NSUpdatedObjectsKey: Set<NSManagedObject>([attachment])]
+        ))
+
+        let outboundRecord = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        outboundRecord.id = message.id
+        outboundRecord.createdAt = Date()
+        XCTAssertTrue(VirtualScrollState.isRelevantChatContextChange(
+            [NSUpdatedObjectsKey: Set<NSManagedObject>([outboundRecord])]
         ))
     }
 

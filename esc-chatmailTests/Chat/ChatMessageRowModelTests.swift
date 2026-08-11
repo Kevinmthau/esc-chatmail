@@ -151,4 +151,150 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertEqual(request.headerDisplayName, "Header Sender")
         XCTAssertNil(request.personDisplayName)
     }
+
+    func testMap_surfacesDurableOutboundDeliveryStates() throws {
+        let optimisticID = UUID().uuidString
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let message = MessageBuilder()
+            .withId(optimisticID)
+            .withBody("Preserved user-authored text")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        message.messageId = MimeBuilder.messageId(
+            forOptimisticMessageID: optimisticID
+        )
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = optimisticID
+        record.createdAt = Date()
+        try viewContext.save()
+
+        XCTAssertEqual(
+            ChatMessageRowModelMapper.map(message).outboundSendDeliveryState,
+            .sending
+        )
+
+        record.remoteCommittedMessageId = OutboundSendRemoteState.inFlightMessageID
+        try viewContext.save()
+        XCTAssertEqual(
+            ChatMessageRowModelMapper.map(message).outboundSendDeliveryState,
+            .sending
+        )
+
+        record.remoteCommittedMessageId = OutboundSendRemoteState.notSentMessageID
+        try viewContext.save()
+        XCTAssertEqual(
+            ChatMessageRowModelMapper.map(message).outboundSendDeliveryState,
+            .notSent
+        )
+
+        record.remoteCommittedMessageId = OutboundSendRemoteState.ambiguousMessageID
+        try viewContext.save()
+        XCTAssertEqual(
+            ChatMessageRowModelMapper.map(message).outboundSendDeliveryState,
+            .deliveryUnknown
+        )
+    }
+
+    func testMapMessages_batchFetchesOutboundDeliveryStateOnceForMultipleRows() throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let stateMarkers: [String?] = [
+            nil,
+            OutboundSendRemoteState.notSentMessageID,
+            OutboundSendRemoteState.ambiguousMessageID
+        ]
+        var messages: [Message] = []
+        var optimisticIDs = Set<String>()
+
+        for marker in stateMarkers {
+            let optimisticID = UUID().uuidString
+            optimisticIDs.insert(optimisticID)
+            let message = MessageBuilder()
+                .withId(optimisticID)
+                .withBody("Preserved body \(optimisticID)")
+                .fromMe()
+                .inConversation(conversation)
+                .build(in: viewContext)
+            message.messageId = MimeBuilder.messageId(
+                forOptimisticMessageID: optimisticID
+            )
+            let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+            record.id = optimisticID
+            record.createdAt = Date()
+            record.remoteCommittedMessageId = marker
+            messages.append(message)
+        }
+
+        let ordinaryMessage = MessageBuilder()
+            .withId("gmail-ordinary-sent-row")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        ordinaryMessage.messageId = "<ordinary@example.com>"
+        messages.append(ordinaryMessage)
+        try viewContext.save()
+
+        var fetchCount = 0
+        var requestedIDs = Set<String>()
+        let rows = ChatMessageRowModelMapper.map(
+            messages,
+            fetchOutboundSendMutationRecords: { context, ids in
+                fetchCount += 1
+                requestedIDs.formUnion(ids)
+                let request = OutboundSendMutationRecord.fetchRequest()
+                request.predicate = NSPredicate(format: "id IN %@", Array(ids))
+                request.includesPendingChanges = true
+                return try context.fetch(request)
+            }
+        )
+
+        XCTAssertEqual(fetchCount, 1)
+        XCTAssertEqual(requestedIDs, optimisticIDs)
+        XCTAssertEqual(
+            rows.map(\.outboundSendDeliveryState),
+            [.sending, .notSent, .deliveryUnknown, .none]
+        )
+    }
+
+    func testMessageSendStatusPresentation_pinsLabelsAndPrioritizesDurableState() {
+        XCTAssertEqual(
+            MessageSendStatusPresentation.resolve(
+                deliveryState: .sending,
+                isSendingLocalAttachments: false,
+                hasFailedLocalAttachmentUploads: false
+            ),
+            .sending
+        )
+
+        let notSent = MessageSendStatusPresentation.resolve(
+            deliveryState: .notSent,
+            isSendingLocalAttachments: true,
+            hasFailedLocalAttachmentUploads: true
+        )
+        XCTAssertEqual(notSent, .notSent)
+        XCTAssertEqual(notSent.label, "Not sent")
+
+        let deliveryUnknown = MessageSendStatusPresentation.resolve(
+            deliveryState: .deliveryUnknown,
+            isSendingLocalAttachments: true,
+            hasFailedLocalAttachmentUploads: false
+        )
+        XCTAssertEqual(deliveryUnknown, .deliveryUnknown)
+        XCTAssertEqual(deliveryUnknown.label, "Delivery unknown")
+
+        XCTAssertEqual(
+            MessageSendStatusPresentation.resolve(
+                deliveryState: .none,
+                isSendingLocalAttachments: false,
+                hasFailedLocalAttachmentUploads: true
+            ).label,
+            "Send failed"
+        )
+    }
 }

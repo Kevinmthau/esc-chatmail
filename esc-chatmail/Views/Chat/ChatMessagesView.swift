@@ -588,8 +588,10 @@ struct ChatMessagesView: View {
 
     @ViewBuilder
     private func messageContextMenu(for message: ChatMessageRowModel) -> some View {
-        Button(action: { viewModel.setReplyingTo(messageObjectID: message.messageObjectID) }) {
-            SwiftUI.Label("Reply", systemImage: "arrow.turn.up.left")
+        if message.outboundSendDeliveryState == .none {
+            Button(action: { viewModel.setReplyingTo(messageObjectID: message.messageObjectID) }) {
+                SwiftUI.Label("Reply", systemImage: "arrow.turn.up.left")
+            }
         }
         Button(action: { viewModel.setMessageToForward(messageObjectID: message.messageObjectID) }) {
             SwiftUI.Label("Forward", systemImage: "arrow.turn.up.right")
@@ -674,6 +676,7 @@ private struct ChatReplyComposerOverlay: View {
                 replyingTo: $composerState.replyingTo,
                 attachments: $composerState.attachments,
                 conversation: conversation,
+                isSending: composerState.isSending,
                 onSend: onSend,
                 focusBinding: focusBinding
             )

@@ -1,6 +1,46 @@
 import SwiftUI
 import CoreData
 
+enum MessageSendStatusPresentation: Equatable {
+    case none
+    case sending
+    case notSent
+    case deliveryUnknown
+    case sendFailed
+
+    var label: String? {
+        switch self {
+        case .notSent:
+            return "Not sent"
+        case .deliveryUnknown:
+            return "Delivery unknown"
+        case .sendFailed:
+            return "Send failed"
+        case .none, .sending:
+            return nil
+        }
+    }
+
+    static func resolve(
+        deliveryState: OutboundSendDeliveryState,
+        isSendingLocalAttachments: Bool,
+        hasFailedLocalAttachmentUploads: Bool
+    ) -> Self {
+        switch deliveryState {
+        case .sending:
+            return .sending
+        case .notSent:
+            return .notSent
+        case .deliveryUnknown:
+            return .deliveryUnknown
+        case .none:
+            if isSendingLocalAttachments { return .sending }
+            if hasFailedLocalAttachmentUploads { return .sendFailed }
+            return .none
+        }
+    }
+}
+
 struct MessageBubble: View {
     let message: ChatMessageRowModel
     /// Pre-loaded sender names from batch fetch (avoids N+1 queries)
@@ -169,12 +209,27 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var sendStatusView: some View {
-        if message.isSendingLocalAttachments {
+        switch MessageSendStatusPresentation.resolve(
+            deliveryState: message.outboundSendDeliveryState,
+            isSendingLocalAttachments: message.isSendingLocalAttachments,
+            hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads
+        ) {
+        case .sending:
             MessageSendingIndicator()
-        } else if message.hasFailedLocalAttachmentUploads {
-            Text("Send failed")
+        case .notSent:
+            Text(MessageSendStatusPresentation.notSent.label ?? "")
                 .font(.caption2)
                 .foregroundColor(.red)
+        case .deliveryUnknown:
+            Text(MessageSendStatusPresentation.deliveryUnknown.label ?? "")
+                .font(.caption2)
+                .foregroundColor(.orange)
+        case .sendFailed:
+            Text(MessageSendStatusPresentation.sendFailed.label ?? "")
+                .font(.caption2)
+                .foregroundColor(.red)
+        case .none:
+            EmptyView()
         }
     }
 
