@@ -131,7 +131,7 @@ final class Dependencies: ObservableObject {
 
         return OutboundMessageCoordinator(
             sendService: makeSendService(),
-            syncPerformer: syncEngine,
+            syncPerformer: foregroundSyncCoordinator,
             messageFormatBuilder: makeMessageFormatBuilder(),
             outboundReplyContextBuilder: makeOutboundReplyContextBuilder(),
             mutationTracker: outboundSendMutationTracker

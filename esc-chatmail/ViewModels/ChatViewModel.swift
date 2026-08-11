@@ -12,6 +12,7 @@ final class ChatComposerState: ObservableObject {
     @Published var replyText: String
     @Published var replyingTo: Message?
     @Published var attachments: [Attachment]
+    @Published private(set) var isSending = false
 
     init(
         replyText: String = "",
@@ -48,6 +49,16 @@ final class ChatComposerState: ObservableObject {
     ) -> Bool {
         !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
             hasAttachments
+    }
+
+    func beginSending() -> Bool {
+        guard !isSending else { return false }
+        isSending = true
+        return true
+    }
+
+    func finishSending() {
+        isSending = false
     }
 }
 
@@ -256,6 +267,8 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Reply Actions
 
     func setReplyingTo(_ message: Message) {
+        guard !composerState.isSending,
+              isValidReplyTarget(message) else { return }
         replyingTo = message
     }
 
@@ -266,7 +279,10 @@ final class ChatViewModel: ObservableObject {
 
     /// Sets the initial replyingTo message when the conversation loads
     func initializeReplyingTo(lastMessage: Message?) {
-        guard replyingTo == nil, let lastMessage = lastMessage else { return }
+        guard !composerState.isSending,
+              replyingTo == nil,
+              let lastMessage,
+              isValidReplyTarget(lastMessage) else { return }
         replyingTo = lastMessage
     }
 
@@ -277,6 +293,8 @@ final class ChatViewModel: ObservableObject {
     /// subject; otherwise outbound validation rejects the reply. List chats also
     /// advance across Gmail threads whose subjects happen to match.
     func updateReplyingToIfNewSubject(lastMessage: Message?) {
+        guard !composerState.isSending else { return }
+
         // If user cleared replyingTo (tapped X), don't auto-update
         guard let currentReplyingTo = replyingTo else { return }
 
@@ -311,6 +329,10 @@ final class ChatViewModel: ObservableObject {
             destination = .forwardCompose(context)
         } catch {
             Log.error("Failed to prepare forward compose context", category: .message, error: error)
+            sendErrorAlert = ChatSendErrorAlert(
+                title: "Couldn’t Forward Message",
+                message: error.localizedDescription
+            )
         }
     }
 
@@ -353,6 +375,8 @@ final class ChatViewModel: ObservableObject {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachments = composerState.attachments
         guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return nil }
+        guard composerState.beginSending() else { return nil }
+        defer { composerState.finishSending() }
 
         guard !isConversationDrained else {
             Log.warning(
@@ -390,7 +414,7 @@ final class ChatViewModel: ObservableObject {
         }
         guard let result else { return nil }
 
-        // Clear composer immediately after optimistic insertion.
+        // Clear only after local preflight reaches durable transmission admission.
         replyText = ""
         replyingTo = nil
         composerState.attachments = []
@@ -416,7 +440,8 @@ final class ChatViewModel: ObservableObject {
     private func isValidReplyTarget(_ message: Message) -> Bool {
         guard message.managedObjectContext != nil,
               !message.isDeleted,
-              message.conversation?.objectID == conversationObjectID else {
+              message.conversation?.objectID == conversationObjectID,
+              OutboundSendDeliveryState.resolve(for: message) == .none else {
             return false
         }
 
@@ -596,8 +621,8 @@ final class ChatViewModel: ObservableObject {
             filename: attachment.filenameValue,
             mimeType: attachment.mimeTypeValue,
             byteSize: attachment.byteSize,
-            localURL: attachment.localURLValue,
-            previewURL: attachment.previewURLValue,
+            localURL: attachment.readableLocalURLValue,
+            previewURL: attachment.readablePreviewURLValue,
             width: attachment.width,
             height: attachment.height,
             pageCount: attachment.pageCount
@@ -626,5 +651,14 @@ final class ChatViewModel: ObservableObject {
 
 struct ChatSendErrorAlert: Identifiable {
     let id = UUID()
+    let title: String
     let message: String
+
+    init(
+        title: String = "Couldn’t Send Reply",
+        message: String
+    ) {
+        self.title = title
+        self.message = message
+    }
 }

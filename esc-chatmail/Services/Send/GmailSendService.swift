@@ -38,7 +38,9 @@ final class GmailSendService: ObservableObject {
         htmlBody: String? = nil,
         subject: String? = nil,
         attachmentInfos: [AttachmentInfo] = [],
-        inlineAttachmentInfos: [AttachmentInfo] = []
+        inlineAttachmentInfos: [AttachmentInfo] = [],
+        messageId: String? = nil,
+        beforeTransmission: @Sendable () async throws -> Void = {}
     ) async throws -> SendResult {
         let (fromEmail, fromName) = await MainActor.run { (authSession.userEmail, authSession.userName) }
         guard let fromEmail = fromEmail else {
@@ -55,10 +57,15 @@ final class GmailSendService: ObservableObject {
             htmlBody: htmlBody,
             subject: subject,
             attachments: attachmentData,
-            inlineAttachments: inlineAttachmentData
+            inlineAttachments: inlineAttachmentData,
+            messageId: messageId
         )
 
-        return try await sendMessage(mimeData: mimeData, threadId: nil)
+        return try await sendMessage(
+            mimeData: mimeData,
+            threadId: nil,
+            beforeTransmission: beforeTransmission
+        )
     }
 
     /// Sends a reply to an existing thread.
@@ -72,7 +79,9 @@ final class GmailSendService: ObservableObject {
         inReplyTo: String?,
         references: [String],
         originalMessage: QuotedMessage? = nil,
-        attachmentInfos: [AttachmentInfo] = []
+        attachmentInfos: [AttachmentInfo] = [],
+        messageId: String? = nil,
+        beforeTransmission: @Sendable () async throws -> Void = {}
     ) async throws -> SendResult {
         let sessionFrom = await MainActor.run { (authSession.userEmail, authSession.userName) }
         let resolvedFromEmail = fromEmail ?? sessionFrom.0
@@ -91,29 +100,51 @@ final class GmailSendService: ObservableObject {
             inReplyTo: inReplyTo,
             references: references,
             originalMessage: originalMessage,
-            attachments: attachmentData
+            attachments: attachmentData,
+            messageId: messageId
         )
 
-        return try await sendMessage(mimeData: mimeData, threadId: threadId)
+        return try await sendMessage(
+            mimeData: mimeData,
+            threadId: threadId,
+            beforeTransmission: beforeTransmission
+        )
     }
 
     // MARK: - Private
 
     /// Sends the MIME-encoded message to Gmail API.
-    private nonisolated func sendMessage(mimeData: Data, threadId: String?) async throws -> SendResult {
+    private nonisolated func sendMessage(
+        mimeData: Data,
+        threadId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
+    ) async throws -> SendResult {
         Log.debug("Sending MIME message (\(mimeData.count) bytes)", category: .api)
 
         let rawMessage = MimeBuilder.base64UrlEncode(mimeData)
+
         do {
             let response = try await apiClient.sendMessage(
                 rawMessage: rawMessage,
-                threadId: threadId
+                threadId: threadId,
+                beforeTransmission: beforeTransmission
             )
 
             Log.info("Message sent - ID: \(response.id)", category: .api)
             return SendResult(messageId: response.id, threadId: response.threadId)
+        } catch let error as GmailMessageSendError {
+            switch error {
+            case .transmissionNotStarted(let underlying):
+                throw underlying
+            case .ambiguousDelivery:
+                throw SendError.ambiguousDelivery(error.localizedDescription)
+            }
         } catch let error as APIError {
             throw mapSendError(error)
+        } catch is CancellationError {
+            // A custom API client may surface cancellation directly. Once the
+            // call began, conservatively preserve it as an ambiguous send.
+            throw SendError.ambiguousDelivery("Gmail may have accepted the message before cancellation")
         } catch {
             throw SendError.apiError(error.localizedDescription)
         }
@@ -125,6 +156,13 @@ final class GmailSendService: ObservableObject {
             return .authenticationFailed
         case .invalidURL:
             return .apiError("Invalid API URL")
+        case .serverError, .timeout, .decodingError:
+            return .ambiguousDelivery(error.localizedDescription)
+        case .networkError(let underlying):
+            if ConnectionErrorDetector.isPreTransmissionError(underlying) {
+                return .apiError(error.localizedDescription)
+            }
+            return .ambiguousDelivery(error.localizedDescription)
         default:
             return .apiError(error.localizedDescription)
         }

@@ -54,7 +54,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
         let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         let conversation = try XCTUnwrap(message.conversation)
-        XCTAssertTrue(conversation.isInserted)
+        XCTAssertFalse(conversation.isInserted)
         XCTAssertEqual(try conversationCount(in: context), 1)
 
         sendService.handleFailedOptimisticMessage(message)
@@ -222,7 +222,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
     }
 
-    func testUpdateOptimisticMessage_clearsDurableMutationRecordOnSuccess() async throws {
+    func testUpdateOptimisticMessage_retainsCommittedRouteUntilExactSync() async throws {
         let context = coreDataStack.viewContext
         let recipient = "success-clear@example.com"
 
@@ -241,8 +241,19 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             with: GmailSendService.SendResult(messageId: "gmail-success-id", threadId: "gmail-thread-id")
         )
 
-        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
-        XCTAssertNotNil(sendService.fetchMessageSync(byID: "gmail-success-id"))
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
+        let retained = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(retained.gmThreadId, "gmail-thread-id")
+        XCTAssertNil(sendService.fetchMessageSync(byID: "gmail-success-id"))
+        let committed = try XCTUnwrap(
+            sendService.remoteCommittedSendResult(
+                optimisticMessageID: handle.optimisticMessageID
+            )
+        )
+        XCTAssertEqual(committed.messageId, "gmail-success-id")
+        XCTAssertEqual(committed.threadId, "gmail-thread-id")
     }
 
     func testRemoteCommittedSendResultReadsFreshStoreState() async throws {
@@ -280,7 +291,53 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(committedResult.threadId, remoteResult.threadId)
     }
 
-    func testReconcileAbandonedOptimisticSendMutations_remoteCommittedRecordReconcilesWithoutFailureCleanup() async throws {
+    func testRemoteCommitRefreshesRegisteredAdmissionMarkerWithoutPendingOverwrite() async throws {
+        let context = coreDataStack.viewContext
+        context.automaticallyMergesChangesFromParent = false
+        let remoteResult = GmailSendService.SendResult(
+            messageId: "gmail-after-admission-id",
+            threadId: "gmail-after-admission-thread"
+        )
+        let recipient = "commit-after-admission@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Keep the real commit durable",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+
+        try sendService.recordRemoteSendAdmission(
+            optimisticMessageID: handle.optimisticMessageID
+        )
+        let registeredRecord = try XCTUnwrap(
+            optimisticMutationRecord(in: context, id: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(
+            registeredRecord.remoteCommittedMessageId,
+            OutboundSendRemoteState.inFlightMessageID
+        )
+        XCTAssertFalse(context.hasChanges)
+
+        try sendService.recordRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: remoteResult
+        )
+
+        XCTAssertEqual(registeredRecord.remoteCommittedMessageId, remoteResult.messageId)
+        XCTAssertEqual(registeredRecord.remoteCommittedThreadId, remoteResult.threadId)
+        XCTAssertFalse(context.hasChanges)
+        try coreDataStack.saveViewContext()
+        coreDataStack.resetViewContext()
+
+        let durableRecord = try XCTUnwrap(
+            optimisticMutationRecord(in: context, id: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(durableRecord.remoteCommittedMessageId, remoteResult.messageId)
+        XCTAssertEqual(durableRecord.remoteCommittedThreadId, remoteResult.threadId)
+    }
+
+    func testReconcileAbandonedOptimisticSendMutations_remoteCommittedRecordWaitsForExactSync() async throws {
         let context = coreDataStack.viewContext
         let recipient = "remote-committed@example.com"
         let remoteResult = GmailSendService.SendResult(
@@ -304,11 +361,682 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
         sendService.reconcileAbandonedOptimisticSendMutations()
 
-        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
-        let reconciled = try XCTUnwrap(sendService.fetchMessageSync(byID: remoteResult.messageId))
-        XCTAssertEqual(reconciled.gmThreadId, remoteResult.threadId)
-        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+        let retained = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(retained.gmThreadId, remoteResult.threadId)
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: retained), .none)
+        XCTAssertNil(sendService.fetchMessageSync(byID: remoteResult.messageId))
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
         XCTAssertEqual(try conversationCount(in: context), 1)
+    }
+
+    func testProductionServerAmbiguity_coldRecoveryRetainsOptimisticSendWithoutRetry() async throws {
+        StubURLProtocol.reset()
+        defer { StubURLProtocol.reset() }
+        StubURLProtocol.script = [.status(500)]
+
+        let authSession = AuthSession()
+        authSession.userEmail = "sender@example.com"
+        let productionAPIClient = GmailAPIClient(
+            tokenManager: MockTokenManager(),
+            retryStrategy: NetworkRetryStrategy(
+                maxRetries: 3,
+                initialDelay: 0.01,
+                maxDelay: 0.02
+            ),
+            session: StubURLProtocol.makeSession()
+        )
+        let productionSendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            apiClient: productionAPIClient,
+            authSession: authSession
+        )
+        let recipient = "ambiguous-cancellation@example.com"
+        let handle = try await productionSendService.createOptimisticMessage(
+            to: [recipient],
+            body: "This send may already have reached Gmail",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        try coreDataStack.saveViewContext()
+
+        let sendTask = ComposeSendOrchestrator(
+            sendService: productionSendService,
+            syncPerformer: NoOpIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: .init(
+                recipientEmails: [recipient],
+                body: "This send may already have reached Gmail",
+                htmlBody: nil,
+                subject: "Ambiguous",
+                attachmentInfos: [],
+                inlineAttachmentInfos: [],
+                replyMetadata: nil
+            ),
+            attachmentReferences: [],
+            optimisticMessageID: handle.optimisticMessageID
+        )
+        await sendTask.task.value
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+        XCTAssertNotNil(productionSendService.fetchMessageSync(byID: handle.optimisticMessageID))
+
+        coreDataStack.resetViewContext()
+        let coldStartAPIClient = MockGmailAPIClient()
+        let coldStartSendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            apiClient: coldStartAPIClient
+        )
+        let durableRecord = try XCTUnwrap(
+            optimisticMutationRecord(
+                in: coreDataStack.viewContext,
+                id: handle.optimisticMessageID
+            )
+        )
+        XCTAssertNotNil(durableRecord.remoteCommittedMessageId)
+        XCTAssertNil(durableRecord.remoteCommittedThreadId)
+
+        coldStartSendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertNotNil(
+            coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID),
+            "Cold recovery must retain an ambiguous optimistic send rather than classify it as failed"
+        )
+        XCTAssertEqual(try optimisticMutationRecordCount(in: coreDataStack.viewContext), 1)
+        XCTAssertEqual(coldStartAPIClient.sendMessageCallCount, 0)
+    }
+
+    func testInFlightSend_coldRecoveryConvertsDurableAdmissionToDeliveryUnknown() async throws {
+        let recipient = "in-flight-crash-window@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "The response has not arrived yet",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        let gate = InFlightSendGate()
+        let gatedSendService = InFlightComposeSendService(
+            base: sendService,
+            gate: gate
+        )
+        let sendTask = ComposeSendOrchestrator(
+            sendService: gatedSendService,
+            syncPerformer: NoOpIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: .init(
+                recipientEmails: [recipient],
+                body: "The response has not arrived yet",
+                htmlBody: nil,
+                subject: "In flight",
+                attachmentInfos: [],
+                inlineAttachmentInfos: [],
+                replyMetadata: nil
+            ),
+            attachmentReferences: [],
+            optimisticMessageID: handle.optimisticMessageID
+        )
+        await gate.waitUntilStarted()
+        try await sendTask.waitForTransmissionAdmission()
+
+        // Simulate a fresh recovery session while messages.send is suspended
+        // with no success or error response. The pre-send barrier must already
+        // be durable, so recovery cannot classify this as definite failure.
+        coreDataStack.resetViewContext()
+        let coldStartSendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            apiClient: MockGmailAPIClient()
+        )
+        let durableRecord = try XCTUnwrap(
+            optimisticMutationRecord(
+                in: coreDataStack.viewContext,
+                id: handle.optimisticMessageID
+            )
+        )
+        XCTAssertEqual(
+            durableRecord.remoteCommittedMessageId,
+            OutboundSendRemoteState.inFlightMessageID
+        )
+        XCTAssertNil(durableRecord.remoteCommittedThreadId)
+
+        coldStartSendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertNotNil(
+            coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(
+            try optimisticMutationRecord(
+                in: coreDataStack.viewContext,
+                id: handle.optimisticMessageID
+            )?.remoteCommittedMessageId,
+            OutboundSendRemoteState.ambiguousMessageID
+        )
+        XCTAssertEqual(try optimisticMutationRecordCount(in: coreDataStack.viewContext), 1)
+        XCTAssertEqual(gatedSendService.sendCallCount, 1)
+
+        await gate.release()
+        await sendTask.task.value
+
+        XCTAssertEqual(try optimisticMutationRecordCount(in: coreDataStack.viewContext), 1)
+        let committedOptimistic = try XCTUnwrap(
+            coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(committedOptimistic.gmThreadId, "gated-thread-id")
+        XCTAssertNil(coldStartSendService.fetchMessageSync(byID: "gated-sent-id"))
+        XCTAssertEqual(
+            try optimisticMutationRecord(
+                in: coreDataStack.viewContext,
+                id: handle.optimisticMessageID
+            )?.remoteCommittedMessageId,
+            "gated-sent-id"
+        )
+    }
+
+    func testCoordinatorReturn_hasDurableMessageAndSendingMarkerBeforeAPIResponse() async throws {
+        let recipient = "admitted-before-response@example.com"
+        let gate = InFlightSendGate()
+        let apiClient = MockGmailAPIClient()
+        apiClient.sendMessageOperation = { _, _ in
+            await gate.waitUntilReleased()
+            return SendMessageResponse(
+                id: "admitted-sent-id",
+                threadId: "admitted-thread-id"
+            )
+        }
+        let authSession = AuthSession()
+        authSession.userEmail = "me@example.com"
+        let productionSendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            apiClient: apiClient,
+            authSession: authSession
+        )
+        let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
+        let coordinator = OutboundMessageCoordinator(
+            sendService: productionSendService,
+            syncPerformer: NoOpIncrementalSyncPerformer(),
+            messageFormatBuilder: MessageFormatBuilder(authSession: authSession),
+            outboundReplyContextBuilder: OutboundReplyContextBuilder(
+                viewContext: coreDataStack.viewContext,
+                replyMetadataBuilder: ReplyMetadataBuilder(authSession: authSession),
+                replyHTMLContentLoader: HTMLContentLoader(
+                    contentHandler: HTMLContentHandler(),
+                    sanitizer: .shared
+                )
+            ),
+            mutationTracker: OutboundSendMutationTracker(),
+            outboundTaskRegistry: outboundTaskRegistry
+        )
+        let successExpectation = expectation(description: "background send completes")
+
+        let sendResult = try await coordinator.send(
+            .compose(
+                .init(
+                    recipientEmails: [recipient],
+                    subject: "Admitted",
+                    body: "Durable before composer success",
+                    attachments: []
+                )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: { _ in successExpectation.fulfill() },
+                onFailure: nil
+            )
+        )
+        let submission = try XCTUnwrap(sendResult)
+        await gate.waitUntilStarted()
+
+        let durableRecord = try XCTUnwrap(
+            durableMutationState(id: submission.optimisticMessageID)
+        )
+        XCTAssertEqual(
+            durableRecord.remoteCommittedMessageId,
+            OutboundSendRemoteState.inFlightMessageID
+        )
+        XCTAssertNil(durableRecord.remoteCommittedThreadId)
+        XCTAssertNotNil(try durableMessageState(id: submission.optimisticMessageID))
+        XCTAssertEqual(apiClient.sendMessageCallCount, 1)
+
+        let inFlightMessage = try XCTUnwrap(
+            productionSendService.fetchMessageSync(byID: submission.optimisticMessageID)
+        )
+        let deliveryState = OutboundSendDeliveryState.resolve(for: inFlightMessage)
+        XCTAssertEqual(deliveryState, .sending)
+        XCTAssertEqual(
+            MessageSendStatusPresentation.resolve(
+                deliveryState: deliveryState,
+                isSendingLocalAttachments: false,
+                hasFailedLocalAttachmentUploads: false
+            ),
+            .sending
+        )
+
+        await gate.release()
+        await fulfillment(of: [successExpectation], timeout: 1.0)
+        outboundTaskRegistry.closeAdmission()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+    }
+
+    func testSyncEchoConsumesMutationBeforeAPIResponse_successIsIdempotent() async throws {
+        let recipient = "sync-first-race@example.com"
+        let remoteMessageID = "gmail-sync-first-id"
+        let remoteThreadID = "gmail-sync-first-thread"
+        let gate = InFlightSendGate()
+        let apiClient = MockGmailAPIClient()
+        apiClient.sendMessageOperation = { _, _ in
+            await gate.waitUntilReleased()
+            return SendMessageResponse(id: remoteMessageID, threadId: remoteThreadID)
+        }
+        let authSession = AuthSession()
+        authSession.userEmail = "me@example.com"
+        let productionSendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            apiClient: apiClient,
+            authSession: authSession
+        )
+        let handle = try await productionSendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Sync wins before the API response",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        let sendOperation = ComposeSendOrchestrator(
+            sendService: productionSendService,
+            syncPerformer: NoOpIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: .init(
+                recipientEmails: [recipient],
+                body: "Sync wins before the API response",
+                htmlBody: nil,
+                subject: "Race",
+                attachmentInfos: [],
+                inlineAttachmentInfos: [],
+                replyMetadata: nil
+            ),
+            attachmentReferences: [],
+            optimisticMessageID: handle.optimisticMessageID
+        )
+
+        await gate.waitUntilStarted()
+        try await sendOperation.waitForTransmissionAdmission()
+
+        let processedSentMessage = makeHeaderlessSentMessage(
+            id: remoteMessageID,
+            threadId: remoteThreadID,
+            messageId: MimeBuilder.messageId(
+                forOptimisticMessageID: handle.optimisticMessageID
+            )
+        )
+        let syncContext = coreDataStack.newBackgroundContext()
+        let isolatedCoreDataStack = CoreDataStack(
+            persistentContainerForTesting: coreDataStack.persistentContainer
+        )
+        let persister = MessagePersister(
+            coreDataStack: isolatedCoreDataStack,
+            messageProcessor: StubRemoteSentMessageProcessor(
+                processedMessage: processedSentMessage
+            ),
+            photoPrefetcher: { _ in }
+        )
+        try await persister.saveMessage(
+            GmailMessage(
+                id: remoteMessageID,
+                threadId: remoteThreadID,
+                labelIds: ["SENT"],
+                snippet: processedSentMessage.snippet,
+                historyId: nil,
+                internalDate: nil,
+                payload: nil,
+                sizeEstimate: nil
+            ),
+            myAliases: ["me@example.com"],
+            in: syncContext
+        )
+        try await syncContext.perform {
+            try syncContext.save()
+        }
+        let viewContext = coreDataStack.viewContext
+        viewContext.performAndWait {
+            viewContext.refreshAllObjects()
+        }
+
+        XCTAssertEqual(try durableMutationRecordCount(), 0)
+        XCTAssertNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertNotNil(try durableMessageState(id: remoteMessageID))
+
+        await gate.release()
+        await sendOperation.task.value
+
+        XCTAssertEqual(apiClient.sendMessageCallCount, 1)
+        XCTAssertEqual(try durableMutationRecordCount(), 0)
+        XCTAssertNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertNotNil(try durableMessageState(id: remoteMessageID))
+    }
+
+    func testAPICommitAfterSyncStagesConsumptionBeforeSaveConvergesAtomically() async throws {
+        let recipient = "api-reconcile-during-sync@example.com"
+        let remoteMessageID = "gmail-api-reconcile-race-id"
+        let remoteThreadID = "gmail-api-reconcile-race-thread"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "API success lands while sync is persisting the echo",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        try sendService.recordRemoteSendAdmission(
+            optimisticMessageID: handle.optimisticMessageID
+        )
+
+        let processedSentMessage = makeHeaderlessSentMessage(
+            id: remoteMessageID,
+            threadId: remoteThreadID,
+            messageId: MimeBuilder.messageId(
+                forOptimisticMessageID: handle.optimisticMessageID
+            )
+        )
+        let syncContext = coreDataStack.newBackgroundContext()
+        let isolatedCoreDataStack = CoreDataStack(
+            persistentContainerForTesting: coreDataStack.persistentContainer
+        )
+        let persister = MessagePersister(
+            coreDataStack: isolatedCoreDataStack,
+            photoPrefetcher: { _ in }
+        )
+        let sentRFCMessageID = try XCTUnwrap(
+            processedSentMessage.headers.messageId
+        )
+        let capturedResolutions = try await persister.remoteCommittedSendMutationResolutions(
+            for: [remoteMessageID],
+            sentMessageIDsByRemoteID: [remoteMessageID: sentRFCMessageID],
+            in: syncContext
+        )
+        let capturedResolution = try XCTUnwrap(capturedResolutions[remoteMessageID])
+
+        // Sync has inserted the exact echo and staged deletion of both the
+        // optimistic row and route, but its atomic context is not durable yet.
+        try await persister.createNewMessage(
+            processedSentMessage,
+            labelIds: nil,
+            myAliases: ["me@example.com"],
+            modificationTransaction: nil,
+            remoteCommittedSendMutation: capturedResolution,
+            in: syncContext
+        )
+        let syncHasPendingReplacement = await syncContext.perform {
+            syncContext.hasChanges
+        }
+        XCTAssertTrue(syncHasPendingReplacement)
+        XCTAssertEqual(try durableMutationRecordCount(), 1)
+        XCTAssertNotNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertNil(try durableMessageState(id: remoteMessageID))
+
+        // The API response now lands in the old race window. It must retain the
+        // graph/route rather than rename the row under sync's pending deletion.
+        let sendResult = GmailSendService.SendResult(
+            messageId: remoteMessageID,
+            threadId: remoteThreadID
+        )
+        try sendService.recordRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: sendResult
+        )
+        XCTAssertTrue(
+            try sendService.reconcileRemoteCommittedSend(
+                optimisticMessageID: handle.optimisticMessageID,
+                result: sendResult
+            )
+        )
+        XCTAssertEqual(try durableMutationRecordCount(), 1)
+        XCTAssertNotNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertNil(try durableMessageState(id: remoteMessageID))
+
+        try await syncContext.perform {
+            try syncContext.save()
+        }
+
+        XCTAssertEqual(try durableMutationRecordCount(), 0)
+        XCTAssertNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertNotNil(try durableMessageState(id: remoteMessageID))
+        XCTAssertEqual(try durableMessageCount(id: remoteMessageID), 1)
+    }
+
+    func testExactSyncEchoHandsOffOptimisticAttachmentFilesBeforeDeletingGraph() async throws {
+        let testID = UUID().uuidString
+        let localAttachmentID = "local_echo_handoff_\(testID)"
+        let remoteAttachmentID = "gmail-echo-handoff-attachment-\(testID)"
+        let remoteMessageID = "gmail-echo-handoff-message-\(testID)"
+        let remoteThreadID = "gmail-echo-handoff-thread-\(testID)"
+        let filename = "echo-handoff.jpg"
+        let originalData = Data("optimistic original attachment bytes".utf8)
+        let previewData = Data("optimistic preview attachment bytes".utf8)
+        let localOriginalPath = AttachmentPaths.originalPath(
+            idOrUUID: localAttachmentID,
+            ext: "jpg"
+        )
+        let localPreviewPath = AttachmentPaths.previewPath(idOrUUID: localAttachmentID)
+        let remoteOriginalPath = AttachmentPaths.originalPath(
+            messageId: remoteMessageID,
+            attachmentId: remoteAttachmentID,
+            ext: "jpg"
+        )
+        let remotePreviewPath = AttachmentPaths.previewPath(
+            messageId: remoteMessageID,
+            attachmentId: remoteAttachmentID
+        )
+        defer {
+            AttachmentPaths.deleteFile(at: localOriginalPath)
+            AttachmentPaths.deleteFile(at: localPreviewPath)
+            AttachmentPaths.deleteFile(at: remoteOriginalPath)
+            AttachmentPaths.deleteFile(at: remotePreviewPath)
+        }
+
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(originalData, to: localOriginalPath))
+        XCTAssertTrue(AttachmentPaths.saveData(previewData, to: localPreviewPath))
+
+        let context = coreDataStack.viewContext
+        let localAttachment = AttachmentBuilder()
+            .withId(localAttachmentID)
+            .asImage(width: 320, height: 180)
+            .withFilename(filename)
+            .withByteSize(Int64(originalData.count))
+            .withLocalURL(localOriginalPath)
+            .withPreviewURL(localPreviewPath)
+            .downloaded()
+            .build(in: context)
+        let attachmentContexts = try OutboundAttachmentContextBuilder(
+            viewContext: context
+        ).buildSendAttachments(from: [localAttachment])
+        let recipient = "echo-handoff@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Preserve the attachment across exact echo convergence",
+            attachments: attachmentContexts,
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        try sendService.recordRemoteSendAdmission(
+            optimisticMessageID: handle.optimisticMessageID
+        )
+
+        let activePreviewItem = try XCTUnwrap(
+            AttachmentPreviewItem(attachment: localAttachment)
+        )
+        let activePreviewURL = try XCTUnwrap(activePreviewItem.previewItemURL)
+        XCTAssertEqual(activePreviewURL, AttachmentPaths.fullURL(for: localOriginalPath))
+
+        var processedSentMessage = makeHeaderlessSentMessage(
+            id: remoteMessageID,
+            threadId: remoteThreadID,
+            messageId: MimeBuilder.messageId(
+                forOptimisticMessageID: handle.optimisticMessageID
+            )
+        )
+        processedSentMessage.hasAttachments = true
+        processedSentMessage.attachmentInfo = [
+            AttachmentInfo(
+                id: remoteAttachmentID,
+                filename: filename,
+                mimeType: "image/jpeg",
+                size: originalData.count,
+                contentId: nil
+            )
+        ]
+
+        let syncContext = coreDataStack.newBackgroundContext()
+        let isolatedCoreDataStack = CoreDataStack(
+            persistentContainerForTesting: coreDataStack.persistentContainer
+        )
+        let persister = MessagePersister(
+            coreDataStack: isolatedCoreDataStack,
+            photoPrefetcher: { _ in }
+        )
+        let sentRFCMessageID = try XCTUnwrap(processedSentMessage.headers.messageId)
+        let resolutions = try await persister.remoteCommittedSendMutationResolutions(
+            for: [remoteMessageID],
+            sentMessageIDsByRemoteID: [remoteMessageID: sentRFCMessageID],
+            in: syncContext
+        )
+        let resolution = try XCTUnwrap(resolutions[remoteMessageID])
+
+        try await persister.createNewMessage(
+            processedSentMessage,
+            labelIds: nil,
+            myAliases: ["me@example.com"],
+            modificationTransaction: nil,
+            remoteCommittedSendMutation: resolution,
+            in: syncContext
+        )
+
+        let invalidationPlan = await syncContext.perform {
+            CacheCoordinator.computeInvalidationPlan(
+                updatedObjectIDs: Set(syncContext.updatedObjects.map(\.objectID)),
+                deletedObjectIDs: Set(syncContext.deletedObjects.map(\.objectID)),
+                in: syncContext
+            )
+        }
+        XCTAssertFalse(invalidationPlan.attachmentPathsToDelete.contains(localOriginalPath))
+        XCTAssertFalse(invalidationPlan.attachmentPathsToDelete.contains(localPreviewPath))
+        XCTAssertFalse(invalidationPlan.attachmentPathsToDelete.contains(remoteOriginalPath))
+        XCTAssertFalse(invalidationPlan.attachmentPathsToDelete.contains(remotePreviewPath))
+
+        try await syncContext.perform {
+            try syncContext.save()
+        }
+
+        let cacheCoordinator = CacheCoordinator()
+        if let accountContext = cacheCoordinator.captureInvalidationAccountContext() {
+            cacheCoordinator.applyInvalidationPlan(
+                invalidationPlan,
+                accountContext: accountContext
+            )
+            await Task.yield()
+            await cacheCoordinator.closeAccountWorkAndAwait()
+        }
+
+        XCTAssertEqual(try durableMutationRecordCount(), 0)
+        XCTAssertNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertEqual(try durableAttachmentCount(id: localAttachmentID), 0)
+        XCTAssertEqual(try durableMessageCount(id: remoteMessageID), 1)
+
+        let durableAttachment = try XCTUnwrap(
+            durableAttachmentState(
+                messageID: remoteMessageID,
+                attachmentID: remoteAttachmentID
+            )
+        )
+        XCTAssertEqual(durableAttachment.localURL, remoteOriginalPath)
+        XCTAssertEqual(durableAttachment.previewURL, remotePreviewPath)
+        XCTAssertEqual(durableAttachment.readableLocalURL, remoteOriginalPath)
+        XCTAssertEqual(durableAttachment.readablePreviewURL, remotePreviewPath)
+        XCTAssertEqual(durableAttachment.state, .downloaded)
+        XCTAssertEqual(AttachmentPaths.loadData(from: remoteOriginalPath), originalData)
+        XCTAssertEqual(AttachmentPaths.loadData(from: remotePreviewPath), previewData)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: activePreviewURL.path))
+        XCTAssertEqual(try Data(contentsOf: activePreviewURL), originalData)
+        XCTAssertEqual(AttachmentPaths.loadData(from: localPreviewPath), previewData)
+        _ = activePreviewItem
+    }
+
+    func testColdRecovery_ambiguousSendConvergesOnExactSyncedMessageID() async throws {
+        let recipient = "ambiguous-convergence@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Ambiguous send that later arrives through sync",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        try sendService.persistOptimisticMessageBeforeTransmission(
+            optimisticMessageID: handle.optimisticMessageID
+        )
+        try sendService.recordAmbiguousRemoteSend(
+            optimisticMessageID: handle.optimisticMessageID
+        )
+
+        coreDataStack.resetViewContext()
+        let coldStartSendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            apiClient: MockGmailAPIClient()
+        )
+        coldStartSendService.reconcileAbandonedOptimisticSendMutations()
+        XCTAssertNotNil(
+            coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+
+        let remoteMessageID = "gmail-ambiguous-converged-id"
+        let remoteThreadID = "gmail-ambiguous-converged-thread"
+        let processedSentMessage = makeHeaderlessSentMessage(
+            id: remoteMessageID,
+            threadId: remoteThreadID,
+            messageId: MimeBuilder.messageId(
+                forOptimisticMessageID: handle.optimisticMessageID
+            )
+        )
+        let syncContext = coreDataStack.newBackgroundContext()
+        let isolatedCoreDataStack = CoreDataStack(
+            persistentContainerForTesting: coreDataStack.persistentContainer
+        )
+        let persister = MessagePersister(
+            coreDataStack: isolatedCoreDataStack,
+            messageProcessor: StubRemoteSentMessageProcessor(
+                processedMessage: processedSentMessage
+            ),
+            photoPrefetcher: { _ in }
+        )
+        try await persister.saveMessage(
+            GmailMessage(
+                id: remoteMessageID,
+                threadId: remoteThreadID,
+                labelIds: ["SENT"],
+                snippet: processedSentMessage.snippet,
+                historyId: nil,
+                internalDate: nil,
+                payload: nil,
+                sizeEstimate: nil
+            ),
+            myAliases: ["me@example.com"],
+            in: syncContext
+        )
+
+        // The marker and optimistic row remain durable until the real sent
+        // message, duplicate cleanup, and marker consumption save atomically.
+        XCTAssertEqual(try durableMutationRecordCount(), 1)
+        XCTAssertNotNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertNil(try durableMessageState(id: remoteMessageID))
+
+        try await syncContext.perform {
+            try syncContext.save()
+        }
+
+        XCTAssertEqual(try durableMutationRecordCount(), 0)
+        XCTAssertNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertNotNil(try durableMessageState(id: remoteMessageID))
     }
 
     func testColdRecovery_missingOptimisticListReplyRetainsRouteUntilSentSyncConsumesItAtomically() async throws {
@@ -344,8 +1072,14 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             result: remoteResult
         )
 
-        // Exact process-death window: the mutation record is durable, while
-        // the optimistic Message (including its inherited List-Id) is not.
+        // Simulate a repaired/legacy store in which the committed mutation route
+        // survived but its optimistic Message did not. New optimistic creation
+        // persists both atomically, so this state is no longer a normal crash window.
+        let optimisticMessage = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        context.delete(optimisticMessage)
+        try context.save()
         coreDataStack.resetViewContext()
         let coldStartSendService = GmailSendService(
             viewContext: coreDataStack.viewContext
@@ -554,7 +1288,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(try conversationCount(in: context), 1)
     }
 
-    func testReconcileAbandonedOptimisticSendMutations_deletesPersistedNewEmptyConversation() async throws {
+    func testColdRecovery_nilRemoteStateRetainsMessageAsNotSent() async throws {
         let context = coreDataStack.viewContext
         let recipient = "abandoned-new-thread@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
@@ -562,9 +1296,9 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         let handle = try await sendService.createOptimisticMessage(
             to: [recipient],
             body: "Abandoned pending send",
+            subject: "Preserved subject",
             optimisticConversation: .participantHash(participantHash)
         )
-        try coreDataStack.saveViewContext()
         coreDataStack.resetViewContext()
 
         XCTAssertNotNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
@@ -573,9 +1307,209 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
         sendService.reconcileAbandonedOptimisticSendMutations()
 
+        let retainedMessage = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(retainedMessage.bodyText, "Abandoned pending send")
+        XCTAssertEqual(retainedMessage.subject, "Preserved subject")
+        XCTAssertEqual(try conversationCount(in: context), 1)
+        let record = try XCTUnwrap(
+            optimisticMutationRecord(in: context, id: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(
+            record.remoteCommittedMessageId,
+            OutboundSendRemoteState.notSentMessageID
+        )
+        XCTAssertNil(record.remoteCommittedThreadId)
+    }
+
+    func testColdRecovery_legacyNilStateStampsLocalIdentityAndShowsDeliveryUnknown() throws {
+        let context = coreDataStack.viewContext
+        let optimisticID = UUID().uuidString
+        let conversation = ConversationBuilder()
+            .withDisplayName("Legacy optimistic send")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let legacyMessage = MessageBuilder()
+            .withId(optimisticID)
+            .withBody("Preserve legacy authored text")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        legacyMessage.messageId = nil
+        try context.obtainPermanentIDs(for: [conversation, legacyMessage])
+        let legacyRecord = context.insertTestObject(OutboundSendMutationRecord.self)
+        legacyRecord.id = optimisticID
+        legacyRecord.createdAt = Date()
+        legacyRecord.conversationId = conversation.id
+        legacyRecord.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+        legacyRecord.hidden = false
+        legacyRecord.newlyInsertedConversation = false
+        try context.save()
+
+        coreDataStack.resetViewContext()
+        let apiClient = MockGmailAPIClient()
+        let coldStartSendService = GmailSendService(
+            viewContext: context,
+            apiClient: apiClient
+        )
+        coldStartSendService.reconcileAbandonedOptimisticSendMutations()
+
+        let retained = try XCTUnwrap(
+            coldStartSendService.fetchMessageSync(byID: optimisticID)
+        )
+        XCTAssertEqual(retained.bodyText, "Preserve legacy authored text")
+        XCTAssertEqual(
+            retained.messageIdValue,
+            MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        )
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: retained), .deliveryUnknown)
+        XCTAssertEqual(
+            try optimisticMutationRecord(in: context, id: optimisticID)?
+                .remoteCommittedMessageId,
+            OutboundSendRemoteState.ambiguousMessageID
+        )
+        XCTAssertEqual(apiClient.sendMessageCallCount, 0)
+    }
+
+    func testRollbackBeforeTransmission_removesOptimisticBubbleAndRequeuesComposerAttachment() async throws {
+        let context = coreDataStack.viewContext
+        let attachment = AttachmentBuilder()
+            .withId("local_preflight_rollback")
+            .asImage()
+            .queued()
+            .withLocalURL("Attachments/preflight-rollback.jpg")
+            .withPreviewURL("Previews/preflight-rollback.jpg")
+            .build(in: context)
+        let attachmentContexts = try OutboundAttachmentContextBuilder(
+            viewContext: context
+        ).buildSendAttachments(from: [attachment])
+        let recipient = "preflight-rollback@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Composer still owns this body",
+            subject: "Composer still owns this subject",
+            attachments: attachmentContexts,
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        let reference = attachmentContexts[0].localAttachmentReference
+        sendService.markAttachmentsAsUploading(references: [reference])
+
+        XCTAssertEqual(attachment.message?.id, handle.optimisticMessageID)
+        XCTAssertEqual(attachment.state, .uploading)
+
+        sendService.rollbackOptimisticMessageBeforeTransmission(
+            byID: handle.optimisticMessageID,
+            fallbackAttachmentReferences: [reference]
+        )
+
         XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
-        XCTAssertEqual(try conversationCount(in: context), 0)
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+        XCTAssertEqual(try messageCount(in: context), 0)
+        XCTAssertEqual(try conversationCount(in: context), 0)
+        XCTAssertFalse(attachment.isDeleted)
+        XCTAssertNil(attachment.message)
+        XCTAssertEqual(attachment.state, .queued)
+    }
+
+    func testRetainDefinitelyUnsentOptimisticMessage_preservesBodySubjectAndAttachments() async throws {
+        let context = coreDataStack.viewContext
+        let attachment = AttachmentBuilder()
+            .withId("local_definite_failure")
+            .asImage()
+            .queued()
+            .withLocalURL("Attachments/definite-failure.jpg")
+            .withPreviewURL("Previews/definite-failure.jpg")
+            .build(in: context)
+        let attachmentContexts = try OutboundAttachmentContextBuilder(viewContext: context)
+            .buildSendAttachments(from: [attachment])
+        let recipient = "definite-failure@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Keep this authored body",
+            subject: "Keep this subject",
+            attachments: attachmentContexts,
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        try sendService.recordRemoteSendAdmission(
+            optimisticMessageID: handle.optimisticMessageID
+        )
+
+        sendService.retainDefinitelyUnsentOptimisticMessage(
+            byID: handle.optimisticMessageID,
+            fallbackAttachmentReferences: attachmentContexts.map(\.localAttachmentReference)
+        )
+        coreDataStack.resetViewContext()
+
+        let retainedMessage = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(retainedMessage.bodyText, "Keep this authored body")
+        XCTAssertEqual(retainedMessage.subject, "Keep this subject")
+        XCTAssertEqual(retainedMessage.attachmentsArray.map(\.id), ["local_definite_failure"])
+        XCTAssertEqual(retainedMessage.attachmentsArray.first?.state, .failed)
+        let record = try XCTUnwrap(
+            optimisticMutationRecord(in: context, id: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(
+            record.remoteCommittedMessageId,
+            OutboundSendRemoteState.notSentMessageID
+        )
+        XCTAssertNil(record.remoteCommittedThreadId)
+    }
+
+    func testColdRecovery_ambiguousMarkerStopsAttachmentSpinnerWithoutRetry() async throws {
+        let context = coreDataStack.viewContext
+        let attachment = AttachmentBuilder()
+            .withId("local_ambiguous_attachment")
+            .asImage()
+            .queued()
+            .withLocalURL("Attachments/ambiguous.jpg")
+            .withPreviewURL("Previews/ambiguous.jpg")
+            .build(in: context)
+        let attachmentContexts = try OutboundAttachmentContextBuilder(viewContext: context)
+            .buildSendAttachments(from: [attachment])
+        let recipient = "ambiguous-attachment@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Do not retry this ambiguous send",
+            attachments: attachmentContexts,
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        attachment.state = .uploading
+        try context.save()
+        try sendService.recordAmbiguousRemoteSend(
+            optimisticMessageID: handle.optimisticMessageID
+        )
+
+        coreDataStack.resetViewContext()
+        let apiClient = MockGmailAPIClient()
+        let coldStartSendService = GmailSendService(
+            viewContext: context,
+            apiClient: apiClient
+        )
+        coldStartSendService.reconcileAbandonedOptimisticSendMutations()
+
+        let retainedMessage = try XCTUnwrap(
+            coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertFalse(retainedMessage.isSendingLocalAttachments)
+        XCTAssertEqual(retainedMessage.attachmentsArray.first?.state, .uploaded)
+        let record = try XCTUnwrap(
+            optimisticMutationRecord(in: context, id: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(
+            record.remoteCommittedMessageId,
+            OutboundSendRemoteState.ambiguousMessageID
+        )
+        XCTAssertEqual(apiClient.sendMessageCallCount, 0)
     }
 
     func testHandleFailedOptimisticMessage_withLocalAttachments_marksOnlyLocalAttachmentsFailed() throws {
@@ -696,12 +1630,42 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         let conversationListId: String?
     }
 
+    private struct DurableMutationState {
+        let remoteCommittedMessageId: String?
+        let remoteCommittedThreadId: String?
+    }
+
+    private struct DurableAttachmentState {
+        let localURL: String?
+        let previewURL: String?
+        let readableLocalURL: String?
+        let readablePreviewURL: String?
+        let state: Attachment.State
+    }
+
     private func durableMutationRecordCount() throws -> Int {
         let verificationContext = coreDataStack.newBackgroundContext()
         return try verificationContext.performAndWait {
             let request = OutboundSendMutationRecord.fetchRequest()
             request.includesPendingChanges = false
             return try verificationContext.count(for: request)
+        }
+    }
+
+    private func durableMutationState(id: String) throws -> DurableMutationState? {
+        let verificationContext = coreDataStack.newBackgroundContext()
+        return try verificationContext.performAndWait {
+            let request = OutboundSendMutationRecord.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            request.fetchLimit = 1
+            request.includesPendingChanges = false
+            guard let record = try verificationContext.fetch(request).first else {
+                return nil
+            }
+            return DurableMutationState(
+                remoteCommittedMessageId: record.remoteCommittedMessageId,
+                remoteCommittedThreadId: record.remoteCommittedThreadId
+            )
         }
     }
 
@@ -723,9 +1687,56 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         }
     }
 
+    private func durableMessageCount(id: String) throws -> Int {
+        let verificationContext = coreDataStack.newBackgroundContext()
+        return try verificationContext.performAndWait {
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id(id)
+            request.includesPendingChanges = false
+            return try verificationContext.count(for: request)
+        }
+    }
+
+    private func durableAttachmentState(
+        messageID: String,
+        attachmentID: String
+    ) throws -> DurableAttachmentState? {
+        let verificationContext = coreDataStack.newBackgroundContext()
+        return try verificationContext.performAndWait {
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id(messageID)
+            request.fetchLimit = 1
+            request.relationshipKeyPathsForPrefetching = ["attachments"]
+            guard let message = try verificationContext.fetch(request).first,
+                  let attachment = message.attachmentsArray.first(where: {
+                      $0.id == attachmentID
+                  }) else {
+                return nil
+            }
+            return DurableAttachmentState(
+                localURL: attachment.localURL,
+                previewURL: attachment.previewURL,
+                readableLocalURL: attachment.readableLocalURLValue,
+                readablePreviewURL: attachment.readablePreviewURLValue,
+                state: attachment.state
+            )
+        }
+    }
+
+    private func durableAttachmentCount(id: String) throws -> Int {
+        let verificationContext = coreDataStack.newBackgroundContext()
+        return try verificationContext.performAndWait {
+            let request = Attachment.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            request.includesPendingChanges = false
+            return try verificationContext.count(for: request)
+        }
+    }
+
     private func makeHeaderlessSentMessage(
         id: String,
-        threadId: String
+        threadId: String,
+        messageId: String? = nil
     ) -> ProcessedMessage {
         var headers = ProcessedHeaders()
         headers.subject = "Re: List topic"
@@ -735,6 +1746,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         ]
         headers.isFromMe = true
         headers.listId = nil
+        headers.messageId = messageId
 
         var processedMessage = ProcessedMessage()
         processedMessage.id = id
@@ -747,6 +1759,175 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         processedMessage.plainTextBody = "Committed list reply"
         processedMessage.labelIds = ["SENT"]
         return processedMessage
+    }
+}
+
+@MainActor
+private final class NoOpIncrementalSyncPerformer: IncrementalSyncPerforming {
+    func performIncrementalSync() async throws {}
+}
+
+private actor InFlightSendGate {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilReleased() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private final class InFlightComposeSendService: ComposeSendServicing, @unchecked Sendable {
+    private let base: GmailSendService
+    private let gate: InFlightSendGate
+    private let lock = NSLock()
+    private var _sendCallCount = 0
+
+    init(base: GmailSendService, gate: InFlightSendGate) {
+        self.base = base
+        self.gate = gate
+    }
+
+    var sendCallCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _sendCallCount
+    }
+
+    @MainActor
+    func markAttachmentsAsUploaded(references: [LocalAttachmentReference]) {
+        base.markAttachmentsAsUploaded(references: references)
+    }
+
+    func sendReply(
+        to recipients: [String],
+        fromEmail: String?,
+        fromName: String?,
+        body: String,
+        subject: String,
+        threadId: String,
+        inReplyTo: String?,
+        references: [String],
+        originalMessage: QuotedMessage?,
+        attachmentInfos: [GmailSendService.AttachmentInfo],
+        messageId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
+    ) async throws -> GmailSendService.SendResult {
+        try await beforeTransmission()
+        await waitForResponse()
+        return .init(messageId: "gated-sent-id", threadId: threadId)
+    }
+
+    func sendNew(
+        to recipients: [String],
+        body: String,
+        htmlBody: String?,
+        subject: String?,
+        attachmentInfos: [GmailSendService.AttachmentInfo],
+        inlineAttachmentInfos: [GmailSendService.AttachmentInfo],
+        messageId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
+    ) async throws -> GmailSendService.SendResult {
+        try await beforeTransmission()
+        await waitForResponse()
+        return .init(messageId: "gated-sent-id", threadId: "gated-thread-id")
+    }
+
+    @MainActor
+    func remoteCommittedSendResult(optimisticMessageID: String) -> GmailSendService.SendResult? {
+        base.remoteCommittedSendResult(optimisticMessageID: optimisticMessageID)
+    }
+
+    @MainActor
+    func persistOptimisticMessageBeforeTransmission(optimisticMessageID: String) throws {
+        try base.persistOptimisticMessageBeforeTransmission(
+            optimisticMessageID: optimisticMessageID
+        )
+    }
+
+    @MainActor
+    func recordRemoteSendAdmission(optimisticMessageID: String) throws {
+        try base.recordRemoteSendAdmission(optimisticMessageID: optimisticMessageID)
+    }
+
+    @MainActor
+    func recordAmbiguousRemoteSend(optimisticMessageID: String) throws {
+        try base.recordAmbiguousRemoteSend(optimisticMessageID: optimisticMessageID)
+    }
+
+    @MainActor
+    func recordRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws {
+        try base.recordRemoteCommittedSend(
+            optimisticMessageID: optimisticMessageID,
+            result: result
+        )
+    }
+
+    @MainActor
+    func reconcileRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws -> Bool {
+        try base.reconcileRemoteCommittedSend(
+            optimisticMessageID: optimisticMessageID,
+            result: result
+        )
+    }
+
+    @MainActor
+    func rollbackOptimisticMessageBeforeTransmission(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        base.rollbackOptimisticMessageBeforeTransmission(
+            byID: messageID,
+            fallbackAttachmentReferences: fallbackAttachmentReferences
+        )
+    }
+
+    @MainActor
+    func retainDefinitelyUnsentOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        base.retainDefinitelyUnsentOptimisticMessage(
+            byID: messageID,
+            fallbackAttachmentReferences: fallbackAttachmentReferences
+        )
+    }
+
+    private func waitForResponse() async {
+        recordSendStarted()
+        await gate.waitUntilReleased()
+    }
+
+    private func recordSendStarted() {
+        lock.lock()
+        _sendCallCount += 1
+        lock.unlock()
     }
 }
 

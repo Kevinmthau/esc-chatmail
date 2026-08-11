@@ -10,12 +10,14 @@ protocol OutboundSendMutationTracking: AnyObject {
     func trackPendingMutation(_ mutation: OutboundSendMutationTracker.PendingMutation)
     func reconcileSuccess(_ success: OutboundMessageReconciliationHooks.Success)
     func reconcileFailure(_ failure: OutboundMessageReconciliationHooks.Failure)
+    func reconcileAmbiguous(_ ambiguous: OutboundMessageReconciliationHooks.Ambiguous)
     var pendingMutationCount: Int { get }
     var failedMutations: [OutboundSendMutationTracker.FailedMutation] { get }
 }
 
-/// Tracks outbound mailbox mutations created by optimistic sends until Gmail
-/// send success or failure reconciles them.
+/// Tracks outbound mailbox mutations created by optimistic sends until the
+/// request reaches a terminal local disposition. Delivery-unknown state is
+/// retained durably in Core Data rather than in this process-local tracker.
 @MainActor
 final class OutboundSendMutationTracker: OutboundSendMutationTracking {
     struct PendingMutation: Identifiable, Sendable {
@@ -77,5 +79,12 @@ final class OutboundSendMutationTracker: OutboundSendMutationTracking {
         )
         NotificationCenter.default.post(name: .outboundSendMutationChanged, object: nil)
         NotificationCenter.default.post(name: .outboundSendFailed, object: nil)
+    }
+
+    func reconcileAmbiguous(_ ambiguous: OutboundMessageReconciliationHooks.Ambiguous) {
+        let removedPending = pendingMutationsByID.removeValue(forKey: ambiguous.optimisticMessageID)
+        let removedFailed = failedMutationsByID.removeValue(forKey: ambiguous.optimisticMessageID)
+        guard removedPending != nil || removedFailed != nil else { return }
+        NotificationCenter.default.post(name: .outboundSendMutationChanged, object: nil)
     }
 }

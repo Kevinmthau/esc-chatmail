@@ -3,11 +3,23 @@ import CoreData
 
 @MainActor
 struct OutboundAttachmentContextBuilder {
+    enum BuildError: LocalizedError, Equatable {
+        case attachmentNotReady(filename: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .attachmentNotReady(let filename):
+                return "\(filename) is still being prepared. Wait for it to finish before sending."
+            }
+        }
+    }
+
     let viewContext: NSManagedObjectContext
 
     func buildSendAttachments(
         from attachments: [Attachment]
     ) throws -> [OutboundMessageRequest.AttachmentContext] {
+        try ensureAttachmentsAreReady(attachments)
         try ensurePermanentObjectIDs(for: attachments)
 
         return attachments.map { attachment in
@@ -21,6 +33,7 @@ struct OutboundAttachmentContextBuilder {
     func buildInlineAttachmentInfos(
         from attachments: [Attachment]
     ) throws -> [GmailSendService.AttachmentInfo] {
+        try ensureAttachmentsAreReady(attachments)
         try ensurePermanentObjectIDs(for: attachments)
         return attachments.map(makeAttachmentInfo)
     }
@@ -34,11 +47,20 @@ struct OutboundAttachmentContextBuilder {
 
     private func makeAttachmentInfo(from attachment: Attachment) -> GmailSendService.AttachmentInfo {
         GmailSendService.AttachmentInfo(
-            localURL: attachment.localURLValue,
+            localURL: attachment.readableLocalURLValue,
             filename: attachment.filenameValue,
             mimeType: attachment.mimeTypeValue,
             contentId: attachment.contentId
         )
+    }
+
+    private func ensureAttachmentsAreReady(_ attachments: [Attachment]) throws {
+        for attachment in attachments {
+            guard let localURL = attachment.readableLocalURLValue,
+                  !localURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw BuildError.attachmentNotReady(filename: attachment.filenameValue)
+            }
+        }
     }
 
     private func ensurePermanentObjectIDs(for attachments: [Attachment]) throws {

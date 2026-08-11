@@ -117,6 +117,14 @@ struct OutboundReplyContextBuilder {
             return nil
         }
 
+        guard OutboundSendDeliveryState.resolve(for: message) == .none else {
+            Log.warning(
+                "Rejecting local outbound delivery state as a reply target",
+                category: .message
+            )
+            return nil
+        }
+
         if conversation.conversationType == .list {
             guard let conversationListId = conversation.listId,
                   !conversationListId.isEmpty,

@@ -6,16 +6,19 @@ import CoreData
 final class OutboundMessageCoordinatorTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
     private var htmlContentHandler: HTMLContentHandler!
+    private var outboundTaskRegistry: OutboundTaskRegistry!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
         htmlContentHandler = HTMLContentHandler()
+        outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
     }
 
     override func tearDown() {
         htmlContentHandler = nil
         coreDataStack = nil
+        outboundTaskRegistry = nil
         super.tearDown()
     }
 
@@ -306,11 +309,25 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
         let completionExpectation = expectation(description: "forward send completes")
         let attachmentBuilder = OutboundAttachmentContextBuilder(viewContext: coreDataStack.viewContext)
+        let sourceMessage = MessageBuilder()
+            .withId("forward-source-message")
+            .withAttachments()
+            .build(in: coreDataStack.viewContext)
+        let inlineAttachmentID = "inline-attachment"
+        let inlinePath = AttachmentPaths.originalPath(
+            messageId: sourceMessage.id,
+            attachmentId: inlineAttachmentID,
+            ext: "png"
+        )
+        XCTAssertTrue(AttachmentPaths.saveData(Data("inline".utf8), to: inlinePath))
+        defer { AttachmentPaths.deleteFile(at: inlinePath) }
         let inlineAttachment = AttachmentBuilder()
-            .withId("inline-attachment")
+            .withId(inlineAttachmentID)
             .withFilename("inline.png")
             .withMimeType("image/png")
+            .withLocalURL(inlinePath)
             .downloaded()
+            .forMessage(sourceMessage)
             .build(in: coreDataStack.viewContext)
         inlineAttachment.contentId = "cid-inline"
 
@@ -463,6 +480,489 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
     }
 
+    func testSend_ambiguousOutcomeClearsPendingTrackerWithoutRecordingFailure() async throws {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        sendService.sendNewError = GmailSendService.SendError.ambiguousDelivery("connection reset")
+        let mutationTracker = MockOutboundSendMutationTracker()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            mutationTracker: mutationTracker
+        )
+        let ambiguousExpectation = expectation(description: "ambiguous hook called")
+        var ambiguousMessageID: String?
+
+        let submission = try await coordinator.send(
+            .compose(
+                .init(
+                    recipientEmails: ["to@example.com"],
+                    subject: "Hello",
+                    body: "Body",
+                    attachments: []
+                )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: nil,
+                onAmbiguous: { ambiguous in
+                    ambiguousMessageID = ambiguous.optimisticMessageID
+                    ambiguousExpectation.fulfill()
+                }
+            )
+        )
+
+        let queuedSubmission = try XCTUnwrap(submission)
+        await fulfillment(of: [ambiguousExpectation], timeout: 1.0)
+        XCTAssertEqual(ambiguousMessageID, queuedSubmission.optimisticMessageID)
+        XCTAssertEqual(mutationTracker.pendingMutationCount, 0)
+        XCTAssertEqual(mutationTracker.ambiguousMutationIDs, [queuedSubmission.optimisticMessageID])
+        XCTAssertTrue(mutationTracker.failedMutationIDs.isEmpty)
+    }
+
+    func testSend_waitsForPreflightAndTransmissionAdmissionBeforeReturning() async throws {
+        let preflightGate = OutboundSendTestGate()
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        sendService.sendNewPreflightGate = preflightGate
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer()
+        )
+        var didReturn = false
+
+        let sendTask = Task { @MainActor in
+            let result = try await coordinator.send(
+                .compose(
+                    .init(
+                        recipientEmails: ["to@example.com"],
+                        subject: "Preflight",
+                        body: "Body",
+                        attachments: []
+                    )
+                )
+            )
+            didReturn = true
+            return result
+        }
+
+        await preflightGate.waitUntilStarted()
+        XCTAssertFalse(didReturn, "The composer-success path must wait for final request admission")
+
+        await preflightGate.release()
+        let result = try await sendTask.value
+
+        XCTAssertNotNil(result)
+        XCTAssertTrue(didReturn)
+    }
+
+    func testSend_preflightFailurePropagatesBeforeComposerSuccess() async {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("preflight")
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer()
+        )
+
+        do {
+            _ = try await coordinator.send(
+                .compose(
+                    .init(
+                        recipientEmails: ["to@example.com"],
+                        subject: "Preflight failure",
+                        body: "Body",
+                        attachments: []
+                    )
+                )
+            )
+            XCTFail("Expected preflight failure")
+        } catch {
+            // Expected: the caller retains the source composer.
+        }
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
+        XCTAssertEqual(snapshot.failedOptimisticMessageIDs.count, 1)
+        XCTAssertTrue(snapshot.sendNewCancellationObservations.isEmpty)
+    }
+
+    func testSend_closedAdmissionRejectsBeforeOptimisticCreation() async {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer()
+        )
+        outboundTaskRegistry.closeAdmission()
+
+        do {
+            _ = try await coordinator.send(
+                .compose(
+                    .init(
+                        recipientEmails: ["to@example.com"],
+                        subject: "Blocked",
+                        body: "Body",
+                        attachments: []
+                    )
+                )
+            )
+            XCTFail("Expected account-transition admission to reject the send")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertTrue(sendService.snapshot.createOptimisticCalls.isEmpty)
+        XCTAssertTrue(sendService.snapshot.sendNewCalls.isEmpty)
+    }
+
+    func testRegistry_newerAccountTransitionPreventsOlderReopen() {
+        let olderTransition = outboundTaskRegistry.closeAdmission()
+        let newerTransition = outboundTaskRegistry.closeAdmission()
+
+        XCTAssertFalse(outboundTaskRegistry.reopenAdmission(after: olderTransition))
+        XCTAssertNil(outboundTaskRegistry.reserve())
+        XCTAssertTrue(outboundTaskRegistry.reopenAdmission(after: newerTransition))
+
+        let reservation = outboundTaskRegistry.reserve()
+        XCTAssertNotNil(reservation)
+        if let reservation {
+            outboundTaskRegistry.finish(reservation)
+        }
+    }
+
+    func testRegistry_closeDuringSuccessfulMarkerPersistenceDrainsAdmittedTask() async throws {
+        let gate = OutboundSendTestGate()
+        let reservation = try XCTUnwrap(outboundTaskRegistry.reserve())
+        let backgroundTask = Task {
+            await gate.waitUntilReleased()
+        }
+        var cancellationRequests = 0
+        XCTAssertTrue(
+            outboundTaskRegistry.handOff(
+                reservation,
+                to: backgroundTask,
+                cancelBeforeTransmission: {
+                    cancellationRequests += 1
+                    backgroundTask.cancel()
+                }
+            )
+        )
+        await gate.waitUntilStarted()
+
+        try outboundTaskRegistry.admitTransmission(
+            reservation,
+            persistingMarker: {
+                outboundTaskRegistry.closeAdmission()
+            }
+        )
+
+        XCTAssertEqual(cancellationRequests, 0)
+        XCTAssertFalse(backgroundTask.isCancelled)
+
+        let drainTask = Task { @MainActor in
+            await outboundTaskRegistry.cancelAndAwaitAll()
+        }
+        await gate.release()
+        await drainTask.value
+        XCTAssertEqual(cancellationRequests, 0)
+    }
+
+    func testRegistry_closeDuringFailedMarkerPersistenceCancelsPreflightTask() async throws {
+        let gate = OutboundSendTestGate()
+        let reservation = try XCTUnwrap(outboundTaskRegistry.reserve())
+        let backgroundTask = Task {
+            await gate.waitUntilReleased()
+        }
+        var cancellationRequests = 0
+        XCTAssertTrue(
+            outboundTaskRegistry.handOff(
+                reservation,
+                to: backgroundTask,
+                cancelBeforeTransmission: {
+                    cancellationRequests += 1
+                    backgroundTask.cancel()
+                }
+            )
+        )
+        await gate.waitUntilStarted()
+
+        XCTAssertThrowsError(
+            try outboundTaskRegistry.admitTransmission(
+                reservation,
+                persistingMarker: {
+                    outboundTaskRegistry.closeAdmission()
+                    throw GmailSendService.SendError.optimisticCreationFailed
+                }
+            )
+        )
+        XCTAssertEqual(cancellationRequests, 1)
+        XCTAssertTrue(backgroundTask.isCancelled)
+
+        let drainTask = Task { @MainActor in
+            await outboundTaskRegistry.cancelAndAwaitAll()
+        }
+        await gate.release()
+        await drainTask.value
+    }
+
+    func testRegistry_handoffAfterAdmissionDoesNotReinstallPreflightCancellation() async throws {
+        let gate = OutboundSendTestGate()
+        let reservation = try XCTUnwrap(outboundTaskRegistry.reserve())
+        let backgroundTask = Task {
+            await gate.waitUntilReleased()
+        }
+        await gate.waitUntilStarted()
+
+        try outboundTaskRegistry.admitTransmission(
+            reservation,
+            persistingMarker: {}
+        )
+        outboundTaskRegistry.closeAdmission()
+
+        var cancellationRequests = 0
+        XCTAssertFalse(
+            outboundTaskRegistry.handOff(
+                reservation,
+                to: backgroundTask,
+                cancelBeforeTransmission: {
+                    cancellationRequests += 1
+                    backgroundTask.cancel()
+                }
+            )
+        )
+        XCTAssertEqual(cancellationRequests, 0)
+        XCTAssertFalse(backgroundTask.isCancelled)
+
+        let drainTask = Task { @MainActor in
+            await outboundTaskRegistry.cancelAndAwaitAll()
+        }
+        await gate.release()
+        await drainTask.value
+        XCTAssertEqual(cancellationRequests, 0)
+    }
+
+    func testSend_accountTransitionDrainsRequestBuilderBeforeReopen() async {
+        let requestBuilderGate = OutboundSendTestGate()
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer()
+        )
+
+        let sendTask = Task { @MainActor in
+            do {
+                _ = try await coordinator.send(preparing: {
+                    await requestBuilderGate.waitUntilReleased()
+                    return .compose(
+                        .init(
+                            recipientEmails: ["old-account-recipient@example.com"],
+                            subject: "Old account draft",
+                            body: "Body",
+                            attachments: []
+                        )
+                    )
+                })
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+                return false
+            }
+        }
+        await requestBuilderGate.waitUntilStarted()
+
+        let transition = outboundTaskRegistry.closeAdmission()
+        XCTAssertFalse(
+            outboundTaskRegistry.reopenAdmission(after: transition),
+            "The request builder must own a reservation before its first suspension"
+        )
+
+        var didDrain = false
+        let drainTask = Task { @MainActor in
+            await outboundTaskRegistry.cancelAndAwaitAll()
+            didDrain = true
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(didDrain, "Account teardown must await the suspended request builder")
+
+        await requestBuilderGate.release()
+        let wasCancelled = await sendTask.value
+        await drainTask.value
+
+        XCTAssertTrue(wasCancelled)
+        XCTAssertTrue(didDrain)
+        XCTAssertTrue(outboundTaskRegistry.reopenAdmission(after: transition))
+        XCTAssertTrue(sendService.snapshot.createOptimisticCalls.isEmpty)
+        XCTAssertTrue(sendService.snapshot.sendNewCalls.isEmpty)
+    }
+
+    func testSend_accountTransitionDrainsPreparationAndPreventsBackgroundHandoff() async {
+        let optimisticGate = OutboundSendTestGate()
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        sendService.optimisticCreationGate = optimisticGate
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer()
+        )
+
+        let sendTask = Task { @MainActor in
+            do {
+                _ = try await coordinator.send(
+                    .compose(
+                        .init(
+                            recipientEmails: ["to@example.com"],
+                            subject: "Preparing",
+                            body: "Body",
+                            attachments: []
+                        )
+                    )
+                )
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+                return false
+            }
+        }
+        await optimisticGate.waitUntilStarted()
+
+        outboundTaskRegistry.closeAdmission()
+        var didDrain = false
+        let drainTask = Task { @MainActor in
+            await outboundTaskRegistry.cancelAndAwaitAll()
+            didDrain = true
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(didDrain, "Teardown must retain the pre-handoff reservation")
+
+        await optimisticGate.release()
+        let wasCancelled = await sendTask.value
+        XCTAssertTrue(wasCancelled)
+        await drainTask.value
+
+        XCTAssertTrue(didDrain)
+        XCTAssertEqual(sendService.snapshot.createOptimisticCalls.count, 1)
+        XCTAssertTrue(sendService.snapshot.sendNewCalls.isEmpty)
+        XCTAssertEqual(sendService.snapshot.failedOptimisticMessageIDs.count, 1)
+    }
+
+    func testSend_accountTransitionDuringPreflightCancelsWorkerAndPreventsGmailAdmission() async {
+        let preflightGate = OutboundSendTestGate()
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        sendService.sendNewPreflightGate = preflightGate
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer()
+        )
+
+        let sendTask = Task { @MainActor in
+            do {
+                _ = try await coordinator.send(
+                    .compose(
+                        .init(
+                            recipientEmails: ["to@example.com"],
+                            subject: "Cancelled preflight",
+                            body: "Body",
+                            attachments: []
+                        )
+                    )
+                )
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+                return false
+            }
+        }
+        await preflightGate.waitUntilStarted()
+
+        outboundTaskRegistry.closeAdmission()
+        var didDrain = false
+        let drainTask = Task { @MainActor in
+            await outboundTaskRegistry.cancelAndAwaitAll()
+            didDrain = true
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(didDrain, "Teardown must retain the cancelled preflight task")
+
+        await preflightGate.release()
+        let wasCancelled = await sendTask.value
+        XCTAssertTrue(wasCancelled)
+        await drainTask.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertTrue(didDrain)
+        XCTAssertEqual(snapshot.sendNewCalls.count, 1)
+        XCTAssertEqual(snapshot.sendNewPreflightCancellationObservations, [true])
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertEqual(snapshot.failedOptimisticMessageIDs.count, 1)
+    }
+
+    func testSend_accountTransitionDoesNotCancelStartedGmailCallAndDrainsThroughSuccess() async throws {
+        let sendGate = OutboundSendTestGate()
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        sendService.sendNewGate = sendGate
+        let syncPerformer = MockCoordinatorSyncPerformer()
+        let mutationTracker = MockOutboundSendMutationTracker()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: syncPerformer,
+            mutationTracker: mutationTracker
+        )
+        var successIDs: [String] = []
+        var failureIDs: [String] = []
+
+        let optionalSubmission = try await coordinator.send(
+            .compose(
+                .init(
+                    recipientEmails: ["to@example.com"],
+                    subject: "In flight",
+                    body: "Body",
+                    attachments: []
+                )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: { success in successIDs.append(success.optimisticMessageID) },
+                onFailure: { failure in failureIDs.append(failure.optimisticMessageID) }
+            )
+        )
+        let submission = try XCTUnwrap(optionalSubmission)
+        await sendGate.waitUntilStarted()
+
+        outboundTaskRegistry.closeAdmission()
+        var didDrain = false
+        let drainTask = Task { @MainActor in
+            await outboundTaskRegistry.cancelAndAwaitAll()
+            didDrain = true
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(didDrain, "Teardown must await an API call that ignores cancellation")
+        XCTAssertTrue(successIDs.isEmpty)
+
+        await sendGate.release()
+        await drainTask.value
+
+        XCTAssertTrue(didDrain)
+        XCTAssertEqual(sendService.snapshot.sendNewCancellationObservations, [false])
+        XCTAssertEqual(successIDs, [submission.optimisticMessageID])
+        XCTAssertTrue(failureIDs.isEmpty)
+        XCTAssertEqual(mutationTracker.successfulMutationIDs, [submission.optimisticMessageID])
+        XCTAssertTrue(mutationTracker.failedMutationIDs.isEmpty)
+        XCTAssertTrue(sendService.snapshot.failedOptimisticMessageIDs.isEmpty)
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+    }
+
     private func makeCoordinator(
         sendService: MockOutboundMessageSendService,
         syncPerformer: MockCoordinatorSyncPerformer,
@@ -482,7 +982,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                     sanitizer: .shared
                 )
             ),
-            mutationTracker: mutationTracker ?? MockOutboundSendMutationTracker()
+            mutationTracker: mutationTracker ?? MockOutboundSendMutationTracker(),
+            outboundTaskRegistry: outboundTaskRegistry
         )
     }
 
@@ -588,6 +1089,11 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let sendNewCalls: [SendNewCall]
         let sendReplyCalls: [SendReplyCall]
         let markAttachmentsAsUploadingCalls: [[LocalAttachmentReference]]
+        let failedOptimisticMessageIDs: [String]
+        let sendNewCancellationObservations: [Bool]
+        let sendNewPreflightCancellationObservations: [Bool]
+        let recordRemoteSendAdmissionCalls: [String]
+        let remoteTransmissionCalls: Int
     }
 
     private let context: NSManagedObjectContext
@@ -599,9 +1105,18 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     private var newCalls: [SendNewCall] = []
     private var replyCalls: [SendReplyCall] = []
     private var markUploadingCalls: [[LocalAttachmentReference]] = []
+    private var failedOptimisticMessageIDs: [String] = []
+    private var sendNewCancellationObservations: [Bool] = []
+    private var sendNewPreflightCancellationObservations: [Bool] = []
+    private var recordRemoteSendAdmissionCalls: [String] = []
+    private var remoteTransmissionCalls = 0
     var sendDelayNanoseconds: UInt64 = 0
     var sendNewError: Error?
     var sendReplyError: Error?
+    var optimisticCreationGate: OutboundSendTestGate?
+    var sendNewPreflightGate: OutboundSendTestGate?
+    var sendNewPreflightError: Error?
+    var sendNewGate: OutboundSendTestGate?
 
     init(context: NSManagedObjectContext) {
         self.context = context
@@ -614,7 +1129,12 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                 createdOptimisticMessageObjectIDs: createdOptimisticMessageObjectIDs,
                 sendNewCalls: newCalls,
                 sendReplyCalls: replyCalls,
-                markAttachmentsAsUploadingCalls: markUploadingCalls
+                markAttachmentsAsUploadingCalls: markUploadingCalls,
+                failedOptimisticMessageIDs: failedOptimisticMessageIDs,
+                sendNewCancellationObservations: sendNewCancellationObservations,
+                sendNewPreflightCancellationObservations: sendNewPreflightCancellationObservations,
+                recordRemoteSendAdmissionCalls: recordRemoteSendAdmissionCalls,
+                remoteTransmissionCalls: remoteTransmissionCalls
             )
         }
     }
@@ -631,6 +1151,9 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         senderName: String?,
         optimisticConversation: OptimisticConversationReference?
     ) async throws -> OptimisticSendHandle {
+        if let optimisticCreationGate {
+            await optimisticCreationGate.waitUntilReleased()
+        }
         queue.sync {
             createCalls.append(
                 CreateOptimisticCall(
@@ -697,7 +1220,9 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         inReplyTo: String?,
         references: [String],
         originalMessage: QuotedMessage?,
-        attachmentInfos: [GmailSendService.AttachmentInfo]
+        attachmentInfos: [GmailSendService.AttachmentInfo],
+        messageId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
     ) async throws -> GmailSendService.SendResult {
         queue.sync {
             replyCalls.append(
@@ -714,6 +1239,9 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                 )
             )
         }
+
+        try await beforeTransmission()
+        queue.sync { remoteTransmissionCalls += 1 }
 
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
@@ -734,7 +1262,9 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         htmlBody: String?,
         subject: String?,
         attachmentInfos: [GmailSendService.AttachmentInfo],
-        inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
+        inlineAttachmentInfos: [GmailSendService.AttachmentInfo],
+        messageId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
     ) async throws -> GmailSendService.SendResult {
         queue.sync {
             newCalls.append(
@@ -748,6 +1278,27 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
             )
         }
 
+        if let sendNewPreflightGate {
+            await sendNewPreflightGate.waitUntilReleased()
+            let wasCancelled = Task.isCancelled
+            queue.sync {
+                sendNewPreflightCancellationObservations.append(wasCancelled)
+            }
+        }
+        if let sendNewPreflightError {
+            throw sendNewPreflightError
+        }
+
+        try await beforeTransmission()
+        queue.sync { remoteTransmissionCalls += 1 }
+
+        if let sendNewGate {
+            await sendNewGate.waitUntilReleased()
+            let wasCancelled = Task.isCancelled
+            queue.sync {
+                sendNewCancellationObservations.append(wasCancelled)
+            }
+        }
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
         }
@@ -767,6 +1318,19 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
             remoteCommittedResults[optimisticMessageID]
         }
     }
+
+    @MainActor
+    func persistOptimisticMessageBeforeTransmission(optimisticMessageID: String) throws {}
+
+    @MainActor
+    func recordRemoteSendAdmission(optimisticMessageID: String) throws {
+        queue.sync {
+            recordRemoteSendAdmissionCalls.append(optimisticMessageID)
+        }
+    }
+
+    @MainActor
+    func recordAmbiguousRemoteSend(optimisticMessageID: String) throws {}
 
     @MainActor
     func recordRemoteCommittedSend(
@@ -812,11 +1376,24 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     func markAttachmentsAsUploaded(references: [LocalAttachmentReference]) {}
 
     @MainActor
-    func handleFailedOptimisticMessage(
+    func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
     ) {
+        queue.sync {
+            failedOptimisticMessageIDs.append(messageID)
+        }
         optimisticMessages[messageID] = nil
+    }
+
+    @MainActor
+    func retainDefinitelyUnsentOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        queue.sync {
+            failedOptimisticMessageIDs.append(messageID)
+        }
     }
 
     @MainActor
@@ -827,6 +1404,36 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     }
 }
 
+private actor OutboundSendTestGate {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilReleased() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+    }
+}
+
 @MainActor
 private final class MockOutboundSendMutationTracker: OutboundSendMutationTracking {
     private var pendingMutationIDSet: Set<String> = []
@@ -834,6 +1441,7 @@ private final class MockOutboundSendMutationTracker: OutboundSendMutationTrackin
     private(set) var trackedConversationReferences: [ConversationReference?] = []
     private(set) var successfulMutationIDs: [String] = []
     private(set) var failedMutationIDs: [String] = []
+    private(set) var ambiguousMutationIDs: [String] = []
 
     var pendingMutationCount: Int {
         pendingMutationIDSet.count
@@ -865,5 +1473,10 @@ private final class MockOutboundSendMutationTracker: OutboundSendMutationTrackin
     func reconcileFailure(_ failure: OutboundMessageReconciliationHooks.Failure) {
         pendingMutationIDSet.remove(failure.optimisticMessageID)
         failedMutationIDs.append(failure.optimisticMessageID)
+    }
+
+    func reconcileAmbiguous(_ ambiguous: OutboundMessageReconciliationHooks.Ambiguous) {
+        pendingMutationIDSet.remove(ambiguous.optimisticMessageID)
+        ambiguousMutationIDs.append(ambiguous.optimisticMessageID)
     }
 }

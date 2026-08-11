@@ -20,7 +20,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         super.tearDown()
     }
 
-    func testCreateOptimisticMessage_newConversationLeavesChangesPendingWithStableIDs() async throws {
+    func testCreateOptimisticMessage_newConversationPersistsDurablyWithStableIDs() async throws {
         let context = coreDataStack.viewContext
         let attachmentBuilder = OutboundAttachmentContextBuilder(viewContext: context)
         let attachment = AttachmentBuilder()
@@ -41,7 +41,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             )
         )
 
-        XCTAssertTrue(context.hasChanges, "Optimistic creation should defer persistence so send navigation is not blocked.")
+        XCTAssertFalse(context.hasChanges, "The optimistic graph and recovery record must be durable together.")
         let fetched = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         XCTAssertFalse(fetched.objectID.isTemporaryID)
         XCTAssertEqual(handle.optimisticMessageObjectID, fetched.objectID)
@@ -51,6 +51,15 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(handle.conversationReference, ConversationReference(objectID: conversation.objectID))
 
         XCTAssertEqual(fetched.attachmentsArray.compactMap(\.id), ["local_attachment_1"])
+
+        coreDataStack.resetViewContext()
+        let durableMessage = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(durableMessage.bodyText, "hello")
+        XCTAssertEqual(durableMessage.subject, "Subject")
+        XCTAssertEqual(durableMessage.attachmentsArray.compactMap(\.id), ["local_attachment_1"])
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
     }
 
     func testCreateOptimisticMessage_mirrorsSessionSenderIdentityByDefault() async throws {
@@ -247,7 +256,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(message.chatPreviewText, "Intro line")
     }
 
-    func testCreateOptimisticMessage_persistsMutationRecordBeforeViewContextSave() async throws {
+    func testCreateOptimisticMessage_persistsGraphAndMutationRecordAtomically() async throws {
         let context = coreDataStack.viewContext
         let recipient = "durable-record@example.com"
 
@@ -259,11 +268,14 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             )
         )
 
-        XCTAssertTrue(context.hasChanges, "The optimistic message graph should still be pending.")
+        XCTAssertFalse(context.hasChanges)
 
         coreDataStack.resetViewContext()
 
-        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        let durableMessage = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(durableMessage.bodyText, "pending send")
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
     }
 
@@ -320,7 +332,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(retryMessage.attachmentsArray.first?.objectID, attachment.objectID)
     }
 
-    func testCreateOptimisticMessage_reactivatesArchivedConversationWithoutImmediateSave() async throws {
+    func testCreateOptimisticMessage_reactivatesArchivedConversationDurably() async throws {
         let context = coreDataStack.viewContext
         let recipient = "friend@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
@@ -343,7 +355,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(conversation.objectID, archivedConversation.objectID)
         XCTAssertEqual(handle.conversationReference, ConversationReference(objectID: conversation.objectID))
         XCTAssertNil(conversation.archivedAt)
-        XCTAssertTrue(context.hasChanges, "Reactivating the conversation and inserting the optimistic message should remain unsaved until the send flow persists it.")
+        XCTAssertFalse(context.hasChanges)
     }
 
     func testCreateOptimisticMessage_withOptimisticConversationReferenceReusesExistingConversation() async throws {
@@ -367,7 +379,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(message.conversation?.objectID, conversation.objectID)
         XCTAssertEqual(handle.conversationReference, ConversationReference(objectID: conversation.objectID))
         XCTAssertEqual(message.gmThreadId, "thread-123")
-        XCTAssertTrue(context.hasChanges, "Anchored optimistic replies should stay unsaved until the background send path persists them.")
+        XCTAssertFalse(context.hasChanges)
     }
 
     func testCreateOptimisticMessage_inheritsListIdFromAnchoredConversation() async throws {
@@ -491,13 +503,15 @@ private final class MutationRecordPersistenceFailingContext: NSManagedObjectCont
     var failMutationRecordPersistence = false
     var failAfterObtainingPermanentIDs = true
 
-    override var persistentStoreCoordinator: NSPersistentStoreCoordinator? {
-        get {
-            failMutationRecordPersistence ? nil : super.persistentStoreCoordinator
+    override func save() throws {
+        if failMutationRecordPersistence {
+            throw NSError(
+                domain: "GmailSendServiceOptimisticCreationTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Injected optimistic transaction failure"]
+            )
         }
-        set {
-            super.persistentStoreCoordinator = newValue
-        }
+        try super.save()
     }
 
     override func obtainPermanentIDs(for objects: [NSManagedObject]) throws {

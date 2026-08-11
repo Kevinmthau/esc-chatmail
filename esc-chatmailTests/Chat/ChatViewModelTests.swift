@@ -204,6 +204,75 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.replyingTo, replacement)
     }
 
+    func testRetainedOutboundFailureCannotBecomeAutomaticOrManualReplyTarget() throws {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let baseDependencies = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        ).makeChatDependencies()
+        let chatDependencies = ChatDependencies(
+            session: baseDependencies.session,
+            content: baseDependencies.content,
+            messaging: baseDependencies.messaging,
+            contacts: baseDependencies.contacts,
+            storage: ChatStorageDependencies(
+                viewContext: context,
+                makeBackgroundContext: { stack.newBackgroundContext() }
+            ),
+            fullEmailOpener: baseDependencies.fullEmailOpener
+        )
+        let conversation = ConversationBuilder()
+            .withDisplayName("Reply Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let optimisticID = UUID().uuidString
+        let notSentMessage = MessageBuilder()
+            .withId(optimisticID)
+            .withBody("This unsent body must never be quoted implicitly")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        notSentMessage.messageId = MimeBuilder.messageId(
+            forOptimisticMessageID: optimisticID
+        )
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = optimisticID
+        record.createdAt = Date()
+        record.remoteCommittedMessageId = OutboundSendRemoteState.notSentMessageID
+        try stack.saveViewContext()
+        let conversationObjectID = conversation.objectID
+        let messageObjectID = notSentMessage.objectID
+
+        // Exercise the same cold registered-object state used when a retained
+        // optimistic row becomes the latest message after relaunch.
+        stack.resetViewContext()
+        let coldConversation = try XCTUnwrap(
+            try context.existingObject(with: conversationObjectID) as? Conversation
+        )
+        let coldNotSentMessage = try XCTUnwrap(
+            try context.existingObject(with: messageObjectID) as? Message
+        )
+        let viewModel = ChatViewModel(
+            conversation: coldConversation,
+            chatDependencies: chatDependencies
+        )
+
+        viewModel.initializeReplyingTo(lastMessage: coldNotSentMessage)
+        XCTAssertNil(viewModel.replyingTo)
+
+        viewModel.setReplyingTo(coldNotSentMessage)
+        XCTAssertNil(viewModel.replyingTo)
+
+        let coldRecord = try XCTUnwrap(
+            try context.fetch(OutboundSendMutationRecord.fetchRequest()).first
+        )
+        coldRecord.remoteCommittedMessageId = OutboundSendRemoteState.ambiguousMessageID
+        try stack.saveViewContext()
+        viewModel.setReplyingTo(coldNotSentMessage)
+        XCTAssertNil(viewModel.replyingTo)
+    }
+
     func testListReplyTargetRetargetsWhenSameSubjectMovesToNewGmailThread() {
         let deps = makeDependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com")
@@ -639,34 +708,54 @@ final class ChatViewModelTests: XCTestCase {
             for: message.id
         )
 
-        let regularPath = AttachmentPaths.originalPath(idOrUUID: "forward-regular", ext: "pdf")
-        XCTAssertTrue(AttachmentPaths.saveData(Data("regular".utf8), to: regularPath))
-        defer { AttachmentPaths.deleteFile(at: regularPath) }
+        let firstRegularAttachmentID = "attachment-regular-1"
+        let secondRegularAttachmentID = "attachment-regular-2"
+        let inlineAttachmentID = "attachment-inline"
+        let firstRegularPath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: firstRegularAttachmentID,
+            ext: "pdf"
+        )
+        let secondRegularPath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: secondRegularAttachmentID,
+            ext: "pdf"
+        )
+        XCTAssertTrue(AttachmentPaths.saveData(Data("regular".utf8), to: firstRegularPath))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("regular".utf8), to: secondRegularPath))
+        defer {
+            AttachmentPaths.deleteFile(at: firstRegularPath)
+            AttachmentPaths.deleteFile(at: secondRegularPath)
+        }
 
-        let inlinePath = AttachmentPaths.originalPath(idOrUUID: "forward-inline", ext: "png")
+        let inlinePath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: inlineAttachmentID,
+            ext: "png"
+        )
         XCTAssertTrue(AttachmentPaths.saveData(Data("inline".utf8), to: inlinePath))
         defer { AttachmentPaths.deleteFile(at: inlinePath) }
 
         let _ = AttachmentBuilder()
-            .withId("attachment-regular-1")
+            .withId(firstRegularAttachmentID)
             .withFilename("report.pdf")
             .withMimeType("application/pdf")
             .withByteSize(91_248)
-            .withLocalURL(regularPath)
+            .withLocalURL(firstRegularPath)
             .downloaded()
             .forMessage(message)
             .build(in: context)
         let _ = AttachmentBuilder()
-            .withId("attachment-regular-2")
+            .withId(secondRegularAttachmentID)
             .withFilename("report.pdf")
             .withMimeType("application/pdf")
             .withByteSize(91_248)
-            .withLocalURL(regularPath)
+            .withLocalURL(secondRegularPath)
             .downloaded()
             .forMessage(message)
             .build(in: context)
         let _ = AttachmentBuilder()
-            .withId("attachment-inline")
+            .withId(inlineAttachmentID)
             .withFilename("inline.png")
             .withMimeType("image/png")
             .withLocalURL(inlinePath)
@@ -688,12 +777,65 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.forwardComposeContext?.forwardedHTMLBody?.contains("Forwarded HTML body") == true)
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.count, 1)
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
+        XCTAssertEqual(
+            viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.first?.localURL,
+            inlinePath
+        )
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachments.count, 1)
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachments.first?.filename, "report.pdf")
+        XCTAssertTrue(
+            [firstRegularPath, secondRegularPath].contains(
+                viewModel.forwardComposeContext?.forwardedRegularAttachments.first?.localURL ?? ""
+            )
+        )
         guard case .forwardCompose(let context) = viewModel.destination else {
             return XCTFail("Expected forward compose destination")
         }
         XCTAssertEqual(context.id, "message-forward")
+    }
+
+    func testSetMessageToForward_rejectsUnreadableInlineAttachmentWithVisibleError() {
+        let deps = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test Chat")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("message-forward-legacy-inline")
+            .withSubject("Forward Me")
+            .withAttachments()
+            .inConversation(conversation)
+            .build(in: context)
+        let attachmentID = "legacy-inline"
+        _ = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("inline.png")
+            .withMimeType("image/png")
+            .withContentId("inline@example.com")
+            .withLocalURL(
+                AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "png")
+            )
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+
+        viewModel.setMessageToForward(message)
+
+        XCTAssertNil(viewModel.forwardComposeContext)
+        XCTAssertNil(viewModel.destination)
+        XCTAssertEqual(viewModel.sendErrorAlert?.title, "Couldn’t Forward Message")
+        XCTAssertEqual(
+            viewModel.sendErrorAlert?.message,
+            "inline.png is still being prepared. Wait for it to finish before sending."
+        )
     }
 
     func testSendReply_buildsStableReplyRequestAtViewModelEdge() async {
@@ -861,6 +1003,60 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertNil(result)
         XCTAssertEqual(viewModel.replyText, "Retryable reply")
+        XCTAssertFalse(viewModel.composerState.isSending)
+    }
+
+    func testSendReply_freezesReplyTargetAndRejectsDuplicateSendDuringPreflight() async {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockChatOutboundMessageCoordinator()
+        coordinator.suspendsSend = true
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Reply Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let capturedTarget = MessageBuilder()
+            .withId("captured-target")
+            .withSubject("Captured Subject")
+            .inConversation(conversation)
+            .build(in: context)
+        let laterTarget = MessageBuilder()
+            .withId("later-target")
+            .withSubject("Later Subject")
+            .inConversation(conversation)
+            .build(in: context)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.replyText = "Captured reply"
+        viewModel.replyingTo = capturedTarget
+        defer { coordinator.resumeSend() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.lastRequest != nil }
+
+        XCTAssertTrue(viewModel.composerState.isSending)
+        viewModel.setReplyingTo(laterTarget)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: laterTarget)
+        XCTAssertEqual(viewModel.replyingTo, capturedTarget)
+        let duplicateResult = await viewModel.sendReply()
+        XCTAssertNil(duplicateResult)
+
+        coordinator.resumeSend()
+        let result = await sendTask.value
+        XCTAssertNotNil(result)
+        XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertEqual(viewModel.replyText, "")
+        XCTAssertNil(viewModel.replyingTo)
     }
 
     func testSendReply_drainedConversationPreservesTextAndAttachments() async {
@@ -924,6 +1120,8 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
     private(set) var lastRequest: OutboundMessageRequest?
     var sendError: Error?
     var sendResult: OutboundMessageResult?
+    var suspendsSend = false
+    private var sendContinuation: CheckedContinuation<Void, Never>?
 
     init() {
         let coreDataStack = TestCoreDataStack()
@@ -941,14 +1139,25 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
     }
 
     func send(
-        _ request: OutboundMessageRequest,
+        preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks
     ) async throws -> OutboundMessageResult? {
+        let request = try await requestBuilder()
         lastRequest = request
+        if suspendsSend {
+            await withCheckedContinuation { continuation in
+                sendContinuation = continuation
+            }
+        }
         if let sendError {
             throw sendError
         }
         return sendResult
+    }
+
+    func resumeSend() {
+        sendContinuation?.resume()
+        sendContinuation = nil
     }
 }
 

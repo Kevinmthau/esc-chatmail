@@ -81,9 +81,13 @@ final class ComposeViewModel: ObservableObject {
     var recipients: [Recipient] { recipientManager.recipients }
     var recipientInput: String {
         get { recipientManager.recipientInput }
-        set { recipientManager.recipientInput = newValue }
+        set {
+            guard !isSending else { return }
+            recipientManager.recipientInput = newValue
+        }
     }
     var attachments: [Attachment] { attachmentManager.attachments }
+    var isImportingAttachments: Bool { attachmentManager.isImportingAttachments }
     var autocompleteContacts: [ContactsService.ContactMatch] { autocompleteService.autocompleteContacts }
     var showAutocomplete: Bool { autocompleteService.showAutocomplete }
     var isForwardMode: Bool {
@@ -94,7 +98,12 @@ final class ComposeViewModel: ObservableObject {
 
     var canSend: Bool {
         let hasValidRecipients = !recipients.isEmpty && recipients.allSatisfy { $0.isValid }
-        guard hasValidRecipients && !isSending else { return false }
+        guard hasValidRecipients,
+              !isSending,
+              !isImportingAttachments,
+              attachments.allSatisfy(Self.isAttachmentReadyToSend) else {
+            return false
+        }
 
         switch mode {
         case .forward:
@@ -210,18 +219,22 @@ final class ComposeViewModel: ObservableObject {
     }
 
     func addRecipient(_ recipient: Recipient) {
+        guard !isSending else { return }
         recipientManager.addRecipient(recipient)
     }
 
     func addRecipient(email: String, displayName: String? = nil) {
+        guard !isSending else { return }
         recipientManager.addRecipient(email: email, displayName: displayName)
     }
 
     func removeRecipient(_ recipient: Recipient) {
+        guard !isSending else { return }
         recipientManager.removeRecipient(recipient)
     }
 
     func addRecipientFromInput() {
+        guard !isSending else { return }
         if recipientManager.addRecipientFromInput() {
             autocompleteService.clearAutocomplete()
         }
@@ -232,6 +245,7 @@ final class ComposeViewModel: ObservableObject {
     }
 
     func selectContact(_ contact: ContactsService.ContactMatch, email: String? = nil) {
+        guard !isSending else { return }
         let result = autocompleteService.selectContact(contact, email: email)
         recipientManager.addRecipient(email: result.email, displayName: result.displayName)
         recipientManager.recipientInput = ""
@@ -247,11 +261,17 @@ final class ComposeViewModel: ObservableObject {
     }
 
     func addAttachment(_ attachment: Attachment) {
+        guard !isSending else { return }
         attachmentManager.addAttachment(attachment)
     }
 
     func removeAttachment(_ attachment: Attachment) {
+        guard !isSending else { return }
         attachmentManager.removeAttachment(attachment)
+    }
+
+    func setAttachmentImportInProgress(_ isInProgress: Bool, id: UUID) {
+        attachmentManager.setImportInProgress(isInProgress, id: id)
     }
 
     // MARK: - Send Message
@@ -266,10 +286,14 @@ final class ComposeViewModel: ObservableObject {
         let result: OutboundMessageResult?
         do {
             let recipientEmails = recipients.map { $0.email }
-            let myAliases = await AliasManager.shared.getAliases(from: storage.viewContext)
-            cachedMyAliases = myAliases
-            let request = try makeOutboundSendRequest(recipientEmails: recipientEmails, myAliases: myAliases)
-            result = try await outboundMessageCoordinator.send(request)
+            result = try await outboundMessageCoordinator.send(preparing: { [self] in
+                let myAliases = await AliasManager.shared.getAliases(from: storage.viewContext)
+                cachedMyAliases = myAliases
+                return try makeOutboundSendRequest(
+                    recipientEmails: recipientEmails,
+                    myAliases: myAliases
+                )
+            })
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)
             self.error = error
@@ -323,6 +347,11 @@ final class ComposeViewModel: ObservableObject {
                 )
             )
         }
+    }
+
+    private static func isAttachmentReadyToSend(_ attachment: Attachment) -> Bool {
+        guard let localURL = attachment.localURLValue else { return false }
+        return !localURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func makeOptimisticConversationReference(

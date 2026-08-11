@@ -14,12 +14,15 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             attachmentReferences: [],
             optimisticMessageID: "optimistic-1"
         )
-        await task.value
+        await task.task.value
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.markUploadedCalls, 1)
         XCTAssertEqual(snapshot.sendNewCalls, 1)
         XCTAssertEqual(snapshot.sendReplyCalls, 0)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.recordRemoteSendAdmissionCalls, ["optimistic-1"])
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
         XCTAssertEqual(snapshot.markFailedCalls, 0)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
@@ -37,7 +40,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             attachmentReferences: [attachmentReference],
             optimisticMessageID: "optimistic-1a"
         )
-        await task.value
+        await task.task.value
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.markUploadedCalls, 1)
@@ -65,7 +68,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             attachmentReferences: [],
             optimisticMessageID: "optimistic-2"
         )
-        await task.value
+        await task.task.value
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.sendNewCalls, 0)
@@ -94,7 +97,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             attachmentReferences: [],
             optimisticMessageID: "optimistic-2b"
         )
-        await task.value
+        await task.task.value
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.sendNewCalls, 0)
@@ -102,9 +105,9 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
 
-    func testExecuteInBackground_cancelled_doesNotTriggerSync() async {
+    func testExecuteInBackground_cancellationDrainsInFlightSendAndSkipsSync() async {
         let sendService = MockComposeSendService()
-        sendService.sendDelayNanoseconds = 500_000_000
+        sendService.sendDelayNanoseconds = 100_000_000
 
         let syncPerformer = MockIncrementalSyncPerformer()
         let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
@@ -115,32 +118,213 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             optimisticMessageID: "optimistic-3"
         )
 
-        task.cancel()
-        await task.value
+        while sendService.snapshot.sendNewCalls == 0 {
+            await Task.yield()
+        }
+        task.task.cancel()
+        await task.task.value
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.sendNewCalls, 1)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+        XCTAssertEqual(snapshot.recordRemoteSendAdmissionCalls, ["optimistic-3"])
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
+        XCTAssertEqual(snapshot.recordRemoteCommittedSendCalls, ["optimistic-3"])
+        XCTAssertEqual(snapshot.reconcileRemoteCommittedSendCalls, ["optimistic-3"])
+        XCTAssertEqual(snapshot.markUploadedCalls, 1)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
     }
 
-    func testExecuteInBackground_sendFailure_usesUnifiedOptimisticCleanup() async {
+    func testExecuteInBackground_cancelBeforeWorkerInstallationCancelsNestedSend() async {
+        let sendService = MockComposeSendService()
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer
+        )
+
+        let operation = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "optimistic-cancel-before-install",
+            transmissionAdmission: {
+                try Task.checkCancellation()
+                try sendService.recordRemoteSendAdmission(
+                    optimisticMessageID: "optimistic-cancel-before-install"
+                )
+            }
+        )
+
+        // MainActor has not yielded since operation creation, so the detached
+        // worker cannot yet have completed its first MainActor preflight hop.
+        operation.cancelBeforeTransmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 1)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
+    func testExecuteInBackground_directAmbiguousCancellationDoesNotInvokeFailureHook() async {
+        let sendService = MockComposeSendService()
+        sendService.sendNewError = CancellationError()
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
+        var failureIDs: [String] = []
+        var ambiguousIDs: [String] = []
+        let attachmentReference = LocalAttachmentReference(
+            persistentStoreURI: URL(string: "x-coredata://attachment/ambiguous")!
+        )
+
+        let task = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [attachmentReference],
+            optimisticMessageID: "optimistic-cooperative-cancel",
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: { failure in failureIDs.append(failure.optimisticMessageID) },
+                onAmbiguous: { ambiguous in ambiguousIDs.append(ambiguous.optimisticMessageID) }
+            )
+        )
+        await task.task.value
+
+        XCTAssertEqual(sendService.snapshot.rollbackBeforeTransmissionCalls, 0)
+        XCTAssertEqual(
+            sendService.snapshot.recordRemoteSendAdmissionCalls,
+            ["optimistic-cooperative-cancel"]
+        )
+        XCTAssertEqual(
+            sendService.snapshot.recordAmbiguousRemoteSendCalls,
+            ["optimistic-cooperative-cancel"]
+        )
+        XCTAssertTrue(failureIDs.isEmpty)
+        XCTAssertEqual(ambiguousIDs, ["optimistic-cooperative-cancel"])
+        XCTAssertEqual(sendService.snapshot.retainDefinitelyUnsentCalls, 0)
+        XCTAssertEqual(sendService.snapshot.markUploadedCalls, 1)
+        XCTAssertEqual(
+            sendService.snapshot.uploadedAttachmentReferences,
+            [attachmentReference]
+        )
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
+    func testExecuteInBackground_postAdmissionDefiniteFailureRetainsOptimisticMessage() async {
         let sendService = MockComposeSendService()
         sendService.sendNewError = GmailSendService.SendError.apiError("boom")
 
         let syncPerformer = MockIncrementalSyncPerformer()
         let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
+        var failureIDs: [String] = []
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
             attachmentReferences: [],
-            optimisticMessageID: "optimistic-failure"
+            optimisticMessageID: "optimistic-failure",
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: { failure in failureIDs.append(failure.optimisticMessageID) }
+            )
         )
-        await task.value
+        await task.task.value
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.sendNewCalls, 1)
-        XCTAssertEqual(snapshot.handleFailedCalls, 1)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
+        XCTAssertEqual(
+            snapshot.recordRemoteSendAdmissionCalls,
+            ["optimistic-failure"]
+        )
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
         XCTAssertEqual(snapshot.markFailedCalls, 0)
+        XCTAssertEqual(failureIDs, ["optimistic-failure"])
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
+    func testExecuteInBackground_preflightFailureIsDefiniteAndDoesNotPersistBarrier() async {
+        let sendService = MockComposeSendService()
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("preflight")
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let attachmentReference = LocalAttachmentReference(
+            persistentStoreURI: URL(string: "x-coredata://attachment/preflight")!
+        )
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer
+        )
+
+        let task = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [attachmentReference],
+            optimisticMessageID: "optimistic-preflight-failure"
+        )
+        await task.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 1)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.failedAttachmentReferences, [attachmentReference])
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
+    func testExecuteInBackground_preflightCancellationIsDefiniteAndRecoverable() async {
+        let sendService = MockComposeSendService()
+        sendService.sendNewPreflightError = CancellationError()
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer
+        )
+
+        let task = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "optimistic-preflight-cancel"
+        )
+        await task.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 1)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
+    func testExecuteInBackground_markerPersistenceFailureDoesNotBeginSend() async {
+        let sendService = MockComposeSendService()
+        sendService.recordRemoteSendAdmissionError =
+            GmailSendService.SendError.optimisticCreationFailed
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer
+        )
+
+        let task = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "optimistic-barrier-failure"
+        )
+        await task.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 1)
+        XCTAssertEqual(snapshot.sendReplyCalls, 0)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(
+            snapshot.recordRemoteSendAdmissionCalls,
+            ["optimistic-barrier-failure"]
+        )
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
     }
 
@@ -158,10 +342,11 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             attachmentReferences: [attachmentReference],
             optimisticMessageID: "optimistic-failure-refs"
         )
-        await task.value
+        await task.task.value
 
         let snapshot = sendService.snapshot
-        XCTAssertEqual(snapshot.handleFailedCalls, 1)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
         XCTAssertEqual(snapshot.failedAttachmentReferences, [attachmentReference])
     }
 
@@ -176,13 +361,13 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             attachmentReferences: [],
             optimisticMessageID: "optimistic-remote-committed"
         )
-        await firstTask.value
+        await firstTask.task.value
 
         var snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.sendNewCalls, 1)
         XCTAssertEqual(snapshot.recordRemoteCommittedSendCalls, ["optimistic-remote-committed"])
         XCTAssertEqual(snapshot.reconcileRemoteCommittedSendCalls, ["optimistic-remote-committed"])
-        XCTAssertEqual(snapshot.handleFailedCalls, 0)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
 
         sendService.reconcileRemoteCommittedSendError = nil
 
@@ -191,7 +376,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             attachmentReferences: [],
             optimisticMessageID: "optimistic-remote-committed"
         )
-        await retryTask.value
+        await retryTask.task.value
 
         snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.sendNewCalls, 1, "Retry must not send a second Gmail message")
@@ -232,9 +417,13 @@ private final class MockComposeSendService: ComposeSendServicing {
         let markUploadedCalls: Int
         let sendNewCalls: Int
         let sendReplyCalls: Int
+        let remoteTransmissionCalls: Int
         let updateOptimisticCalls: Int
         let markFailedCalls: Int
-        let handleFailedCalls: Int
+        let rollbackBeforeTransmissionCalls: Int
+        let retainDefinitelyUnsentCalls: Int
+        let recordRemoteSendAdmissionCalls: [String]
+        let recordAmbiguousRemoteSendCalls: [String]
         let recordRemoteCommittedSendCalls: [String]
         let reconcileRemoteCommittedSendCalls: [String]
         let uploadedAttachmentReferences: [LocalAttachmentReference]
@@ -244,16 +433,23 @@ private final class MockComposeSendService: ComposeSendServicing {
     private let queue = DispatchQueue(label: "ComposeSendOrchestratorTests.MockComposeSendService")
 
     var sendDelayNanoseconds: UInt64 = 0
+    var sendNewPreflightError: Error?
     var sendNewError: Error?
     var sendReplyError: Error?
+    var recordRemoteSendAdmissionError: Error?
+    var recordAmbiguousRemoteSendError: Error?
     var reconcileRemoteCommittedSendError: Error?
 
     private var _markUploadedCalls = 0
     private var _sendNewCalls = 0
     private var _sendReplyCalls = 0
+    private var _remoteTransmissionCalls = 0
     private var _updateOptimisticCalls = 0
     private var _markFailedCalls = 0
-    private var _handleFailedCalls = 0
+    private var _rollbackBeforeTransmissionCalls = 0
+    private var _retainDefinitelyUnsentCalls = 0
+    private var _recordRemoteSendAdmissionCalls: [String] = []
+    private var _recordAmbiguousRemoteSendCalls: [String] = []
     private var _recordRemoteCommittedSendCalls: [String] = []
     private var _reconcileRemoteCommittedSendCalls: [String] = []
     private var _remoteCommittedResults: [String: GmailSendService.SendResult] = [:]
@@ -266,9 +462,13 @@ private final class MockComposeSendService: ComposeSendServicing {
                 markUploadedCalls: _markUploadedCalls,
                 sendNewCalls: _sendNewCalls,
                 sendReplyCalls: _sendReplyCalls,
+                remoteTransmissionCalls: _remoteTransmissionCalls,
                 updateOptimisticCalls: _updateOptimisticCalls,
                 markFailedCalls: _markFailedCalls,
-                handleFailedCalls: _handleFailedCalls,
+                rollbackBeforeTransmissionCalls: _rollbackBeforeTransmissionCalls,
+                retainDefinitelyUnsentCalls: _retainDefinitelyUnsentCalls,
+                recordRemoteSendAdmissionCalls: _recordRemoteSendAdmissionCalls,
+                recordAmbiguousRemoteSendCalls: _recordAmbiguousRemoteSendCalls,
                 recordRemoteCommittedSendCalls: _recordRemoteCommittedSendCalls,
                 reconcileRemoteCommittedSendCalls: _reconcileRemoteCommittedSendCalls,
                 uploadedAttachmentReferences: _uploadedAttachmentReferences,
@@ -295,9 +495,14 @@ private final class MockComposeSendService: ComposeSendServicing {
         inReplyTo: String?,
         references: [String],
         originalMessage: QuotedMessage?,
-        attachmentInfos: [GmailSendService.AttachmentInfo]
+        attachmentInfos: [GmailSendService.AttachmentInfo],
+        messageId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
     ) async throws -> GmailSendService.SendResult {
         queue.sync { _sendReplyCalls += 1 }
+
+        try await beforeTransmission()
+        queue.sync { _remoteTransmissionCalls += 1 }
 
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
@@ -314,9 +519,18 @@ private final class MockComposeSendService: ComposeSendServicing {
         htmlBody: String?,
         subject: String?,
         attachmentInfos: [GmailSendService.AttachmentInfo],
-        inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
+        inlineAttachmentInfos: [GmailSendService.AttachmentInfo],
+        messageId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
     ) async throws -> GmailSendService.SendResult {
         queue.sync { _sendNewCalls += 1 }
+
+        if let sendNewPreflightError {
+            throw sendNewPreflightError
+        }
+
+        try await beforeTransmission()
+        queue.sync { _remoteTransmissionCalls += 1 }
 
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
@@ -331,6 +545,29 @@ private final class MockComposeSendService: ComposeSendServicing {
     func remoteCommittedSendResult(optimisticMessageID: String) -> GmailSendService.SendResult? {
         queue.sync {
             _remoteCommittedResults[optimisticMessageID]
+        }
+    }
+
+    @MainActor
+    func persistOptimisticMessageBeforeTransmission(optimisticMessageID: String) throws {}
+
+    @MainActor
+    func recordRemoteSendAdmission(optimisticMessageID: String) throws {
+        try queue.sync {
+            _recordRemoteSendAdmissionCalls.append(optimisticMessageID)
+            if let recordRemoteSendAdmissionError {
+                throw recordRemoteSendAdmissionError
+            }
+        }
+    }
+
+    @MainActor
+    func recordAmbiguousRemoteSend(optimisticMessageID: String) throws {
+        try queue.sync {
+            _recordAmbiguousRemoteSendCalls.append(optimisticMessageID)
+            if let recordAmbiguousRemoteSendError {
+                throw recordAmbiguousRemoteSendError
+            }
         }
     }
 
@@ -372,12 +609,23 @@ private final class MockComposeSendService: ComposeSendServicing {
     }
 
     @MainActor
-    func handleFailedOptimisticMessage(
+    func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
     ) {
         queue.sync {
-            _handleFailedCalls += 1
+            _rollbackBeforeTransmissionCalls += 1
+            _failedAttachmentReferences = fallbackAttachmentReferences
+        }
+    }
+
+    @MainActor
+    func retainDefinitelyUnsentOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        queue.sync {
+            _retainDefinitelyUnsentCalls += 1
             _failedAttachmentReferences = fallbackAttachmentReferences
         }
     }

@@ -63,7 +63,7 @@ extension GmailSendService {
     /// Creates a read-only attachment snapshot for MIME building without mutating local send state.
     func attachmentSnapshot(_ attachment: Attachment) -> AttachmentInfo {
         AttachmentInfo(
-            localURL: attachment.localURLValue,
+            localURL: attachment.readableLocalURLValue,
             filename: attachment.filenameValue,
             mimeType: attachment.mimeTypeValue,
             contentId: attachment.contentId

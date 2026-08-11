@@ -212,22 +212,148 @@ final class ComposeViewModelTests: XCTestCase {
             calculateParticipantHash(from: [EmailNormalizer.normalize("Friend@example.com")])
         )
     }
+
+    func testSend_waitsForAttachmentImportFinalizationBeforeInvokingCoordinator() async {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let viewModel = ComposeViewModel(
+            mode: .newMessage,
+            dependencies: deps.makeComposeDependencies()
+        )
+        viewModel.addRecipient(email: "friend@example.com")
+        viewModel.body = "Hello with attachment"
+
+        let attachment = deps.viewContext.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "photo.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.stateRaw = Attachment.State.queued.rawValue
+        viewModel.addAttachment(attachment)
+        defer { viewModel.attachmentManager.clear() }
+
+        let importID = UUID()
+        viewModel.setAttachmentImportInProgress(true, id: importID)
+
+        XCTAssertTrue(viewModel.isImportingAttachments)
+        XCTAssertFalse(viewModel.canSend)
+        let didSendDuringImport = await viewModel.send()
+        XCTAssertFalse(didSendDuringImport)
+        XCTAssertNil(coordinator.lastRequest)
+
+        viewModel.setAttachmentImportInProgress(false, id: importID)
+
+        XCTAssertFalse(viewModel.isImportingAttachments)
+        XCTAssertFalse(viewModel.canSend, "An unfinished placeholder must remain unsendable")
+        let didSendUnfinishedAttachment = await viewModel.send()
+        XCTAssertFalse(didSendUnfinishedAttachment)
+        XCTAssertNil(coordinator.lastRequest)
+
+        attachment.localURL = AttachmentPaths.originalPath(
+            idOrUUID: attachment.id ?? UUID().uuidString,
+            ext: "jpg"
+        )
+
+        XCTAssertTrue(viewModel.canSend)
+        let didSendFinalizedAttachment = await viewModel.send()
+        XCTAssertTrue(didSendFinalizedAttachment)
+        XCTAssertNotNil(coordinator.lastRequest)
+    }
+
+    func testSend_freezesStructuralDraftMutationUntilTransmissionAdmission() async throws {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockOutboundMessageCoordinator()
+        coordinator.suspendsSend = true
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let viewModel = ComposeViewModel(
+            mode: .newMessage,
+            dependencies: deps.makeComposeDependencies()
+        )
+        viewModel.addRecipient(email: "friend@example.com")
+        viewModel.body = "Captured body"
+        let capturedAttachment = deps.viewContext.insertTestObject(Attachment.self)
+        capturedAttachment.id = "local_captured-attachment"
+        capturedAttachment.localURL = AttachmentPaths.originalPath(
+            idOrUUID: "local_captured-attachment",
+            ext: "jpg"
+        )
+        viewModel.addAttachment(capturedAttachment)
+        defer {
+            coordinator.resumeSend()
+            viewModel.attachmentManager.clear()
+        }
+
+        let sendTask = Task { await viewModel.send() }
+        await waitUntil { coordinator.lastRequest != nil }
+
+        XCTAssertTrue(viewModel.isSending)
+        viewModel.recipientInput = "new@example.com"
+        viewModel.addRecipient(email: "new@example.com")
+        viewModel.removeRecipient(try XCTUnwrap(viewModel.recipients.first))
+        viewModel.removeAttachment(capturedAttachment)
+        let laterAttachment = deps.viewContext.insertTestObject(Attachment.self)
+        laterAttachment.id = "later-attachment"
+        viewModel.addAttachment(laterAttachment)
+
+        XCTAssertEqual(viewModel.recipients.map(\.email), ["friend@example.com"])
+        XCTAssertEqual(viewModel.recipientInput, "")
+        XCTAssertEqual(viewModel.attachments.map(\.id), ["local_captured-attachment"])
+
+        coordinator.resumeSend()
+        let didSend = await sendTask.value
+        XCTAssertTrue(didSend)
+        XCTAssertFalse(viewModel.isSending)
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 2.0,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
 }
 
 @MainActor
 private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating {
     private let coreDataStack: TestCoreDataStack
     private(set) var lastRequest: OutboundMessageRequest?
+    var suspendsSend = false
+    private var sendContinuation: CheckedContinuation<Void, Never>?
 
     init() {
         coreDataStack = TestCoreDataStack()
     }
 
     func send(
-        _ request: OutboundMessageRequest,
+        preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks
     ) async throws -> OutboundMessageResult? {
+        let request = try await requestBuilder()
         lastRequest = request
+        if suspendsSend {
+            await withCheckedContinuation { continuation in
+                sendContinuation = continuation
+            }
+        }
         let message = coreDataStack.viewContext.insertTestObject(Message.self)
         message.id = "optimistic-1"
         try coreDataStack.viewContext.obtainPermanentIDs(for: [message])
@@ -238,5 +364,10 @@ private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating 
                 persistentStoreURI: URL(string: "x-coredata://conversation/123")!
             )
         )
+    }
+
+    func resumeSend() {
+        sendContinuation?.resume()
+        sendContinuation = nil
     }
 }

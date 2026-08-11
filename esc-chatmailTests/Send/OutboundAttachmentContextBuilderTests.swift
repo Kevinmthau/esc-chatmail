@@ -39,4 +39,58 @@ final class OutboundAttachmentContextBuilderTests: XCTestCase {
             [LocalAttachmentReference(objectID: attachment.objectID)]
         )
     }
+
+    func testBuildSendAttachments_rejectsUnfinishedPlaceholderBeforePromotingObjectID() throws {
+        let context = coreDataStack.viewContext
+        let builder = OutboundAttachmentContextBuilder(viewContext: context)
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = "local_unfinished"
+        attachment.filename = "photo.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.stateRaw = Attachment.State.queued.rawValue
+
+        XCTAssertThrowsError(try builder.buildSendAttachments(from: [attachment])) { error in
+            XCTAssertEqual(
+                error as? OutboundAttachmentContextBuilder.BuildError,
+                .attachmentNotReady(filename: "photo.jpg")
+            )
+        }
+        XCTAssertTrue(
+            attachment.objectID.isTemporaryID,
+            "Rejected placeholders must not mutate the draft's Core Data identity"
+        )
+    }
+
+    func testBuildersRejectLegacyRemotePathForForwardingOrSend() throws {
+        let context = coreDataStack.viewContext
+        let builder = OutboundAttachmentContextBuilder(viewContext: context)
+        let message = MessageBuilder()
+            .withId("forward-source")
+            .withAttachments()
+            .build(in: context)
+        let attachmentID = "legacy-forward-attachment"
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("inline.png")
+            .withMimeType("image/png")
+            .withContentId("inline@example.com")
+            .withLocalURL(AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "png"))
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+
+        XCTAssertThrowsError(try builder.buildSendAttachments(from: [attachment])) { error in
+            XCTAssertEqual(
+                error as? OutboundAttachmentContextBuilder.BuildError,
+                .attachmentNotReady(filename: "inline.png")
+            )
+        }
+
+        XCTAssertThrowsError(try builder.buildInlineAttachmentInfos(from: [attachment])) { error in
+            XCTAssertEqual(
+                error as? OutboundAttachmentContextBuilder.BuildError,
+                .attachmentNotReady(filename: "inline.png")
+            )
+        }
+    }
 }

@@ -99,6 +99,9 @@ extension GmailSendService {
         message.bodyText = body
         message.gmThreadId = gmThreadId
         message.subject = subject
+        message.messageId = MimeBuilder.messageId(
+            forOptimisticMessageID: messageId
+        )
         // Mirror the From identity the outgoing MIME will carry. Leaving these
         // nil makes the sent message's sync echo read as a sender-header change,
         // which posts a display-info refresh that resets every visible bubble.
@@ -137,9 +140,9 @@ extension GmailSendService {
         conversation.snippet = message.conversationPreviewText
         // IMPORTANT: do NOT set conversation.hasInbox = true here for outgoing messages
 
-        // Keep the optimistic graph unsaved so chat navigation is not blocked by a
-        // main-thread Core Data save, especially for image attachments. Stabilize the
-        // objectIDs up front so SwiftUI navigation can still target the new thread.
+        // Stabilize the objectIDs before the optimistic graph and its recovery
+        // record are saved in one transaction. Returning an unsaved graph would
+        // lose the composed body if the process died during send preflight.
         let preassignmentRollbackSnapshot = OptimisticSendMutationSnapshot(
             optimisticMessageID: messageId,
             conversation: conversation
@@ -163,10 +166,11 @@ extension GmailSendService {
             conversation: conversation
         )
         do {
-            try persistOptimisticSendMutationRecord(rollbackSnapshot)
+            try persistOptimisticSendMutationAndGraph(rollbackSnapshot)
         } catch {
-            Log.error("Failed to persist optimistic send mutation record", category: .message, error: error)
+            Log.error("Failed to persist optimistic send state", category: .message, error: error)
             rollbackOptimisticCreation(message, snapshot: rollbackSnapshot)
+            deleteOptimisticSendMutationRecord(messageID: messageId)
             throw SendError.optimisticCreationFailed
         }
         viewContext.processPendingChanges()
@@ -192,11 +196,180 @@ extension GmailSendService {
         fetchFreshOptimisticSendMutationSnapshot(messageID: optimisticMessageID)?.remoteCommittedResult
     }
 
+    /// Makes the optimistic message graph durable before local attachment/MIME
+    /// preflight begins, without crossing the remote-delivery ambiguity barrier.
+    /// A process death in preflight is therefore still a definite unsent recovery.
+    @MainActor
+    func persistOptimisticMessageBeforeTransmission(optimisticMessageID: String) throws {
+        guard fetchFreshOptimisticSendMutationSnapshot(messageID: optimisticMessageID) != nil,
+              fetchMessageSync(byID: optimisticMessageID) != nil else {
+            throw SendError.optimisticCreationFailed
+        }
+
+        if viewContext.hasChanges {
+            try viewContext.save()
+        }
+    }
+
+    /// Crosses the durable remote-delivery barrier immediately before Gmail API
+    /// request admission. While the process is alive this renders as sending;
+    /// cold recovery conservatively converts it to delivery-unknown.
+    @MainActor
+    func recordRemoteSendAdmission(optimisticMessageID: String) throws {
+        guard try recordRemoteSendState(
+            optimisticMessageID: optimisticMessageID,
+            messageID: OutboundSendRemoteState.inFlightMessageID,
+            threadID: nil,
+            missingRecordIsError: true
+        ) else {
+            throw SendError.optimisticCreationFailed
+        }
+        refreshRemoteSendStateInViewContext(optimisticMessageID: optimisticMessageID)
+    }
+
+    /// Transitions an admitted request from actively sending to terminal delivery
+    /// ambiguity. This state is retained indefinitely and is never auto-retried.
+    @MainActor
+    func recordAmbiguousRemoteSend(optimisticMessageID: String) throws {
+        guard try recordRemoteSendState(
+            optimisticMessageID: optimisticMessageID,
+            messageID: OutboundSendRemoteState.ambiguousMessageID,
+            threadID: nil,
+            missingRecordIsError: false
+        ) else {
+            return
+        }
+        refreshRemoteSendStateInViewContext(optimisticMessageID: optimisticMessageID)
+        refreshRetainedMessageIdentityInViewContext(
+            optimisticMessageID: optimisticMessageID
+        )
+    }
+
+    /// Rolls back a send that failed before Gmail request admission. The source
+    /// composer is still intact, so retaining a second failed bubble would
+    /// duplicate the user's body and attachments. Detach/requeue the original
+    /// attachment objects before deleting the optimistic graph so the composer
+    /// can retry with the same durable references.
+    @MainActor
+    func rollbackOptimisticMessageBeforeTransmission(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        let fallbackAttachments = resolveAttachments(
+            from: fallbackAttachmentReferences
+        )
+
+        guard let message = fetchMessageSync(byID: messageID) else {
+            restoreConversationStateForMissingOptimisticMessage(messageID: messageID)
+            requeueComposerAttachments(
+                fallbackAttachments,
+                detachedFromMessageID: messageID
+            )
+            saveOptimisticFailureCleanup()
+            return
+        }
+
+        let cleanup = OptimisticFailureConversationCleanup(
+            message: message,
+            persistedSnapshot: fetchOptimisticSendMutationSnapshot(
+                messageID: messageID
+            )
+        )
+        let messageAttachments = message.attachmentsArray
+        requeueComposerAttachments(
+            messageAttachments,
+            detachedFromMessageID: messageID
+        )
+        requeueComposerAttachments(
+            fallbackAttachments,
+            detachedFromMessageID: messageID
+        )
+        viewContext.delete(message)
+        finalizeOptimisticFailureCleanup(cleanup, restoreRollupFields: true)
+        deleteOptimisticSendMutationRecord(messageID: messageID)
+        saveOptimisticFailureCleanup()
+    }
+
+    /// Retains the user-authored optimistic graph after Gmail has definitely
+    /// rejected an admitted request. The durable marker distinguishes this from
+    /// an ambiguous send and prevents the message from appearing delivered.
+    @MainActor
+    func retainDefinitelyUnsentOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        guard fetchMessageSync(byID: messageID) != nil else {
+            restoreConversationStateForMissingOptimisticMessage(messageID: messageID)
+            let fallbackAttachments = resolveAttachments(from: fallbackAttachmentReferences)
+            if !fallbackAttachments.isEmpty {
+                markAttachmentsAsFailed(fallbackAttachments)
+            }
+            return
+        }
+
+        do {
+            guard try recordRemoteSendState(
+                optimisticMessageID: messageID,
+                messageID: OutboundSendRemoteState.notSentMessageID,
+                threadID: nil,
+                missingRecordIsError: false
+            ) else {
+                // An exact sent sync echo may have consumed the optimistic graph
+                // and record first. Never recreate a local failure marker.
+                return
+            }
+
+            refreshRemoteSendStateInViewContext(optimisticMessageID: messageID)
+            refreshRetainedMessageIdentityInViewContext(
+                optimisticMessageID: messageID
+            )
+            markRetainedOptimisticAttachments(
+                messageID: messageID,
+                state: .failed
+            )
+        } catch {
+            Log.error(
+                "Failed to retain definitely unsent optimistic message \(messageID)",
+                category: .message,
+                error: error
+            )
+        }
+    }
+
     @MainActor
     func recordRemoteCommittedSend(
         optimisticMessageID: String,
         result: SendResult
     ) throws {
+        let didRecord = try recordRemoteSendState(
+            optimisticMessageID: optimisticMessageID,
+            messageID: result.messageId,
+            threadID: result.threadId,
+            missingRecordIsError: false
+        )
+        if didRecord {
+            refreshRemoteCommittedSendStateIfLocalMarker(
+                optimisticMessageID: optimisticMessageID
+            )
+        } else {
+            // The exact sent echo may win the race and atomically consume both
+            // the ambiguity marker and optimistic row before the API response.
+            // That is already converged; never recreate an unrouteable record.
+            Log.info(
+                "Remote send mutation already consumed before API success for \(optimisticMessageID)",
+                category: .message
+            )
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    private func recordRemoteSendState(
+        optimisticMessageID: String,
+        messageID: String?,
+        threadID: String?,
+        missingRecordIsError: Bool
+    ) throws -> Bool {
         guard let coordinator = viewContext.persistentStoreCoordinator else {
             throw SendError.optimisticCreationFailed
         }
@@ -205,26 +378,93 @@ extension GmailSendService {
         context.persistentStoreCoordinator = coordinator
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
 
+        var didRecord = false
         try context.performAndWait {
-            let record = Self.fetchOptimisticSendMutationRecords(
+            guard let record = Self.fetchOptimisticSendMutationRecords(
                 messageID: optimisticMessageID,
                 in: context
-            ).first ?? OutboundSendMutationRecord(context: context)
-
-            if record.isInserted {
-                Self.initializeFallbackOptimisticSendMutationRecord(
-                    record,
-                    optimisticMessageID: optimisticMessageID
-                )
+            ).first else {
+                if missingRecordIsError {
+                    throw SendError.optimisticCreationFailed
+                }
+                return
             }
 
-            record.remoteCommittedMessageId = result.messageId
-            record.remoteCommittedThreadId = result.threadId
+            record.remoteCommittedMessageId = messageID
+            record.remoteCommittedThreadId = threadID
+
+            // Legacy optimistic rows did not carry the deterministic RFC
+            // Message-ID used to recognize local send state. Stamp terminal
+            // retained rows in the same transaction as their marker so the UI
+            // can resolve the local state. For legacy ambiguous sends this is
+            // only a local identity: the pre-update MIME used another Message-ID,
+            // so it must not turn the outcome into a retryable Not sent state.
+            if messageID == OutboundSendRemoteState.notSentMessageID ||
+                messageID == OutboundSendRemoteState.ambiguousMessageID {
+                let messageRequest = Message.fetchRequest()
+                messageRequest.predicate = MessagePredicates.id(optimisticMessageID)
+                messageRequest.fetchLimit = 1
+                if let optimisticMessage = try context.fetch(messageRequest).first,
+                   optimisticMessage.messageIdValue.flatMap({
+                       MimeBuilder.optimisticMessageID(from: $0)
+                   }) != optimisticMessageID {
+                    optimisticMessage.messageId = MimeBuilder.messageId(
+                        forOptimisticMessageID: optimisticMessageID
+                    )
+                }
+            }
 
             if context.hasChanges {
                 try context.save()
             }
+            didRecord = true
         }
+        return didRecord
+    }
+
+    /// Reflects a durable delivery state in the registered UI context without
+    /// leaving a pending main-context write that could later overwrite it.
+    @MainActor
+    private func refreshRemoteSendStateInViewContext(optimisticMessageID: String) {
+        guard let record = fetchOptimisticSendMutationRecords(
+            messageID: optimisticMessageID
+        ).first,
+        !record.isDeleted else {
+            return
+        }
+
+        viewContext.refresh(record, mergeChanges: false)
+    }
+
+    @MainActor
+    private func refreshRetainedMessageIdentityInViewContext(
+        optimisticMessageID: String
+    ) {
+        guard let message = fetchMessageSync(byID: optimisticMessageID),
+              message.messageIdValue.flatMap({
+                  MimeBuilder.optimisticMessageID(from: $0)
+              }) != optimisticMessageID else {
+            return
+        }
+
+        viewContext.refresh(message, mergeChanges: true)
+    }
+
+    /// Replaces only the UI context's pending local marker after the durable
+    /// Gmail commit has succeeded. A direct committed-state write intentionally
+    /// remains fresh-store-only for callers that do not have a staged marker.
+    @MainActor
+    private func refreshRemoteCommittedSendStateIfLocalMarker(
+        optimisticMessageID: String
+    ) {
+        guard let record = fetchOptimisticSendMutationRecords(
+            messageID: optimisticMessageID
+        ).first,
+        OutboundSendRemoteState.isLocalMarker(record.remoteCommittedMessageId) else {
+            return
+        }
+
+        refreshRemoteSendStateInViewContext(optimisticMessageID: optimisticMessageID)
     }
 
     @MainActor
@@ -283,12 +523,18 @@ extension GmailSendService {
             return false
         }
 
-        let originalMessageID = message.id
         let originalThreadID = message.gmThreadId
         let localAttachments = message.attachmentsArray.filter(\.isLocalAttachment)
         let originalAttachmentStates = localAttachments.map { ($0, $0.state) }
 
-        message.id = result.messageId
+        // Keep the durable optimistic identity and committed mutation route
+        // until MessagePersister receives Gmail's echo. Renaming/deleting this
+        // row here can race a sync context that already resolved it as the
+        // superseded optimistic row but has not saved its atomic replacement
+        // yet; that stale pending deletion can otherwise erase the only remote
+        // message. The committed route suppresses retransmission and renders as
+        // sent while sync atomically persists the echo, removes this row, and
+        // consumes the route.
         message.gmThreadId = result.threadId
         for attachment in localAttachments {
             attachment.state = .uploaded
@@ -299,19 +545,16 @@ extension GmailSendService {
                 try viewContext.save()
             }
         } catch {
-            message.id = originalMessageID
             message.gmThreadId = originalThreadID
             for (attachment, state) in originalAttachmentStates {
                 attachment.state = state
             }
-            Log.error("Failed to reconcile optimistic message with Gmail ID", category: .message, error: error)
+            Log.error(
+                "Failed to reflect remote committed send locally",
+                category: .message,
+                error: error
+            )
             throw error
-        }
-
-        do {
-            try deleteOptimisticSendMutationRecordAndSave(messageID: optimisticMessageID)
-        } catch {
-            Log.error("Failed to clear reconciled optimistic send mutation record", category: .message, error: error)
         }
 
         return true
@@ -380,13 +623,17 @@ extension GmailSendService {
         }
     }
 
-    /// Updates an optimistic message with the actual Gmail IDs after successful send.
+    /// Records a successful send and keeps its optimistic graph until exact sync convergence.
     @MainActor
     func updateOptimisticMessage(_ message: Message, with result: SendResult) {
         do {
+            try recordRemoteCommittedSend(
+                optimisticMessageID: message.id,
+                result: result
+            )
             try reconcileRemoteCommittedSend(optimisticMessageID: message.id, result: result)
         } catch {
-            Log.error("Failed to update message with Gmail ID", category: .message, error: error)
+            Log.error("Failed to reconcile successful send", category: .message, error: error)
         }
     }
 
@@ -429,6 +676,20 @@ extension GmailSendService {
             }
         } catch {
             Log.error("Failed to save optimistic failure cleanup", category: .message, error: error)
+        }
+    }
+
+    @MainActor
+    private func requeueComposerAttachments(
+        _ attachments: [Attachment],
+        detachedFromMessageID messageID: String
+    ) {
+        for attachment in attachments
+            where attachment.managedObjectContext != nil && !attachment.isDeleted {
+            if attachment.message?.id == messageID {
+                attachment.message = nil
+            }
+            attachment.state = .queued
         }
     }
 
@@ -636,7 +897,41 @@ extension GmailSendService {
 
         Log.info("Reconciling \(snapshots.count) abandoned optimistic send mutation(s)", category: .message)
         for snapshot in snapshots {
-            if let remoteCommittedResult = snapshot.remoteCommittedResult {
+            if snapshot.hasInFlightRemoteSend {
+                do {
+                    try recordAmbiguousRemoteSend(
+                        optimisticMessageID: snapshot.optimisticMessageID
+                    )
+                } catch {
+                    Log.error(
+                        "Failed to preserve cold in-flight send as delivery-unknown \(snapshot.optimisticMessageID)",
+                        category: .message,
+                        error: error
+                    )
+                }
+                markRetainedOptimisticAttachments(
+                    messageID: snapshot.optimisticMessageID,
+                    state: .uploaded
+                )
+                Log.warning(
+                    "Retaining interrupted in-flight send \(snapshot.optimisticMessageID) to avoid a duplicate retry",
+                    category: .message
+                )
+            } else if snapshot.hasAmbiguousRemoteSend {
+                markRetainedOptimisticAttachments(
+                    messageID: snapshot.optimisticMessageID,
+                    state: .uploaded
+                )
+                Log.warning(
+                    "Retaining ambiguous optimistic send \(snapshot.optimisticMessageID) to avoid a duplicate retry",
+                    category: .message
+                )
+            } else if snapshot.hasDefiniteRemoteFailure {
+                retainDefinitelyUnsentOptimisticMessage(
+                    byID: snapshot.optimisticMessageID,
+                    fallbackAttachmentReferences: []
+                )
+            } else if let remoteCommittedResult = snapshot.remoteCommittedResult {
                 do {
                     try reconcileRemoteCommittedSend(
                         optimisticMessageID: snapshot.optimisticMessageID,
@@ -649,8 +944,50 @@ extension GmailSendService {
                         error: error
                     )
                 }
+            } else if let optimisticMessage = fetchMessageSync(
+                byID: snapshot.optimisticMessageID
+            ) {
+                let hasCurrentDeterministicIdentity = optimisticMessage.messageIdValue.flatMap {
+                    MimeBuilder.optimisticMessageID(from: $0)
+                } == snapshot.optimisticMessageID
+
+                guard !hasCurrentDeterministicIdentity else {
+                    retainDefinitelyUnsentOptimisticMessage(
+                        byID: snapshot.optimisticMessageID,
+                        fallbackAttachmentReferences: []
+                    )
+                    continue
+                }
+
+                // Before the durable admission barrier existed, a mutation
+                // record could still have nil remote fields after Gmail had
+                // admitted the request. Missing/non-deterministic Message-ID is
+                // the upgrade discriminator: preserve it as delivery-unknown
+                // and never auto-retry it.
+                do {
+                    try recordAmbiguousRemoteSend(
+                        optimisticMessageID: snapshot.optimisticMessageID
+                    )
+                } catch {
+                    Log.error(
+                        "Failed to preserve legacy optimistic send as delivery-unknown \(snapshot.optimisticMessageID)",
+                        category: .message,
+                        error: error
+                    )
+                }
+                markRetainedOptimisticAttachments(
+                    messageID: snapshot.optimisticMessageID,
+                    state: .uploaded
+                )
+                Log.warning(
+                    "Retaining legacy optimistic send \(snapshot.optimisticMessageID) as delivery-unknown to avoid a duplicate retry",
+                    category: .message
+                )
             } else {
-                handleFailedOptimisticMessage(
+                // There is no authored graph to retain. Reuse the definite
+                // cleanup path to restore conversation rollups and consume the
+                // orphaned mutation record.
+                retainDefinitelyUnsentOptimisticMessage(
                     byID: snapshot.optimisticMessageID,
                     fallbackAttachmentReferences: []
                 )
@@ -660,27 +997,32 @@ extension GmailSendService {
     }
 
     @MainActor
-    private func persistOptimisticSendMutationRecord(_ snapshot: OptimisticSendMutationSnapshot) throws {
-        guard let coordinator = viewContext.persistentStoreCoordinator else {
-            throw SendError.optimisticCreationFailed
+    private func persistOptimisticSendMutationAndGraph(
+        _ snapshot: OptimisticSendMutationSnapshot
+    ) throws {
+        let record = fetchOptimisticSendMutationRecords(
+            messageID: snapshot.optimisticMessageID
+        ).first ?? OutboundSendMutationRecord(context: viewContext)
+        snapshot.apply(to: record)
+
+        if viewContext.hasChanges {
+            try viewContext.save()
         }
+    }
 
-        let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
-        context.persistentStoreCoordinator = coordinator
-        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+    @MainActor
+    private func markRetainedOptimisticAttachments(
+        messageID: String,
+        state: Attachment.State
+    ) {
+        guard let message = fetchMessageSync(byID: messageID) else { return }
+        let localAttachments = message.attachmentsArray.filter(\.isLocalAttachment)
+        guard !localAttachments.isEmpty else { return }
 
-        try context.performAndWait {
-            let record = Self.fetchOptimisticSendMutationRecords(
-                messageID: snapshot.optimisticMessageID,
-                in: context
-            ).first
-                ?? OutboundSendMutationRecord(context: context)
-            snapshot.apply(to: record)
-
-            if context.hasChanges {
-                try context.save()
-            }
+        for attachment in localAttachments {
+            attachment.state = state
         }
+        saveOptimisticFailureCleanup()
     }
 
     @MainActor
@@ -756,16 +1098,6 @@ extension GmailSendService {
         if viewContext.hasChanges {
             try viewContext.save()
         }
-    }
-
-    private static func initializeFallbackOptimisticSendMutationRecord(
-        _ record: OutboundSendMutationRecord,
-        optimisticMessageID: String
-    ) {
-        record.id = optimisticMessageID
-        record.createdAt = Date()
-        record.hidden = false
-        record.newlyInsertedConversation = false
     }
 
     @MainActor
@@ -940,8 +1272,24 @@ private struct OptimisticSendMutationSnapshot {
     let remoteCommittedMessageId: String?
     let remoteCommittedThreadId: String?
 
+    var hasInFlightRemoteSend: Bool {
+        remoteCommittedMessageId == OutboundSendRemoteState.inFlightMessageID
+            && remoteCommittedThreadId == nil
+    }
+
+    var hasAmbiguousRemoteSend: Bool {
+        remoteCommittedMessageId == OutboundSendRemoteState.ambiguousMessageID
+            && remoteCommittedThreadId == nil
+    }
+
+    var hasDefiniteRemoteFailure: Bool {
+        remoteCommittedMessageId == OutboundSendRemoteState.notSentMessageID
+            && remoteCommittedThreadId == nil
+    }
+
     var remoteCommittedResult: GmailSendService.SendResult? {
-        guard let remoteCommittedMessageId,
+        guard !OutboundSendRemoteState.isLocalMarker(remoteCommittedMessageId),
+              let remoteCommittedMessageId,
               let remoteCommittedThreadId,
               !remoteCommittedMessageId.isEmpty,
               !remoteCommittedThreadId.isEmpty else {

@@ -62,4 +62,21 @@ final class OutboundSendMutationTrackerTests: XCTestCase {
         XCTAssertEqual(failedMutation.createdAt, createdAt)
         XCTAssertEqual(failedMutation.errorDescription, "boom")
     }
+
+    func testReconcileAmbiguous_clearsPendingWithoutRecordingFailure() {
+        let tracker = OutboundSendMutationTracker()
+        tracker.trackPendingMutation(
+            .init(
+                optimisticMessageID: "optimistic-ambiguous",
+                conversationReference: nil
+            )
+        )
+
+        tracker.reconcileAmbiguous(
+            .init(optimisticMessageID: "optimistic-ambiguous")
+        )
+
+        XCTAssertEqual(tracker.pendingMutationCount, 0)
+        XCTAssertTrue(tracker.failedMutations.isEmpty)
+    }
 }

@@ -17,8 +17,10 @@ struct ForwardAttachmentSnapshot: Equatable {
 @MainActor
 final class ComposeAttachmentManager: ObservableObject {
     @Published var attachments: [Attachment] = []
+    @Published private(set) var isImportingAttachments = false
 
     private let viewContext: NSManagedObjectContext
+    private var activeImportIDs: Set<UUID> = []
 
     init(viewContext: NSManagedObjectContext = CoreDataStack.shared.viewContext) {
         self.viewContext = viewContext
@@ -26,6 +28,19 @@ final class ComposeAttachmentManager: ObservableObject {
 
     func addAttachment(_ attachment: Attachment) {
         attachments.append(attachment)
+    }
+
+    func setImportInProgress(_ isInProgress: Bool, id: UUID) {
+        if isInProgress {
+            activeImportIDs.insert(id)
+        } else {
+            activeImportIDs.remove(id)
+        }
+
+        let hasActiveImports = !activeImportIDs.isEmpty
+        if isImportingAttachments != hasActiveImports {
+            isImportingAttachments = hasActiveImports
+        }
     }
 
     func removeAttachment(_ attachment: Attachment) {

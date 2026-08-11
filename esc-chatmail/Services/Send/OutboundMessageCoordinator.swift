@@ -106,23 +106,55 @@ struct OutboundMessageReconciliationHooks: Sendable {
         let errorDescription: String
     }
 
+    struct Ambiguous: Sendable {
+        let optimisticMessageID: String
+    }
+
     let onSuccess: (@Sendable @MainActor (Success) -> Void)?
     let onFailure: (@Sendable @MainActor (Failure) -> Void)?
+    let onAmbiguous: (@Sendable @MainActor (Ambiguous) -> Void)?
 
-    static let none = Self(onSuccess: nil, onFailure: nil)
+    init(
+        onSuccess: (@Sendable @MainActor (Success) -> Void)?,
+        onFailure: (@Sendable @MainActor (Failure) -> Void)?,
+        onAmbiguous: (@Sendable @MainActor (Ambiguous) -> Void)? = nil
+    ) {
+        self.onSuccess = onSuccess
+        self.onFailure = onFailure
+        self.onAmbiguous = onAmbiguous
+    }
+
+    static let none = Self(onSuccess: nil, onFailure: nil, onAmbiguous: nil)
 }
 
 @MainActor
 protocol OutboundMessageCoordinating: AnyObject {
+    /// Acquires account-scoped send admission before invoking `requestBuilder`.
     func send(
-        _ request: OutboundMessageRequest,
+        preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks
     ) async throws -> OutboundMessageResult?
 }
 
 extension OutboundMessageCoordinating {
+    func send(
+        _ request: OutboundMessageRequest,
+        reconciliationHooks: OutboundMessageReconciliationHooks
+    ) async throws -> OutboundMessageResult? {
+        try await send(
+            preparing: { request },
+            reconciliationHooks: reconciliationHooks
+        )
+    }
+
     func send(_ request: OutboundMessageRequest) async throws -> OutboundMessageResult? {
         try await send(request, reconciliationHooks: .none)
+    }
+
+    func send(
+        preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest
+    ) async throws -> OutboundMessageResult? {
+        try await send(preparing: requestBuilder, reconciliationHooks: .none)
     }
 }
 
@@ -163,49 +195,122 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let replyMetadata: OutboundMessageRequest.ReplyMetadata?
     }
 
+    private struct OptimisticPreparation {
+        let preparedSend: PreparedSend
+        let handle: OptimisticSendHandle
+    }
+
     private let sendService: any OutboundMessageSendServicing
     private let syncPerformer: IncrementalSyncPerforming
     private let messageFormatBuilder: MessageFormatBuilder
     private let outboundReplyContextBuilder: OutboundReplyContextBuilder
     private let mutationTracker: any OutboundSendMutationTracking
-    private var backgroundSendTasks: [String: Task<Void, Never>] = [:]
+    private let outboundTaskRegistry: OutboundTaskRegistry
 
     init(
         sendService: any OutboundMessageSendServicing,
         syncPerformer: IncrementalSyncPerforming,
         messageFormatBuilder: MessageFormatBuilder,
         outboundReplyContextBuilder: OutboundReplyContextBuilder,
-        mutationTracker: any OutboundSendMutationTracking
+        mutationTracker: any OutboundSendMutationTracking,
+        outboundTaskRegistry: OutboundTaskRegistry? = nil
     ) {
         self.sendService = sendService
         self.syncPerformer = syncPerformer
         self.messageFormatBuilder = messageFormatBuilder
         self.outboundReplyContextBuilder = outboundReplyContextBuilder
         self.mutationTracker = mutationTracker
+        self.outboundTaskRegistry = outboundTaskRegistry ?? .shared
     }
 
     func send(
-        _ request: OutboundMessageRequest,
+        preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks = .none
     ) async throws -> OutboundMessageResult? {
-        let preparedSend = try await prepare(request)
-        guard !preparedSend.recipientEmails.isEmpty else {
+        // Reserve before the first suspension point. Account teardown can then
+        // close admission and await this preparation even if optimistic state
+        // has not yet been created or the background task has not been handed off.
+        guard let reservation = outboundTaskRegistry.reserve() else {
+            throw CancellationError()
+        }
+        var didHandOffReservation = false
+        defer {
+            if !didHandOffReservation {
+                outboundTaskRegistry.finish(reservation)
+            }
+        }
+
+        let preparationTask: Task<OptimisticPreparation?, Error> = Task { @MainActor in
+            let request = try await requestBuilder()
+            let preparedSend = try await prepare(request)
+            try checkActive(reservation)
+            guard !preparedSend.recipientEmails.isEmpty else {
+                return nil
+            }
+
+            let handle = try await sendService.createOptimisticMessage(
+                to: preparedSend.recipientEmails,
+                body: preparedSend.body,
+                subject: preparedSend.subject,
+                threadId: preparedSend.threadId,
+                attachments: preparedSend.attachments,
+                chatPreviewText: preparedSend.chatPreviewText,
+                senderEmail: preparedSend.replyMetadata?.fromEmail,
+                senderName: preparedSend.replyMetadata?.fromName,
+                optimisticConversation: preparedSend.optimisticConversation
+            )
+            do {
+                try checkActive(reservation)
+            } catch {
+                sendService.rollbackOptimisticMessageBeforeTransmission(
+                    byID: handle.optimisticMessageID,
+                    fallbackAttachmentReferences: preparedSend.attachments.map(\.localAttachmentReference)
+                )
+                reconciliationHooks.onFailure?(
+                    .init(
+                        optimisticMessageID: handle.optimisticMessageID,
+                        errorDescription: error.localizedDescription
+                    )
+                )
+                throw error
+            }
+            return OptimisticPreparation(preparedSend: preparedSend, handle: handle)
+        }
+        guard outboundTaskRegistry.ownPreparation(preparationTask, for: reservation) else {
+            throw CancellationError()
+        }
+        let preparation = try await withTaskCancellationHandler {
+            try await preparationTask.value
+        } onCancel: {
+            preparationTask.cancel()
+        }
+        guard let preparation else {
             Log.warning("Skipping outbound send with no recipients", category: .message)
             return nil
         }
 
-        let optimisticSendHandle = try await sendService.createOptimisticMessage(
-            to: preparedSend.recipientEmails,
-            body: preparedSend.body,
-            subject: preparedSend.subject,
-            threadId: preparedSend.threadId,
-            attachments: preparedSend.attachments,
-            chatPreviewText: preparedSend.chatPreviewText,
-            senderEmail: preparedSend.replyMetadata?.fromEmail,
-            senderName: preparedSend.replyMetadata?.fromName,
-            optimisticConversation: preparedSend.optimisticConversation
-        )
+        let preparedSend = preparation.preparedSend
+        let optimisticSendHandle = preparation.handle
         let optimisticMessageID = optimisticSendHandle.optimisticMessageID
+        do {
+            // MainActor serialization makes the following background-task
+            // creation + registry handoff atomic with admission closure. MIME
+            // and attachment preflight remain cancellable after this point.
+            try checkActive(reservation)
+        } catch {
+            sendService.rollbackOptimisticMessageBeforeTransmission(
+                byID: optimisticMessageID,
+                fallbackAttachmentReferences: preparedSend.attachments.map(\.localAttachmentReference)
+            )
+            reconciliationHooks.onFailure?(
+                .init(
+                    optimisticMessageID: optimisticMessageID,
+                    errorDescription: error.localizedDescription
+                )
+            )
+            throw error
+        }
+
         mutationTracker.trackPendingMutation(
             .init(
                 optimisticMessageID: optimisticMessageID,
@@ -229,29 +334,56 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         )
 
         let effectiveHooks = makeReconciliationHooks(reconciliationHooks)
-        let backgroundTask = ComposeSendOrchestrator(
+        let backgroundOperation = ComposeSendOrchestrator(
             sendService: sendService,
             syncPerformer: syncPerformer
         ).executeInBackground(
             input: sendInput,
             attachmentReferences: preparedSend.attachments.map(\.localAttachmentReference),
             optimisticMessageID: optimisticMessageID,
-            reconciliationHooks: effectiveHooks
+            reconciliationHooks: effectiveHooks,
+            transmissionAdmission: { [sendService, outboundTaskRegistry] in
+                try outboundTaskRegistry.admitTransmission(
+                    reservation,
+                    persistingMarker: {
+                        try sendService.recordRemoteSendAdmission(
+                            optimisticMessageID: optimisticMessageID
+                        )
+                    }
+                )
+            }
         )
 
-        backgroundSendTasks[optimisticMessageID] = backgroundTask
-        Task { [weak self] in
-            _ = await backgroundTask.result
-            await MainActor.run {
-                _ = self?.backgroundSendTasks.removeValue(forKey: optimisticMessageID)
-            }
+        // The registry cancels the inner worker during preflight, then retains
+        // this outer task as the drain owner once Gmail admission is durable.
+        let remainsActive = outboundTaskRegistry.handOff(
+            reservation,
+            to: backgroundOperation.task,
+            cancelBeforeTransmission: backgroundOperation.cancelBeforeTransmission
+        )
+        didHandOffReservation = true
+        guard remainsActive else {
+            throw CancellationError()
         }
+
+        // The caller clears its composer only after all local preflight has
+        // completed and the optimistic graph + ambiguity marker are durable at
+        // final Gmail request admission. Failures before admission propagate
+        // while the source composer still owns the user's content.
+        try await backgroundOperation.waitForTransmissionAdmission()
 
         return OutboundMessageResult(
             optimisticMessageID: optimisticMessageID,
             optimisticMessageObjectID: optimisticSendHandle.optimisticMessageObjectID,
             conversationReference: optimisticSendHandle.conversationReference
         )
+    }
+
+    private func checkActive(_ reservation: OutboundSendReservation) throws {
+        try Task.checkCancellation()
+        guard outboundTaskRegistry.isActive(reservation) else {
+            throw CancellationError()
+        }
     }
 
     private func prepare(_ request: OutboundMessageRequest) async throws -> PreparedSend {
@@ -354,6 +486,10 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             onFailure: { [weak mutationTracker] failure in
                 mutationTracker?.reconcileFailure(failure)
                 externalHooks.onFailure?(failure)
+            },
+            onAmbiguous: { [weak mutationTracker] ambiguous in
+                mutationTracker?.reconcileAmbiguous(ambiguous)
+                externalHooks.onAmbiguous?(ambiguous)
             }
         )
     }

@@ -542,6 +542,68 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertTrue(metadata.recipientEmails.contains("later-sender@example.com"))
     }
 
+    func testBuildReplyMetadata_rejectsTargetThatTransitionsToTerminalLocalSendState() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(
+            in: context,
+            friendEmail: "friend@example.com"
+        )
+        let optimisticID = UUID().uuidString
+        let selectedMessage = MessageBuilder()
+            .withId(optimisticID)
+            .withThreadId("optimistic-thread")
+            .withSender(email: "me@example.com", name: "Me")
+            .withBody("Never quote this retained local body")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        selectedMessage.messageId = MimeBuilder.messageId(
+            forOptimisticMessageID: optimisticID
+        )
+        addMessageParticipant(email: "me@example.com", kind: .from, to: selectedMessage)
+        addMessageParticipant(email: "friend@example.com", kind: .to, to: selectedMessage)
+        try context.obtainPermanentIDs(for: [conversation, selectedMessage])
+
+        // Selection can predate the terminal transition. The send-time metadata
+        // builder remains the authority even if the UI still holds this objectID.
+        let replyContext = makeBuilder().build(
+            conversationObjectID: conversation.objectID,
+            replyingToMessageObjectID: selectedMessage.objectID,
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: conversation.objectID)
+            )
+        )
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = optimisticID
+        record.createdAt = Date()
+        record.conversationId = conversation.id
+        record.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+        record.hidden = false
+        record.newlyInsertedConversation = false
+
+        let localMarkers: [String?] = [
+            nil,
+            OutboundSendRemoteState.notSentMessageID,
+            OutboundSendRemoteState.ambiguousMessageID
+        ]
+        for marker in localMarkers {
+            record.remoteCommittedMessageId = marker
+            record.remoteCommittedThreadId = nil
+            try context.save()
+
+            do {
+                _ = try await makeBuilder().buildReplyMetadata(replyContext)
+                XCTFail(
+                    "Expected replyTargetUnavailable for \(marker ?? "nil local state")"
+                )
+            } catch {
+                guard case GmailSendService.SendError.replyTargetUnavailable = error else {
+                    return XCTFail("Expected replyTargetUnavailable, got \(error)")
+                }
+            }
+        }
+    }
+
     func testBuildReplyMetadata_listReplyFailsClosedWhenSelectedTargetReroutes() async throws {
         let fixture = try makeRotatingListConversation()
         let otherConversation = ConversationBuilder()
