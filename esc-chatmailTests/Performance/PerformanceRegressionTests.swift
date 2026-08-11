@@ -29,9 +29,11 @@ final class PerformanceRegressionTests: XCTestCase {
         let conversations = try PerformanceFixtureFactory.seedConversationList(in: context)
         let searchService = ConversationSearchService(debounceInterval: 60_000_000_000)
         let filterService = ConversationFilterService(contactsService: ContactsService())
+        let windowProvider = ConversationWindowProvider()
         let viewModel = ConversationListViewModel(
             searchService: searchService,
-            filterService: filterService
+            filterService: filterService,
+            windowProvider: windowProvider
         )
         let options = makePerformanceOptions(iterationCount: 3)
 
@@ -45,7 +47,7 @@ final class PerformanceRegressionTests: XCTestCase {
 
             MainActor.assumeIsolated {
                 viewModel.refreshConversations(fetched)
-                XCTAssertEqual(viewModel.filteredConversationItems.count, conversations.count)
+                XCTAssertEqual(viewModel.filteredConversationItems.count, windowProvider.initialLimit)
             }
 
             XCTAssertEqual(fetched.count, conversations.count)
@@ -66,14 +68,16 @@ final class PerformanceRegressionTests: XCTestCase {
         let changedObjectIDs = Array(seededConversations.prefix(8)).map(\.objectID)
         let searchService = ConversationSearchService(debounceInterval: 60_000_000_000)
         let filterService = ConversationFilterService(contactsService: ContactsService())
+        let windowProvider = ConversationWindowProvider()
         let viewModel = ConversationListViewModel(
             searchService: searchService,
-            filterService: filterService
+            filterService: filterService,
+            windowProvider: windowProvider
         )
         let options = makePerformanceOptions(iterationCount: 5)
 
         viewModel.refreshConversations(fetched)
-        XCTAssertEqual(viewModel.filteredConversationItems.count, seededConversations.count)
+        XCTAssertEqual(viewModel.filteredConversationItems.count, windowProvider.initialLimit)
 
         var iteration = 0
         measure(metrics: [XCTClockMetric(), XCTCPUMetric()], options: options) {
@@ -93,7 +97,7 @@ final class PerformanceRegressionTests: XCTestCase {
 
             MainActor.assumeIsolated {
                 viewModel.applyConversationChanges(updatedConversations: changedConversations)
-                XCTAssertEqual(viewModel.filteredConversationItems.count, seededConversations.count)
+                XCTAssertEqual(viewModel.filteredConversationItems.count, windowProvider.initialLimit)
             }
         }
     }
