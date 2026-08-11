@@ -16,6 +16,24 @@ struct BackgroundSyncCompletionDisposition: Equatable {
     let shouldResetRetryState: Bool
 }
 
+enum BackgroundMailboxSyncExecutionResult: Equatable, Sendable {
+    case completed
+    case needsFollowUp
+    case blocked(by: SyncRunKind?)
+    case failed
+}
+
+/// The model-v3 mailbox sync entry point used by `BGTask` launches. The
+/// production implementation owns and cancels the exact incremental run it
+/// starts, while tests can exercise the background hand-off without creating
+/// `BGTask` instances (which Apple does not expose public initializers for).
+@MainActor
+protocol BackgroundMailboxSyncExecuting: AnyObject, Sendable {
+    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult
+}
+
+extension SyncEngine: BackgroundMailboxSyncExecuting {}
+
 /// Main orchestrator for background sync operations
 final class BackgroundSyncManager {
     static let shared = BackgroundSyncManager()
@@ -32,14 +50,31 @@ final class BackgroundSyncManager {
     private let apiClientProvider: @MainActor @Sendable () -> GmailAPIClientProtocol
     private let syncRunCoordinator: SyncRunCoordinator
     private let defaults: UserDefaults
+    private let authoritativeSyncExecutorProvider: @MainActor @Sendable () -> any BackgroundMailboxSyncExecuting
+    private let authoritativeSyncReadiness: @Sendable () async -> Bool
+    private let authoritativeSyncIsAuthenticated: @MainActor @Sendable () -> Bool
+    /// Characterization tests can still exercise the retired delta writer, but
+    /// production routes every new and already-submitted request through the
+    /// same model-v3 executor used for foreground sync.
+    private let legacyDeltaSyncEnabled: Bool
 
     init(
         taskScheduler: any BackgroundTaskScheduling = BackgroundTaskScheduler.shared,
         coreDataStack: CoreDataStack = .shared,
         defaults: UserDefaults = .standard,
         syncRunCoordinator: SyncRunCoordinator = .shared,
+        legacyDeltaSyncEnabled: Bool = false,
         authSessionProvider: @escaping @MainActor @Sendable () -> AuthSession = { AuthSession.shared },
         apiClientProvider: @escaping @MainActor @Sendable () -> GmailAPIClientProtocol = { GmailAPIClient.shared },
+        authoritativeSyncExecutorProvider: @escaping @MainActor @Sendable () -> any BackgroundMailboxSyncExecuting = {
+            SyncEngine.shared
+        },
+        authoritativeSyncReadiness: @escaping @Sendable () async -> Bool = {
+            await AppStartupBootstrap.shared.prepareForBackgroundSync()
+        },
+        authoritativeSyncIsAuthenticated: @escaping @MainActor @Sendable () -> Bool = {
+            AuthSession.shared.isAuthenticated
+        },
         syncCoordinatorProvider: @escaping @MainActor @Sendable () -> BackgroundSyncMessageCoordinating = {
             SyncEngine.shared
         }
@@ -58,6 +93,10 @@ final class BackgroundSyncManager {
         self.apiClientProvider = apiClientProvider
         self.syncRunCoordinator = syncRunCoordinator
         self.defaults = defaults
+        self.authoritativeSyncExecutorProvider = authoritativeSyncExecutorProvider
+        self.authoritativeSyncReadiness = authoritativeSyncReadiness
+        self.authoritativeSyncIsAuthenticated = authoritativeSyncIsAuthenticated
+        self.legacyDeltaSyncEnabled = legacyDeltaSyncEnabled
 
         setupTaskHandlers()
     }
@@ -110,13 +149,71 @@ final class BackgroundSyncManager {
                 latch.complete(success: false)
                 return
             }
-            let success = await self.performDeltaSync(isProcessingTask: isProcessingTask)
+            let success: Bool
+            if self.legacyDeltaSyncEnabled {
+                success = await self.performDeltaSync(isProcessingTask: isProcessingTask)
+            } else {
+                success = await self.performAuthoritativeSync()
+            }
             latch.complete(success: success)
         }
 
         task.expirationHandler = {
             backgroundTask.cancel()
             latch.complete(success: false)
+        }
+    }
+
+    /// Executes the authoritative model-v3 sync and preserves structured task
+    /// cancellation so a `BGTask` expiration reaches the exact underlying run.
+    func performAuthoritativeSync() async -> Bool {
+        guard !Task.isCancelled else { return false }
+        guard await authoritativeSyncReadiness() else {
+            // Bootstrap failure is a real failure, not a verdict on the mailbox,
+            // so it takes the same bounded backoff as any other failed run. An
+            // expired task is different: it must not queue more work.
+            if !Task.isCancelled {
+                scheduleFailureBackoffRetry()
+            }
+            return false
+        }
+        guard !Task.isCancelled else { return false }
+        guard await MainActor.run(body: authoritativeSyncIsAuthenticated) else {
+            // A stale request delivered after logout is a successful no-op. The
+            // bootstrap has already completed any interrupted account cleanup.
+            return true
+        }
+
+        BackgroundSyncStateManager.clearContinuationState(in: defaults)
+        let executor = await MainActor.run { authoritativeSyncExecutorProvider() }
+        let result = await executor.performIncrementalSyncForBackground()
+        // The system asked an expired task to stop: the handlers already queued
+        // the next ordinary cycle before this run started, so schedule nothing.
+        guard !Task.isCancelled else { return false }
+
+        switch result {
+        case .completed:
+            // Mirrors the legacy path's `shouldResetRetryState`: a clean run
+            // returns the shared backoff to its initial delay so the next
+            // failure does not inherit a spent retry budget.
+            stateManager.resetRetryCount()
+            return true
+        case .needsFollowUp:
+            scheduleCatchUpRetry()
+            return false
+        case .blocked(let activeKind):
+            guard Self.shouldScheduleRetryWhenBlocked(by: activeKind) else {
+                return true
+            }
+            scheduleCatchUpRetry()
+            return false
+        case .failed:
+            // Without this the run reported failure and scheduled nothing, so a
+            // transient failure waited out the ordinary 15-minute refresh cadence
+            // instead of the bounded exponential backoff every other failure
+            // path uses.
+            scheduleFailureBackoffRetry()
+            return false
         }
     }
 
@@ -509,6 +606,20 @@ final class BackgroundSyncManager {
     // MARK: - Error Handling
 
     private func handleSyncError() {
+        guard legacyDeltaSyncEnabled else { return }
+        scheduleFailureBackoffRetry()
+    }
+
+    /// Exponential backoff shared by every genuinely failed run.
+    ///
+    /// `incrementRetryAndGetBackoff()` is a rolling three-failure window, not a
+    /// terminal budget: it returns 60s, then 120s, then nil while resetting the
+    /// counter and backoff to their initial values. So a permanently-failing
+    /// account settles into a 60s / 120s / skip cycle rather than escalating
+    /// without bound or giving up. The skipped third retry is deliberate — the
+    /// app-refresh and processing handlers already queued the next ordinary
+    /// cycle before this run began, so that slot is covered by normal cadence.
+    private func scheduleFailureBackoffRetry() {
         if let backoff = stateManager.incrementRetryAndGetBackoff() {
             taskScheduler.scheduleRetryAfterBackoff(backoff)
         }

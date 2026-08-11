@@ -107,6 +107,573 @@ final class BackgroundSyncManagerTests: XCTestCase {
         )
     }
 
+    func testModelV3Executor_registersHandlersAndSchedulesBackgroundWork() {
+        let manager = makeManager(legacyDeltaSyncEnabled: false)
+
+        manager.registerBackgroundTasks()
+        manager.scheduleAppRefresh()
+        manager.scheduleProcessingTask()
+
+        XCTAssertEqual(taskScheduler.registrationCount, 1)
+        XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
+        XCTAssertNotNil(taskScheduler.onAppRefresh)
+        XCTAssertNotNil(taskScheduler.onProcessing)
+    }
+
+    func testModelV3Executor_performsAuthoritativeIncrementalSync() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertTrue(success)
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 1)
+    }
+
+    func testModelV3Executor_incompleteHistorySchedulesCatchUpAndFailsTask() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
+    }
+
+    // Revert-check: fails if `BackgroundSyncManager.scheduleFailureBackoffRetry()`
+    // is removed from the `.failed` case of `performAuthoritativeSync()`.
+    // A failed background run must take the same bounded exponential backoff the
+    // legacy delta path took via `.failureBackoff`, not silently wait out the
+    // ordinary 15-minute refresh cadence.
+    func testModelV3Executor_failedSyncSchedulesFailureBackoffRetry() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .failed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+        // First strike doubles the 30s initial backoff.
+        XCTAssertEqual(taskScheduler.retryBackoffs, [60])
+    }
+
+    // Revert-check: fails if `scheduleFailureBackoffRetry()` stops routing through
+    // `BackgroundSyncStateManager.incrementRetryAndGetBackoff()` (e.g. is replaced
+    // by a fixed delay), which would lose the escalation and the skipped slot.
+    // Pins the rolling three-failure window: 60s, 120s, skip, and repeat — the
+    // counter resets on the skipped slot rather than terminating.
+    func testModelV3Executor_failureBackoffCyclesEveryThirdConsecutiveRetry() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .failed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        for _ in 0..<6 {
+            _ = await manager.performAuthoritativeSync()
+        }
+
+        // 30s initial backoff doubles twice; the third consecutive strike skips
+        // scheduling and resets, so the cycle restarts rather than escalating.
+        XCTAssertEqual(taskScheduler.retryBackoffs, [60, 120, 60, 120])
+    }
+
+    // Revert-check: fails if `stateManager.resetRetryCount()` is removed from the
+    // `.completed` case of `performAuthoritativeSync()`. Without it the trailing
+    // failure below exhausts the retry budget and schedules nothing.
+    func testModelV3Executor_completedSyncResetsFailureBackoff() async {
+        let executor = await MainActor.run {
+            SequencedBackgroundMailboxSyncExecutorSpy(
+                results: [.failed, .failed, .completed, .failed]
+            )
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        for _ in 0..<4 {
+            _ = await manager.performAuthoritativeSync()
+        }
+
+        // The clean run returns the backoff to its initial delay, so the trailing
+        // failure starts over at 60 instead of falling off the exhausted budget.
+        XCTAssertEqual(taskScheduler.retryBackoffs, [60, 120, 60])
+    }
+
+    // Revert-check: fails if the readiness-failure branch of
+    // `performAuthoritativeSync()` stops calling `scheduleFailureBackoffRetry()`.
+    func testModelV3Executor_bootstrapFailureSchedulesFailureBackoffRetry() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncReadiness: { false }
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.retryBackoffs, [60])
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testModelV3Executor_waitsForPersistenceBootstrapBeforeSyncing() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let readinessGate = BackgroundSyncReadinessGate()
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncReadiness: {
+                await readinessGate.waitUntilReleased()
+            }
+        )
+        let syncTask = Task {
+            await manager.performAuthoritativeSync()
+        }
+        await readinessGate.waitUntilStarted()
+
+        let callCountBeforeReadiness = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCountBeforeReadiness, 0)
+
+        await readinessGate.release(succeeded: true)
+        let success = await syncTask.value
+        XCTAssertTrue(success)
+        let finalCallCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(finalCallCount, 1)
+    }
+
+    func testModelV3Executor_bootstrapFailureDoesNotTouchSyncEngine() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncReadiness: { false }
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testModelV3Executor_unauthenticatedAfterBootstrapSkipsSyncAsSuccessfulNoOp() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncIsAuthenticated: { false }
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertTrue(success)
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testStartupBootstrap_coalescesConcurrentPersistencePreparation() async {
+        let readinessGate = BackgroundSyncReadinessGate()
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: {
+                await readinessGate.waitUntilReleased()
+            }
+        )
+        let first = Task { await bootstrap.preparePersistenceIfNeeded() }
+        await readinessGate.waitUntilStarted()
+        let second = Task { await bootstrap.preparePersistenceIfNeeded() }
+
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        let invocationCountWhileBlocked = await readinessGate.invocationCount()
+        XCTAssertEqual(invocationCountWhileBlocked, 1)
+
+        await readinessGate.release(succeeded: true)
+        let firstResult = await first.value
+        let secondResult = await second.value
+        XCTAssertTrue(firstResult)
+        XCTAssertTrue(secondResult)
+
+        let cachedResult = await bootstrap.preparePersistenceIfNeeded()
+        XCTAssertTrue(cachedResult)
+        let finalInvocationCount = await readinessGate.invocationCount()
+        XCTAssertEqual(finalInvocationCount, 1)
+    }
+
+    func testStartupBootstrap_failedPersistencePreparationRetries() async {
+        let preparationScript = BackgroundPersistencePreparationScript(
+            outcomes: [false, true]
+        )
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: {
+                await preparationScript.prepare()
+            }
+        )
+
+        let firstResult = await bootstrap.preparePersistenceIfNeeded()
+        let retryResult = await bootstrap.preparePersistenceIfNeeded()
+        let cachedResult = await bootstrap.preparePersistenceIfNeeded()
+
+        XCTAssertFalse(firstResult)
+        XCTAssertTrue(retryResult)
+        XCTAssertTrue(cachedResult)
+        let invocationCount = await preparationScript.invocationCount()
+        XCTAssertEqual(invocationCount, 2)
+    }
+
+    func testStartupBootstrap_foregroundRetriesAfterJoinedBackgroundPreparationFails() async {
+        let firstAttemptGate = BackgroundSyncReadinessGate()
+        let preparationScript = BackgroundPersistencePreparationScript(
+            outcomes: [false, true]
+        )
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: {
+                let result = await preparationScript.prepare()
+                if result == false {
+                    return await firstAttemptGate.waitUntilReleased()
+                }
+                return result
+            }
+        )
+
+        let background = Task { await bootstrap.preparePersistenceIfNeeded() }
+        await firstAttemptGate.waitUntilStarted()
+        let foreground = Task {
+            await bootstrap.preparePersistenceUntilReady(retryDelayNanoseconds: 0)
+        }
+
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        let invocationCountWhileJoined = await preparationScript.invocationCount()
+        XCTAssertEqual(
+            invocationCountWhileJoined,
+            1,
+            "Foreground startup should join the in-flight background preparation"
+        )
+
+        await firstAttemptGate.release(succeeded: false)
+
+        let backgroundResult = await background.value
+        let foregroundResult = await foreground.value
+        XCTAssertFalse(backgroundResult)
+        XCTAssertTrue(
+            foregroundResult,
+            "Foreground startup must retry instead of leaving AppLoadingView stuck"
+        )
+        let finalInvocationCount = await preparationScript.invocationCount()
+        XCTAssertEqual(finalInvocationCount, 2)
+    }
+
+    func testStartupBootstrap_cancelledPersistenceWaiterReleasesWithoutCancellingSharedPreparation() async {
+        let readinessGate = BackgroundSyncReadinessGate()
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: {
+                await readinessGate.waitUntilReleased()
+            }
+        )
+        let background = Task { await bootstrap.preparePersistenceIfNeeded() }
+        await readinessGate.waitUntilStarted()
+
+        background.cancel()
+        let cancelledResult: Bool? = await withSoftTimeout(seconds: 1) {
+            await background.value
+        }
+
+        XCTAssertEqual(
+            cancelledResult,
+            false,
+            "An expired background caller must stop waiting before shared preparation finishes"
+        )
+
+        let foreground = Task { await bootstrap.preparePersistenceIfNeeded() }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        let invocationCountWhileBlocked = await readinessGate.invocationCount()
+        XCTAssertEqual(
+            invocationCountWhileBlocked,
+            1,
+            "The foreground caller must join the preparation left running by cancellation"
+        )
+
+        await readinessGate.release(succeeded: true)
+        let foregroundResult = await foreground.value
+        XCTAssertTrue(foregroundResult)
+        let finalInvocationCount = await readinessGate.invocationCount()
+        XCTAssertEqual(finalInvocationCount, 1)
+    }
+
+    func testStartupBootstrap_coalescesForegroundAndBackgroundAuthenticationRestore() async {
+        let authenticationGate = BackgroundSyncReadinessGate()
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: { true },
+            restoreAuthenticationOperation: {
+                _ = await authenticationGate.waitUntilReleased()
+                return .authenticated
+            }
+        )
+        let background = Task { await bootstrap.prepareForBackgroundSync() }
+        await authenticationGate.waitUntilStarted()
+        let foreground = Task { await bootstrap.restoreAuthenticationIfNeeded() }
+
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        let invocationCountWhileBlocked = await authenticationGate.invocationCount()
+        XCTAssertEqual(invocationCountWhileBlocked, 1)
+
+        await authenticationGate.release(succeeded: true)
+        let backgroundResult = await background.value
+        let foregroundResult = await foreground.value
+        XCTAssertTrue(backgroundResult)
+        XCTAssertTrue(foregroundResult)
+        let finalInvocationCount = await authenticationGate.invocationCount()
+        XCTAssertEqual(finalInvocationCount, 1)
+    }
+
+    func testStartupBootstrap_cancelledBackgroundWaiterPreservesSharedRestoreForForeground() async {
+        let authenticationGate = BackgroundSyncReadinessGate()
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: { true },
+            restoreAuthenticationOperation: {
+                _ = await authenticationGate.waitUntilReleased()
+                return .authenticated
+            }
+        )
+        let background = Task { await bootstrap.prepareForBackgroundSync() }
+        await authenticationGate.waitUntilStarted()
+
+        background.cancel()
+        let cancelledResult: Bool? = await withSoftTimeout(seconds: 1) {
+            await background.value
+        }
+
+        XCTAssertEqual(
+            cancelledResult,
+            false,
+            "An expired BGTask caller must stop waiting before shared auth restore finishes"
+        )
+
+        let foreground = Task { await bootstrap.restoreAuthenticationIfNeeded() }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        let invocationCountWhileBlocked = await authenticationGate.invocationCount()
+        XCTAssertEqual(
+            invocationCountWhileBlocked,
+            1,
+            "Foreground startup must join, rather than restart, the shared auth restore"
+        )
+
+        await authenticationGate.release(succeeded: true)
+        let foregroundResult = await foreground.value
+        XCTAssertTrue(foregroundResult)
+        let finalInvocationCount = await authenticationGate.invocationCount()
+        XCTAssertEqual(finalInvocationCount, 1)
+    }
+
+    func testStartupBootstrap_backgroundTransientRestoreRemainsReadyAndForegroundRetries() async {
+        let restoreScript = BackgroundAuthenticationRestoreScript(
+            outcomes: [.retryableFailure, .authenticated]
+        )
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: { true },
+            restoreAuthenticationOperation: {
+                await restoreScript.restore()
+            }
+        )
+
+        let backgroundResult = await bootstrap.prepareForBackgroundSync()
+
+        XCTAssertTrue(
+            backgroundResult,
+            "A transient auth restore must not turn persistence readiness into a loading-screen failure"
+        )
+        let callsAfterBackground = await restoreScript.invocationCount()
+        XCTAssertEqual(callsAfterBackground, 1)
+
+        let foregroundResult = await bootstrap.restoreAuthenticationIfNeeded()
+
+        XCTAssertTrue(foregroundResult)
+        let callsAfterForeground = await restoreScript.invocationCount()
+        XCTAssertEqual(
+            callsAfterForeground,
+            2,
+            "The background attempt's retryable result must not be memoized"
+        )
+
+        let cachedResult = await bootstrap.restoreAuthenticationIfNeeded()
+        XCTAssertTrue(cachedResult)
+        let finalInvocationCount = await restoreScript.invocationCount()
+        XCTAssertEqual(finalInvocationCount, 2)
+    }
+
+    func testModelV3Executor_propagatesFailureToBackgroundCompletion() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .failed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+    }
+
+    func testModelV3Executor_pendingActionsBlockSchedulesCatchUpAndFailsTask() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .blocked(by: .pendingActions))
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
+    }
+
+    func testModelV3Executor_quiescenceBlockSchedulesCatchUpAndFailsTask() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .blocked(by: nil))
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
+    }
+
+    func testModelV3Executor_activeMailboxSyncSatisfiesTaskWithoutCatchUp() async {
+        for activeKind in [SyncRunKind.foregroundInitial, .foregroundIncremental, .background] {
+            taskScheduler = BackgroundTaskSchedulerSpy()
+            let executor = await MainActor.run {
+                BackgroundMailboxSyncExecutorSpy(result: .blocked(by: activeKind))
+            }
+            let manager = makeManager(
+                legacyDeltaSyncEnabled: false,
+                authoritativeSyncExecutor: executor
+            )
+
+            let success = await manager.performAuthoritativeSync()
+
+            XCTAssertTrue(success, "Expected \(activeKind.rawValue) to satisfy background mailbox sync")
+            XCTAssertTrue(taskScheduler.retryBackoffs.isEmpty)
+        }
+    }
+
+    func testModelV3Executor_cancellationPropagatesToAuthoritativeRun() async {
+        let executor = await MainActor.run {
+            CancellableBackgroundMailboxSyncExecutorSpy()
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+        let task = Task {
+            await manager.performAuthoritativeSync()
+        }
+        await executor.waitUntilStarted()
+
+        task.cancel()
+        let success = await task.value
+
+        XCTAssertFalse(success)
+        let wasCancelled = await MainActor.run { executor.wasCancelled }
+        XCTAssertTrue(wasCancelled)
+        // Revert-check: fails if the `guard !Task.isCancelled` that precedes the
+        // result switch in `performAuthoritativeSync()` is removed. That guard
+        // became load-bearing once `.failed` started scheduling a retry: an
+        // expired BGTask maps cancellation to `.failed`, so without it the run
+        // would submit a BGTaskRequest after `setTaskCompleted` already fired.
+        XCTAssertTrue(
+            taskScheduler.retryBackoffs.isEmpty,
+            "An expired BGTask must not submit a new BGTaskRequest"
+        )
+    }
+
+    // Revert-check: fails if the `if !Task.isCancelled` wrapper around
+    // `scheduleFailureBackoffRetry()` in the readiness-failure branch of
+    // `performAuthoritativeSync()` is removed. Cancellation arriving *during* the
+    // readiness suspension is not reachable from the leading cancellation guard.
+    func testModelV3Executor_cancelledBootstrapDoesNotScheduleFailureBackoffRetry() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let readinessGate = BackgroundSyncReadinessGate()
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncReadiness: {
+                await readinessGate.waitUntilReleased()
+            }
+        )
+        let task = Task {
+            await manager.performAuthoritativeSync()
+        }
+        await readinessGate.waitUntilStarted()
+
+        task.cancel()
+        await readinessGate.release(succeeded: false)
+        let success = await task.value
+
+        XCTAssertFalse(success)
+        XCTAssertTrue(
+            taskScheduler.retryBackoffs.isEmpty,
+            "A bootstrap abandoned by task expiry must not queue more work"
+        )
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testLegacyGateOn_preservesSchedulingForCharacterizationTests() {
+        let manager = makeManager(legacyDeltaSyncEnabled: true)
+
+        manager.scheduleAppRefresh()
+        manager.scheduleProcessingTask()
+
+        XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
+    }
+
     func testHistoryContinuationCompatibility_requiresMatchingAccountAndCursor() {
         let continuationState = BackgroundSyncContinuationState.history(
             startHistoryId: "history-100",
@@ -436,15 +1003,27 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertTrue(accounts.isEmpty)
     }
 
-    private func makeManager() -> BackgroundSyncManager {
+    private func makeManager(
+        legacyDeltaSyncEnabled: Bool = true,
+        authoritativeSyncExecutor: (any BackgroundMailboxSyncExecuting)? = nil,
+        authoritativeSyncReadiness: @escaping @Sendable () async -> Bool = { true },
+        authoritativeSyncIsAuthenticated: @escaping @MainActor @Sendable () -> Bool = { true }
+    ) -> BackgroundSyncManager {
         let apiClient = apiClient!
         let syncCoordinator = BackgroundSyncNoopCoordinator()
+        let executor = authoritativeSyncExecutor
         return BackgroundSyncManager(
             taskScheduler: taskScheduler,
             coreDataStack: coreDataStack,
             defaults: defaults,
             syncRunCoordinator: SyncRunCoordinator(),
+            legacyDeltaSyncEnabled: legacyDeltaSyncEnabled,
             apiClientProvider: { apiClient },
+            authoritativeSyncExecutorProvider: {
+                executor ?? SyncEngine.shared
+            },
+            authoritativeSyncReadiness: authoritativeSyncReadiness,
+            authoritativeSyncIsAuthenticated: authoritativeSyncIsAuthenticated,
             syncCoordinatorProvider: { syncCoordinator }
         )
     }
@@ -484,6 +1063,158 @@ final class BackgroundSyncManagerTests: XCTestCase {
     }
 }
 
+@MainActor
+private final class BackgroundMailboxSyncExecutorSpy: BackgroundMailboxSyncExecuting {
+    private let result: BackgroundMailboxSyncExecutionResult
+    private(set) var callCount = 0
+
+    init(result: BackgroundMailboxSyncExecutionResult) {
+        self.result = result
+    }
+
+    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult {
+        callCount += 1
+        return result
+    }
+}
+
+/// Returns a different outcome per call so one manager (and therefore one
+/// retry-state counter) can be driven across a failure/recovery sequence.
+private final class SequencedBackgroundMailboxSyncExecutorSpy: BackgroundMailboxSyncExecuting {
+    private let results: [BackgroundMailboxSyncExecutionResult]
+    private(set) var callCount = 0
+
+    init(results: [BackgroundMailboxSyncExecutionResult]) {
+        self.results = results
+    }
+
+    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult {
+        defer { callCount += 1 }
+        guard callCount < results.count else {
+            // Name an over-run rather than silently substituting an outcome the
+            // test never scripted, which would quietly change what it asserts.
+            XCTFail("Executor called \(callCount + 1) times but only \(results.count) outcomes were scripted")
+            return .failed
+        }
+        return results[callCount]
+    }
+}
+
+@MainActor
+private final class CancellableBackgroundMailboxSyncExecutorSpy: BackgroundMailboxSyncExecuting {
+    private var didStart = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var wasCancelled = false
+
+    func waitUntilStarted() async {
+        guard !didStart else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult {
+        didStart = true
+        let waiters = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        do {
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+            return .completed
+        } catch is CancellationError {
+            wasCancelled = true
+            return .failed
+        } catch {
+            return .failed
+        }
+    }
+}
+
+private actor BackgroundSyncReadinessGate {
+    private var didStart = false
+    private var waitInvocationCount = 0
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var result: Bool?
+    private var readinessWaiters: [CheckedContinuation<Bool, Never>] = []
+
+    func waitUntilReleased() async -> Bool {
+        waitInvocationCount += 1
+        didStart = true
+        let waiters = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        if let result {
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            readinessWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !didStart else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func invocationCount() -> Int {
+        waitInvocationCount
+    }
+
+    func release(succeeded: Bool) {
+        guard result == nil else { return }
+        result = succeeded
+        let waiters = readinessWaiters
+        readinessWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume(returning: succeeded) }
+    }
+}
+
+private actor BackgroundAuthenticationRestoreScript {
+    private var outcomes: [AuthRestoreOutcome]
+    private var calls = 0
+
+    init(outcomes: [AuthRestoreOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func restore() -> AuthRestoreOutcome {
+        calls += 1
+        guard !outcomes.isEmpty else {
+            return .terminalNoSession
+        }
+        return outcomes.removeFirst()
+    }
+
+    func invocationCount() -> Int {
+        calls
+    }
+}
+
+private actor BackgroundPersistencePreparationScript {
+    private var outcomes: [Bool]
+    private var calls = 0
+
+    init(outcomes: [Bool]) {
+        self.outcomes = outcomes
+    }
+
+    func prepare() -> Bool {
+        calls += 1
+        guard !outcomes.isEmpty else {
+            return false
+        }
+        return outcomes.removeFirst()
+    }
+
+    func invocationCount() -> Int {
+        calls
+    }
+}
+
 private struct BackgroundAccountSnapshot {
     let email: String
     let historyId: String?
@@ -494,10 +1225,13 @@ private final class BackgroundTaskSchedulerSpy: BackgroundTaskScheduling {
     var onProcessing: ((BGProcessingTask) -> Void)?
 
     private(set) var retryBackoffs: [TimeInterval] = []
+    private(set) var registrationCount = 0
+    private(set) var appRefreshScheduleCount = 0
+    private(set) var processingScheduleCount = 0
 
-    func registerBackgroundTasks() {}
-    func scheduleAppRefresh() {}
-    func scheduleProcessingTask() {}
+    func registerBackgroundTasks() { registrationCount += 1 }
+    func scheduleAppRefresh() { appRefreshScheduleCount += 1 }
+    func scheduleProcessingTask() { processingScheduleCount += 1 }
 
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval) {
         retryBackoffs.append(backoff)

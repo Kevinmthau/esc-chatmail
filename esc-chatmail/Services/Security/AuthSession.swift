@@ -1,14 +1,114 @@
+import CoreData
 import Foundation
 import GoogleSignIn
 import UIKit
 
+@MainActor
+private final class AuthenticatedGoogleUserBox {
+    var user: GIDGoogleUser?
+    var restoreOutcome: AuthRestoreOutcome = .retryableFailure
+    var didReplaceGoogleSession = false
+}
+
+enum AuthRestoreOutcome: Equatable, Sendable {
+    case authenticated
+    case terminalNoSession
+    case retryableFailure
+
+    var isComplete: Bool {
+        self != .retryableFailure
+    }
+}
+
+struct LocalMailboxStoreInspection: Equatable, Sendable {
+    let accountEmails: [String]
+    let hasAccountScopedMailboxData: Bool
+}
+
+private enum ProductionLocalMailboxStoreInspector {
+    /// Every non-Account entity in the single-account store belongs to the
+    /// mailbox owner. Keep this explicit so a newly added entity must make an
+    /// intentional account-boundary decision.
+    private static let accountScopedEntityNames = [
+        "Attachment",
+        "Conversation",
+        "ConversationParticipant",
+        "Label",
+        "PendingAction",
+        "OutboundSendMutationRecord",
+        "Message",
+        "MessageParticipant",
+        "Person",
+        "AbandonedSyncMessage",
+        "SyncCheckpoint"
+    ]
+
+    static func inspect() async throws -> LocalMailboxStoreInspection {
+        try await CoreDataStack.shared.performBackgroundTask { context in
+            let accountEmails = try context.fetch(Account.fetchRequest()).map(\.email)
+            var hasAccountScopedMailboxData = false
+
+            // Normal established stores have an Account row, so avoid issuing
+            // the additional existence queries on the common launch path.
+            if accountEmails.isEmpty {
+                for entityName in accountScopedEntityNames {
+                    let request = NSFetchRequest<NSFetchRequestResult>(entityName: entityName)
+                    request.fetchLimit = 1
+                    if try context.count(for: request) > 0 {
+                        hasAccountScopedMailboxData = true
+                        break
+                    }
+                }
+                if !hasAccountScopedMailboxData {
+                    hasAccountScopedMailboxData = try HTMLContentHandler.shared
+                        .hasStoredHTMLFiles()
+                }
+            }
+
+            return LocalMailboxStoreInspection(
+                accountEmails: accountEmails,
+                hasAccountScopedMailboxData: hasAccountScopedMailboxData
+            )
+        }
+    }
+}
+
+private enum ProductionAttachmentCacheAccountTransition {
+    static func closeAdmission() async {
+        await AttachmentCacheActor.shared.closeAdmission()
+    }
+
+    static func reopenAdmission() async {
+        await AttachmentCacheActor.shared.reopenAdmission()
+    }
+}
+
+private enum ProductionParticipantCacheAccountTransition {
+    static func closeAccountWorkAndClear() async {
+        // ContactsResolver is itself a Person writer: direct lookups can await
+        // avatar storage before saving a contact match. Drain it alongside the
+        // two read/result caches before the single-account store is reset.
+        await ContactsResolver.shared.closeAccountWorkAndClear()
+        await PersonCache.shared.closeAccountWorkAndClear()
+        await ProfilePhotoResolver.shared.closeAccountWorkAndClear()
+    }
+
+    static func reopenAccountWork() async {
+        await PersonCache.shared.reopenAccountWork()
+        await ContactsResolver.shared.reopenAccountWork()
+        await ProfilePhotoResolver.shared.reopenAccountWork()
+    }
+}
+
 /// AuthSession uses @unchecked Sendable because:
 /// - All state is @MainActor isolated
 /// - ObservableObject pattern requires class semantics with Sendable conformance
-/// - GIDSignIn callbacks are properly dispatched to MainActor via DispatchQueue.main.async
+/// - GIDSignIn callbacks bridge into MainActor tasks before mutating session state
 @MainActor
 final class AuthSession: ObservableObject, @unchecked Sendable {
     static let shared = AuthSession()
+    static let localStoreResetRequiredKey = "auth.localStoreResetRequired.v1"
+    static let credentialCleanupRequiredKey = "auth.credentialCleanupRequired.v1"
     
     @Published var isAuthenticated = false
     @Published var currentUser: GIDGoogleUser?
@@ -19,36 +119,162 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private let tokenManagerProvider: @MainActor @Sendable () -> TokenManagerProtocol
     private lazy var tokenManager: TokenManagerProtocol = tokenManagerProvider()
     private let keychainService: KeychainServiceProtocol
+    private let hasPreviousGoogleSignIn: @MainActor @Sendable () -> Bool
+    private let restorePreviousGoogleSignIn: @MainActor @Sendable (
+        @escaping (GIDGoogleUser?, Error?) -> Void
+    ) -> Void
+    private let interactiveGoogleSignIn: @MainActor @Sendable (
+        UIViewController,
+        String?,
+        @escaping @Sendable (GIDSignInResult?, Error?) -> Void
+    ) -> Void
+    private let signOutGoogleSession: @MainActor @Sendable () -> Void
     private let userDefaults: UserDefaults
     private let clearConversationCaches: @MainActor @Sendable () -> Void
-    private let cleanupDownloads: @MainActor @Sendable () -> Void
+    private let clearParticipantCaches: @Sendable () async -> Void
+    private let reopenParticipantCaches: @Sendable () async -> Void
+    private let cleanupDownloads: @MainActor @Sendable () async -> Void
+    private let reopenDownloads: @MainActor @Sendable () async -> Void
     private let resetCoreDataStore: @Sendable () async throws -> Void
+    private let inspectLocalMailboxStore: @Sendable () async throws -> LocalMailboxStoreInspection
+    private let deleteAttachmentFiles: @Sendable () async throws -> Void
     private let clearAttachmentCache: @Sendable () async -> Void
+    private let cleanupHTMLContent: @MainActor @Sendable () async throws -> Void
+    private let reopenHTMLContent: @MainActor @Sendable () async throws -> Void
+    private let revokeGoogleToken: @Sendable (String) async throws -> Void
+    private let syncRunCoordinator: SyncRunCoordinator
+    private let outboundTaskRegistry: OutboundTaskRegistry
 
     init(
         tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol = { TokenManager.shared },
         keychainService: KeychainServiceProtocol = KeychainService.shared,
+        hasPreviousGoogleSignIn: @escaping @MainActor @Sendable () -> Bool = {
+            GIDSignIn.sharedInstance.hasPreviousSignIn()
+        },
+        restorePreviousGoogleSignIn: @escaping @MainActor @Sendable (
+            @escaping (GIDGoogleUser?, Error?) -> Void
+        ) -> Void = { completion in
+            GIDSignIn.sharedInstance.restorePreviousSignIn { user, error in
+                completion(user, error)
+            }
+        },
+        interactiveGoogleSignIn: @escaping @MainActor @Sendable (
+            UIViewController,
+            String?,
+            @escaping @Sendable (GIDSignInResult?, Error?) -> Void
+        ) -> Void = { viewController, loginHint, completion in
+            GIDSignIn.sharedInstance.signIn(
+                withPresenting: viewController,
+                hint: loginHint,
+                additionalScopes: GoogleConfig.additionalScopes,
+                completion: completion
+            )
+        },
+        signOutGoogleSession: @escaping @MainActor @Sendable () -> Void = {
+            GIDSignIn.sharedInstance.signOut()
+        },
         userDefaults: UserDefaults = .standard,
         clearConversationCaches: @escaping @MainActor @Sendable () -> Void = {
             ConversationCache.shared.clearAllCaches()
         },
-        cleanupDownloads: @escaping @MainActor @Sendable () -> Void = {
-            AttachmentDownloader.shared.cleanupAll()
+        clearParticipantCaches: @escaping @Sendable () async -> Void = {
+            await ProductionParticipantCacheAccountTransition.closeAccountWorkAndClear()
+        },
+        reopenParticipantCaches: @escaping @Sendable () async -> Void = {
+            await ProductionParticipantCacheAccountTransition.reopenAccountWork()
+        },
+        cleanupDownloads: @escaping @MainActor @Sendable () async -> Void = {
+            PendingActionsManager.shared.resetQuotaRetryStateForAccountTransition()
+            await AttachmentAccountWorkRegistry.shared.cancelAndAwaitAll()
+            await AttachmentDownloader.shared.cancelAndAwaitAllDownloads()
+            await ProductionAttachmentCacheAccountTransition.closeAdmission()
+        },
+        reopenDownloads: @escaping @MainActor @Sendable () async -> Void = {
+            // Full cleanup removes these directories. Recreate them before
+            // admitting any same-process imports or downloads for a new login.
+            AttachmentPaths.setupDirectories()
+            AttachmentAccountWorkRegistry.shared.reopenAdmission()
+            AttachmentDownloader.shared.reopenAdmission()
+            await ProductionAttachmentCacheAccountTransition.reopenAdmission()
         },
         resetCoreDataStore: @escaping @Sendable () async throws -> Void = {
             try await CoreDataStack.shared.resetStore()
         },
+        inspectLocalMailboxStore: @escaping @Sendable () async throws -> LocalMailboxStoreInspection = {
+            try await ProductionLocalMailboxStoreInspector.inspect()
+        },
+        deleteAttachmentFiles: @escaping @Sendable () async throws -> Void = {
+            try AuthSession.deleteAttachmentFilesFromDisk()
+        },
         clearAttachmentCache: @escaping @Sendable () async -> Void = {
             await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+        },
+        cleanupHTMLContent: @escaping @MainActor @Sendable () async throws -> Void = {
+            var firstError: Error?
+            await CacheCoordinator.shared.closeAccountWorkAndAwait()
+            HTMLContentHandler.shared.closeAccountWork()
+            do {
+                try await HTMLContentHandler.shared.deleteAllHTMLFromClosedAccount()
+            } catch {
+                firstError = error
+            }
+            await HTMLContentRecoveryService.shared.closeAccountWorkAndAwait()
+            await ProcessedTextCache.shared.closeAccountWorkAndClear()
+            await HTMLContentLoader.shared.closeAccountWorkAndClearCaches()
+            MessageBubbleHTMLAnalysisCache.shared.closeAccountWorkAndClear()
+            await EmailPreviewSnapshotRenderer.shared.closeAccountWorkAndAwait()
+            do {
+                try await EmailPreviewSnapshotCache.shared.closeAccountWorkAndClear()
+            } catch {
+                firstError = firstError ?? error
+            }
+            await FullEmailWebViewManager.shared.clearForAccountTransition()
+            if let firstError {
+                throw firstError
+            }
+        },
+        reopenHTMLContent: @escaping @MainActor @Sendable () async throws -> Void = {
+            // Reopen is also used on launch without a preceding cleanup. Retire
+            // and drain any save notifications captured before this account was
+            // established before advancing the component generations below.
+            await CacheCoordinator.shared.closeAccountWorkAndAwait()
+            try HTMLContentHandler.shared.reopenAccountWork()
+            HTMLContentRecoveryService.shared.reopenAccountWork()
+            ProcessedTextCache.shared.reopenAccountWork()
+            await HTMLContentLoader.shared.reopenAccountWork()
+            MessageBubbleHTMLAnalysisCache.shared.reopenAccountWork()
+            try EmailPreviewSnapshotCache.shared.reopenAccountWork()
+            EmailPreviewSnapshotRenderer.shared.reopenAccountWork()
+            FullEmailWebViewManager.shared.reopenAccountWork()
+            CacheCoordinator.shared.reopenAccountWork()
+        },
+        syncRunCoordinator: SyncRunCoordinator = .shared,
+        outboundTaskRegistry: OutboundTaskRegistry? = nil,
+        revokeGoogleToken: @escaping @Sendable (String) async throws -> Void = { token in
+            try await AuthSession.revokeGoogleToken(token)
         }
     ) {
         self.tokenManagerProvider = tokenManagerProvider
         self.keychainService = keychainService
+        self.hasPreviousGoogleSignIn = hasPreviousGoogleSignIn
+        self.restorePreviousGoogleSignIn = restorePreviousGoogleSignIn
+        self.interactiveGoogleSignIn = interactiveGoogleSignIn
+        self.signOutGoogleSession = signOutGoogleSession
         self.userDefaults = userDefaults
         self.clearConversationCaches = clearConversationCaches
+        self.clearParticipantCaches = clearParticipantCaches
+        self.reopenParticipantCaches = reopenParticipantCaches
         self.cleanupDownloads = cleanupDownloads
+        self.reopenDownloads = reopenDownloads
         self.resetCoreDataStore = resetCoreDataStore
+        self.inspectLocalMailboxStore = inspectLocalMailboxStore
+        self.deleteAttachmentFiles = deleteAttachmentFiles
         self.clearAttachmentCache = clearAttachmentCache
+        self.cleanupHTMLContent = cleanupHTMLContent
+        self.reopenHTMLContent = reopenHTMLContent
+        self.syncRunCoordinator = syncRunCoordinator
+        self.outboundTaskRegistry = outboundTaskRegistry ?? .shared
+        self.revokeGoogleToken = revokeGoogleToken
         // Don't auto-restore on init
         // The app will call restorePreviousSignIn() AFTER fresh install check
     }
@@ -57,57 +283,153 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         currentUser?.refreshToken.tokenString
     }
     
-    func restorePreviousSignIn() async {
-        guard GIDSignIn.sharedInstance.hasPreviousSignIn() else {
-            return
+    @discardableResult
+    func restorePreviousSignIn() async -> AuthRestoreOutcome {
+        // A crash after sign-out was requested can leave Google already signed
+        // out while store/file cleanup is still pending. The durable marker
+        // wins over SDK restore state and is resumed before any account can be
+        // published or background-readable credentials remain available.
+        if let outcome = await resumeInterruptedAccountRemovalIfNeeded() {
+            return outcome
+        }
+        if let outcome = await resumeInterruptedCredentialCleanupIfNeeded() {
+            return outcome
         }
 
-        await withCheckedContinuation { continuation in
-            GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
-                DispatchQueue.main.async {
+        // A retryable launch restore can be followed by a successful interactive
+        // sign-in. A later bootstrap join must not close the account work that
+        // sign-in just reopened by attempting the SDK restore again.
+        if isAuthenticated {
+            return .authenticated
+        }
+
+        guard hasPreviousGoogleSignIn() else {
+            return .terminalNoSession
+        }
+
+        let outboundTransition = outboundTaskRegistry.closeAdmission()
+        await syncRunCoordinator.beginQuiescence()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+        await clearParticipantCaches()
+        await cleanupDownloads()
+        let restoredUser = AuthenticatedGoogleUserBox()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            restorePreviousGoogleSignIn { [weak self] user, error in
+                Task { @MainActor [weak self] in
+                    defer { continuation.resume() }
+
                     if let error {
                         Log.warning("Failed to restore previous sign-in: \(error.localizedDescription)", category: .auth)
                     }
-                    if let user = user {
-                        guard self?.hasRequiredGmailScope(user) == true else {
-                            Log.warning("Restored session missing Gmail scope; user must sign in again to grant Gmail access", category: .auth)
-                            self?.clearAuthState()
-                            continuation.resume()
-                            return
+
+                    guard let self else { return }
+                    guard let user else {
+                        if error.map(Self.isCredentialInvalidatingRestoreError) ?? true {
+                            restoredUser.restoreOutcome = self.clearFailedGoogleSession()
+                                ? .terminalNoSession
+                                : .retryableFailure
+                        } else {
+                            restoredUser.restoreOutcome = .retryableFailure
                         }
-                        self?.currentUser = user
-                        self?.userEmail = user.profile?.email
-                        self?.userName = user.profile?.name
-                        self?.isAuthenticated = true
-                        self?.accessToken = user.accessToken.tokenString
-                        do {
-                            try self?.persistSessionForBackgroundAccess(
-                                accessToken: user.accessToken.tokenString,
-                                refreshToken: user.refreshToken.tokenString,
-                                expirationDate: user.accessToken.expirationDate ?? Date().addingTimeInterval(3600),
-                                email: user.profile?.email
-                            )
-                        } catch {
-                            Log.error("Failed to migrate restored session for background access", category: .auth, error: error)
-                        }
+                        return
                     }
-                    continuation.resume()
+                    guard self.hasRequiredGmailScope(user) else {
+                        Log.warning("Restored session missing Gmail scope; user must sign in again to grant Gmail access", category: .auth)
+                        restoredUser.restoreOutcome = self.clearFailedGoogleSession()
+                            ? .terminalNoSession
+                            : .retryableFailure
+                        return
+                    }
+
+                    do {
+                        // A previous account's store must be repaired before
+                        // authenticated UI can expose any local rows.
+                        try await self.prepareLocalStoreForAuthenticatedAccount(user.profile?.email)
+                        try self.persistSessionForBackgroundAccess(
+                            accessToken: user.accessToken.tokenString,
+                            refreshToken: user.refreshToken.tokenString,
+                            expirationDate: user.accessToken.expirationDate ?? Date().addingTimeInterval(3600),
+                            email: user.profile?.email
+                        )
+                    } catch {
+                        Log.error("Failed to isolate restored account state", category: .auth, error: error)
+                        _ = self.clearFailedGoogleSession()
+                        restoredUser.restoreOutcome = .retryableFailure
+                        return
+                    }
+
+                    // Stage the restored user only after local-store isolation
+                    // and credential persistence succeed. Publication happens
+                    // after account-scoped admission reopens and quiescence is
+                    // released.
+                    restoredUser.user = user
                 }
             }
         }
+
+        let didReopenAccountWork: Bool
+        if restoredUser.user != nil {
+            didReopenAccountWork = await reopenAccountWork(after: outboundTransition)
+        } else {
+            didReopenAccountWork = false
+        }
+        await syncRunCoordinator.endQuiescence()
+
+        guard let user = restoredUser.user, didReopenAccountWork else {
+            return restoredUser.restoreOutcome
+        }
+        publishAuthenticatedSession(user, recordsCompletedSignIn: false)
+        return .authenticated
     }
     
     @MainActor
     func signIn(presenting viewController: UIViewController, loginHint: String? = nil) async throws {
+        let wasAuthenticated = isAuthenticated
+        let outboundTransition = outboundTaskRegistry.closeAdmission()
+        await syncRunCoordinator.beginQuiescence()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+        await clearParticipantCaches()
+        await cleanupDownloads()
+        var releasedQuiescence = false
+        let signedInUser = AuthenticatedGoogleUserBox()
+        do {
+            try await performSignIn(
+                presenting: viewController,
+                loginHint: loginHint,
+                stagedUser: signedInUser
+            )
+            guard let user = signedInUser.user else {
+                throw CancellationError()
+            }
+            guard await reopenAccountWork(after: outboundTransition) else {
+                throw CancellationError()
+            }
+            await syncRunCoordinator.endQuiescence()
+            releasedQuiescence = true
+            publishAuthenticatedSession(user, recordsCompletedSignIn: true)
+        } catch {
+            if !releasedQuiescence {
+                if signedInUser.didReplaceGoogleSession {
+                    clearFailedGoogleSession()
+                } else if wasAuthenticated {
+                    await reopenPreSignInAccountWork(after: outboundTransition)
+                }
+                await syncRunCoordinator.endQuiescence()
+            }
+            throw error
+        }
+    }
+
+    private func performSignIn(
+        presenting viewController: UIViewController,
+        loginHint: String?,
+        stagedUser: AuthenticatedGoogleUserBox
+    ) async throws {
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: GoogleConfig.clientId)
         let normalizedLoginHint = Self.normalizedLoginHint(loginHint)
 
         return try await withCheckedThrowingContinuation { continuation in
-            GIDSignIn.sharedInstance.signIn(
-                withPresenting: viewController,
-                hint: normalizedLoginHint,
-                additionalScopes: GoogleConfig.additionalScopes
-            ) { [weak self] result, error in
+            interactiveGoogleSignIn(viewController, normalizedLoginHint) { [weak self] result, error in
                 if let error = error {
                     continuation.resume(throwing: error)
                     return
@@ -118,11 +440,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     return
                 }
 
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     guard let self = self else {
                         continuation.resume(throwing: AuthError.noUser)
                         return
                     }
+                    stagedUser.didReplaceGoogleSession = true
 
                     guard self.hasRequiredGmailScope(result.user) else {
                         self.clearAuthState()
@@ -130,12 +453,13 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         return
                     }
 
-                    self.currentUser = result.user
-                    self.userEmail = result.user.profile?.email
-                    self.userName = result.user.profile?.name
-                    self.accessToken = result.user.accessToken.tokenString
-
                     do {
+                        // Hold the account-transition lease while validating
+                        // and, when necessary, replacing a previous account's
+                        // persistent store. Never publish authenticated UI on
+                        // top of mismatched local data.
+                        try await self.prepareLocalStoreForAuthenticatedAccount(result.user.profile?.email)
+
                         // Save tokens and account email with background-readable access so
                         // BGTask cold starts can recover legacy sessions before Sign-In restore runs.
                         try self.persistSessionForBackgroundAccess(
@@ -145,19 +469,17 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                             email: result.user.profile?.email
                         )
 
-                        // Only mark as authenticated after tokens are successfully saved
-                        self.isAuthenticated = true
-
-                        // Mark that user has successfully signed in
-                        self.userDefaults.set(true, forKey: "hasCompletedSignIn")
-
-                        // Success - resume inside do block after all state is set
+                        // The caller releases quiescence and reopens outbound
+                        // admission before publishing authenticated UI.
+                        stagedUser.user = result.user
                         continuation.resume()
                     } catch {
-                        Log.error("Failed to save tokens - clearing auth state", category: .auth, error: error)
-                        // Clear auth state since tokens weren't persisted
-                        self.clearAuthState()
-                        continuation.resume(throwing: AuthError.tokenPersistenceFailed(error))
+                        Log.error("Failed to complete isolated sign-in", category: .auth, error: error)
+                        if let authError = error as? AuthError {
+                            continuation.resume(throwing: authError)
+                        } else {
+                            continuation.resume(throwing: AuthError.tokenPersistenceFailed(error))
+                        }
                         return
                     }
                 }
@@ -166,21 +488,33 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     }
     
     @MainActor
-    func signOut() async {
-        GIDSignIn.sharedInstance.signOut()
+    @discardableResult
+    func signOut() async -> Bool {
+        // Close send admission before the first suspension point. While this
+        // transition waits for an active sync, UI may still be authenticated,
+        // but it can no longer admit an old-account optimistic send.
+        let outboundTransition = outboundTaskRegistry.closeAdmission()
+        // Acquire the exclusive account-transition lease before publishing
+        // logged-out UI. A new interactive sign-in therefore cannot start
+        // until every old-account writer and this cleanup have finished.
+        await syncRunCoordinator.beginQuiescence()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+        do {
+            try persistLocalCleanupRequirement()
+        } catch {
+            Log.error("Failed to persist the sign-out cleanup prerequisite", category: .auth, error: error)
+            _ = outboundTaskRegistry.reopenAdmission(after: outboundTransition)
+            await syncRunCoordinator.endQuiescence()
+            return false
+        }
+        await clearParticipantCaches()
+        signOutGoogleSession()
         currentUser = nil
         userEmail = nil
         userName = nil
         isAuthenticated = false
         accessToken = nil
-
-        // Clear tokens from secure storage
-        do {
-            try tokenManager.clearTokens()
-            try keychainService.delete(for: KeychainService.Key.googleUserEmail.rawValue)
-        } catch {
-            Log.error("Failed to clear tokens", category: .auth, error: error)
-        }
+        clearAccountScopedSyncDefaults()
 
         // Clear the sign-in flag
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
@@ -192,74 +526,110 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await SendAsAliasManager.shared.invalidate()
 
         // Clear attachment downloader tracking data
-        cleanupDownloads()
+        await cleanupDownloads()
 
-        // Clear attachment files from disk
-        clearAttachmentFiles()
-
-        // Await async cleanup tasks to ensure completion before allowing new sign-in
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                do {
-                    try await self.resetCoreDataStore()
-                } catch {
-                    Log.error("Failed to clear Core Data during sign-out", category: .coreData, error: error)
-                }
-            }
-
-            group.addTask {
-                await self.clearAttachmentCache()
-            }
-        }
+        await completeDurableLocalCleanupForAccountRemoval(
+            failureMessage: "Failed to clear Core Data during sign-out"
+        )
+        await syncRunCoordinator.endQuiescence()
         Log.info("Sign-out cleanup completed", category: .auth)
+        return true
     }
 
-    private func clearAttachmentFiles() {
+    private nonisolated static func deleteAttachmentFilesFromDisk() throws {
         let fileManager = FileManager.default
 
         // Get app support directory
         guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            Log.warning("Could not find application support directory for cleanup", category: .auth)
-            return
+            throw CocoaError(.fileNoSuchFile)
         }
 
         // Clear Attachments directory
         let attachmentsURL = appSupportURL.appendingPathComponent("Attachments")
         if fileManager.fileExists(atPath: attachmentsURL.path) {
-            do {
-                try fileManager.removeItem(at: attachmentsURL)
-            } catch {
-                Log.error("Failed to remove Attachments directory during sign-out - previous user's files may persist", category: .auth, error: error)
-            }
+            try fileManager.removeItem(at: attachmentsURL)
         }
 
         // Clear Previews directory
         let previewsURL = appSupportURL.appendingPathComponent("Previews")
         if fileManager.fileExists(atPath: previewsURL.path) {
-            do {
-                try fileManager.removeItem(at: previewsURL)
-            } catch {
-                Log.error("Failed to remove Previews directory during sign-out - previous user's files may persist", category: .auth, error: error)
-            }
+            try fileManager.removeItem(at: previewsURL)
         }
 
         // Clear any cache directories
         if let cacheURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
             let attachmentCacheURL = cacheURL.appendingPathComponent("AttachmentCache")
             if fileManager.fileExists(atPath: attachmentCacheURL.path) {
-                do {
-                    try fileManager.removeItem(at: attachmentCacheURL)
-                } catch {
-                    Log.error("Failed to remove AttachmentCache directory during sign-out - previous user's files may persist", category: .auth, error: error)
-                }
+                try fileManager.removeItem(at: attachmentCacheURL)
             }
+        }
+    }
+
+    nonisolated static func googleTokenRevocationRequest(for token: String) -> URLRequest {
+        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/revoke")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "token=\(formURLEncodedValue(token))".data(using: .utf8)
+        return request
+    }
+
+    private nonisolated static func formURLEncodedValue(_ value: String) -> String {
+        let hexDigits = Array("0123456789ABCDEF")
+        var encoded = ""
+        encoded.reserveCapacity(value.utf8.count)
+
+        for byte in value.utf8 {
+            switch byte {
+            case 0x41...0x5A, 0x61...0x7A, 0x30...0x39, 0x2D, 0x2E, 0x5F, 0x7E:
+                encoded.append(Character(UnicodeScalar(byte)))
+            default:
+                encoded.append("%")
+                encoded.append(hexDigits[Int(byte >> 4)])
+                encoded.append(hexDigits[Int(byte & 0x0F)])
+            }
+        }
+
+        return encoded
+    }
+
+    private nonisolated static func revokeGoogleToken(_ token: String) async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 15
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let request = googleTokenRevocationRequest(for: token)
+
+        let (_, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            throw URLError(.badServerResponse)
         }
     }
 
     @MainActor
     func signOutAndDisconnect() async throws {
-        // First sign out
-        GIDSignIn.sharedInstance.signOut()
+        let outboundTransition = outboundTaskRegistry.closeAdmission()
+        await syncRunCoordinator.beginQuiescence()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+        do {
+            try persistLocalCleanupRequirement()
+        } catch {
+            Log.error("Failed to persist the disconnect cleanup prerequisite", category: .auth, error: error)
+            _ = outboundTaskRegistry.reopenAdmission(after: outboundTransition)
+            await syncRunCoordinator.endQuiescence()
+            throw AuthError.cleanupPrerequisitePersistenceFailed(error)
+        }
+        await clearParticipantCaches()
+
+        // Capture the old credential before local SDK sign-out clears it. Use
+        // a bounded token-based request below instead of GIDSignIn.disconnect:
+        // the SDK callback has no finite bound and can mutate global sign-in
+        // state after a new account authenticates.
+        let revocationToken = refreshToken ?? accessToken
+        signOutGoogleSession()
 
         // Clear local state immediately
         currentUser = nil
@@ -267,25 +637,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         userName = nil
         isAuthenticated = false
         accessToken = nil
-
-        // Then disconnect to revoke tokens (wrap callback in continuation)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            GIDSignIn.sharedInstance.disconnect { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            }
-        }
-
-        // Clear tokens from secure storage
-        do {
-            try tokenManager.clearTokens()
-            try keychainService.delete(for: KeychainService.Key.googleUserEmail.rawValue)
-        } catch {
-            Log.error("Failed to clear tokens", category: .auth, error: error)
-        }
+        // Clear account-scoped sync state before the remote disconnect:
+        // revocation can fail, but a later sign-in must never inherit this
+        // account's sync strikes or its "we synced recently" timestamps.
+        clearAccountScopedSyncDefaults()
 
         // Clear the sign-in flag
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
@@ -297,26 +652,28 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await SendAsAliasManager.shared.invalidate()
 
         // Clear attachment downloader tracking data
-        cleanupDownloads()
+        await cleanupDownloads()
 
-        // Clear attachment files from disk
-        clearAttachmentFiles()
+        await completeDurableLocalCleanupForAccountRemoval(
+            failureMessage: "Failed to clear Core Data during disconnect"
+        )
 
-        // Await async cleanup tasks to ensure completion before allowing new sign-in
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                do {
-                    try await self.resetCoreDataStore()
-                } catch {
-                    Log.error("Failed to clear Core Data during disconnect", category: .coreData, error: error)
-                }
+        let disconnectError: Error?
+        do {
+            guard let revocationToken, !revocationToken.isEmpty else {
+                throw AuthError.noAccessToken
             }
-
-            group.addTask {
-                await self.clearAttachmentCache()
-            }
+            try await revokeGoogleToken(revocationToken)
+            disconnectError = nil
+        } catch {
+            disconnectError = error
         }
+        await syncRunCoordinator.endQuiescence()
         Log.info("Disconnect cleanup completed", category: .auth)
+
+        if let disconnectError {
+            throw disconnectError
+        }
     }
 
     nonisolated func withFreshToken() async throws -> String {
@@ -330,6 +687,55 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedValue.isEmpty ? nil : trimmedValue
+    }
+
+    /// Ensures authenticated UI can never be published over another
+    /// account's surviving local store. The caller owns the account-transition
+    /// lease for this entire operation.
+    func prepareLocalStoreForAuthenticatedAccount(_ accountEmail: String?) async throws {
+        guard let normalizedEmail = Self.normalizedLoginHint(accountEmail) else {
+            throw AuthError.missingAccountEmail
+        }
+
+        var resetRequired = hasPersistedLocalCleanupRequirement
+        if !resetRequired {
+            let storeInspection: LocalMailboxStoreInspection
+            do {
+                storeInspection = try await inspectLocalMailboxStore()
+            } catch {
+                throw AuthError.localAccountIsolationFailed(error)
+            }
+
+            // This app owns one account-wide store. A matching row is not
+            // sufficient if any other Account row survived an older failed
+            // teardown, because conversations are not filtered by account.
+            // Likewise, an absent Account row is safe only when the rest of the
+            // mailbox store and canonical HTML directory are genuinely empty;
+            // orphaned rows/files have no account predicate and would otherwise
+            // publish under the new login.
+            if storeInspection.accountEmails.isEmpty {
+                resetRequired = storeInspection.hasAccountScopedMailboxData
+            } else {
+                resetRequired = storeInspection.accountEmails.contains {
+                    $0.caseInsensitiveCompare(normalizedEmail) != .orderedSame
+                }
+            }
+        }
+
+        guard resetRequired else { return }
+
+        // Persist the requirement in Keychain before touching the store. A
+        // process crash or reset failure therefore cannot let a later sign-in
+        // skip the remaining store/file cleanup.
+        do {
+            try persistLocalCleanupRequirement()
+            try await performDurableLocalCleanup()
+        } catch {
+            throw AuthError.localAccountIsolationFailed(error)
+        }
+
+        clearAccountScopedSyncDefaults()
+        BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
     }
 
     func currentOrPersistedUserEmail() -> String? {
@@ -358,12 +764,17 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         expirationDate: Date,
         email: String?
     ) throws {
+        // This marker turns the otherwise multi-key credential write into a
+        // crash-safe transaction. A launch interrupted after any partial write
+        // clears the rejected credentials before considering SDK restore state.
+        try persistCredentialCleanupRequirement()
         try tokenManager.saveTokens(
             access: accessToken,
             refresh: refreshToken,
             expirationDate: expirationDate
         )
         try persistUserEmailForBackgroundAccess(email)
+        try clearCredentialCleanupRequirement()
     }
 
     func persistUserEmailForBackgroundAccess(_ email: String?) throws {
@@ -383,6 +794,20 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         return grantedScopes.contains(GoogleConfig.gmailModifyScope)
     }
 
+    private func publishAuthenticatedSession(
+        _ user: GIDGoogleUser,
+        recordsCompletedSignIn: Bool
+    ) {
+        currentUser = user
+        userEmail = user.profile?.email
+        userName = user.profile?.name
+        accessToken = user.accessToken.tokenString
+        if recordsCompletedSignIn {
+            userDefaults.set(true, forKey: "hasCompletedSignIn")
+        }
+        isAuthenticated = true
+    }
+
     private func clearAuthState() {
         currentUser = nil
         userEmail = nil
@@ -390,11 +815,302 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         isAuthenticated = false
         accessToken = nil
     }
+
+    @discardableResult
+    private func clearFailedGoogleSession() -> Bool {
+        signOutGoogleSession()
+        clearAuthState()
+        userDefaults.removeObject(forKey: "hasCompletedSignIn")
+        clearAccountScopedSyncDefaults()
+
+        // Persist before the first delete so a crash or partial Keychain
+        // failure always has a launch-time retry path. UserDefaults is a
+        // compatibility fallback when Keychain itself is temporarily unable
+        // to accept the marker.
+        do {
+            try persistCredentialCleanupRequirement()
+        } catch {
+            userDefaults.set(true, forKey: Self.credentialCleanupRequiredKey)
+            Log.error("Failed to persist rejected-session cleanup prerequisite", category: .auth, error: error)
+        }
+
+        var firstError: Error?
+        do {
+            try tokenManager.clearTokens()
+        } catch {
+            firstError = error
+            Log.error("Failed to clear tokens after rejected sign-in", category: .auth, error: error)
+        }
+        do {
+            try keychainService.delete(for: KeychainService.Key.googleUserEmail.rawValue)
+        } catch {
+            firstError = firstError ?? error
+            Log.error("Failed to clear persisted email after rejected sign-in", category: .auth, error: error)
+        }
+
+        guard firstError == nil else { return false }
+        do {
+            try clearCredentialCleanupRequirement()
+            return true
+        } catch {
+            // The marker remains a safe false positive and will retry the
+            // already-completed deletes on the next launch.
+            Log.error("Failed to clear rejected-session cleanup prerequisite", category: .auth, error: error)
+            return false
+        }
+    }
+
+    nonisolated static func isCredentialInvalidatingRestoreError(_ error: Error) -> Bool {
+        let error = error as NSError
+        return (error.domain == kGIDSignInErrorDomain && error.code == -4)
+            || (error.domain == "org.openid.appauth.oauth_token" && error.code == -10)
+    }
+
+    @discardableResult
+    func reopenAccountWork(after transition: OutboundAccountTransition) async -> Bool {
+        do {
+            try await reopenHTMLContent()
+        } catch {
+            Log.error("Failed to reopen account HTML storage", category: .auth, error: error)
+            // Reopening is an all-or-none account boundary. A late failure
+            // must close anything the reopen sequence admitted before the
+            // transition releases quiescence.
+            do {
+                try await cleanupHTMLContent()
+            } catch {
+                Log.error("Failed to roll back partial HTML reopen", category: .auth, error: error)
+            }
+            return false
+        }
+        await reopenParticipantCaches()
+        await reopenDownloads()
+        guard outboundTaskRegistry.reopenAdmission(after: transition) else {
+            // A newer account transition superseded this one while the async
+            // reopen sequence was yielding. Return every component to the
+            // closed state so the stale transition cannot expose partial work
+            // during the newer teardown.
+            await cleanupDownloads()
+            await clearParticipantCaches()
+            do {
+                try await cleanupHTMLContent()
+            } catch {
+                Log.error("Failed to roll back account work after stale reopen", category: .auth, error: error)
+            }
+            return false
+        }
+        return true
+    }
+
+    private func reopenPreSignInAccountWork(after transition: OutboundAccountTransition) async {
+        await reopenParticipantCaches()
+        await reopenDownloads()
+        guard outboundTaskRegistry.reopenAdmission(after: transition) else {
+            // A newer transition superseded this failed sign-in while its
+            // Google UI was active. Roll back every stale account-work reopen.
+            await cleanupDownloads()
+            await clearParticipantCaches()
+            return
+        }
+    }
+
+    private func performDurableLocalCleanup() async throws {
+        // Try every independent cleanup even when one fails, but retain the
+        // durable marker until all credential, store, and file work succeeds.
+        // This prevents a transient Keychain failure from becoming the sole
+        // unretried remnant of an account transition.
+        var firstError: Error?
+        do {
+            try performDurableCredentialCleanup()
+        } catch {
+            firstError = error
+        }
+        do {
+            try await cleanupHTMLContent()
+        } catch {
+            firstError = firstError ?? error
+        }
+        // This is deliberately before the store reset. The close operation
+        // invalidates admission and drains suspended Person/photo work, so an
+        // old context cannot save into the replacement account's store.
+        await clearParticipantCaches()
+        do {
+            try await resetCoreDataStore()
+        } catch {
+            firstError = firstError ?? error
+        }
+        do {
+            try await deleteAttachmentFiles()
+        } catch {
+            firstError = firstError ?? error
+        }
+        await clearAttachmentCache()
+        if let firstError {
+            throw firstError
+        }
+        try keychainService.delete(
+            for: KeychainService.Key.localStoreResetRequired.rawValue
+        )
+        userDefaults.removeObject(forKey: Self.localStoreResetRequiredKey)
+    }
+
+    private func performDurableCredentialCleanup() throws {
+        var firstError: Error?
+        do {
+            try tokenManager.clearTokens()
+        } catch {
+            firstError = error
+        }
+        do {
+            try keychainService.delete(for: KeychainService.Key.googleUserEmail.rawValue)
+        } catch {
+            firstError = firstError ?? error
+        }
+        if let firstError {
+            throw firstError
+        }
+        try clearCredentialCleanupRequirement()
+    }
+
+    /// Completes a sign-out that was interrupted after its durable marker was
+    /// written. This runs even when Google has no previous session to restore.
+    private func resumeInterruptedAccountRemovalIfNeeded() async -> AuthRestoreOutcome? {
+        guard hasPersistedLocalCleanupRequirement else { return nil }
+
+        outboundTaskRegistry.closeAdmission()
+        await syncRunCoordinator.beginQuiescence()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+        await clearParticipantCaches()
+
+        GIDSignIn.sharedInstance.signOut()
+        currentUser = nil
+        userEmail = nil
+        userName = nil
+        isAuthenticated = false
+        accessToken = nil
+        clearAccountScopedSyncDefaults()
+
+        userDefaults.removeObject(forKey: "hasCompletedSignIn")
+        BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        clearConversationCaches()
+        await AliasManager.shared.invalidate()
+        await SendAsAliasManager.shared.invalidate()
+        await cleanupDownloads()
+        let cleanupSucceeded = await completeDurableLocalCleanupForAccountRemoval(
+            failureMessage: "Failed to resume interrupted account cleanup"
+        )
+        await syncRunCoordinator.endQuiescence()
+        return cleanupSucceeded ? .terminalNoSession : .retryableFailure
+    }
+
+    /// Completes a credential transaction interrupted during a rejected sign-in
+    /// or restore. Unlike full account removal, the isolated local store and
+    /// attachment files remain available for a later authenticated retry.
+    private func resumeInterruptedCredentialCleanupIfNeeded() async -> AuthRestoreOutcome? {
+        guard hasPersistedCredentialCleanupRequirement else { return nil }
+
+        outboundTaskRegistry.closeAdmission()
+        await syncRunCoordinator.beginQuiescence()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+        await clearParticipantCaches()
+
+        GIDSignIn.sharedInstance.signOut()
+        clearAuthState()
+        clearAccountScopedSyncDefaults()
+        userDefaults.removeObject(forKey: "hasCompletedSignIn")
+        BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        clearConversationCaches()
+        await AliasManager.shared.invalidate()
+        await SendAsAliasManager.shared.invalidate()
+        await cleanupDownloads()
+
+        let cleanupSucceeded: Bool
+        do {
+            try performDurableCredentialCleanup()
+            cleanupSucceeded = true
+        } catch {
+            Log.error("Failed to resume interrupted credential cleanup", category: .auth, error: error)
+            cleanupSucceeded = false
+        }
+        await syncRunCoordinator.endQuiescence()
+        return cleanupSucceeded ? .terminalNoSession : .retryableFailure
+    }
+
+    /// Keychain is the crash-durable source of truth. UserDefaults remains as
+    /// a compatibility mirror so installs that entered the pre-fix failure
+    /// state still fail closed and retry cleanup.
+    private var hasPersistedLocalCleanupRequirement: Bool {
+        keychainService.exists(
+            for: KeychainService.Key.localStoreResetRequired.rawValue
+        ) || userDefaults.bool(forKey: Self.localStoreResetRequiredKey)
+    }
+
+    private var hasPersistedCredentialCleanupRequirement: Bool {
+        keychainService.exists(
+            for: KeychainService.Key.credentialCleanupRequired.rawValue
+        ) || userDefaults.bool(forKey: Self.credentialCleanupRequiredKey)
+    }
+
+    private func persistLocalCleanupRequirement() throws {
+        try keychainService.save(
+            Data([1]),
+            for: KeychainService.Key.localStoreResetRequired.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        userDefaults.set(true, forKey: Self.localStoreResetRequiredKey)
+    }
+
+    private func persistCredentialCleanupRequirement() throws {
+        try keychainService.save(
+            Data([1]),
+            for: KeychainService.Key.credentialCleanupRequired.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        userDefaults.set(true, forKey: Self.credentialCleanupRequiredKey)
+    }
+
+    private func clearCredentialCleanupRequirement() throws {
+        try keychainService.delete(
+            for: KeychainService.Key.credentialCleanupRequired.rawValue
+        )
+        userDefaults.removeObject(forKey: Self.credentialCleanupRequiredKey)
+    }
+
+    @discardableResult
+    private func completeDurableLocalCleanupForAccountRemoval(failureMessage: String) async -> Bool {
+        do {
+            try await performDurableLocalCleanup()
+            return true
+        } catch {
+            // Keep localStoreResetRequiredKey set. Interactive sign-in and
+            // restore both fail closed until store and attachment cleanup succeed.
+            Log.error(failureMessage, category: .coreData, error: error)
+            return false
+        }
+    }
+
+    /// Removes every UserDefaults-backed sync signal scoped to the account
+    /// being torn down. The failure keys are pre-v3 migration state, but the
+    /// two timestamps are live: `lastSuccessfulSyncTime` seeds
+    /// `SyncTimeCalculator` for `.historyRecovery` and `.reconciliation`, and
+    /// `lastReconciliationTime` gates `shouldSkipLabelReconciliation`. Leaving
+    /// either behind lets a new account start — or skip — reconciliation as if
+    /// work had already run against a store that has never synced. Clearing
+    /// them only ever widens the next window, so it is also safe on the paths
+    /// that deliberately retain the local store for a same-account retry.
+    private func clearAccountScopedSyncDefaults() {
+        userDefaults.removeObject(forKey: SyncConfig.consecutiveFailuresKey)
+        userDefaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)
+        userDefaults.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        userDefaults.removeObject(forKey: SyncConfig.lastReconciliationTimeKey)
+    }
 }
 
 enum AuthError: LocalizedError {
     case noUser
     case noAccessToken
+    case missingAccountEmail
+    case localAccountIsolationFailed(Error)
+    case cleanupPrerequisitePersistenceFailed(Error)
     case missingRequiredScopes
     case tokenPersistenceFailed(Error)
 
@@ -404,6 +1120,12 @@ enum AuthError: LocalizedError {
             return "No authenticated user"
         case .noAccessToken:
             return "Failed to get access token"
+        case .missingAccountEmail:
+            return "The signed-in Google account did not provide an email address"
+        case .localAccountIsolationFailed(let underlyingError):
+            return "Could not safely isolate local mail for this account: \(underlyingError.localizedDescription)"
+        case .cleanupPrerequisitePersistenceFailed(let underlyingError):
+            return "Could not safely begin account cleanup: \(underlyingError.localizedDescription)"
         case .missingRequiredScopes:
             return "Google sign-in did not grant required Gmail permissions. Please try signing in again."
         case .tokenPersistenceFailed(let underlyingError):

@@ -1,5 +1,6 @@
 import Foundation
 import GoogleSignIn
+import Security
 
 /// Handles fresh install detection and cleanup.
 ///
@@ -9,6 +10,8 @@ import GoogleSignIn
 struct FreshInstallHandler {
     private let userDefaults: UserDefaults
     private let keychainService: KeychainService
+    private let loadInstallationId: @Sendable () throws -> String
+    private let handleDetectedFreshInstall: (@Sendable (Bool) async -> Void)?
 
     private static let installationKey = "AppInstallationID"
     private static let installTimestampKey = "installTimestamp"
@@ -16,28 +19,68 @@ struct FreshInstallHandler {
 
     init(
         userDefaults: UserDefaults = .standard,
-        keychainService: KeychainService = .shared
+        keychainService: KeychainService = .shared,
+        loadInstallationId: (@Sendable () throws -> String)? = nil,
+        handleDetectedFreshInstall: (@Sendable (Bool) async -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
         self.keychainService = keychainService
+        self.loadInstallationId = loadInstallationId ?? {
+            try keychainService.loadString(for: .installationId)
+        }
+        self.handleDetectedFreshInstall = handleDetectedFreshInstall
     }
 
     /// Checks for fresh install and performs cleanup if needed.
     /// Should be called early in app launch, before auth restoration.
-    func checkAndHandleFreshInstall() async {
+    @discardableResult
+    func checkAndHandleFreshInstall() async -> Bool {
         let hasUserDefaultsID = userDefaults.string(forKey: Self.installationKey) != nil
-        let hasKeychainData = (try? keychainService.loadString(for: .installationId)) != nil
+        let keychainInstallationId: String?
+        do {
+            keychainInstallationId = try loadInstallationId()
+        } catch KeychainError.itemNotFound {
+            keychainInstallationId = nil
+        } catch {
+            if Self.isTransientProtectedDataError(error) {
+                // Background launches can run before the first device unlock,
+                // when AfterFirstUnlock items are temporarily inaccessible.
+                // Never interpret that protected-data state as an install
+                // mismatch because the cleanup below is destructive.
+                Log.warning("Installation ID is temporarily unavailable; deferring fresh-install handling", category: .auth)
+                return false
+            }
+
+            // An unreadable or permanently unavailable installation ID cannot
+            // safely prove continuity with the current install. Preserve the
+            // fail-closed behavior by treating it as missing: cleanup replaces
+            // stale credentials/state, while bootstrap can still make progress.
+            Log.error("Installation ID could not be read; performing fail-safe fresh-install cleanup", category: .auth, error: error)
+            keychainInstallationId = nil
+        }
 
         if !hasUserDefaultsID {
-            await handleFreshInstall(hasKeychainData: hasKeychainData)
+            await handleFreshInstall(hasKeychainData: keychainInstallationId != nil)
         } else if let storedID = userDefaults.string(forKey: Self.installationKey) {
-            await verifyInstallationConsistency(storedID: storedID)
+            await verifyInstallationConsistency(
+                storedID: storedID,
+                keychainInstallationId: keychainInstallationId
+            )
         }
 
         ensureInstallTimestampExists()
+        return true
     }
 
     // MARK: - Private Methods
+
+    private static func isTransientProtectedDataError(_ error: Error) -> Bool {
+        guard let keychainError = error as? KeychainError,
+              case .unhandledError(let status) = keychainError else {
+            return false
+        }
+        return status == errSecInteractionNotAllowed
+    }
 
     private func handleFreshInstall(hasKeychainData: Bool) async {
         Log.info("Fresh install detected - UserDefaults cleared", category: .auth)
@@ -46,15 +89,26 @@ struct FreshInstallHandler {
             Log.warning("Keychain data from previous installation found - cleaning up", category: .auth)
         }
 
-        await performCleanup()
-        setupNewInstallation()
-    }
-
-    private func verifyInstallationConsistency(storedID: String) async {
-        if !keychainService.verifyInstallationId(storedID) {
-            Log.warning("Installation ID mismatch - performing cleanup", category: .auth)
+        if let handleDetectedFreshInstall {
+            await handleDetectedFreshInstall(hasKeychainData)
+        } else {
             await performCleanup()
             setupNewInstallation()
+        }
+    }
+
+    private func verifyInstallationConsistency(
+        storedID: String,
+        keychainInstallationId: String?
+    ) async {
+        if keychainInstallationId != storedID {
+            Log.warning("Installation ID mismatch - performing cleanup", category: .auth)
+            if let handleDetectedFreshInstall {
+                await handleDetectedFreshInstall(keychainInstallationId != nil)
+            } else {
+                await performCleanup()
+                setupNewInstallation()
+            }
         }
     }
 
@@ -183,7 +237,7 @@ struct FreshInstallHandler {
         Log.debug("In-memory caches cleared", category: .general)
 
         Log.debug("Clearing attachment caches", category: .attachment)
-        await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+        await AttachmentCacheActor.shared.clearForAccountTransition()
     }
 
     private func clearAttachmentFiles() {

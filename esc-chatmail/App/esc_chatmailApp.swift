@@ -107,22 +107,15 @@ struct esc_chatmailApp: App {
             return
         }
 
-        // 1. Fresh install check (awaited - completes before continuing)
-        await FreshInstallHandler().checkAndHandleFreshInstall()
-        logStartupTiming("FreshInstallHandler complete")
-
-        // 2. Only start Core Data loading after fresh-install cleanup has had a chance to reset it.
-        _ = CoreDataStack.shared.persistentContainer
-        logStartupTiming("Core Data container accessed")
-
-        // 3. Wait for Core Data store to load
-        guard await waitForCoreData() else {
-            logStartupTiming("Core Data failed")
+        // 1. Fresh-install cleanup and store loading are single-flight because
+        // a cold BGTask launch may request the same prerequisites concurrently.
+        guard await AppStartupBootstrap.shared.preparePersistenceUntilReady() else {
+            logStartupTiming("Persistence bootstrap stopped before readiness")
             return
         }
-        logStartupTiming("Core Data ready")
+        logStartupTiming("Fresh-install and Core Data bootstrap complete")
 
-        // 4. Start cache coordinator for Core Data change notifications
+        // 2. Start cache coordinator for Core Data change notifications
         CacheCoordinator.shared.start()
         logStartupTiming("CacheCoordinator started")
 
@@ -131,8 +124,13 @@ struct esc_chatmailApp: App {
             logStartupTiming("Database maintenance scheduled")
         }
 
-        // 5. Restore auth session (after cleanup complete)
-        await AuthSession.shared.restorePreviousSignIn()
+        // 3. Restore auth session (after cleanup complete). A cold background
+        // launch may already own this single-flight phase, in which case the UI
+        // joins it instead of starting a second account transition.
+        guard await AppStartupBootstrap.shared.restoreAuthenticationIfNeeded() else {
+            logStartupTiming("Auth bootstrap failed")
+            return
+        }
         applyUITestLaunchStateIfNeeded()
         logStartupTiming("Auth restored")
 
@@ -150,7 +148,7 @@ struct esc_chatmailApp: App {
             )
         }
 
-        // 6. Ready to show main UI
+        // 4. Ready to show main UI
         isInitialized = true
         await dependencies.telemetryClient.record(
             TelemetryEvent(
@@ -160,7 +158,7 @@ struct esc_chatmailApp: App {
         )
         logStartupTiming("initializeApp() complete")
 
-        // 7. Prewarm WebKit after UI becomes available to avoid launch-path contention.
+        // 5. Prewarm WebKit after UI becomes available to avoid launch-path contention.
         if !isRunningUITests {
             Task { @MainActor in
                 guard await Task.sleepUnlessCancelled(nanoseconds: 2_000_000_000) else { return }
@@ -170,16 +168,6 @@ struct esc_chatmailApp: App {
         }
     }
 
-    private func waitForCoreData() async -> Bool {
-        do {
-            try await CoreDataStack.shared.waitForStoreToLoad(timeout: .infinity)
-            return true
-        } catch {
-            Log.error("Core Data store failed to load", category: .coreData, error: error)
-            return false
-        }
-    }
-    
     private func configureGoogleSignIn() {
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(
             clientID: GoogleConfig.clientId

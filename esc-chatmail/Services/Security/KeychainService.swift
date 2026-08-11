@@ -79,6 +79,8 @@ final class KeychainService: KeychainServiceProtocol {
         case googleUserId = "com.esc.inboxchat.google.userId"
 
         // App State
+        case localStoreResetRequired = "com.esc.inboxchat.localStoreResetRequired.v1"
+        case credentialCleanupRequired = "com.esc.inboxchat.credentialCleanupRequired.v1"
         case installationId = "com.esc.inboxchat.installationId"
         case installationTimestamp = "com.esc.inboxchat.installationTimestamp"
         case lastSyncToken = "com.esc.inboxchat.lastSyncToken"

@@ -18,6 +18,7 @@ actor ContactsResolver: ContactsResolving {
 
     let contactStore: CNContactStore
     let coreDataStack: CoreDataStack
+    let saveAvatar: @Sendable (String, Data) async -> String?
 
     // MARK: - State
 
@@ -25,10 +26,16 @@ actor ContactsResolver: ContactsResolving {
     private var authorizationStatus: CNAuthorizationStatus
     private let authorizationStatusProvider: () -> CNAuthorizationStatus
     private let accessRequester: () async throws -> Bool
+    private let contactLookup: ((String) -> ContactMatch?)?
     /// Deduplicates concurrent permission requests: CNContactStore misbehaves
     /// when requestAccess is invoked multiple times in flight (the CI/on-device
     /// hang class), so every caller awaits the one stored request.
     private var accessRequestTask: Task<CNAuthorizationStatus, Never>?
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
+    private var accountGenerationToken = ParticipantCacheAccountGenerationToken(value: 0)
+    private var activeOperationCounts: [UInt64: Int] = [:]
+    private var drainWaiters: [UInt64: [CheckedContinuation<Void, Never>]] = [:]
 
     // MARK: - Initialization
 
@@ -38,11 +45,18 @@ actor ContactsResolver: ContactsResolving {
         authorizationStatusProvider: @escaping () -> CNAuthorizationStatus = {
             CNContactStore.authorizationStatus(for: .contacts)
         },
-        accessRequester: (() async throws -> Bool)? = nil
+        accessRequester: (() async throws -> Bool)? = nil,
+        coreDataStack: CoreDataStack = .shared,
+        contactLookup: ((String) -> ContactMatch?)? = nil,
+        saveAvatar: @escaping @Sendable (String, Data) async -> String? = { email, data in
+            AvatarStorage.shared.saveAvatar(for: email, imageData: data)
+        }
     ) {
         let store = CNContactStore()
         self.contactStore = store
-        self.coreDataStack = CoreDataStack.shared
+        self.coreDataStack = coreDataStack
+        self.contactLookup = contactLookup
+        self.saveAvatar = saveAvatar
         self.cache.countLimit = 500
         self.authorizationStatusProvider = authorizationStatusProvider
         self.accessRequester = accessRequester ?? { try await store.requestAccess(for: .contacts) }
@@ -127,6 +141,9 @@ actor ContactsResolver: ContactsResolving {
     }
 
     public func lookup(email: String) async -> ContactMatch? {
+        guard let generation = beginAccountOperation() else { return nil }
+        defer { finishAccountOperation(generation) }
+
         let normalizedEmail = EmailNormalizer.normalize(email)
 
         // Check cache first
@@ -141,22 +158,35 @@ actor ContactsResolver: ContactsResolving {
             logAuthorizationFailure(error, operation: "lookup")
             return nil
         }
+        guard isCurrentAccountGeneration(generation) else { return nil }
 
         // Search contacts (uses extension method)
-        let match = searchContact(for: normalizedEmail)
+        let match: ContactMatch?
+        if let contactLookup {
+            match = contactLookup(normalizedEmail)
+        } else {
+            match = searchContact(for: normalizedEmail)
+        }
 
         // Cache the result
         if let match = match {
             cache.setObject(match, forKey: normalizedEmail as NSString)
 
             // Update Person in Core Data (uses extension method)
-            await updatePerson(email: normalizedEmail, match: match)
+            await updatePerson(
+                email: normalizedEmail,
+                match: match,
+                accountGeneration: generation
+            )
         }
 
-        return match
+        return isCurrentAccountGeneration(generation) ? match : nil
     }
 
     public func prewarm(emails: [String]) async {
+        guard let generation = beginAccountOperation() else { return }
+        defer { finishAccountOperation(generation) }
+
         // Ensure authorization once before batch lookups
         do {
             try await ensureAuthorization()
@@ -164,6 +194,7 @@ actor ContactsResolver: ContactsResolving {
             logAuthorizationFailure(error, operation: "prewarm")
             return
         }
+        guard isCurrentAccountGeneration(generation) else { return }
 
         // Dedupe and normalize emails
         let uniqueEmails = Set(emails.map { EmailNormalizer.normalize($0) })
@@ -196,6 +227,68 @@ actor ContactsResolver: ContactsResolving {
     public func invalidateAllCache() {
         cache.removeAllObjects()
         ParticipantRollupDependencyTracker.shared.invalidateAll()
+    }
+
+    // MARK: - Account Lifecycle
+
+    /// Drains direct lookup writers as well as clearing contact memory. A
+    /// `lookup` can await avatar storage and then save a Person independently
+    /// of PersonCache/ProfilePhotoResolver, so AuthSession must include this
+    /// actor in the participant boundary before resetting the store.
+    func closeAccountWorkAndClear() async {
+        let closingGeneration = accountGeneration
+        if acceptsAccountWork {
+            acceptsAccountWork = false
+            accountGenerationToken.invalidate()
+        }
+        invalidateAllCache()
+        await waitForAccountOperationsToDrain(generation: closingGeneration)
+    }
+
+    func reopenAccountWork() {
+        guard !acceptsAccountWork else { return }
+        accountGeneration &+= 1
+        accountGenerationToken = ParticipantCacheAccountGenerationToken(value: accountGeneration)
+        acceptsAccountWork = true
+    }
+
+    func captureAccountGeneration() -> ParticipantCacheAccountGenerationToken? {
+        guard acceptsAccountWork else { return nil }
+        return accountGenerationToken
+    }
+
+    private func beginAccountOperation() -> ParticipantCacheAccountGenerationToken? {
+        guard acceptsAccountWork, accountGenerationToken.isActive else { return nil }
+        let generation = accountGenerationToken
+        activeOperationCounts[generation.value, default: 0] += 1
+        return generation
+    }
+
+    private func finishAccountOperation(_ generation: ParticipantCacheAccountGenerationToken) {
+        let remaining = max((activeOperationCounts[generation.value] ?? 1) - 1, 0)
+        if remaining == 0 {
+            activeOperationCounts[generation.value] = nil
+            let waiters = drainWaiters.removeValue(forKey: generation.value) ?? []
+            waiters.forEach { $0.resume() }
+        } else {
+            activeOperationCounts[generation.value] = remaining
+        }
+    }
+
+    private func waitForAccountOperationsToDrain(generation: UInt64) async {
+        guard (activeOperationCounts[generation] ?? 0) > 0 else { return }
+        await withCheckedContinuation { continuation in
+            drainWaiters[generation, default: []].append(continuation)
+        }
+    }
+
+    func isCurrentAccountGeneration(
+        _ generation: ParticipantCacheAccountGenerationToken
+    ) -> Bool {
+        acceptsAccountWork
+            && generation.value == accountGeneration
+            && generation === accountGenerationToken
+            && generation.isActive
     }
 
     private func logAuthorizationFailure(_ error: Error, operation: String) {
@@ -233,6 +326,8 @@ extension ContactsResolver {
     /// Much more efficient than individual lookups when prefetching.
     public func resolveAvatarDataBatch(for emails: [String]) async -> [String: Data] {
         guard !emails.isEmpty else { return [:] }
+        guard let generation = beginAccountOperation() else { return [:] }
+        defer { finishAccountOperation(generation) }
 
         // Ensure we have authorization
         do {
@@ -241,10 +336,12 @@ extension ContactsResolver {
             logAuthorizationFailure(error, operation: "batch lookup")
             return [:]
         }
+        guard isCurrentAccountGeneration(generation) else { return [:] }
 
         let normalizedEmails = Set(emails.map { EmailNormalizer.normalize($0) })
 
         // Uses extension method
-        return performBatchLookup(for: normalizedEmails)
+        let results = performBatchLookup(for: normalizedEmails)
+        return isCurrentAccountGeneration(generation) ? results : [:]
     }
 }

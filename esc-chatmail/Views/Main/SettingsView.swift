@@ -78,8 +78,13 @@ struct SettingsView: View {
     private func signOut() {
         isSigningOut = true
         Task {
-            await authSession.signOut()
-            // isSigningOut will reset when view is replaced by SignInView
+            let didSignOut = await authSession.signOut()
+            if !didSignOut {
+                // Cleanup never began, so the authenticated settings view stays
+                // visible and must become interactive again.
+                isSigningOut = false
+            }
+            // On success, isSigningOut resets when SignInView replaces this view.
         }
     }
 }

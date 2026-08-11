@@ -16,6 +16,7 @@ final class MockKeychainService: KeychainServiceProtocol {
 
     /// Optional error to throw on next operation (resets after throwing)
     var errorToThrow: Error?
+    private var saveErrorsByKey: [String: Error] = [:]
 
     /// Interleave hook: runs after `load(for:)` has read the stored value but
     /// before it returns, letting tests deterministically emulate mutations
@@ -30,6 +31,7 @@ final class MockKeychainService: KeychainServiceProtocol {
         loadCallCount = 0
         deleteCallCount = 0
         errorToThrow = nil
+        saveErrorsByKey.removeAll()
         onLoad = nil
     }
 
@@ -37,6 +39,9 @@ final class MockKeychainService: KeychainServiceProtocol {
 
     func save(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel) throws {
         saveCallCount += 1
+        if let error = saveErrorsByKey.removeValue(forKey: key) {
+            throw error
+        }
         if let error = errorToThrow {
             errorToThrow = nil
             throw error
@@ -126,6 +131,10 @@ final class MockKeychainService: KeychainServiceProtocol {
 // MARK: - Test Helpers
 
 extension MockKeychainService {
+    func failNextSave(for key: String, with error: Error) {
+        saveErrorsByKey[key] = error
+    }
+
     /// Pre-populates storage with test data
     func preload(_ data: [String: Data]) {
         for (key, value) in data {
