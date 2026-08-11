@@ -8,13 +8,6 @@ struct ImageAttachmentBubble: View {
 
     private let maxWidth = UIScreen.main.bounds.width * 0.65
 
-    var isDownloading: Bool {
-        if let attachmentId = attachment.id {
-            return downloader.activeDownloads.contains(attachmentId)
-        }
-        return false
-    }
-
     var body: some View {
         Button(action: onTap) {
             ZStack {
@@ -63,7 +56,11 @@ struct ImageAttachmentBubble: View {
         .opacity([.downloaded, .uploaded, .failed].contains(attachment.state) ? 1.0 : 0.7)
         .disabled(!attachment.isReady)
         .onAppear {
-            thumbnailLoader.load(attachmentId: attachment.id, previewPath: attachment.previewURL)
+            thumbnailLoader.load(
+                attachmentId: attachment.id,
+                messageId: attachment.message?.id,
+                previewPath: attachment.previewURL
+            )
             // Download if queued, failed, or file is missing from disk
             if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
                 Task {
@@ -71,12 +68,14 @@ struct ImageAttachmentBubble: View {
                 }
             }
         }
-        .onChange(of: attachment.previewURL) { oldValue, newValue in
-            // Reload thumbnail when previewURL becomes available after download
-            if newValue != nil && thumbnailLoader.image == nil {
-                thumbnailLoader.reset()
-                thumbnailLoader.load(attachmentId: attachment.id, previewPath: newValue)
-            }
+        .onChange(of: attachment.previewURL) { _, newValue in
+            // Path identity participates in the loader request, so migration
+            // must replace any image decoded from the previous path.
+            thumbnailLoader.load(
+                attachmentId: attachment.id,
+                messageId: attachment.message?.id,
+                previewPath: newValue
+            )
         }
         .onDisappear {
             thumbnailLoader.cancel()

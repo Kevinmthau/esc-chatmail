@@ -2,27 +2,51 @@ import SwiftUI
 import QuickLook
 import CoreData
 
+struct QuickLookPresentation: Identifiable {
+    let id = UUID()
+    let previewItems: [AttachmentPreviewItem]
+    let selectedIndex: Int
+
+    init?(attachments: [Attachment], selectedAttachment: Attachment) {
+        let previewItems = attachments.compactMap { attachment in
+            AttachmentPreviewItem(attachment: attachment)
+        }
+        guard let selectedIndex = previewItems.firstIndex(where: {
+            $0.attachment == selectedAttachment
+        }) else {
+            return nil
+        }
+
+        self.previewItems = previewItems
+        self.selectedIndex = selectedIndex
+    }
+}
+
 struct QuickLookView: UIViewControllerRepresentable {
-    let attachments: [Attachment]
-    @Binding var currentIndex: Int
+    let presentation: QuickLookPresentation
     @Environment(\.dismiss) private var dismiss
+
+    static func clampedPreviewIndex(_ index: Int, itemCount: Int) -> Int {
+        guard itemCount > 0 else { return 0 }
+        return min(max(index, 0), itemCount - 1)
+    }
     
     func makeUIViewController(context: Context) -> UINavigationController {
         let controller = QLPreviewController()
         controller.dataSource = context.coordinator
         controller.delegate = context.coordinator
-        controller.currentPreviewItemIndex = currentIndex
+        controller.currentPreviewItemIndex = Self.clampedPreviewIndex(
+            presentation.selectedIndex,
+            itemCount: context.coordinator.previewItems.count
+        )
         
         let navController = UINavigationController(rootViewController: controller)
         return navController
     }
     
     func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {
-        if let qlController = uiViewController.viewControllers.first as? QLPreviewController {
-            if qlController.currentPreviewItemIndex != currentIndex {
-                qlController.currentPreviewItemIndex = currentIndex
-            }
-        }
+        // The presentation and its data source are an immutable snapshot.
+        // QLPreviewController owns subsequent paging without SwiftUI resetting it.
     }
     
     func makeCoordinator() -> Coordinator {
@@ -31,14 +55,12 @@ struct QuickLookView: UIViewControllerRepresentable {
     
     class Coordinator: NSObject, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
         let parent: QuickLookView
-        var previewItems: [QLPreviewItem] = []
+        let previewItems: [AttachmentPreviewItem]
         
         init(_ parent: QuickLookView) {
             self.parent = parent
+            self.previewItems = parent.presentation.previewItems
             super.init()
-            self.previewItems = parent.attachments.compactMap { attachment in
-                AttachmentPreviewItem(attachment: attachment)
-            }
         }
         
         // MARK: - QLPreviewControllerDataSource
@@ -70,26 +92,23 @@ class AttachmentPreviewItem: NSObject, QLPreviewItem {
     init?(attachment: Attachment) {
         self.attachment = attachment
         super.init()
-        
-        // Get the file URL from the attachment's local storage
-        if let localURL = attachment.localURL,
-           let url = AttachmentPaths.fullURL(for: localURL) {
-            // Ensure the file exists
-            if FileManager.default.fileExists(atPath: url.path) {
-                self._fileURL = url
-            } else {
-                // Try to load from preview if original doesn't exist
-                if let previewURL = attachment.previewURL,
-                   let url = AttachmentPaths.fullURL(for: previewURL),
-                   FileManager.default.fileExists(atPath: url.path) {
-                    self._fileURL = url
-                } else {
-                    return nil
-                }
-            }
-        } else {
+
+        guard let url = Self.fileURL(for: attachment) else {
             return nil
         }
+        self._fileURL = url
+    }
+
+    static func fileURL(for attachment: Attachment) -> URL? {
+        // Remote paths must prove the composite message/attachment identity;
+        // an ID-only legacy path may point at a sibling message's bytes.
+        let readablePaths = [
+            attachment.readableLocalURLValue,
+            attachment.readablePreviewURLValue
+        ].compactMap { $0 }
+        return readablePaths.lazy
+            .compactMap({ AttachmentPaths.fullURL(for: $0) })
+            .first(where: { FileManager.default.fileExists(atPath: $0.path) })
     }
     
     var previewItemURL: URL? {

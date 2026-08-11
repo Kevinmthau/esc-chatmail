@@ -32,13 +32,25 @@ struct ComposeAttachmentThumbnail: View {
             .offset(x: 4, y: -4)
         }
         .onAppear {
-            thumbnailLoader.load(attachmentId: attachment.attachmentId, previewPath: attachment.previewURLValue)
+            thumbnailLoader.load(
+                attachmentId: attachment.attachmentId,
+                messageId: attachment.message?.id,
+                previewPath: attachment.previewURLValue
+            )
         }
         .onChange(of: attachment.previewURLValue) { _, newValue in
-            thumbnailLoader.load(attachmentId: attachment.attachmentId, previewPath: newValue)
+            thumbnailLoader.load(
+                attachmentId: attachment.attachmentId,
+                messageId: attachment.message?.id,
+                previewPath: newValue
+            )
         }
         .onChange(of: attachment.attachmentId) { _, newValue in
-            thumbnailLoader.load(attachmentId: newValue, previewPath: attachment.previewURLValue)
+            thumbnailLoader.load(
+                attachmentId: newValue,
+                messageId: attachment.message?.id,
+                previewPath: attachment.previewURLValue
+            )
         }
         .onDisappear {
             thumbnailLoader.cancel()

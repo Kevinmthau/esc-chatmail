@@ -8,6 +8,7 @@ struct VideoAttachmentCard: View {
 
     @State private var thumbnailImage: UIImage?
     @State private var isLoadingThumbnail = false
+    @State private var thumbnailTask: Task<Void, Never>?
 
     private let thumbnailSize = CGSize(width: 100, height: 60)
 
@@ -56,10 +57,12 @@ struct VideoAttachmentCard: View {
             loadThumbnailIfNeeded()
             triggerDownloadIfNeeded()
         }
-        .onChange(of: attachment.localURL) { _, newValue in
-            if newValue != nil {
-                loadThumbnailIfNeeded()
-            }
+        .onChange(of: attachment.localURL) { _, _ in
+            resetThumbnail()
+            loadThumbnailIfNeeded()
+        }
+        .onDisappear {
+            resetThumbnail()
         }
     }
 
@@ -103,8 +106,6 @@ struct VideoAttachmentCard: View {
 
     @ViewBuilder
     private var downloadIndicator: some View {
-        let attachmentId = attachment.id ?? ""
-
         if attachment.state == .uploading || (attachment.state == .queued && isLocalAttachment) {
             ProgressView()
                 .progressViewStyle(CircularProgressViewStyle())
@@ -126,7 +127,10 @@ struct VideoAttachmentCard: View {
                         .foregroundColor(.red)
                 }
             }
-        } else if downloader.activeDownloads.contains(attachmentId) {
+        } else if downloader.isDownloading(
+            messageId: attachment.message?.id,
+            attachmentId: attachment.id
+        ) {
             ProgressView()
                 .progressViewStyle(CircularProgressViewStyle())
                 .scaleEffect(0.8)
@@ -153,7 +157,7 @@ struct VideoAttachmentCard: View {
 
     private func loadThumbnailIfNeeded() {
         guard thumbnailImage == nil, !isLoadingThumbnail else { return }
-        guard let localPath = attachment.localURL,
+        guard let localPath = attachment.readableLocalURLValue,
               let fileURL = AttachmentPaths.fullURL(for: localPath),
               FileManager.default.fileExists(atPath: fileURL.path) else {
             return
@@ -161,7 +165,7 @@ struct VideoAttachmentCard: View {
 
         isLoadingThumbnail = true
 
-        Task.detached(priority: .userInitiated) {
+        thumbnailTask = Task.detached(priority: .userInitiated) {
             let asset = AVAsset(url: fileURL)
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
@@ -171,11 +175,21 @@ struct VideoAttachmentCard: View {
             let cgImage = try? generator.copyCGImage(at: time, actualTime: nil)
 
             await MainActor.run {
+                guard !Task.isCancelled else { return }
+                guard attachment.readableLocalURLValue == localPath else { return }
+                thumbnailTask = nil
                 isLoadingThumbnail = false
                 if let cgImage = cgImage {
                     thumbnailImage = UIImage(cgImage: cgImage)
                 }
             }
         }
+    }
+
+    private func resetThumbnail() {
+        thumbnailTask?.cancel()
+        thumbnailTask = nil
+        thumbnailImage = nil
+        isLoadingThumbnail = false
     }
 }

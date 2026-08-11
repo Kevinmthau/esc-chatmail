@@ -61,13 +61,7 @@ struct AttachmentGridItem: View {
         }
         .buttonStyle(PlainButtonStyle())
         .onAppear {
-            thumbnailLoader.loadDownsampled(
-                attachmentId: attachment.id,
-                localPath: attachment.localURL,
-                previewPath: attachment.previewURL,
-                targetSize: CGSize(width: 200, height: 200),
-                isImage: attachment.isImage
-            )
+            loadThumbnail()
             // Download if queued, failed, or file is missing from disk
             if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
                 Task {
@@ -75,18 +69,11 @@ struct AttachmentGridItem: View {
                 }
             }
         }
-        .onChange(of: attachment.localURL) { oldValue, newValue in
-            // Reload when localURL becomes available after download (preferred over previewURL)
-            if newValue != nil && thumbnailLoader.image == nil {
-                thumbnailLoader.reset()
-                thumbnailLoader.loadDownsampled(
-                    attachmentId: attachment.id,
-                    localPath: newValue,
-                    previewPath: attachment.previewURL,
-                    targetSize: CGSize(width: 200, height: 200),
-                    isImage: attachment.isImage
-                )
-            }
+        .onChange(of: attachment.localURL) { _, _ in
+            loadThumbnail()
+        }
+        .onChange(of: attachment.previewURL) { _, _ in
+            loadThumbnail()
         }
         .onDisappear {
             thumbnailLoader.cancel()
@@ -101,5 +88,16 @@ struct AttachmentGridItem: View {
             return "video.fill"
         }
         return "doc.fill"
+    }
+
+    private func loadThumbnail() {
+        thumbnailLoader.loadDownsampled(
+            attachmentId: attachment.id,
+            messageId: attachment.message?.id,
+            localPath: attachment.localURL,
+            previewPath: attachment.previewURL,
+            targetSize: CGSize(width: 200, height: 200),
+            isImage: attachment.isImage
+        )
     }
 }

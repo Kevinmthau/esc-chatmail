@@ -8,6 +8,7 @@ struct DocumentAttachmentCard: View {
 
     @State private var thumbnailImage: UIImage?
     @State private var isLoadingThumbnail = false
+    @State private var thumbnailRequest: QLThumbnailGenerator.Request?
 
     private var isLocalAttachment: Bool {
         (attachment.id)?.starts(with: "local_") == true
@@ -49,10 +50,12 @@ struct DocumentAttachmentCard: View {
             loadThumbnail()
             triggerDownloadIfNeeded()
         }
-        .onChange(of: attachment.localURL) { _, newValue in
-            if newValue != nil {
-                loadThumbnail()
-            }
+        .onChange(of: attachment.localURL) { _, _ in
+            resetThumbnail()
+            loadThumbnail()
+        }
+        .onDisappear {
+            cancelThumbnailLoad()
         }
     }
 
@@ -83,8 +86,6 @@ struct DocumentAttachmentCard: View {
 
     @ViewBuilder
     private var downloadIndicator: some View {
-        let attachmentId = attachment.id ?? ""
-
         if attachment.state == .uploading || (attachment.state == .queued && isLocalAttachment) {
             // Uploading
             ProgressView()
@@ -109,7 +110,10 @@ struct DocumentAttachmentCard: View {
                         .foregroundColor(.red)
                 }
             }
-        } else if downloader.activeDownloads.contains(attachmentId) {
+        } else if downloader.isDownloading(
+            messageId: attachment.message?.id,
+            attachmentId: attachment.id
+        ) {
             // Actively downloading - show spinner
             ProgressView()
                 .progressViewStyle(CircularProgressViewStyle())
@@ -125,7 +129,7 @@ struct DocumentAttachmentCard: View {
     }
 
     private func loadThumbnail() {
-        guard let localPath = attachment.localURL,
+        guard let localPath = attachment.readableLocalURLValue,
               let fileURL = AttachmentPaths.fullURL(for: localPath),
               FileManager.default.fileExists(atPath: fileURL.path) else {
             return
@@ -139,15 +143,31 @@ struct DocumentAttachmentCard: View {
             scale: UIScreen.main.scale,
             representationTypes: .icon
         )
+        thumbnailRequest = request
 
         QLThumbnailGenerator.shared.generateRepresentations(for: request) { thumbnail, _, _ in
             DispatchQueue.main.async {
+                guard attachment.readableLocalURLValue == localPath else { return }
+                thumbnailRequest = nil
                 isLoadingThumbnail = false
                 if let thumbnail = thumbnail {
                     thumbnailImage = thumbnail.uiImage
                 }
             }
         }
+    }
+
+    private func resetThumbnail() {
+        cancelThumbnailLoad()
+        thumbnailImage = nil
+    }
+
+    private func cancelThumbnailLoad() {
+        if let thumbnailRequest {
+            QLThumbnailGenerator.shared.cancel(thumbnailRequest)
+        }
+        thumbnailRequest = nil
+        isLoadingThumbnail = false
     }
 
     private func triggerDownloadIfNeeded() {

@@ -81,7 +81,11 @@ struct PDFAttachmentCard: View {
         }
         .buttonStyle(PlainButtonStyle())
         .onAppear {
-            thumbnailLoader.load(attachmentId: attachment.id, previewPath: attachment.previewURL)
+            thumbnailLoader.load(
+                attachmentId: attachment.id,
+                messageId: attachment.message?.id,
+                previewPath: attachment.previewURL
+            )
             // Download if queued, failed, or file is missing from disk
             if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
                 Task {
@@ -92,12 +96,14 @@ struct PDFAttachmentCard: View {
         .onDisappear {
             thumbnailLoader.cancel()
         }
-        .onChange(of: attachment.previewURL) { oldValue, newValue in
-            // Reload when preview becomes available after download
-            if newValue != nil && thumbnailLoader.image == nil {
-                thumbnailLoader.reset()
-                thumbnailLoader.load(attachmentId: attachment.id, previewPath: newValue)
-            }
+        .onChange(of: attachment.previewURL) { _, newValue in
+            // Reload when the persisted preview identity changes, including
+            // migration away from a legacy path or clearing a stale preview.
+            thumbnailLoader.load(
+                attachmentId: attachment.id,
+                messageId: attachment.message?.id,
+                previewPath: newValue
+            )
         }
     }
 }

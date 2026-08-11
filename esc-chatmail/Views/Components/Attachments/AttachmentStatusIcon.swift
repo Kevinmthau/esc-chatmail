@@ -34,8 +34,10 @@ struct AttachmentStatusIcon: View {
                             .font(.system(size: 20))
                     }
                 }
-            } else if let attachmentId = attachment.id,
-                      downloader.activeDownloads.contains(attachmentId) {
+            } else if downloader.isDownloading(
+                messageId: attachment.message?.id,
+                attachmentId: attachment.id
+            ) {
                 ProgressView()
                     .progressViewStyle(CircularProgressViewStyle())
                     .scaleEffect(0.8)

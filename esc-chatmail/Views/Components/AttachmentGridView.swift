@@ -6,9 +6,7 @@ struct AttachmentGridView: View {
     let attachments: [ChatMessageAttachmentModel]
     @EnvironmentObject private var deps: Dependencies
     @Environment(\.managedObjectContext) private var viewContext
-    @State private var selectedAttachment: Attachment?
-    @State private var showFullScreen = false
-    @State private var currentIndex = 0
+    @State private var quickLookPresentation: QuickLookPresentation?
 
     private var resolvedAttachments: [Attachment] {
         attachments.compactMap { attachment in
@@ -33,9 +31,7 @@ struct AttachmentGridView: View {
                     attachment: attachment,
                     downloader: deps.attachmentDownloader,
                     onTap: {
-                        selectedAttachment = attachment
-                        currentIndex = 0
-                        showFullScreen = true
+                        presentQuickLook(for: attachment)
                     }
                 )
             } else if resolvedAttachments.count > 1 {
@@ -43,22 +39,22 @@ struct AttachmentGridView: View {
                     attachments: resolvedAttachments,
                     downloader: deps.attachmentDownloader,
                     onTap: { attachment in
-                        if let index = resolvedAttachments.firstIndex(of: attachment) {
-                            currentIndex = index
-                        }
-                        selectedAttachment = attachment
-                        showFullScreen = true
+                        presentQuickLook(for: attachment)
                     }
                 )
             } else if !attachments.isEmpty {
                 AttachmentIndicator(count: attachments.count)
             }
         }
-        .sheet(isPresented: $showFullScreen) {
-            QuickLookView(
-                attachments: resolvedAttachments,
-                currentIndex: $currentIndex
-            )
+        .sheet(item: $quickLookPresentation) { presentation in
+            QuickLookView(presentation: presentation)
         }
+    }
+
+    private func presentQuickLook(for attachment: Attachment) {
+        quickLookPresentation = QuickLookPresentation(
+            attachments: resolvedAttachments,
+            selectedAttachment: attachment
+        )
     }
 }
