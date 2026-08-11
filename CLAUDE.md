@@ -1,0 +1,131 @@
+# CLAUDE.md
+
+Native iOS SwiftUI Gmail client (chat-style mailbox) plus a separate `web/` PWA. `AGENTS.md` and `CONCURRENCY.md` are the pre-existing agent docs; this file does not replace them.
+
+## Build, test, lint
+
+Always use the wrappers: they pin `DESTINATION` to `iPhone 17 Pro`, export `DEVELOPER_DIR` to the Xcode app toolchain (plain `xcodebuild` otherwise resolves to Command Line Tools), and `cd` to the repo root. `Scripts/run-tests.sh` run bare works but auto-picks the first available iPhone simulator, sets no `DEVELOPER_DIR`, and passes no `-project`.
+
+```bash
+export "$(bash Scripts/prepare-simulator.sh)"       # boots a sim + pre-grants Contacts, pins DESTINATION to it
+./Scripts/codex-build.sh                            # xcodebuild build, Debug, iPhone 17 Pro sim
+./Scripts/codex-test.sh                             # full suite, default test plan (esc-chatmail.xctestplan)
+./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/SyncRunCoordinatorTests'
+./Scripts/codex-test.sh --performance               # Performance.xctestplan: PerformanceRegressionTests only
+./Scripts/codex-test.sh -parallel-testing-enabled NO # escape hatch for the Core Data parallel flake
+./Scripts/lint.sh                                   # SwiftLint, advisory; silently exits 0 if swiftlint isn't installed
+```
+
+All `web/` commands run from `web/` — there is no root `package.json`, and each shell starts at the repo root.
+
+```bash
+cd web && corepack pnpm install --frozen-lockfile
+cd web && corepack pnpm typecheck && corepack pnpm lint && corepack pnpm format:check && corepack pnpm test && corepack pnpm build
+cd web && corepack pnpm exec playwright install chromium   # one-time; browsers are not in the lockfile
+cd web && corepack pnpm test:e2e
+```
+
+- One scheme (`esc-chatmail`), project container `esc-chatmail.xcodeproj` — never a `.xcworkspace`.
+- Start with the narrowest suite; the full run is thousands of tests and slow.
+- `SWIFT_TREAT_WARNINGS_AS_ERRORS = YES` in Debug/Release xcconfigs: a new warning fails the build.
+- SwiftLint is advisory by design (`|| true`, no `severity: error`, size/complexity rules disabled, tests excluded). Do not reshape code to satisfy it, and do not make it blocking.
+- Skipping `prepare-simulator.sh` locally can hang the first Contacts-touching test forever (`CNContactStore.requestAccess` never returns on a headless runner). It honors `SIMULATOR_ID` and prints exactly one `DESTINATION=…` line on stdout.
+- Web CI is zero-tolerance: `eslint --max-warnings 0` and `format:check` must be clean.
+
+## Layout
+
+- `esc-chatmail/` is the app target; `Services/` holds nearly all logic, with Sync, Send, Caching, HTMLContent/HTMLSanitization, EmailDOM (SwiftSoup) and Chat the dense areas.
+- Entity classes: `Services/CoreData/ManagedObjects.swift` (`@objc` class decls) + `Services/Models/<Entity>+Extensions.swift` (`@NSManaged` props, helpers). Adding an attribute means editing the versioned `.xcdatamodel` **and** the `+Extensions` file.
+- `esc-chatmail/Models/` holds the versioned schema (`esc-chatmail/Models/CoreData/ESCChatmail.xcdatamodeld`, current version `ESCChatmail 3.xcdatamodel`) plus a legacy grab-bag of value types; entity *class* code is not there.
+- Test directories broadly track `Services/` subsystem names but are not a strict mirror; shared fakes live in `esc-chatmailTests/TestSupport/` (`Mocks/`, `Builders/`, `TestCoreDataStack.swift`, `FakeSyncClock.swift`).
+- App and unit-test targets use filesystem-synchronized groups: new `.swift` files are picked up automatically. Never hand-edit `project.pbxproj`.
+- `web/` is an independent React/Vite/Dexie PWA in no Xcode target. Its only contract with iOS is the golden corpus, imported live via the `@fixtures` alias — editing `esc-chatmailTests/TestSupport/Fixtures/**` triggers web CI.
+
+## Account-generation boundary (break this and data leaks across accounts)
+
+Every account-scoped subsystem is fenced by an admission flag plus a monotonic generation — roughly two dozen participants today; enumerate them with `grep -rn 'func reopenAccountWork\|func reopenAdmission' esc-chatmail/` rather than trusting a number here.
+
+- **All orchestration lives in `AuthSession`** (`Services/Security/AuthSession.swift`). Six transition paths (`restorePreviousSignIn`, `signIn`, `signOut`, `signOutAndDisconnect`, and the crash-resume pair `resumeInterruptedAccountRemovalIfNeeded` / `resumeInterruptedCredentialCleanupIfNeeded`) follow one fixed order: `outboundTaskRegistry.closeAdmission()` synchronously **before the first await** → `syncRunCoordinator.beginQuiescence()` → `cancelAndAwaitAll()` → `cleanupDownloads()` → destructive cleanup → reopen → `endQuiescence()` → only then publish authenticated UI.
+- A new participant must be wired into `AuthSession`'s four injectable closures (`cleanupHTMLContent` / `reopenHTMLContent` / `cleanupDownloads` / `reopenDownloads`), or into `HTMLContentLoader.closeAccountWorkAndClearCaches()`'s fan-out. Otherwise it never closes.
+- Participant contract (duck-typed; there is no shared protocol): `private var acceptsAccountWork`, `private var accountGeneration: UInt64`, `captureAccountGeneration() -> XAccountGeneration?` (nil while closed), `isAccountGenerationCurrent(_:)`, a close method, `reopenAccountWork()`. Define your own nominal token struct — never pass raw integers or another subsystem's token. `MessageBubbleHTMLAnalysisCache` is the smallest complete example.
+- Closing must **drain**, not just flip a flag: cancel and `await` every in-flight task before clearing storage. Producer closures retain old-account content even when their final write is generation-rejected. Naming encodes it (`...AndAwait`, `...AndClear`). Reopen guards refuse while work is outstanding, so a leaked task silently keeps the subsystem closed for the next account.
+- Caller contract: capture tokens once up front (bail if any capture returns nil), re-validate after **every** await before using or storing a result, and pass `expectedAccountGeneration:` down into async writes. Multi-participant callers build a composite context (`MessageBubbleLoader.captureAccountWorkContext()`).
+- Reopen is all-or-none: `AuthSession.reopenAccountWork(after:)` rolls back downloads and HTML if outbound reopen refuses. A `false` return means do not publish an authenticated session. Reopen must also recreate directories cleanup deleted (`AttachmentPaths.setupDirectories()`, Messages dir, preview cache dir).
+- Restore and sign-in additionally gate on `prepareLocalStoreForAuthenticatedAccount(_:)`, held under the account-transition lease: the app owns **one** account-wide store and conversations carry no account predicate, so a matching `Account` row is not sufficient (any other surviving row forces a reset) and an absent row is safe only when the mailbox store *and* the canonical HTML directory are genuinely empty. Never publish authenticated UI before it returns; failure maps to `AuthError.localAccountIsolationFailed`.
+- `TokenManager` runs its **own** sign-out generation, separate from these fences. `cacheLock` guards the cached token pair, the epoch, **and** both writers' keychain writes/deletes, so `saveTokens`/`clearTokens` can never interleave keychain operations; `clearTokens` bumps the epoch inside that section. Any new token-producing path must snapshot the epoch *before* its unserialized keychain read or network call, publish only via `setCachedToken(_:ifEpochMatches:)`, and re-check `cachedToken() != nil` after the MainActor hop before assigning `authSession.accessToken` — otherwise a clear that landed mid-flight gets its nil-publish overwritten with a retired token.
+- `CacheCoordinator` captures the generation on the **posting** context's queue inside the didSave publisher, before `.receive(on: .main)`. Any new notification-driven invalidation must capture at post time, not delivery time.
+- Interactive local mutations (mark read, pending actions) use the **non-exclusive** lease: `makeAccountWorkRequest()` → `acquireAccountWorkLease(kind:for:)` → work → `isActiveRun(_:)` re-check after each suspension → `endRun(_:)`. A lease holder must **never** wait on the exclusive boundary (`waitUntilIdle`/`beginRun`/`acquireRun`) before releasing — teardown drains leases, so that deadlocks. `acquireAccountWorkLease` deliberately ignores `Task.isCancelled`.
+- Add boundary regression tests next to `AuthSessionTests` / `HTMLContentAccountBoundaryTests`; the standard shape is "stale generation is rejected after reopen".
+
+## Sync cursor and staging invariants
+
+`SyncEngine` is a facade over `InitialSyncOrchestrator` / `IncrementalSyncOrchestrator`, gated by `SyncRunCoordinator` (single-flight).
+
+- **Nothing but the orchestrator's own save points may save the sync context.** `SyncFailureTracker`, both checkpoint stores, and `AccountPersister.setAccountHistoryId` stage into the caller's context so the failure ledger, the durable counter, the continuation token, and the Account cursor commit or die together.
+- Advance the Account `historyId` only when `planHistoryAdvance` returned `shouldAdvance` **and** the history slice is terminal (`nextPageToken == nil`). A truncated slice stages the continuation token and leaves the cursor frozen; a non-advancing slice moves neither.
+- Apply `SyncFailureTracker` success-side effects only via `commit(_:)` **after** the final save succeeded; discard the plan on save failure. Never call `recordSuccess()`/`reset()` inside a run.
+- Account-scoped aborts (`APIError.isAccountScopedSyncAbort`: auth, revoked credentials, quota) are run-level: put the IDs in **no** failure bucket, stop issuing requests, rethrow so nothing commits.
+- Every attempted ID lands in exactly one `MessagePersistDisposition` bucket (persisted / excluded / unprocessable / failed). Only `.failed` and fetch failures freeze the cursor; 404s and deliberate exclusions must not.
+- `MessageProcessor.processGmailMessage` encodes the body-materialization contract in *whether it throws*: a thrown error means content could not be fully materialized and the message **must not be persisted as-is** — callers map it to a blocking per-message failure (or a run abort for account-scoped errors) so the cursor cannot advance past a silently body-less row. Deterministic per-part failures (404, undecodable response) deliberately do **not** throw, because retrying cannot materialize the part; the best-effort embedded-HTML salvage probe never throws either (except account-scoped failures and cancellation). Classify any new body/attachment error into one of those three buckets explicitly.
+- Cancellation always propagates as a thrown error and is never recorded as a per-message verdict — a partial partition would look like a clean batch.
+- A failed Core Data read is never "absent"/"empty": `planHistoryAdvance` returns `.held` when the ledger is unreadable even on an otherwise clean run; lookup failures return `.lookupFailed`/`.failed` rather than creating duplicates or advancing.
+- `recordFailure` **replaces** the deferred set and must never truncate; a staging failure latches `deferredStagingFailed`, which blocks the escape hatch.
+- Ledger states have different retry owners: `deferred` rows are retried by the normal re-scan (excluded from the drain); `abandoned` rows only by the drain, which alone owns `retryCount`. Drain failures must never influence cursor advancement. The drain query's `state == nil` / `nextRetryAt == nil` disjuncts are load-bearing on SQLite.
+- Background (BGTask) partial sync shares all of the above and adds two rules: `try Task.checkCancellation()` immediately before `finalizeBackgroundSync` (an expired BGTask must not commit a terminal cursor or advance its checkpoint after the system asked it to stop), and any result with fetch failures or a page-limit stop keeps the stored `historyId` and schedules a retry instead of advancing. Cancellation keeps the in-progress checkpoint rather than discarding it.
+- Recompute and save conversation rollups inside one `ConversationRollupMutationSerializer.performThrowingSyncMutation` block keyed on the affected conversation IDs.
+- Every run opens a `ModificationTracker` transaction and must commit+consume on success or roll back on every error path.
+- `MessagePersister.saveMessages`: preparation is concurrent and writes nothing; persistence is strictly sequential in the caller's order, so callers pass chronologically sorted messages.
+- Suites that pin all of this: `IncrementalSyncCursorTests`, `SyncFailureTrackerEscapeHatchTests`, `ForegroundHistoryCheckpointStoreTests`, `SyncFailureCounterCheckpointStoreTests`, `SyncRunCoordinatorTests`, `MessagePersisterDispositionTests`, `AbandonedMessageRetryTests`. Extend them for any sync change.
+
+## Outbound send (non-idempotent; never resend)
+
+- Gmail `messages.send` has no idempotency key. `sendMessage` uses `allowsRetransmission: false`. Never route a send onto a retrying/idempotent path.
+- The transmission-admission barrier is `try Task.checkCancellation()` + `try await beforeTransmission()`, the last safe point before URLSession admits the request. New work goes **before** it, never between it and the request.
+- Outcome matrix keys off `TransmissionBarrierState.isPersisted`: pre-barrier failure → roll back the optimistic message + fail admission (composer keeps the content); post-barrier ambiguous/cancellation → `recordAmbiguousRemoteSend` + succeed (graph retained, no retry); post-barrier definite rejection → retain as definitely-unsent. Misclassifying a new error class is a duplicate-send hazard. Ambiguous = CancellationError, serverError, timeout, decodingError, non-pre-transmission networkError.
+- The deterministic RFC Message-ID (`MimeBuilder.messageId(forOptimisticMessageID:)`) is how sync matches the echo. Always pass `messageId:` on outbound calls; dropping it silently breaks convergence.
+- Optimistic conversation hashing must use `AliasManager.shared.getAliases(from: viewContext)` — the context-taking overload, never a cache-only read. It falls back to Core Data when the alias cache is cold (fresh launch, post-invalidate), which is exactly when a self-exclusion miss would hash the optimistic conversation differently from the synced-back echo and fork the chat.
+- Inserting an optimistic outgoing message bumps `lastMessageDate` and `snippet` only. Do **not** set `conversation.hasInbox = true` — an outgoing message is not inbox presence, and setting it resurrects archived chats on send.
+- On API success, do **not** rename or delete the optimistic row. Sync owns atomic replacement and record consumption (`remoteCommittedSendMutationResolutions` / `consumeRemoteCommittedSendMutation`), inside the same transaction that persists the echo.
+- Any conversation merge, dedup, or cleanup pass must exclude conversations named by an in-flight `OutboundSendMutationRecord` (`ConversationMerger` fetches those `conversationId`s and skips them). The optimistic message may still be unsaved on the view context and therefore invisible to a background fetch; deleting its conversation as a merge loser orphans it and dangles the reconciliation record. Same reason `GmailSendService` refuses to anchor an optimistic reply to a deleted or `isRetainedDrainedShell` conversation.
+- `missingRecordIsError` is true only for `recordRemoteSendAdmission`; other marker writes must tolerate a record an echo already consumed.
+- There is no user-facing resend affordance. Cold recovery (`reconcileAbandonedOptimisticSendMutations`) never retries — it only converts markers.
+- Sends flow `reserve()` → `ownPreparation` → `handOff` → `admitTransmission` (the linearization point; after it the send is drain-only). Re-check `isActive(reservation)` after suspensions.
+- Coverage: `GmailSendServiceOptimisticFailureTests`, `ComposeSendOrchestratorTests`, `OutboundMessageCoordinatorTests`.
+
+## Conventions
+
+- **Concurrency:** `actor` for stateful multi-task services, `@MainActor final class ... : ObservableObject` for view models. `SWIFT_STRICT_CONCURRENCY = minimal` is a ratchet floor; `targeted` does not compile today. `@unchecked Sendable` is a debt marker — carry a `///` comment naming the synchronization that justifies it. (CONCURRENCY.md's count of current holders is stale — grep, don't trust it.)
+- **Core Data:** merge policy `NSMergeByPropertyObjectTrumpMergePolicy` is set by the three `CoreDataStack` factories (viewContext, `newBackgroundContext()`, `performBackgroundTask`); a hand-built context must set it itself, as `GmailSendService+OptimisticUpdates.swift` and `ConversationCreationSerializer.swift` do. Save via `context.saveOrLog(operation:category:)` or `await context.performSaveIfNeeded(caller:)`, not `try? save()`. Use the `perform*` helpers in `NSManagedObjectContext+Perform.swift`, including their `nonisolated(unsafe) let` predicate copies. Never mutate the loaded `NSManagedObjectModel` at runtime — schema changes go in versioned `.xcdatamodel` files only. `Models/CoreDataIndexes.swift` is dead code; real indexing is the 39 `<fetchIndex>` declarations in the current model version.
+- **Managed objects never cross context or actor boundaries.** Pass `NSManagedObjectID`, re-resolve on the destination context, map to `Equatable` value snapshots (`ChatMessageRowModel`) for SwiftUI.
+- Message bodies and attachments live on disk, not in Core Data. Route body-file access through `HTMLContentHandler` (process-wide account boundary), never raw `FileManager`. Never read `Attachment.localURL` / `previewURL` directly for rendering or opening — use `readableLocalURLValue` / `readablePreviewURLValue`; legacy ID-only remote paths and `local_inline_*` files stay persisted only long enough to trigger migration and must never reach a reader, because an attachment-scoped path can be shared by sibling messages. Recovery paths recompute the deterministic ID from *this* message's MIME part (`AttachmentPaths.synthesizedInlinePayloads`) to prove the bytes belong to the row.
+- **Conversation keying** is `Conversation.participantHash` from `calculateParticipantHash` (`p|`) or `calculateListConversationHash` (`l|`). Both are marked CANONICAL — never duplicate the hashing. A list (`l|`) title must **never** be derived from a message's sender (senders vary post to post): use the List-Id display phrase, falling back to the normalized List-Id. Existing-message *repair* must not apply new-arrival epoch semantics — reuse a durable List-Id conversation whether active or archived and leave `archivedAt` untouched (`MessageConversationRouter.existingConversationObjectID`). `Message.strictParticipantSetIdentity(myAliases:)` returns nil when a message has no `MessageParticipant` rows, and nil means **do not re-home**: `senderEmail` alone cannot reconstruct To/Cc, and own-sent messages reconciled through the optimistic-send path never got participant rows, so treating nil as "just me" collapses them into the note-to-self chat.
+- **Untrusted URLs from email content:** any fetch of a URL that came out of message HTML (remote images, link previews, Drive metadata) goes through `SSRFGuardingURLSession.shared`, never `URLSession.shared`. That session blocks redirects to private/loopback/link-local/reserved addresses, but it only sees *redirect* targets, so the caller must also reject the initial URL with `PrivateNetworkAddressDetector.isPrivateOrReserved(_:)` (`HTMLRemoteImageAttachmentFallback.isEligibleCandidate` is the reference call site). Both halves are required: public-looking host → 302 → internal IP is the attack the pair exists to close.
+- **Logging:** only `Log.debug/info/warning/error(_:category:)` and `Log.diagnostic(_:level:_:category:)` (e.g. `Log.diagnostic(.startup, level: .info, "…", category: .general)`), always with an explicit `category:`. Redaction is a hard rule at the call site (OSLog cannot redact — the pipeline emits `%{public}@`): `Log.redact(email:/address:/url:/error:)`, `Log.hashIdentifier(_:)` for message/thread IDs. Pass errors to `error:`, not string interpolation. `Log.api`/`Log.sync`/`Log.performance`/`Log.measure` are dead (zero call sites) — do not use. `ScopedLogger` (via `LogCategory.sync.logger`) is live and is house style inside `Services/Sync`; prefer it there, `Log.*` elsewhere.
+- **DI:** default-valued initializer parameters — `.shared` defaults for services, `@escaping @Sendable` closures for behavior/time (`SyncClock`, `makeBackgroundContext`, `saveContext`). New code takes a narrowed feature bundle from `Dependencies` (`makeChatDependencies()` etc.) rather than reaching for `.shared`. Top-level views get `Dependencies` and `AuthSession` via `@EnvironmentObject` (see `Dependencies.swift`'s own usage doc); child views and services take constructor injection with a `Dependencies.shared` fallback.
+- Errors are domain `enum X: LocalizedError` with an `errorDescription` switch and doc comments distinguishing near-identical cases. No release-path `fatalError`.
+- Comments here are load-bearing "why" notes recording past bugs and deliberate non-obvious choices. Preserve them; an unexplained deviation reads as a defect. One type per file, large types split as `Type+Facet.swift` with the base file's header enumerating the split. `///` doc comments only.
+- View decisions live in pure `enum XPolicy` static-function namespaces so bodies stay declarative and testable.
+
+## Testing
+
+- 100% XCTest — `import Testing` appears nowhere. Names are `test<Subject>_<scenario>_<expectedOutcome>`.
+- Use `TestCoreDataStack`; never construct `NSPersistentContainer(name:)` in a test (a second live model breaks `+[NSManagedObject entity]` and crashes fixture builders under parallel testing). It intentionally uses one process-wide model, a lock around container creation, a private-queue "viewContext", and a never-deallocated graveyard. Save via `stack.saveViewContext()`, never a bare off-queue `context.save()`. `.sqlite` mode exists for persistent-history tests; automerge is opt-in because it races test bodies.
+- Bound waits by wall-clock deadline with a poll interval — copy the nearest per-suite private `waitUntil(timeout:pollIntervalNanoseconds:condition:)`; there is no shared version in `TestSupport/`. Never wait by a fixed number of `Task.yield()`. Use `FakeSyncClock` for backoff/pacing, not real sleeps.
+- Test retry/backoff semantics against the **real** `GmailAPIClient` through `StubURLProtocol` — mock-based retry tests are vacuous. `MockGmailAPIClient` is for everything else.
+- Avoid the real Contacts store in tests: inject `contactEmailLoader` / `accessRequester`.
+- Anti-masking is house style: tests guarding a fix carry a `Revert-check:` comment naming the production symbol whose removal makes them fail, and a `HONEST SCOPE` comment where a test cannot survive a revert. Revert-check every new regression test hunk-by-hunk.
+- Message cleaning / preview routing / newsletter scoring regressions go into `esc-chatmailTests/TestSupport/Fixtures/golden_message_corpus.json`, replayed by `GoldenCorpusReplayTests` in `esc-chatmailTests/Sync/MessageProcessorTests.swift`.
+- Isolate tests touching process-global singletons with UUID-suffixed identifiers plus explicit invalidation; there is no automatic global reset.
+- Unit tests run hosted in the app process, and `initializeApp()` deliberately no-ops under `RuntimeEnvironment.isRunningUnitTests`. Prefer `CoreDataStack(persistentContainerForTesting:)` over `.shared`.
+- `esc-chatmailUITests` is in neither test plan and never runs. `PerformanceRegressionTests` runs only under `--performance`.
+
+## Traps
+
+- The working tree is usually dirty with in-progress work; `git status` before assuming HEAD == working state.
+- The working tree routinely carries a large uncommitted change set. Never `git checkout --`, `git stash`, or `git restore` a tracked file to "undo" your own edit — that discards the user's in-progress work, not just yours. Undo your edits in place.
+- Cross-actor calls inside **default-argument closure literals** (e.g. `AuthSession.init`'s `cleanupDownloads` / `reopenHTMLContent`, which call `ProcessedTextCache.shared.reopenAccountWork()` and friends) compile *without* `await` and still get their executor hop — under `SWIFT_STRICT_CONCURRENCY = minimal` Swift skips isolation checking in that position, though the same call is a hard error in an ordinary function. Adding the "missing" `await` yields `no 'async' operations occur within 'await' expression`, which `SWIFT_TREAT_WARNINGS_AS_ERRORS` promotes to a build failure. Build before "fixing" one of these.
+- Web e2e builds its own demo-mode server (`build:e2e` + `preview --port 4173 --strictPort`) and never reuses an existing one. A stray process on 4173 therefore kills the run at webServer startup with a port-in-use error — kill it rather than debugging fixtures. Demo mode comes from `web/.env.e2e` blanking `VITE_GOOGLE_CLIENT_ID`; a non-demo build would fail every test on a missing fixture, which is why reuse is disabled.
+- `web/.env`, `web/.env.e2e`, and `esc-chatmail/Configuration/{Debug,Release}.xcconfig` are tracked on purpose — public client identifiers, not leaked secrets. Do not remove or relocate them. (`SECURITY_SETUP.md`'s "Configuration files are excluded from version control" bullet is stale; the rest of that file correctly describes the xcconfigs as tracked.)
+- Do not add a live `@FetchRequest`/FRC to `ConversationListView` — an always-on FRC re-diffed the whole result set on every merged sync save. The view model's `objectsDidChange` pipeline owns live updates.
+- `consolidation.md`, `decomposition.md`, `performance-reliability-plan.md`, and `PR-DESCRIPTION.md` are campaign closeouts, not roadmaps, and their file paths predate the ORG1 moves. `consolidation.md`'s "CI cannot go green / 90-minute timeout" claim is stale.
+- Deliberate asymmetries not to "fix": `AttachmentCacheActor` does not bump its generation on memory-pressure `clearCache(level:)`; `AuthSession.reopenHTMLContent` closes `CacheCoordinator` first even at cold launch.
