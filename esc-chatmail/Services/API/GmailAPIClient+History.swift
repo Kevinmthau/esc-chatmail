@@ -51,6 +51,12 @@ extension GmailAPIClient {
                 // Gmail returns 404 when historyId is expired or invalid - don't retry
                 if let errorResponse = try? JSONDecoder().decode(GmailErrorResponse.self, from: data) {
                     let errorMessage = errorResponse.error.message.lowercased()
+                    if self.isInvalidHistoryPageTokenResponse(
+                        request: request,
+                        errorResponse: errorResponse
+                    ) {
+                        throw APIError.invalidHistoryPageToken
+                    }
                     if errorMessage.contains("not found") ||
                        errorMessage.contains("invalid") ||
                        errorMessage.contains("too old") {
@@ -72,6 +78,9 @@ extension GmailAPIClient {
                 // Remaining client errors (400 bad request …) are
                 // non-retriable; mirrors the message path. The engine owns
                 // 429/401 before this mapping is consulted.
+                if self.isInvalidHistoryPageTokenResponse(request: request, data: data) {
+                    throw APIError.invalidHistoryPageToken
+                }
                 let errorMessage = self.gmailErrorMessage(from: data)
                     ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)
                 throw APIError.invalidData("Gmail API \(statusCode): \(errorMessage)")
@@ -79,6 +88,75 @@ extension GmailAPIClient {
             default:
                 throw APIError.serverError(statusCode)
             }
+        }
+    }
+
+    /// Gmail does not expose a dedicated status code for an invalid History
+    /// API page token: observed responses use a 4xx plus a message/reason that
+    /// names `pageToken`. Only classify that narrow shape, and only when the
+    /// request actually carried a token, so an expired startHistoryId or an
+    /// unrelated malformed request cannot trigger a checkpoint replay.
+    /// The match deliberately reads only the decoded `message`/`reason`
+    /// fields: folding in the raw body let an unrelated occurrence of
+    /// "pageToken" anywhere in the payload misclassify an expired-history 404.
+    nonisolated private func isInvalidHistoryPageTokenResponse(
+        request: URLRequest,
+        data: Data
+    ) -> Bool {
+        guard let errorResponse = try? JSONDecoder().decode(
+            GmailErrorResponse.self,
+            from: data
+        ) else {
+            return false
+        }
+        return isInvalidHistoryPageTokenResponse(
+            request: request,
+            errorResponse: errorResponse
+        )
+    }
+
+    nonisolated private func isInvalidHistoryPageTokenResponse(
+        request: URLRequest,
+        errorResponse: GmailErrorResponse
+    ) -> Bool {
+        guard requestContainsHistoryPageToken(request) else {
+            return false
+        }
+
+        let normalizedMessage = errorResponse.error.message
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        // A response that names the frozen cursor must take the history-expiry
+        // recovery path even if it also mentions the continuation token.
+        guard !normalizedMessage.contains("starthistoryid") else { return false }
+
+        let diagnostic = ([errorResponse.error.message] +
+            (errorResponse.error.errors?.compactMap(\.reason) ?? []))
+        .joined(separator: " ")
+        .lowercased()
+        .replacingOccurrences(of: "_", with: "")
+        .replacingOccurrences(of: "-", with: "")
+        .replacingOccurrences(of: " ", with: "")
+
+        return diagnostic.contains("pagetoken") && (
+            diagnostic.contains("invalid") ||
+            diagnostic.contains("expired") ||
+            diagnostic.contains("notfound")
+        )
+    }
+
+    nonisolated private func requestContainsHistoryPageToken(_ request: URLRequest) -> Bool {
+        guard let url = request.url,
+              let queryItems = URLComponents(
+                url: url,
+                resolvingAgainstBaseURL: false
+              )?.queryItems else {
+            return false
+        }
+        return queryItems.contains {
+            $0.name == "pageToken" && !($0.value ?? "").isEmpty
         }
     }
 }

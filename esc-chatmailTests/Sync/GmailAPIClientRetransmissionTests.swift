@@ -1,6 +1,14 @@
 import XCTest
 @testable import esc_chatmail
 
+private actor GmailSendAdmissionProbe {
+    private(set) var callCount = 0
+
+    func record() {
+        callCount += 1
+    }
+}
+
 /// Verifies that non-idempotent requests (messages.send) are never retransmitted
 /// after ambiguous failures, while idempotent requests keep full retry behavior.
 final class GmailAPIClientRetransmissionTests: XCTestCase {
@@ -31,16 +39,48 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
     private static let sendResponseBody = Data(#"{"id":"sent-1","threadId":"thread-1"}"#.utf8)
     private static let messageResponseBody = Data(#"{"id":"m1","threadId":"t1"}"#.utf8)
+    private static let userRateLimitBody = Data(
+        #"{"error":{"code":403,"message":"User rate limit exceeded","status":"PERMISSION_DENIED","errors":[{"message":"User rate limit exceeded","domain":"usageLimits","reason":"userRateLimitExceeded"}]}}"#.utf8
+    )
 
     // MARK: - Send is not retransmitted on ambiguous failures
+
+    func testSendMessage_authPreflightFailure_doesNotCrossAdmissionBarrier() async {
+        tokenManager.getTokenError = TokenManagerError.noValidToken
+        let admissionProbe = GmailSendAdmissionProbe()
+
+        do {
+            _ = try await client.sendMessage(
+                rawMessage: "raw",
+                beforeTransmission: {
+                    await admissionProbe.record()
+                }
+            )
+            XCTFail("Expected authentication preflight failure")
+        } catch GmailMessageSendError.transmissionNotStarted(let underlying) {
+            guard let tokenError = underlying as? TokenManagerError,
+                  case .noValidToken = tokenError else {
+                return XCTFail("Expected noValidToken, got \(underlying)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let admissionCallCount = await admissionProbe.callCount
+        XCTAssertEqual(admissionCallCount, 0)
+        XCTAssertEqual(StubURLProtocol.requestCount, 0)
+    }
 
     func testSendMessage_serverError_isNotRetransmitted() async {
         StubURLProtocol.script = [.status(500)]
 
         do {
             _ = try await client.sendMessage(rawMessage: "raw")
-            XCTFail("Expected serverError")
-        } catch let APIError.serverError(code) {
+            XCTFail("Expected ambiguous delivery")
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            guard case APIError.serverError(let code) = underlying else {
+                return XCTFail("Expected underlying serverError, got \(underlying)")
+            }
             XCTAssertEqual(code, 500)
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -54,9 +94,11 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
         do {
             _ = try await client.sendMessage(rawMessage: "raw")
-            XCTFail("Expected timeout error")
+            XCTFail("Expected ambiguous delivery")
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            XCTAssertEqual((underlying as? URLError)?.code, .timedOut)
         } catch {
-            // expected
+            XCTFail("Unexpected error: \(error)")
         }
 
         XCTAssertEqual(StubURLProtocol.requestCount, 1, "A timeout is ambiguous for send; it must not be retransmitted")
@@ -67,9 +109,11 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
         do {
             _ = try await client.sendMessage(rawMessage: "raw")
-            XCTFail("Expected connection error")
+            XCTFail("Expected ambiguous delivery")
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            XCTAssertEqual((underlying as? URLError)?.code, .networkConnectionLost)
         } catch {
-            // expected
+            XCTFail("Unexpected error: \(error)")
         }
 
         XCTAssertEqual(StubURLProtocol.requestCount, 1, "A dropped connection is ambiguous for send; it must not be retransmitted")
@@ -101,6 +145,21 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "A TLS handshake failure proves no application data was sent; retry is safe")
     }
 
+    func testSendMessage_definiteClientRejection_isNotAmbiguous() async {
+        StubURLProtocol.script = [.status(400)]
+
+        do {
+            _ = try await client.sendMessage(rawMessage: "raw")
+            XCTFail("Expected definite client rejection")
+        } catch is GmailMessageSendError {
+            XCTFail("A 400 response proves Gmail rejected the send")
+        } catch {
+            // Expected ordinary API error; optimistic failure cleanup remains enabled.
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
     func testSendMessage_rateLimited_isRetried() async throws {
         StubURLProtocol.script = [
             .status(429),
@@ -111,6 +170,22 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
         XCTAssertEqual(response.id, "sent-1")
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "A 429 proves the request was rejected; retry is safe")
+    }
+
+    func testSendMessage_userRateLimit403_isRetried() async throws {
+        StubURLProtocol.script = [
+            .data(403, Self.userRateLimitBody),
+            .data(200, Self.sendResponseBody)
+        ]
+
+        let response = try await client.sendMessage(rawMessage: "raw")
+
+        XCTAssertEqual(response.id, "sent-1")
+        XCTAssertEqual(
+            StubURLProtocol.requestCount,
+            2,
+            "A rate-limit 403 proves the send was rejected and is safe to retry"
+        )
     }
 
     func testSendMessage_unauthorized_refreshesTokenAndRetries() async throws {

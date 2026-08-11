@@ -58,17 +58,69 @@ extension GmailAPIClient {
     }
 
     /// Sends a MIME-encoded raw message.
-    nonisolated func sendMessage(rawMessage: String, threadId: String? = nil) async throws -> SendMessageResponse {
-        let url = try buildURL(endpoint: APIEndpoints.sendMessage())
-        var request = try await authenticatedRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = try JSONEncoder().encode(
-            SendMessageRequest(raw: rawMessage, threadId: threadId)
-        )
+    nonisolated func sendMessage(
+        rawMessage: String,
+        threadId: String? = nil,
+        beforeTransmission: @Sendable () async throws -> Void = {}
+    ) async throws -> SendMessageResponse {
+        let request: URLRequest
+        do {
+            let url = try buildURL(endpoint: APIEndpoints.sendMessage())
+            var preparedRequest = try await authenticatedRequest(url: url)
+            preparedRequest.httpMethod = "POST"
+            preparedRequest.httpBody = try JSONEncoder().encode(
+                SendMessageRequest(raw: rawMessage, threadId: threadId)
+            )
+
+            // This is the final safe boundary: authentication and request-body
+            // construction are complete, but URLSession has not admitted the
+            // first non-idempotent request yet.
+            try Task.checkCancellation()
+            try await beforeTransmission()
+            request = preparedRequest
+        } catch {
+            throw GmailMessageSendError.transmissionNotStarted(error)
+        }
 
         // Sending is not idempotent and Gmail has no idempotency key: resending after
-        // an ambiguous failure (timeout, 5xx) could deliver the email twice.
-        return try await performRequestWithRetry(request, allowsRetransmission: false)
+        // an ambiguous failure (timeout, 5xx) could deliver the email twice. Preserve
+        // that distinction for the optimistic-send recovery layer instead of reducing
+        // it to an ordinary API failure that would enable a duplicate retry.
+        do {
+            return try await performRequestWithRetry(
+                request,
+                allowsRetransmission: false
+            )
+        } catch {
+            if Self.isAmbiguousSendFailure(error) {
+                throw GmailMessageSendError.ambiguousDelivery(error)
+            }
+            throw error
+        }
+    }
+
+    private nonisolated static func isAmbiguousSendFailure(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .serverError, .timeout, .decodingError:
+                return true
+            case .networkError(let underlying):
+                return !ConnectionErrorDetector.isPreTransmissionError(underlying)
+            default:
+                // Authentication, rate/quota rejection, malformed requests,
+                // and other client responses prove Gmail did not commit send.
+                return false
+            }
+        }
+
+        // Connection-establishment failures prove no application bytes reached
+        // Gmail. Other transport failures (timeout, reset, malformed response)
+        // cannot establish whether Gmail committed the request.
+        return !ConnectionErrorDetector.isPreTransmissionError(error)
     }
 
     /// Archives messages by removing the INBOX label.

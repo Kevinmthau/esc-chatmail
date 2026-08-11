@@ -30,6 +30,7 @@ final class APIErrorClassificationTests: XCTestCase {
         XCTAssertFalse(shouldRetry(APIError.decodingError(URLError(.cannotParseResponse))))
         XCTAssertFalse(shouldRetry(APIError.invalidURL("bad url")))
         XCTAssertFalse(shouldRetry(APIError.invalidData("Gmail API 403: quota")))
+        XCTAssertFalse(shouldRetry(APIError.invalidHistoryPageToken))
         XCTAssertFalse(shouldRetry(APIError.historyIdExpired))
         XCTAssertFalse(shouldRetry(APIError.notFound("message")))
     }
@@ -80,6 +81,7 @@ final class APIErrorClassificationTests: XCTestCase {
         XCTAssertEqual(backgroundHandler.handleError(APIError.invalidURL("bad url")), .abort)
         XCTAssertEqual(backgroundHandler.handleError(APIError.decodingError(URLError(.cannotParseResponse))), .abort)
         XCTAssertEqual(backgroundHandler.handleError(APIError.notFound("message")), .abort)
+        XCTAssertEqual(backgroundHandler.handleError(APIError.invalidHistoryPageToken), .abort)
     }
 
     // MARK: - Canonical mapping matrix (APIError.recoveryAction)
@@ -97,6 +99,7 @@ final class APIErrorClassificationTests: XCTestCase {
         XCTAssertEqual(APIError.serverError(400).recoveryAction, .abort)
         XCTAssertEqual(APIError.invalidURL("bad url").recoveryAction, .abort)
         XCTAssertEqual(APIError.invalidData("Gmail API 403: quota").recoveryAction, .abort)
+        XCTAssertEqual(APIError.invalidHistoryPageToken.recoveryAction, .abort)
         XCTAssertEqual(APIError.decodingError(URLError(.cannotParseResponse)).recoveryAction, .abort)
         XCTAssertEqual(APIError.notFound("message").recoveryAction, .abort)
     }
@@ -112,6 +115,7 @@ final class APIErrorClassificationTests: XCTestCase {
         XCTAssertFalse(APIError.credentialsRevoked.isRetriableSameRequest)
         XCTAssertFalse(APIError.notFound("message").isRetriableSameRequest)
         XCTAssertFalse(APIError.invalidData("payload").isRetriableSameRequest)
+        XCTAssertFalse(APIError.invalidHistoryPageToken.isRetriableSameRequest)
     }
 
     func testRetryStrategy_agreesWithCanonicalMapping() {
@@ -120,6 +124,7 @@ final class APIErrorClassificationTests: XCTestCase {
             .networkError(URLError(.networkConnectionLost)),
             .decodingError(URLError(.cannotParseResponse)),
             .invalidData("payload"),
+            .invalidHistoryPageToken,
             .authenticationError,
             .credentialsRevoked,
             .rateLimited(retryAfter: nil),

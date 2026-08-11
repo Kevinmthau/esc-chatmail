@@ -1,6 +1,12 @@
 import Foundation
 @testable import esc_chatmail
 
+struct MockListHistoryCall: Equatable {
+    let startHistoryId: String
+    let pageToken: String?
+    let maxResults: Int?
+}
+
 /// Mock implementation of GmailAPIClientProtocol for testing.
 /// Allows controlling API responses and simulating errors without network calls.
 final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
@@ -20,12 +26,18 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     /// Default response for getMessage() when no specific response is configured
     var defaultGetMessageResponse: GmailMessage?
+    /// Optional async operation for tests that need to suspend a full-message
+    /// request while another caller attempts to join it.
+    var getMessageOperation: (@Sendable (String, String) async throws -> GmailMessage)?
 
     /// Response for modifyMessage() calls
     var modifyMessageResponse: GmailMessage?
 
     /// Response for sendMessage() calls
     var sendMessageResponse: SendMessageResponse = SendMessageResponse(id: "sent-message-id", threadId: "sent-thread-id")
+    /// Optional async operation for tests that need to suspend a send request
+    /// while another production path (for example sync persistence) runs.
+    var sendMessageOperation: (@Sendable (String, String?) async throws -> SendMessageResponse)?
 
     /// Response for getProfile() calls
     var profileResponse: GmailProfile = GmailProfile(
@@ -54,6 +66,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     /// Response for getAttachment() calls, keyed by "messageId:attachmentId"
     var attachmentResponses: [String: Data] = [:]
+    /// Optional async operation for tests that need to suspend an attachment
+    /// request or deliberately ignore cooperative task cancellation.
+    var getAttachmentOperation: (@Sendable (String, String) async throws -> Data)?
 
     // MARK: - Error Simulation
 
@@ -88,6 +103,8 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     /// Error to throw on listHistory() (resets after throwing)
     var listHistoryError: Error?
+    /// Optional page-token keyed listHistory() errors (reset after throwing).
+    var listHistoryErrorsByPageToken: [String: Error] = [:]
 
     /// Error to throw on getAttachment() (resets after throwing)
     var getAttachmentError: Error?
@@ -123,6 +140,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     private(set) var listHistoryLastStartId: String?
     private(set) var listHistoryLastPageToken: String?
     private(set) var listHistoryLastMaxResults: Int?
+    private(set) var listHistoryCalls: [MockListHistoryCall] = []
     /// Cross-endpoint call order ("getProfile"/"listMessages"), for pinning
     /// sequencing contracts such as the pre-scan recovery watermark.
     private(set) var endpointCallOrder: [String] = []
@@ -146,6 +164,17 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         pageToken ?? Self.firstPageTokenKey
     }
 
+    /// Thread-safe readiness read for tests that observe an active concurrent
+    /// request before cancelling it. Ordinary post-completion assertions may
+    /// continue reading the public call counters directly.
+    func getMessageCallCountSnapshot() -> Int {
+        withStateLock { getMessageCallCount }
+    }
+
+    func getAttachmentCallCountSnapshot() -> Int {
+        withStateLock { getAttachmentCallCount }
+    }
+
     // MARK: - Reset
 
     /// Resets all state to defaults
@@ -156,8 +185,10 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             paginatedListMessagesResponses = [:]
             getMessageResponses = [:]
             defaultGetMessageResponse = nil
+            getMessageOperation = nil
             modifyMessageResponse = nil
             sendMessageResponse = SendMessageResponse(id: "sent-message-id", threadId: "sent-thread-id")
+            sendMessageOperation = nil
             profileResponse = GmailProfile(emailAddress: "test@example.com", messagesTotal: 100, threadsTotal: 50, historyId: "12345")
             profileResponses = []
             labelsResponse = []
@@ -165,6 +196,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             historyResponse = HistoryResponse(history: nil, nextPageToken: nil, historyId: "12345")
             paginatedHistoryResponses = [:]
             attachmentResponses = [:]
+            getAttachmentOperation = nil
 
             // Errors
             listMessagesError = nil
@@ -178,6 +210,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listLabelsError = nil
             listSendAsError = nil
             listHistoryError = nil
+            listHistoryErrorsByPageToken = [:]
             getAttachmentError = nil
 
             // Call tracking
@@ -203,6 +236,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listHistoryLastStartId = nil
             listHistoryLastPageToken = nil
             listHistoryLastMaxResults = nil
+            listHistoryCalls = []
             endpointCallOrder = []
             getAttachmentCallCount = 0
             getAttachmentCalls = []
@@ -243,15 +277,19 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     }
 
     func getMessage(id: String, format: String) async throws -> GmailMessage {
-        let delay = withStateLock {
+        let (delay, operation) = withStateLock {
             getMessageCallCount += 1
             getMessageCalledIds.append(id)
             getMessageCalledFormats.append(format)
-            return artificialDelay
+            return (artificialDelay, getMessageOperation)
         }
 
         if delay > 0 {
             try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+
+        if let operation {
+            return try await operation(id, format)
         }
 
         if let error = withStateLock({ getMessageErrors[id] }) {
@@ -333,11 +371,26 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         )
     }
 
-    func sendMessage(rawMessage: String, threadId: String?) async throws -> SendMessageResponse {
-        let delay = withStateLock {
+    func sendMessage(
+        rawMessage: String,
+        threadId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
+    ) async throws -> SendMessageResponse {
+        do {
+            try Task.checkCancellation()
+            try await beforeTransmission()
+        } catch {
+            throw GmailMessageSendError.transmissionNotStarted(error)
+        }
+
+        let (delay, operation) = withStateLock {
             sendMessageCallCount += 1
             sendMessageCalls.append((rawMessage: rawMessage, threadId: threadId))
-            return artificialDelay
+            return (artificialDelay, sendMessageOperation)
+        }
+
+        if let operation {
+            return try await operation(rawMessage, threadId)
         }
 
         if delay > 0 {
@@ -448,6 +501,13 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listHistoryLastStartId = startHistoryId
             listHistoryLastPageToken = pageToken
             listHistoryLastMaxResults = maxResults
+            listHistoryCalls.append(
+                MockListHistoryCall(
+                    startHistoryId: startHistoryId,
+                    pageToken: pageToken,
+                    maxResults: maxResults
+                )
+            )
             return artificialDelay
         }
 
@@ -456,22 +516,33 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         }
 
         return try withStateLock {
+            let tokenKey = pageTokenKey(pageToken)
+            if let error = listHistoryErrorsByPageToken.removeValue(forKey: tokenKey) {
+                throw error
+            }
             if let error = listHistoryError {
                 listHistoryError = nil
                 throw error
             }
-            if let paginated = paginatedHistoryResponses[pageTokenKey(pageToken)] {
+            if let paginated = paginatedHistoryResponses[tokenKey] {
                 return paginated
+            }
+            if pageToken != nil, !paginatedHistoryResponses.isEmpty {
+                throw APIError.invalidData("Unconfigured history page token")
             }
             return historyResponse
         }
     }
 
     func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
-        let delay = withStateLock {
+        let (delay, operation) = withStateLock {
             getAttachmentCallCount += 1
             getAttachmentCalls.append((messageId: messageId, attachmentId: attachmentId))
-            return artificialDelay
+            return (artificialDelay, getAttachmentOperation)
+        }
+
+        if let operation {
+            return try await operation(messageId, attachmentId)
         }
 
         if delay > 0 {

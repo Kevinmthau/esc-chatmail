@@ -12,6 +12,18 @@ enum BackgroundSyncRecoveryAction {
 }
 
 extension APIError {
+    /// Account-wide conditions that prove nothing about the individual Gmail
+    /// resource being processed. Sync must abort without adding a per-message
+    /// failure verdict or spending an abandoned-message retry.
+    var isAccountScopedSyncAbort: Bool {
+        switch self {
+        case .authenticationError, .credentialsRevoked, .quotaExhausted:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Canonical recovery classification for API errors. This is the single
     /// mapping; `RetryStrategy`, `MessageFetcher`, and
     /// `BackgroundSyncErrorHandler` all derive their APIError decisions from
@@ -39,7 +51,7 @@ extension APIError {
             return .abort
         case .serverError(let code):
             return code >= 500 ? .retry : .abort
-        case .invalidURL, .invalidData, .decodingError, .notFound:
+        case .invalidURL, .invalidData, .invalidHistoryPageToken, .decodingError, .notFound:
             // Malformed requests/responses and missing resources repeat their
             // failure on retry.
             return .abort
@@ -57,5 +69,12 @@ extension APIError {
         case .partialSync, .tokenRefreshAndRetry, .abort, .abortNoRetry:
             return false
         }
+    }
+
+    /// A server response that proves a non-idempotent request was rejected and
+    /// may therefore be retried without risking duplicate remote work.
+    var isDefiniteRetryableRejection: Bool {
+        if case .rateLimited = self { return true }
+        return false
     }
 }

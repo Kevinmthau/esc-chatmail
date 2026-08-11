@@ -35,7 +35,11 @@ protocol GmailAPIClientProtocol: AnyObject, Sendable {
     func archiveMessages(ids: [String]) async throws
 
     /// Sends a MIME-encoded raw message.
-    func sendMessage(rawMessage: String, threadId: String?) async throws -> SendMessageResponse
+    func sendMessage(
+        rawMessage: String,
+        threadId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
+    ) async throws -> SendMessageResponse
 
     // MARK: - Profile, Labels & Aliases API
 
@@ -88,7 +92,11 @@ extension GmailAPIClientProtocol {
     }
 
     func sendMessage(rawMessage: String, threadId: String? = nil) async throws -> SendMessageResponse {
-        try await sendMessage(rawMessage: rawMessage, threadId: threadId)
+        try await sendMessage(
+            rawMessage: rawMessage,
+            threadId: threadId,
+            beforeTransmission: {}
+        )
     }
 
     func listHistory(startHistoryId: String, pageToken: String? = nil, maxResults: Int? = nil) async throws -> HistoryResponse {

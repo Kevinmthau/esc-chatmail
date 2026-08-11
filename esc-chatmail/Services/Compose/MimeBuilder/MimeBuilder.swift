@@ -45,7 +45,8 @@ struct MimeBuilder {
         htmlBody: String? = nil,
         subject: String? = nil,
         attachments: [AttachmentData] = [],
-        inlineAttachments: [InlineAttachmentData] = []
+        inlineAttachments: [InlineAttachmentData] = [],
+        messageId: String? = nil
     ) -> Data {
         // If we have HTML content, use the alternative builder for multipart/alternative structure
         if let htmlBody = htmlBody {
@@ -59,15 +60,16 @@ struct MimeBuilder {
                 inReplyTo: nil,
                 references: [],
                 attachments: attachments,
-                inlineAttachments: inlineAttachments
+                inlineAttachments: inlineAttachments,
+                messageId: messageId
             )
         }
 
         // Plain text only
         if attachments.isEmpty {
-            return buildSimpleMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: nil, references: [])
+            return buildSimpleMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: nil, references: [], messageId: messageId)
         } else {
-            return buildMultipartMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: nil, references: [], attachments: attachments)
+            return buildMultipartMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: nil, references: [], attachments: attachments, messageId: messageId)
         }
     }
 
@@ -80,7 +82,8 @@ struct MimeBuilder {
         inReplyTo: String?,
         references: [String],
         originalMessage: QuotedMessage? = nil,
-        attachments: [AttachmentData] = []
+        attachments: [AttachmentData] = [],
+        messageId: String? = nil
     ) -> Data {
         let plainBodyWithQuote = formatReplyBody(body: body, originalMessage: originalMessage)
         let htmlBodyWithQuote = formatReplyHTMLBody(body: body, originalMessage: originalMessage)
@@ -94,7 +97,8 @@ struct MimeBuilder {
             inReplyTo: inReplyTo,
             references: references,
             attachments: attachments,
-            inlineAttachments: []
+            inlineAttachments: [],
+            messageId: messageId
         )
     }
 

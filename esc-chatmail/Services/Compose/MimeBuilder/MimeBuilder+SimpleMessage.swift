@@ -9,7 +9,8 @@ extension MimeBuilder {
         body: String,
         subject: String?,
         inReplyTo: String?,
-        references: [String]
+        references: [String],
+        messageId: String? = nil
     ) -> Data {
         var mime = ""
 
@@ -26,7 +27,7 @@ extension MimeBuilder {
         }
 
         mime += "Date: \(formatDate(Date()))\r\n"
-        mime += "Message-ID: \(generateMessageId())\r\n"
+        mime += "Message-ID: \(messageId ?? generateMessageId())\r\n"
 
         if let inReplyTo = inReplyTo, !inReplyTo.isEmpty {
             mime += "In-Reply-To: \(sanitizeHeaderValue(inReplyTo))\r\n"

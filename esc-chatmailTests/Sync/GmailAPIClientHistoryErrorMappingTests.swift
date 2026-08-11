@@ -155,6 +155,207 @@ final class GmailAPIClientHistoryErrorMappingTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requestCount, 1, "4xx client errors must not be retried")
     }
 
+    func testHistory400_invalidPageToken_mapsToTypedErrorWithoutRetry() async {
+        let body = Data(#"{"error":{"code":400,"message":"Invalid pageToken"}}"#.utf8)
+        StubURLProtocol.script = [.data(400, body)]
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1", pageToken: "opaque-token")
+            XCTFail("Expected invalidHistoryPageToken")
+        } catch let error as APIError {
+            guard case .invalidHistoryPageToken = error else {
+                return XCTFail("Expected invalidHistoryPageToken, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
+    func testHistory400_invalidPageTokenInLaterErrorItem_mapsToTypedError() async {
+        let body = Data(
+            #"{"error":{"code":400,"message":"Bad Request","errors":[{"reason":"badRequest"},{"reason":"invalidPageToken"}]}}"#.utf8
+        )
+        StubURLProtocol.script = [.data(400, body)]
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1", pageToken: "opaque-token")
+            XCTFail("Expected invalidHistoryPageToken")
+        } catch let error as APIError {
+            guard case .invalidHistoryPageToken = error else {
+                return XCTFail("Expected invalidHistoryPageToken, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
+    func testHistory404_messageOnlyInvalidPageToken_mapsToTypedError() async {
+        let body = Data(
+            #"{"error":{"code":404,"message":"Invalid pageToken"}}"#.utf8
+        )
+        StubURLProtocol.script = [.data(404, body)]
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1", pageToken: "opaque-token")
+            XCTFail("Expected invalidHistoryPageToken")
+        } catch let error as APIError {
+            guard case .invalidHistoryPageToken = error else {
+                return XCTFail("Expected invalidHistoryPageToken, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
+    /// The explicit reason must win over the generic "invalid" 404 keyword.
+    func testHistory404_invalidPageTokenReason_mapsToTypedError() async {
+        let body = Data(
+            #"{"error":{"code":404,"message":"Invalid pageToken","errors":[{"reason":"invalidPageToken"}]}}"#.utf8
+        )
+        StubURLProtocol.script = [.data(404, body)]
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1", pageToken: "opaque-token")
+            XCTFail("Expected invalidHistoryPageToken")
+        } catch let error as APIError {
+            guard case .invalidHistoryPageToken = error else {
+                return XCTFail("Expected invalidHistoryPageToken, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testHistory400_unrelatedErrorWithPageToken_staysInvalidData() async {
+        let body = Data(#"{"error":{"code":400,"message":"Invalid label filter"}}"#.utf8)
+        StubURLProtocol.script = [.data(400, body)]
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1", pageToken: "opaque-token")
+            XCTFail("Expected invalidData")
+        } catch let error as APIError {
+            guard case .invalidData = error else {
+                return XCTFail("Expected invalidData, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    // MARK: - Expired-cursor classification wins the 404 (Finding 3)
+
+    // REVERT-CHECK (Finding 3b): the structured page-token classifier runs
+    // before generic 404 keyword classification, but deliberately excludes a
+    // response whose message names startHistoryId. This body therefore falls
+    // through to the expired-cursor branch even though it also names pageToken.
+    func testHistory404_expiredHistoryBodyNamingPageToken_stillMapsToHistoryIdExpired() async {
+        let body = Data(
+            #"{"error":{"code":404,"message":"Invalid startHistoryId; the supplied pageToken cannot be used","errors":[{"reason":"notFound"}]}}"#.utf8
+        )
+        StubURLProtocol.script = [.data(404, body)]
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1", pageToken: "opaque-token")
+            XCTFail("Expected historyIdExpired")
+        } catch let error as APIError {
+            guard case .historyIdExpired = error else {
+                return XCTFail(
+                    """
+                    Expected historyIdExpired, got \(error). An expired history \
+                    cursor misrouted to .invalidHistoryPageToken deadlocks \
+                    incremental sync: BackgroundSyncErrorHandler maps that case \
+                    to .abort with no recovery branch, so the stale cursor is \
+                    never replaced and every subsequent run aborts the same way. \
+                    The reverse mistake only costs one recovery pass.
+                    """
+                )
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1, "4xx client errors must not be retried")
+    }
+
+    // REVERT-CHECK (Finding 3a): fails if isInvalidHistoryPageTokenResponse
+    // folds the raw response body back into its match string. The decoded
+    // message ("Requested entity has expired") and reason ("expired") never
+    // name a page token — only the raw `details` payload does — so a raw-body
+    // fold is the only way this can be classified as
+    // `.invalidHistoryPageToken`. Note this 404 also misses the expired
+    // keywords in the first branch, so it exercises the raw-body removal in
+    // isolation from the Finding 3b reordering.
+    func testHistory404_pageTokenOnlyInRawBody_doesNotClassifyAsInvalidPageToken() async {
+        let body = Data(
+            #"""
+            {"error":{"code":404,"message":"Requested entity has expired","errors":[{"reason":"expired"}],"details":[{"@type":"type.googleapis.com/google.rpc.DebugInfo","detail":"pageToken=CAUQ_aiv rejected downstream"}]}}
+            """#.utf8
+        )
+        StubURLProtocol.script = [.data(404, body)]
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1", pageToken: "opaque-token")
+            XCTFail("Expected historyIdExpired")
+        } catch let error as APIError {
+            guard case .historyIdExpired = error else {
+                return XCTFail(
+                    """
+                    Expected historyIdExpired, got \(error). "pageToken" \
+                    appearing anywhere in the raw payload must not launder an \
+                    expired cursor into the recovery-less \
+                    .invalidHistoryPageToken abort.
+                    """
+                )
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1, "4xx client errors must not be retried")
+    }
+
+    // REVERT-CHECK (Finding 3a, second call site): fails if
+    // isInvalidHistoryPageTokenResponse folds the raw response body into its
+    // match string. The decoded message ("Invalid label filter") supplies the
+    // "invalid" keyword but never names a page token; only the raw `details`
+    // payload does. Pins the generic `case 400...499` call site: an unrelated
+    // malformed request must stay `.invalidData` rather than be laundered into
+    // a checkpoint replay.
+    func testHistory400_pageTokenOnlyInRawBody_staysInvalidData() async {
+        let body = Data(
+            #"""
+            {"error":{"code":400,"message":"Invalid label filter","details":[{"@type":"type.googleapis.com/google.rpc.BadRequest","fieldViolations":[{"field":"pageToken","description":"unused"}]}]}}
+            """#.utf8
+        )
+        StubURLProtocol.script = [.data(400, body)]
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1", pageToken: "opaque-token")
+            XCTFail("Expected invalidData")
+        } catch let error as APIError {
+            guard case .invalidData(let message) = error else {
+                return XCTFail(
+                    """
+                    Expected invalidData, got \(error). A raw-body "pageToken" \
+                    mention must not turn an unrelated 400 into a page-token \
+                    rejection.
+                    """
+                )
+            }
+            XCTAssertTrue(message.contains("400"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1, "4xx client errors must not be retried")
+    }
+
     // MARK: - Existing conversions stay intact
 
     func testHistory404_stillMapsToHistoryIdExpired() async {
@@ -190,6 +391,11 @@ final class GmailAPIClientHistoryErrorMappingTests: XCTestCase {
         let handler = BackgroundSyncErrorHandler()
         let action = handler.handleError(APIError.invalidData("Gmail API 403: quota"))
         XCTAssertEqual(action, .abort)
+    }
+
+    func testErrorHandler_invalidHistoryPageTokenAborts() {
+        let handler = BackgroundSyncErrorHandler()
+        XCTAssertEqual(handler.handleError(APIError.invalidHistoryPageToken), .abort)
     }
 
     func testErrorHandler_credentialsRevokedAbortsWithoutRetry() {

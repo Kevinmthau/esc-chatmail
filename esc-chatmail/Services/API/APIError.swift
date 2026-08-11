@@ -21,6 +21,10 @@ enum APIError: LocalizedError {
     case serverError(Int)
     case timeout
     case historyIdExpired
+    /// Gmail rejected an opaque History API continuation token. The frozen
+    /// history cursor is still valid, so the foreground executor may discard
+    /// only the token and replay from that cursor once.
+    case invalidHistoryPageToken
     case notFound(String)
 
     var errorDescription: String? {
@@ -50,6 +54,8 @@ enum APIError: LocalizedError {
             return "Request timed out"
         case .historyIdExpired:
             return "History ID has expired. A full sync is required."
+        case .invalidHistoryPageToken:
+            return "The Gmail history continuation expired. Sync will restart from the last saved position."
         case .notFound(let resource):
             return "Resource not found: \(resource)"
         }
