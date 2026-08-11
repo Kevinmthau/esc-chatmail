@@ -178,6 +178,43 @@ final class ParsedEmailProviderTests: XCTestCase {
         XCTAssertEqual(parseFailureCount, 1)
     }
 
+    func testProviderRejectsStaleGenerationAfterCloseAndReopen() async throws {
+        let provider = ParsedEmailProvider()
+        let capturedGeneration = await provider.captureAccountGeneration()
+        let oldGeneration = try XCTUnwrap(capturedGeneration)
+
+        let oldParsed = await provider.parsedEmail(
+            messageId: "shared-message",
+            sourceSignature: "old-account-source",
+            canonicalHTML: "<p>Old account content</p>",
+            expectedAccountGeneration: oldGeneration
+        )
+        XCTAssertNotNil(oldParsed)
+
+        await provider.closeAccountWorkAndClear()
+        await provider.reopenAccountWork()
+
+        let staleParsed = await provider.parsedEmail(
+            messageId: "shared-message",
+            sourceSignature: "old-account-late-source",
+            canonicalHTML: "<p>Old account late content</p>",
+            expectedAccountGeneration: oldGeneration
+        )
+        XCTAssertNil(staleParsed)
+        let cachedCountAfterStaleAttempt = await provider.debugCachedCount()
+        XCTAssertEqual(cachedCountAfterStaleAttempt, 0)
+
+        let capturedFreshGeneration = await provider.captureAccountGeneration()
+        let freshGeneration = try XCTUnwrap(capturedFreshGeneration)
+        let freshParsed = await provider.parsedEmail(
+            messageId: "shared-message",
+            sourceSignature: "fresh-account-source",
+            canonicalHTML: "<p>Fresh account content</p>",
+            expectedAccountGeneration: freshGeneration
+        )
+        XCTAssertNotNil(freshParsed)
+    }
+
     func testRenderQualityEvaluatorMatchesFallbackPathWithParsedEmail() throws {
         let html = """
         <!DOCTYPE html>

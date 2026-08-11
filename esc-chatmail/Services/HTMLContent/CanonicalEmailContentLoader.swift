@@ -8,9 +8,23 @@ protocol CanonicalEmailContentLoading: Sendable {
         allowRecovery: Bool
     ) async -> CanonicalEmailContent?
 
+    func loadCanonicalEmailContent(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        allowRecovery: Bool,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
+    ) async -> CanonicalEmailContent?
+
     func recoverCanonicalEmailContent(
         messageId: String,
         bodyText: String?
+    ) async -> CanonicalEmailContent?
+
+    func recoverCanonicalEmailContent(
+        messageId: String,
+        bodyText: String?,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
     ) async -> CanonicalEmailContent?
 
     func currentHTMLSourceSignature(
@@ -54,10 +68,33 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         bodyText: String?,
         allowRecovery: Bool = true
     ) async -> CanonicalEmailContent? {
+        await loadCanonicalEmailContent(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            allowRecovery: allowRecovery,
+            expectedAccountGeneration: nil
+        )
+    }
+
+    func loadCanonicalEmailContent(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        allowRecovery: Bool,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
+    ) async -> CanonicalEmailContent? {
+        guard let accountGeneration = expectedAccountGeneration ?? contentHandler.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
         let normalizedPlainText = Self.normalizedMeaningfulPlainText(from: bodyText)
 
-        if contentHandler.htmlFileExists(for: messageId),
-           let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)) {
+        if contentHandler.htmlFileExists(for: messageId, expectedGeneration: accountGeneration),
+           let html = canonicalHTMLSource(from: contentHandler.loadHTML(
+               for: messageId,
+               expectedGeneration: accountGeneration
+           )) {
             return logAndReturn(
                 CanonicalEmailContent(
                     html: html,
@@ -65,14 +102,18 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                     sourceKind: .html,
                     sourceLocation: .messageFile
                 ),
-                messageId: messageId
+                messageId: messageId,
+                accountGeneration: accountGeneration
             )
         }
 
         if let bodyStorageURI,
            let url = StorageURIResolver.resolve(bodyStorageURI),
            FileManager.default.fileExists(atPath: url.path),
-           let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)) {
+           let html = canonicalHTMLSource(from: contentHandler.loadHTML(
+               from: url,
+               expectedGeneration: accountGeneration
+           )) {
             return logAndReturn(
                 CanonicalEmailContent(
                     html: html,
@@ -80,7 +121,8 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                     sourceKind: .html,
                     sourceLocation: .storageURI
                 ),
-                messageId: messageId
+                messageId: messageId,
+                accountGeneration: accountGeneration
             )
         }
 
@@ -111,8 +153,26 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                     sourceLocation: .rawSourceHTML
                 )
 
+                // Capture every dependent cache epoch before the write. If an
+                // account transition happens after this point, the save or
+                // each subsequent invalidation rejects the stale generation
+                // instead of evicting the newly reopened account's content.
+                guard let invalidationContext = await HTMLContentLoader.shared
+                    .captureInvalidationAccountContext(
+                        expectedAccountGeneration: accountGeneration
+                    ),
+                    let processedTextGeneration = await ProcessedTextCache.shared
+                        .captureAccountGeneration(),
+                    contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+                    return nil
+                }
+
                 let writeStart = CFAbsoluteTimeGetCurrent()
-                if contentHandler.saveHTML(html, for: messageId) != nil {
+                if contentHandler.saveHTML(
+                    html,
+                    for: messageId,
+                    expectedGeneration: accountGeneration
+                ) != nil {
                     OriginalEmailTelemetry.log(
                         event: "original_email_db_write_completed",
                         messageId: messageId,
@@ -120,8 +180,18 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                         duration: CFAbsoluteTimeGetCurrent() - writeStart,
                         detail: "storage=html_file"
                     )
-                    await HTMLContentLoader.shared.invalidateContent(messageId: messageId)
-                    await ProcessedTextCache.shared.invalidate(messageId: messageId)
+                    await HTMLContentLoader.shared.invalidateContent(
+                        messageId: messageId,
+                        accountContext: invalidationContext
+                    )
+                    await ProcessedTextCache.shared.invalidate(
+                        messageId: messageId,
+                        expectedAccountGeneration: processedTextGeneration,
+                        invalidatesRenderedMessage: false
+                    )
+                    guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+                        return nil
+                    }
                     await MainActor.run {
                         HTMLContentLoader.postContentSourceDidChange(
                             messageId: messageId,
@@ -138,7 +208,11 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                     )
                 }
 
-                return logAndReturn(content, messageId: messageId)
+                return logAndReturn(
+                    content,
+                    messageId: messageId,
+                    accountGeneration: accountGeneration
+                )
             }
 
             OriginalEmailTelemetry.log(
@@ -153,7 +227,8 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         if allowRecovery,
            let recoveredContent = await recoverCanonicalEmailContent(
             messageId: messageId,
-            bodyText: bodyText
+            bodyText: bodyText,
+            accountGeneration: accountGeneration
            ) {
             return recoveredContent
         }
@@ -175,7 +250,8 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                 sourceKind: .plainText,
                 sourceLocation: .plainText
             ),
-            messageId: messageId
+            messageId: messageId,
+            accountGeneration: accountGeneration
         )
     }
 
@@ -183,7 +259,59 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         messageId: String,
         bodyText: String?
     ) async -> CanonicalEmailContent? {
-        guard let recoveredHTML = await recoveryService.recoverHTMLContent(messageId: messageId) else {
+        await recoverCanonicalEmailContent(
+            messageId: messageId,
+            bodyText: bodyText,
+            expectedAccountGeneration: nil
+        )
+    }
+
+    func recoverCanonicalEmailContent(
+        messageId: String,
+        bodyText: String?,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
+    ) async -> CanonicalEmailContent? {
+        guard let accountGeneration = expectedAccountGeneration ?? contentHandler.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
+        guard let recoveryGeneration = await recoveryService.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
+        return await recoverCanonicalEmailContent(
+            messageId: messageId,
+            bodyText: bodyText,
+            accountGeneration: accountGeneration,
+            recoveryGeneration: recoveryGeneration
+        )
+    }
+
+    private func recoverCanonicalEmailContent(
+        messageId: String,
+        bodyText: String?,
+        accountGeneration: HTMLContentAccountGeneration,
+        recoveryGeneration: HTMLContentRecoveryAccountGeneration? = nil
+    ) async -> CanonicalEmailContent? {
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
+        let resolvedRecoveryGeneration: HTMLContentRecoveryAccountGeneration
+        if let recoveryGeneration {
+            resolvedRecoveryGeneration = recoveryGeneration
+        } else if let captured = await recoveryService.captureAccountGeneration() {
+            resolvedRecoveryGeneration = captured
+        } else {
+            return nil
+        }
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration),
+              let recoveredHTML = await recoveryService.recoverHTMLContent(
+                  messageId: messageId,
+                  expectedAccountGeneration: resolvedRecoveryGeneration
+              ) else {
+            return nil
+        }
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
             return nil
         }
 
@@ -221,7 +349,8 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                 sourceKind: .recoveredHTML,
                 sourceLocation: .recoveredHTML
             ),
-            messageId: messageId
+            messageId: messageId,
+            accountGeneration: accountGeneration
         )
     }
 
@@ -229,16 +358,24 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         messageId: String,
         bodyStorageURI: String?
     ) -> String? {
-        contentHandler.canonicalHTMLSourceSignature(
+        guard let accountGeneration = contentHandler.captureAccountGeneration() else {
+            return nil
+        }
+        return contentHandler.canonicalHTMLSourceSignature(
             messageId: messageId,
-            bodyStorageURI: bodyStorageURI
+            bodyStorageURI: bodyStorageURI,
+            expectedGeneration: accountGeneration
         )
     }
 
     private func logAndReturn(
         _ content: CanonicalEmailContent,
-        messageId: String
-    ) -> CanonicalEmailContent {
+        messageId: String,
+        accountGeneration: HTMLContentAccountGeneration
+    ) -> CanonicalEmailContent? {
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
         Log.diagnostic(
             .htmlPreview,
             level: .info,

@@ -227,6 +227,10 @@ fileprivate struct HTMLProcessingCleanupResult {
 /// Thread-safe cache for processed message text content
 /// Eliminates redundant HTML parsing and regex operations during scroll
 /// Uses LRUCacheActor for automatic eviction management
+struct ProcessedTextCacheAccountGeneration: Equatable, Sendable {
+    fileprivate let value: UInt64
+}
+
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
@@ -261,6 +265,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
     /// Track task identity to prevent cancelled tasks from clearing newer task references
     private var activePrefetchTaskId: UUID?
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
 
     /// Maximum number of messages to process in a single prefetch batch
     private let maxPrefetchBatchSize = 20
@@ -302,38 +308,51 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return textSize + quotedSize + overheadSize
     }
 
-    private static func cacheKey(for messageId: String) -> String {
-        "\(processingVersion)|\(messageId)"
+    private static func cacheKey(for messageId: String, accountGeneration: UInt64) -> String {
+        "account:\(accountGeneration)|\(processingVersion)|\(messageId)"
     }
 
     private static func cacheKey(
         for messageId: String,
         sourceSignature: String,
-        previewMode: String
+        previewMode: String,
+        accountGeneration: UInt64
     ) -> String {
-        "\(processingVersion)|\(messageId)|source:\(sourceSignature)|mode:\(previewMode)"
+        "account:\(accountGeneration)|\(processingVersion)|\(messageId)|source:\(sourceSignature)|mode:\(previewMode)"
     }
 
-    func get(messageId: String) async -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart])? {
-        guard let entry = await cache.get(Self.cacheKey(for: messageId)) else { return nil }
+    func get(
+        messageId: String,
+        expectedAccountGeneration: ProcessedTextCacheAccountGeneration? = nil
+    ) async -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart])? {
+        guard let generation = resolvedAccountGeneration(expectedAccountGeneration) else { return nil }
+        guard let entry = await cache.get(Self.cacheKey(
+            for: messageId,
+            accountGeneration: generation
+        )) else { return nil }
+        guard acceptsAccountWork, generation == accountGeneration else { return nil }
         return (entry.plainText, entry.hasRichContent, entry.quotedParts)
     }
 
     func get(
         messageId: String,
         sourceSignature: String,
-        previewMode: String
+        previewMode: String,
+        expectedAccountGeneration: ProcessedTextCacheAccountGeneration? = nil
     ) async -> (
         plainText: String?,
         hasRichContent: Bool,
         quotedParts: [QuotedPart]
     )? {
+        guard let generation = resolvedAccountGeneration(expectedAccountGeneration) else { return nil }
         let key = Self.cacheKey(
             for: messageId,
             sourceSignature: sourceSignature,
-            previewMode: previewMode
+            previewMode: previewMode,
+            accountGeneration: generation
         )
         guard let entry = await cache.get(key) else { return nil }
+        guard acceptsAccountWork, generation == accountGeneration else { return nil }
         return (
             entry.plainText,
             entry.hasRichContent,
@@ -345,10 +364,12 @@ actor ProcessedTextCache: MemoryWarningHandler {
         messageId: String,
         plainText: String?,
         hasRichContent: Bool,
-        quotedParts: [QuotedPart] = []
+        quotedParts: [QuotedPart] = [],
+        expectedAccountGeneration: ProcessedTextCacheAccountGeneration? = nil
     ) async {
+        guard let generation = resolvedAccountGeneration(expectedAccountGeneration) else { return }
         let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
-        let key = Self.cacheKey(for: messageId)
+        let key = Self.cacheKey(for: messageId, accountGeneration: generation)
         beginTrackedCacheWrite(key, for: messageId)
         await cache.set(
             key,
@@ -360,6 +381,10 @@ actor ProcessedTextCache: MemoryWarningHandler {
             sizeBytes: size
         )
         finishTrackedCacheWrite()
+        guard acceptsAccountWork, generation == accountGeneration else {
+            await cache.remove(key)
+            return
+        }
         await pruneTrackedCacheKeys()
     }
 
@@ -369,13 +394,16 @@ actor ProcessedTextCache: MemoryWarningHandler {
         previewMode: String,
         plainText: String?,
         hasRichContent: Bool,
-        quotedParts: [QuotedPart] = []
+        quotedParts: [QuotedPart] = [],
+        expectedAccountGeneration: ProcessedTextCacheAccountGeneration? = nil
     ) async {
+        guard let generation = resolvedAccountGeneration(expectedAccountGeneration) else { return }
         let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
         let key = Self.cacheKey(
             for: messageId,
             sourceSignature: sourceSignature,
-            previewMode: previewMode
+            previewMode: previewMode,
+            accountGeneration: generation
         )
         beginTrackedCacheWrite(key, for: messageId)
         await cache.set(
@@ -388,25 +416,34 @@ actor ProcessedTextCache: MemoryWarningHandler {
             sizeBytes: size
         )
         finishTrackedCacheWrite()
+        guard acceptsAccountWork, generation == accountGeneration else {
+            await cache.remove(key)
+            return
+        }
         await pruneTrackedCacheKeys()
     }
 
     /// Prefetches compatibility fallback text for old messages without chatPreviewText.
     func prefetch(messageIds: [String]) async {
+        guard acceptsAccountWork else { return }
+        let generation = accountGeneration
         // Filter out already cached messages
         var uncachedMessages: [(messageId: String, sourceSignature: String)] = []
         let signatureHandler = HTMLContentHandler.shared
+        guard let htmlGeneration = signatureHandler.captureAccountGeneration() else { return }
         for messageId in messageIds {
             let sourceSignature = Self.contentSourceSignature(
                 messageId: messageId,
                 bodyStorageURI: nil,
                 bodyText: nil,
-                handler: signatureHandler
+                handler: signatureHandler,
+                expectedAccountGeneration: htmlGeneration
             )
             let key = Self.cacheKey(
                 for: messageId,
                 sourceSignature: sourceSignature,
-                previewMode: Self.chatBubblePreviewMode
+                previewMode: Self.chatBubblePreviewMode,
+                accountGeneration: generation
             )
             if await !cache.contains(key) {
                 uncachedMessages.append((messageId, sourceSignature))
@@ -425,17 +462,24 @@ actor ProcessedTextCache: MemoryWarningHandler {
         activePrefetchTaskId = taskId
 
         // Track the new prefetch task
-        activePrefetchTask = Task.detached(priority: .utility) { [weak self, messagesToProcess, taskId] in
+        activePrefetchTask = Task.detached(priority: .utility) { [weak self, messagesToProcess, taskId, generation, htmlGeneration] in
             let handler = HTMLContentHandler.shared
 
             for (messageId, sourceSignature) in messagesToProcess {
                 // Check for cancellation between messages
                 guard !Task.isCancelled else { break }
 
-                let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+                let result = ProcessedTextCache.processMessage(
+                    messageId: messageId,
+                    handler: handler,
+                    expectedAccountGeneration: htmlGeneration
+                )
 
                 // Check again before cache write to prevent cancelled tasks from writing stale data
-                guard !Task.isCancelled else { break }
+                guard !Task.isCancelled,
+                      await self?.isCurrentAccountGeneration(generation) == true else {
+                    break
+                }
 
                 await self?.set(
                     messageId: messageId,
@@ -443,7 +487,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
                     previewMode: ProcessedTextCache.chatBubblePreviewMode,
                     plainText: result.plainText,
                     hasRichContent: result.hasRichContent,
-                    quotedParts: result.quotedParts
+                    quotedParts: result.quotedParts,
+                    expectedAccountGeneration: ProcessedTextCacheAccountGeneration(value: generation)
                 )
             }
 
@@ -468,13 +513,61 @@ actor ProcessedTextCache: MemoryWarningHandler {
         activePrefetchTaskId = nil
     }
 
+    func closeAccountWorkAndClear() async {
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+        let prefetchTask = activePrefetchTask
+        prefetchTask?.cancel()
+        if let prefetchTask {
+            await prefetchTask.value
+        }
+        activePrefetchTask = nil
+        activePrefetchTaskId = nil
+        await clear()
+    }
+
+    func reopenAccountWork() {
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+    }
+
+    func captureAccountGeneration() -> ProcessedTextCacheAccountGeneration? {
+        guard acceptsAccountWork else { return nil }
+        return ProcessedTextCacheAccountGeneration(value: accountGeneration)
+    }
+
+    func isAccountGenerationCurrent(_ generation: ProcessedTextCacheAccountGeneration) -> Bool {
+        acceptsAccountWork && generation.value == accountGeneration
+    }
+
+    private func resolvedAccountGeneration(
+        _ expectedGeneration: ProcessedTextCacheAccountGeneration?
+    ) -> UInt64? {
+        guard acceptsAccountWork else { return nil }
+        if let expectedGeneration {
+            guard expectedGeneration.value == accountGeneration else { return nil }
+            return expectedGeneration.value
+        }
+        return accountGeneration
+    }
+
+    private func isCurrentAccountGeneration(_ generation: UInt64) -> Bool {
+        acceptsAccountWork && generation == accountGeneration
+    }
+
     /// Process a single message - can be called from background thread
     nonisolated static func processMessage(
         messageId: String,
         bodyStorageURI: String? = nil,
-        handler: HTMLContentHandler
+        handler: HTMLContentHandler,
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
     ) -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) {
-        let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler)
+        let html = loadHTML(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            handler: handler,
+            expectedAccountGeneration: expectedAccountGeneration
+        )
         if let html {
             let result = ChatBubbleTextProcessor.htmlCompatibilityFallback(
                 from: html,
@@ -492,13 +585,15 @@ actor ProcessedTextCache: MemoryWarningHandler {
         messageId: String,
         bodyStorageURI: String? = nil,
         bodyText: String? = nil,
-        handler: HTMLContentHandler
+        handler: HTMLContentHandler,
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
     ) -> Bool {
         guard let html = richContentHTMLCandidate(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
-            handler: handler
+            handler: handler,
+            expectedAccountGeneration: expectedAccountGeneration
         ) else {
             return false
         }
@@ -510,9 +605,15 @@ actor ProcessedTextCache: MemoryWarningHandler {
         messageId: String,
         bodyStorageURI: String?,
         bodyText: String?,
-        handler: HTMLContentHandler
+        handler: HTMLContentHandler,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
     ) -> String? {
-        if let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler) {
+        if let html = loadHTML(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            handler: handler,
+            expectedAccountGeneration: expectedAccountGeneration
+        ) {
             return html
         }
 
@@ -536,11 +637,13 @@ actor ProcessedTextCache: MemoryWarningHandler {
         messageId: String,
         bodyStorageURI: String?,
         bodyText: String?,
-        handler: HTMLContentHandler
+        handler: HTMLContentHandler,
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
     ) -> String {
         let htmlSourceSignature = handler.htmlSourceSignature(
             messageId: messageId,
-            bodyStorageURI: bodyStorageURI
+            bodyStorageURI: bodyStorageURI,
+            expectedGeneration: expectedAccountGeneration
         )
         if htmlSourceSignature != "missing" {
             return "html:\(htmlSourceSignature)"
@@ -557,13 +660,15 @@ actor ProcessedTextCache: MemoryWarningHandler {
         messageId: String,
         bodyStorageURI: String?,
         bodyText: String?,
-        handler: HTMLContentHandler
+        handler: HTMLContentHandler,
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
     ) -> String {
         let sourceSignature = contentSourceSignature(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
-            handler: handler
+            handler: handler,
+            expectedAccountGeneration: expectedAccountGeneration
         )
         guard sourceSignature.hasPrefix("html:"),
               let bodyTextSignature = bodyTextSignature(for: bodyText) else {
@@ -586,10 +691,17 @@ actor ProcessedTextCache: MemoryWarningHandler {
     nonisolated private static func loadHTML(
         messageId: String,
         bodyStorageURI: String?,
-        handler: HTMLContentHandler
+        handler: HTMLContentHandler,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
     ) -> String? {
-        if handler.htmlFileExists(for: messageId),
-           let html = handler.loadHTML(for: messageId) {
+        if handler.htmlFileExists(
+            for: messageId,
+            expectedGeneration: expectedAccountGeneration
+        ),
+           let html = handler.loadHTML(
+               for: messageId,
+               expectedGeneration: expectedAccountGeneration
+           ) {
             return html
         }
 
@@ -599,7 +711,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
             return nil
         }
 
-        return handler.loadHTML(from: url)
+        return handler.loadHTML(from: url, expectedGeneration: expectedAccountGeneration)
     }
 
     nonisolated private static func sha256Signature(for text: String) -> String {
@@ -1242,13 +1354,44 @@ actor ProcessedTextCache: MemoryWarningHandler {
     /// Invalidates a specific cache entry by message ID.
     /// Use this when a Message entity is deleted.
     func invalidate(messageId: String) async {
+        await invalidate(
+            messageId: messageId,
+            expectedAccountGeneration: nil,
+            invalidatesRenderedMessage: true
+        )
+    }
+
+    func invalidate(
+        messageId: String,
+        expectedAccountGeneration: ProcessedTextCacheAccountGeneration,
+        invalidatesRenderedMessage: Bool
+    ) async {
+        await invalidate(
+            messageId: messageId,
+            expectedAccountGeneration: Optional(expectedAccountGeneration),
+            invalidatesRenderedMessage: invalidatesRenderedMessage
+        )
+    }
+
+    private func invalidate(
+        messageId: String,
+        expectedAccountGeneration: ProcessedTextCacheAccountGeneration?,
+        invalidatesRenderedMessage: Bool
+    ) async {
+        guard let generation = resolvedAccountGeneration(expectedAccountGeneration) else { return }
         let trackedKeys = cacheKeysByMessageID.removeValue(forKey: messageId) ?? []
         cacheKeyTrackingVersion &+= 1
-        let legacyKey = Self.cacheKey(for: messageId)
+        let legacyKey = Self.cacheKey(
+            for: messageId,
+            accountGeneration: generation
+        )
         for key in trackedKeys.union([legacyKey]) {
             await cache.remove(key)
         }
-        await RenderedMessageCache.shared.invalidate(messageId: messageId, reason: .explicit)
+        guard isCurrentAccountGeneration(generation) else { return }
+        if invalidatesRenderedMessage {
+            await RenderedMessageCache.shared.invalidate(messageId: messageId, reason: .explicit)
+        }
     }
 
     /// Returns cache statistics for monitoring
@@ -1301,7 +1444,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
         let key = Self.cacheKey(
             for: messageId,
             sourceSignature: sourceSignature,
-            previewMode: previewMode
+            previewMode: previewMode,
+            accountGeneration: accountGeneration
         )
         beginTrackedCacheWrite(key, for: messageId)
     }

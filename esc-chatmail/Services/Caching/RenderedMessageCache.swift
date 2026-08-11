@@ -99,6 +99,10 @@ private struct RenderedMessageInvalidationSnapshot: Equatable, Sendable {
     let sourceGeneration: UInt64
 }
 
+struct RenderedMessageCacheAccountGeneration: Hashable, Sendable {
+    fileprivate let value: UInt64
+}
+
 private struct RenderedMessageInFlightWork: Sendable {
     let id: UUID
     let task: Task<AnyRenderedArtifactBox, Never>
@@ -119,6 +123,8 @@ actor RenderedMessageCache: MemoryWarningHandler {
     private var sourceInvalidationGenerations: [RenderedMessageKey: UInt64] = [:]
     private var accessSequence: UInt64 = 0
     private var statistics = RenderedMessageCacheStatistics()
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
 
     init(
         countLimit: Int = 500,
@@ -172,13 +178,15 @@ actor RenderedMessageCache: MemoryWarningHandler {
     func cachedChatBubbleText(
         messageId: String,
         sourceSignature: String,
-        variantKey: RenderedMessageVariantKey
+        variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil
     ) -> RenderedMessageChatBubbleText? {
         cachedValue(
             messageId: messageId,
             sourceSignature: sourceSignature,
             artifactType: .chatBubbleText,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: { $0.chatBubbleTextByVariant[variantKey] }
         )
     }
@@ -187,14 +195,16 @@ actor RenderedMessageCache: MemoryWarningHandler {
         _ value: RenderedMessageChatBubbleText,
         messageId: String,
         sourceSignature: String,
-        variantKey: RenderedMessageVariantKey
+        variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil
     ) {
         storeValue(
             value,
             messageId: messageId,
             sourceSignature: sourceSignature,
             artifactType: .chatBubbleText,
-            variantKey: variantKey
+            variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration
         ) { artifacts, value in
             artifacts.chatBubbleTextByVariant[variantKey] = value
         }
@@ -204,6 +214,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         messageId: String,
         sourceSignature: String,
         variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         producer: @escaping @Sendable () async -> MessageBubbleHTMLAnalysis?
     ) async -> MessageBubbleHTMLAnalysis? {
         await cachedOrProduce(
@@ -211,6 +222,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             sourceSignature: sourceSignature,
             artifactType: .htmlAnalysis,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: { $0.htmlAnalysisByVariant[variantKey] },
             store: { $0.htmlAnalysisByVariant[variantKey] = $1 },
             producer: producer
@@ -221,6 +233,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         messageId: String,
         sourceSignature: String,
         variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         producer: @escaping @Sendable () async -> Bool?
     ) async -> Bool? {
         await cachedOrProduce(
@@ -228,6 +241,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             sourceSignature: sourceSignature,
             artifactType: .richContentClassification,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: { $0.richContentClassificationByVariant[variantKey] },
             store: { $0.richContentClassificationByVariant[variantKey] = $1 },
             producer: producer
@@ -269,6 +283,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         messageId: String,
         sourceSignature: String,
         variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         producer: @escaping @Sendable () async -> EmailPreviewSource?
     ) async -> EmailPreviewSource? {
         await cachedOrProduce(
@@ -276,6 +291,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             sourceSignature: sourceSignature,
             artifactType: .previewSource,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: { $0.previewSourceByVariant[variantKey] },
             store: { $0.previewSourceByVariant[variantKey] = $1 },
             producer: producer
@@ -286,6 +302,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         messageId: String,
         sourceSignature: String,
         variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         producer: @escaping @Sendable () async -> EmailPreviewRenderModel?
     ) async -> EmailPreviewRenderModel? {
         await cachedOrProduce(
@@ -293,6 +310,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             sourceSignature: sourceSignature,
             artifactType: .previewRenderModel,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: { $0.previewRenderModelByVariant[variantKey] },
             store: { $0.previewRenderModelByVariant[variantKey] = $1 },
             producer: producer
@@ -303,6 +321,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         messageId: String,
         sourceSignature: String,
         variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         producer: @escaping @Sendable () async -> HTMLPreviewPayload?
     ) async -> HTMLPreviewPayload? {
         await cachedOrProduce(
@@ -310,6 +329,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             sourceSignature: sourceSignature,
             artifactType: .wrappedPreviewHTML,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: { $0.wrappedPreviewHTMLByVariant[variantKey] },
             store: { $0.wrappedPreviewHTMLByVariant[variantKey] = $1 },
             producer: producer
@@ -320,12 +340,14 @@ actor RenderedMessageCache: MemoryWarningHandler {
         messageId: String,
         sourceSignature: String,
         variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         producer: @escaping @Sendable () async -> String?
     ) async -> String? {
         await cacheAwareWrappedOriginalHTML(
             messageId: messageId,
             sourceSignature: sourceSignature,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             producer: {
                 guard let html = await producer() else {
                     return nil
@@ -339,8 +361,10 @@ actor RenderedMessageCache: MemoryWarningHandler {
         messageId: String,
         sourceSignature: String,
         variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         producer: @escaping @Sendable () async -> PreparedOriginalHTML?
     ) async -> String? {
+        guard accepts(expectedAccountGeneration) else { return nil }
         let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
 
         if let cached = cachedValue(
@@ -348,6 +372,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             sourceSignature: sourceSignature,
             artifactType: .wrappedOriginalHTML,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: { $0.wrappedOriginalHTMLByVariant[variantKey] }
         ) {
             return cached
@@ -368,7 +393,8 @@ actor RenderedMessageCache: MemoryWarningHandler {
                 variantKey: variantKey
             )
             let box = await work.task.value
-            guard isCurrent(work.invalidationSnapshot, for: key) else {
+            guard accepts(expectedAccountGeneration),
+                  isCurrent(work.invalidationSnapshot, for: key) else {
                 return nil
             }
             return (box.value as? PreparedOriginalHTML)?.html
@@ -391,6 +417,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         }
 
         guard isCurrentWork,
+              accepts(expectedAccountGeneration),
               isCurrent(work.invalidationSnapshot, for: key),
               let produced = box.value as? PreparedOriginalHTML else {
             return nil
@@ -404,7 +431,8 @@ actor RenderedMessageCache: MemoryWarningHandler {
             produced.html,
             key: key,
             artifactType: .wrappedOriginalHTML,
-            variantKey: variantKey
+            variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration
         ) { artifacts, value in
             artifacts.wrappedOriginalHTMLByVariant[variantKey] = value
         }
@@ -416,14 +444,16 @@ actor RenderedMessageCache: MemoryWarningHandler {
         _ metadata: RenderedMessageSnapshotMetadata,
         messageId: String,
         sourceSignature: String,
-        variantKey: RenderedMessageVariantKey
+        variantKey: RenderedMessageVariantKey,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil
     ) {
         storeValue(
             metadata,
             messageId: messageId,
             sourceSignature: sourceSignature,
             artifactType: .snapshotMetadata,
-            variantKey: variantKey
+            variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration
         ) { artifacts, value in
             artifacts.snapshotMetadataByVariant[variantKey] = value
         }
@@ -483,8 +513,10 @@ actor RenderedMessageCache: MemoryWarningHandler {
     func invalidate(
         messageId: String,
         sourceSignature: String? = nil,
-        reason: RenderedMessageInvalidationReason = .explicit
+        reason: RenderedMessageInvalidationReason = .explicit,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil
     ) {
+        guard accepts(expectedAccountGeneration) else { return }
         let keys = keysByMessageId[messageId] ?? []
         let keysToRemove = keys.filter { key in
             sourceSignature.map { key.sourceSignature == $0 } ?? true
@@ -499,6 +531,34 @@ actor RenderedMessageCache: MemoryWarningHandler {
         remove(keys, reason: .explicit)
         cancelAllInFlight()
         advanceGlobalInvalidationGeneration()
+    }
+
+    func closeAccountWorkAndClear() async {
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+        // Keep handles before `clear()` removes them. Producer closures can
+        // retain canonical HTML and other old-account inputs even when their
+        // final cache write is generation-rejected, so account teardown must
+        // drain them before storage is reopened.
+        let producerTasks = inFlight.values.map(\.task)
+        clear()
+        for task in producerTasks {
+            _ = await task.value
+        }
+    }
+
+    func reopenAccountWork() {
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+    }
+
+    func captureAccountGeneration() -> RenderedMessageCacheAccountGeneration? {
+        guard acceptsAccountWork else { return nil }
+        return RenderedMessageCacheAccountGeneration(value: accountGeneration)
+    }
+
+    func isAccountGenerationCurrent(_ generation: RenderedMessageCacheAccountGeneration) -> Bool {
+        acceptsAccountWork && generation.value == accountGeneration
     }
 
     func handleMemoryWarning() async {
@@ -520,16 +580,19 @@ actor RenderedMessageCache: MemoryWarningHandler {
         sourceSignature: String,
         artifactType: RenderedMessageArtifactType,
         variantKey: RenderedMessageVariantKey?,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         lookup: (RenderedMessageArtifacts) -> T?,
         store: (inout RenderedMessageArtifacts, T) -> Void,
         producer: @escaping @Sendable () async -> T?
     ) async -> T? {
+        guard accepts(expectedAccountGeneration) else { return nil }
         let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
 
         if let cached = cachedValue(
             key: key,
             artifactType: artifactType,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: lookup
         ) {
             return cached
@@ -550,7 +613,8 @@ actor RenderedMessageCache: MemoryWarningHandler {
                 variantKey: variantKey
             )
             let box = await work.task.value
-            guard isCurrent(work.invalidationSnapshot, for: key) else {
+            guard accepts(expectedAccountGeneration),
+                  isCurrent(work.invalidationSnapshot, for: key) else {
                 return nil
             }
             return box.value as? T
@@ -573,6 +637,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         }
 
         guard isCurrentWork,
+              accepts(expectedAccountGeneration),
               isCurrent(work.invalidationSnapshot, for: key) else {
             return nil
         }
@@ -586,6 +651,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             key: key,
             artifactType: artifactType,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             store: store
         )
         statistics.producedArtifacts += 1
@@ -597,6 +663,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         sourceSignature: String,
         artifactType: RenderedMessageArtifactType,
         variantKey: RenderedMessageVariantKey?,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         lookup: (RenderedMessageArtifacts) -> T?
     ) -> T? {
         let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
@@ -604,6 +671,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             key: key,
             artifactType: artifactType,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             lookup: lookup
         )
     }
@@ -612,8 +680,10 @@ actor RenderedMessageCache: MemoryWarningHandler {
         key: RenderedMessageKey,
         artifactType: RenderedMessageArtifactType,
         variantKey: RenderedMessageVariantKey?,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         lookup: (RenderedMessageArtifacts) -> T?
     ) -> T? {
+        guard accepts(expectedAccountGeneration) else { return nil }
         guard let entry = entries[key],
               let value = lookup(entry.artifacts) else {
             statistics.misses += 1
@@ -633,6 +703,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
         sourceSignature: String,
         artifactType: RenderedMessageArtifactType,
         variantKey: RenderedMessageVariantKey?,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         store: (inout RenderedMessageArtifacts, T) -> Void
     ) {
         let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
@@ -641,6 +712,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             key: key,
             artifactType: artifactType,
             variantKey: variantKey,
+            expectedAccountGeneration: expectedAccountGeneration,
             store: store
         )
     }
@@ -650,8 +722,10 @@ actor RenderedMessageCache: MemoryWarningHandler {
         key: RenderedMessageKey,
         artifactType: RenderedMessageArtifactType,
         variantKey: RenderedMessageVariantKey?,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration? = nil,
         store: (inout RenderedMessageArtifacts, T) -> Void
     ) {
+        guard accepts(expectedAccountGeneration) else { return }
         var artifacts = entries[key]?.artifacts ?? RenderedMessageArtifacts(sourceSignature: key.sourceSignature)
         store(&artifacts, value)
 
@@ -664,6 +738,11 @@ actor RenderedMessageCache: MemoryWarningHandler {
         keysByMessageId[key.messageId, default: []].insert(key)
         enforceLimits()
         log(event: "artifact-produced", key: key, artifactType: artifactType, variantKey: variantKey)
+    }
+
+    private func accepts(_ expectedGeneration: RenderedMessageCacheAccountGeneration?) -> Bool {
+        guard acceptsAccountWork else { return false }
+        return expectedGeneration.map { $0.value == accountGeneration } ?? true
     }
 
     private func touch(_ key: RenderedMessageKey) {

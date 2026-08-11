@@ -1,5 +1,9 @@
 import Foundation
 
+struct HTMLContentResultCacheAccountGeneration: Equatable, Sendable {
+    fileprivate let value: UInt64
+}
+
 /// In-memory LRU cache for prepared `HTMLLoadResult`s.
 ///
 /// Results are keyed by a content-derived cache key, with a parallel
@@ -16,9 +20,16 @@ import Foundation
 final class HTMLContentResultCache {
     private let cache = NSCache<NSString, CachedHTMLLoadResultBox>()
     private let delegate = HTMLContentCacheDelegate()
+    /// Serializes cache access against close/reopen without participating in
+    /// eviction callbacks. The tracking lock cannot serve this purpose because
+    /// `NSCache` mutations may synchronously invoke the delegate, which takes
+    /// that lock.
+    private let lifecycleLock = NSLock()
     private let lock = NSLock()
     private var keysByMessageID: [String: Set<String>] = [:]
     private var keyByVariantKey: [String: String] = [:]
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
 
     init() {
         // Limit cache to ~50MB with both count and cost limits for proper memory pressure response
@@ -31,14 +42,26 @@ final class HTMLContentResultCache {
     // MARK: - Lookup
 
     /// Returns the cached result stored directly under `cacheKey`, if any.
-    func result(forKey cacheKey: NSString) -> HTMLLoadResult? {
-        cache.object(forKey: cacheKey)?.result
+    func result(
+        forKey cacheKey: NSString,
+        expectedGeneration: HTMLContentResultCacheAccountGeneration? = nil
+    ) -> HTMLLoadResult? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard accepts(expectedGeneration) else { return nil }
+        return cache.object(forKey: cacheKey)?.result
     }
 
     /// Returns the cached result for a display variant whose source is no longer
     /// available, resolving `variantKey` → tracked cache key → result. Self-heals
     /// the index if the tracked entry has since been evicted.
-    func resultForVariant(_ variantKey: String) -> HTMLLoadResult? {
+    func resultForVariant(
+        _ variantKey: String,
+        expectedGeneration: HTMLContentResultCacheAccountGeneration? = nil
+    ) -> HTMLLoadResult? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard accepts(expectedGeneration) else { return nil }
         let trackedCacheKey: String?
 
         lock.lock()
@@ -66,8 +89,12 @@ final class HTMLContentResultCache {
         cacheKey: NSString,
         variantKey: NSString,
         messageId: String,
-        cost: Int
+        cost: Int,
+        expectedGeneration: HTMLContentResultCacheAccountGeneration? = nil
     ) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard accepts(expectedGeneration) else { return }
         let trackedCacheKey = cacheKey as String
         let trackedVariantKey = variantKey as String
         let staleCacheKey = trackCacheKey(trackedCacheKey, variantKey: trackedVariantKey, for: messageId)
@@ -92,8 +119,12 @@ final class HTMLContentResultCache {
     /// `shouldInvalidate`. Untracked-but-evicted keys are dropped too.
     func invalidate(
         messageId: String,
-        matching shouldInvalidate: (HTMLLoadResult.HTMLLoadSource) -> Bool
+        matching shouldInvalidate: (HTMLLoadResult.HTMLLoadSource) -> Bool,
+        expectedGeneration: HTMLContentResultCacheAccountGeneration? = nil
     ) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard accepts(expectedGeneration) else { return }
         let keys: [String]
         lock.lock()
         let trackedKeys = keysByMessageID[messageId] ?? []
@@ -118,6 +149,55 @@ final class HTMLContentResultCache {
         for key in keys {
             cache.removeObject(forKey: key as NSString)
         }
+    }
+
+    func removeAll() {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        removeAllWhileLifecycleLocked()
+    }
+
+    func captureAccountGeneration() -> HTMLContentResultCacheAccountGeneration? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard acceptsAccountWork else { return nil }
+        return HTMLContentResultCacheAccountGeneration(value: accountGeneration)
+    }
+
+    func isAccountGenerationCurrent(
+        _ generation: HTMLContentResultCacheAccountGeneration
+    ) -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return accepts(generation)
+    }
+
+    func closeAccountWorkAndClear() {
+        lifecycleLock.lock()
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+        removeAllWhileLifecycleLocked()
+        lifecycleLock.unlock()
+    }
+
+    func reopenAccountWork() {
+        lifecycleLock.lock()
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+        lifecycleLock.unlock()
+    }
+
+    private func accepts(_ expectedGeneration: HTMLContentResultCacheAccountGeneration?) -> Bool {
+        guard acceptsAccountWork else { return false }
+        return expectedGeneration.map { $0.value == accountGeneration } ?? true
+    }
+
+    private func removeAllWhileLifecycleLocked() {
+        lock.lock()
+        keysByMessageID.removeAll()
+        keyByVariantKey.removeAll()
+        lock.unlock()
+        cache.removeAllObjects()
     }
 
     // MARK: - Tracking
@@ -170,6 +250,9 @@ final class HTMLContentResultCache {
     /// Number of live (non-evicted) cached variants tracked for `messageId`,
     /// reconciling the index against the live cache as a side effect.
     func variantCount(for messageId: String) -> Int {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard acceptsAccountWork else { return 0 }
         lock.lock()
         defer { lock.unlock() }
         return syncTrackedCacheKeysWithLiveCache(for: messageId)
@@ -177,6 +260,9 @@ final class HTMLContentResultCache {
 
     /// Total live cached variants across all tracked messages.
     func totalVariantCount() -> Int {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard acceptsAccountWork else { return 0 }
         lock.lock()
         defer { lock.unlock() }
         let messageIDs = Array(keysByMessageID.keys)

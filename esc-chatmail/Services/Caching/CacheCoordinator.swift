@@ -21,8 +21,21 @@ import Combine
 final class CacheCoordinator {
     static let shared = CacheCoordinator()
 
+    struct CacheInvalidationAccountContext: Sendable {
+        fileprivate let coordinatorGeneration: UInt64
+        let htmlContent: HTMLContentAccountGeneration
+    }
+
+    private struct AccountScopedSaveNotification {
+        let notification: Notification
+        let htmlContentGeneration: HTMLContentAccountGeneration
+    }
+
     private var cancellables = Set<AnyCancellable>()
     private var isStarted = false
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
+    private var invalidationTasks: [UUID: Task<Void, Never>] = [:]
 
     struct CacheInvalidationPlan: Sendable {
         struct DeletedHTMLArtifact: Sendable, Hashable {
@@ -30,26 +43,22 @@ final class CacheCoordinator {
             let bodyStorageURI: String?
         }
 
+        struct AttachmentIdentity: Sendable, Hashable {
+            let messageId: String?
+            let attachmentId: String
+        }
+
         var conversationIdsToInvalidate: Set<String> = []
         var personEmailsToInvalidate: Set<String> = []
         var messageIdsToInvalidate: Set<String> = []
         var deletedHTMLArtifacts: Set<DeletedHTMLArtifact> = []
         var attachmentPathsToDelete: Set<String> = []
-        var attachmentIdsToInvalidate: Set<String> = []
+        var attachmentIdentitiesToInvalidate: Set<AttachmentIdentity> = []
         var shouldClearConversationCache = false
         var shouldClearPersonCache = false
     }
 
-    /// Message-keyed caches invalidated when a Message entity is deleted,
-    /// through the shared `MessageKeyedCache` contract. ProcessedTextCache
-    /// chains RenderedMessageCache internally, and HTMLContentLoader chains
-    /// RenderedMessageCache and the parsed-email provider — those chains stay
-    /// with the caches; only the routing lives here.
-    private static var messageKeyedCaches: [any MessageKeyedCache] {
-        [ProcessedTextCache.shared, HTMLContentLoader.shared]
-    }
-
-    private init() {}
+    init() {}
 
     /// Starts listening for Core Data changes. Call once at app startup.
     func start() {
@@ -57,9 +66,21 @@ final class CacheCoordinator {
         isStarted = true
 
         NotificationCenter.default.publisher(for: .NSManagedObjectContextDidSave)
+            // Capture the file-store epoch on the posting context's queue. If
+            // delivery to main is delayed across sign-out/reopen, this token
+            // still identifies the account that produced the save.
+            .compactMap { notification -> AccountScopedSaveNotification? in
+                guard let generation = HTMLContentHandler.shared.captureAccountGeneration() else {
+                    return nil
+                }
+                return AccountScopedSaveNotification(
+                    notification: notification,
+                    htmlContentGeneration: generation
+                )
+            }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] notification in
-                self?.handleContextDidSave(notification)
+            .sink { [weak self] capturedNotification in
+                self?.handleContextDidSave(capturedNotification)
             }
             .store(in: &cancellables)
 
@@ -72,7 +93,52 @@ final class CacheCoordinator {
         isStarted = false
     }
 
-    private func handleContextDidSave(_ notification: Notification) {
+    /// Retires queued invalidation work before account-scoped stores are
+    /// cleared. Delayed context callbacks keep their old epoch and are rejected
+    /// even if they arrive after a later account reopens.
+    func closeAccountWorkAndAwait() async {
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+        let activeTasks = Array(invalidationTasks.values)
+        activeTasks.forEach { $0.cancel() }
+        for task in activeTasks {
+            await task.value
+        }
+    }
+
+    func reopenAccountWork() {
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+    }
+
+    func captureInvalidationAccountContext() -> CacheInvalidationAccountContext? {
+        guard let htmlGeneration = HTMLContentHandler.shared.captureAccountGeneration() else {
+            return nil
+        }
+        return captureInvalidationAccountContext(htmlGeneration: htmlGeneration)
+    }
+
+    private func captureInvalidationAccountContext(
+        htmlGeneration: HTMLContentAccountGeneration
+    ) -> CacheInvalidationAccountContext? {
+        guard acceptsAccountWork,
+              HTMLContentHandler.shared.isAccountGenerationCurrent(htmlGeneration) else {
+            return nil
+        }
+        return CacheInvalidationAccountContext(
+            coordinatorGeneration: accountGeneration,
+            htmlContent: htmlGeneration
+        )
+    }
+
+    private func isAccountContextCurrent(_ context: CacheInvalidationAccountContext) -> Bool {
+        acceptsAccountWork &&
+            context.coordinatorGeneration == accountGeneration &&
+            HTMLContentHandler.shared.isAccountGenerationCurrent(context.htmlContent)
+    }
+
+    private func handleContextDidSave(_ capturedNotification: AccountScopedSaveNotification) {
+        let notification = capturedNotification.notification
         guard let sourceContext = notification.object as? NSManagedObjectContext else { return }
 
         let updatedObjects = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject> ?? []
@@ -83,6 +149,9 @@ final class CacheCoordinator {
             Set(deletedObjects.map(\.objectID))
 
         guard !updatedObjectIDs.isEmpty || !deletedObjectIDs.isEmpty else { return }
+        guard let accountContext = captureInvalidationAccountContext(
+            htmlGeneration: capturedNotification.htmlContentGeneration
+        ) else { return }
 
         sourceContext.perform { [weak self] in
             let localPlan = CacheCoordinator.computeInvalidationPlan(
@@ -92,7 +161,7 @@ final class CacheCoordinator {
             )
 
             Task { @MainActor [weak self] in
-                self?.applyInvalidationPlan(localPlan)
+                self?.applyInvalidationPlan(localPlan, accountContext: accountContext)
             }
         }
     }
@@ -163,7 +232,12 @@ final class CacheCoordinator {
                             plan.attachmentPathsToDelete.insert(previewURL)
                         }
                         if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
-                            plan.attachmentIdsToInvalidate.insert(attachmentId)
+                            plan.attachmentIdentitiesToInvalidate.insert(
+                                CacheInvalidationPlan.AttachmentIdentity(
+                                    messageId: messageId,
+                                    attachmentId: attachmentId
+                                )
+                            )
                         }
                     }
                 }
@@ -179,7 +253,14 @@ final class CacheCoordinator {
                     plan.attachmentPathsToDelete.insert(previewURL)
                 }
                 if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
-                    plan.attachmentIdsToInvalidate.insert(attachmentId)
+                    let messageId = (attachment.value(forKey: "message") as? Message)?
+                        .value(forKey: "id") as? String
+                    plan.attachmentIdentitiesToInvalidate.insert(
+                        CacheInvalidationPlan.AttachmentIdentity(
+                            messageId: messageId,
+                            attachmentId: attachmentId
+                        )
+                    )
                 }
             }
         }
@@ -187,7 +268,12 @@ final class CacheCoordinator {
         return plan
     }
 
-    private func applyInvalidationPlan(_ plan: CacheInvalidationPlan) {
+    func applyInvalidationPlan(
+        _ plan: CacheInvalidationPlan,
+        accountContext: CacheInvalidationAccountContext
+    ) {
+        guard isAccountContextCurrent(accountContext) else { return }
+
         // Invalidate conversation cache
         if plan.shouldClearConversationCache {
             Log.warning("Conversation id missing during cache invalidation; clearing ConversationCache", category: .coreData)
@@ -199,72 +285,136 @@ final class CacheCoordinator {
             Log.debug("Invalidated \(plan.conversationIdsToInvalidate.count) conversation cache entries", category: .coreData)
         }
 
-        // Invalidate person cache
-        // Note: Fire-and-forget is acceptable here - caches are in-memory only and
-        // will be empty on next app launch. The async pattern is required because
-        // PersonCache is an actor.
-        if plan.shouldClearPersonCache {
-            Task {
-                await PersonCache.shared.clearCache()
-            }
-            Log.warning("Person email missing during cache invalidation; queued full PersonCache clear", category: .coreData)
-        } else if !plan.personEmailsToInvalidate.isEmpty {
-            let emails = plan.personEmailsToInvalidate  // Capture for async closure
-            Task {
-                for email in emails {
-                    await PersonCache.shared.invalidateEntry(for: email)
-                }
-            }
-            Log.debug("Queued invalidation for \(plan.personEmailsToInvalidate.count) person cache entries", category: .coreData)
-        }
-
         let shouldProcessDeletedArtifacts =
             !plan.messageIdsToInvalidate.isEmpty ||
             !plan.deletedHTMLArtifacts.isEmpty ||
             !plan.attachmentPathsToDelete.isEmpty ||
-            !plan.attachmentIdsToInvalidate.isEmpty
+            !plan.attachmentIdentitiesToInvalidate.isEmpty
 
-        // Invalidate processed text cache and reclaim deleted message/attachment artifacts.
-        // Note: Same fire-and-forget rationale as person cache above.
-        if shouldProcessDeletedArtifacts {
-            let messageIds = plan.messageIdsToInvalidate
-            let deletedHTMLArtifacts = plan.deletedHTMLArtifacts
-            let attachmentPaths = plan.attachmentPathsToDelete
-            let attachmentIds = plan.attachmentIdsToInvalidate
-
-            Task {
-                for messageId in messageIds {
-                    for cache in CacheCoordinator.messageKeyedCaches {
-                        await cache.invalidate(messageId: messageId, reason: .messageDeleted)
-                    }
-                }
-
-                for artifact in deletedHTMLArtifacts {
-                    HTMLContentHandler.shared.deleteHTML(
-                        for: artifact.messageId,
-                        bodyStorageURI: artifact.bodyStorageURI
-                    )
-                }
-
-                for relativePath in attachmentPaths {
-                    AttachmentPaths.deleteFile(at: relativePath)
-                }
-
-                for attachmentId in attachmentIds {
-                    await AttachmentCacheActor.shared.removeFromCache(attachmentId)
-                }
-            }
+        let needsAsyncInvalidation = plan.shouldClearPersonCache ||
+            !plan.personEmailsToInvalidate.isEmpty ||
+            shouldProcessDeletedArtifacts
+        if needsAsyncInvalidation {
+            enqueueInvalidation(plan, accountContext: accountContext)
         }
 
         if !plan.messageIdsToInvalidate.isEmpty {
             Log.debug("Queued invalidation for \(plan.messageIdsToInvalidate.count) processed text cache entries", category: .coreData)
         }
 
-        if !plan.attachmentPathsToDelete.isEmpty || !plan.attachmentIdsToInvalidate.isEmpty {
+        if !plan.attachmentPathsToDelete.isEmpty || !plan.attachmentIdentitiesToInvalidate.isEmpty {
             Log.debug(
-                "Queued cleanup for \(plan.attachmentPathsToDelete.count) attachment files and \(plan.attachmentIdsToInvalidate.count) attachment cache entries",
+                "Queued cleanup for \(plan.attachmentPathsToDelete.count) attachment files and \(plan.attachmentIdentitiesToInvalidate.count) attachment cache entries",
                 category: .coreData
             )
+        }
+    }
+
+    private func enqueueInvalidation(
+        _ plan: CacheInvalidationPlan,
+        accountContext: CacheInvalidationAccountContext
+    ) {
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.invalidationTasks.removeValue(forKey: taskID) }
+            await self.performAsyncInvalidation(plan, accountContext: accountContext)
+        }
+        invalidationTasks[taskID] = task
+    }
+
+    private func performAsyncInvalidation(
+        _ plan: CacheInvalidationPlan,
+        accountContext: CacheInvalidationAccountContext
+    ) async {
+        guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
+
+        if plan.shouldClearPersonCache {
+            await PersonCache.shared.clearCache()
+        } else {
+            for email in plan.personEmailsToInvalidate {
+                guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
+                await PersonCache.shared.invalidateEntry(for: email)
+            }
+        }
+
+        guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
+
+        let needsMessageInvalidation =
+            !plan.messageIdsToInvalidate.isEmpty || !plan.deletedHTMLArtifacts.isEmpty
+        let processedTextGeneration: ProcessedTextCacheAccountGeneration?
+        let htmlInvalidationContext: HTMLContentInvalidationAccountContext?
+        if needsMessageInvalidation {
+            processedTextGeneration = await ProcessedTextCache.shared.captureAccountGeneration()
+            htmlInvalidationContext = await HTMLContentLoader.shared.captureInvalidationAccountContext(
+                expectedAccountGeneration: accountContext.htmlContent
+            )
+            guard processedTextGeneration != nil,
+                  htmlInvalidationContext != nil,
+                  !Task.isCancelled,
+                  isAccountContextCurrent(accountContext) else {
+                return
+            }
+        } else {
+            processedTextGeneration = nil
+            htmlInvalidationContext = nil
+        }
+
+        let needsAttachmentInvalidation =
+            !plan.attachmentPathsToDelete.isEmpty || !plan.attachmentIdentitiesToInvalidate.isEmpty
+        let attachmentGeneration: AttachmentCacheAccountGeneration?
+        if needsAttachmentInvalidation {
+            attachmentGeneration = await AttachmentCacheActor.shared.captureAccountGeneration()
+            guard attachmentGeneration != nil,
+                  !Task.isCancelled,
+                  isAccountContextCurrent(accountContext) else {
+                return
+            }
+        } else {
+            attachmentGeneration = nil
+        }
+
+        if let processedTextGeneration, let htmlInvalidationContext {
+            for messageId in plan.messageIdsToInvalidate {
+                guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
+                await ProcessedTextCache.shared.invalidate(
+                    messageId: messageId,
+                    expectedAccountGeneration: processedTextGeneration,
+                    invalidatesRenderedMessage: false
+                )
+                await HTMLContentLoader.shared.invalidateContent(
+                    messageId: messageId,
+                    accountContext: htmlInvalidationContext
+                )
+            }
+
+            for artifact in plan.deletedHTMLArtifacts {
+                guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
+                HTMLContentHandler.shared.deleteHTML(
+                    for: artifact.messageId,
+                    bodyStorageURI: artifact.bodyStorageURI,
+                    expectedGeneration: accountContext.htmlContent
+                )
+            }
+        }
+
+        if let attachmentGeneration {
+            for relativePath in plan.attachmentPathsToDelete {
+                guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
+                await AttachmentCacheActor.shared.deleteFile(
+                    at: relativePath,
+                    expectedAccountGeneration: attachmentGeneration
+                )
+            }
+
+            for attachmentIdentity in plan.attachmentIdentitiesToInvalidate {
+                guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
+                await AttachmentCacheActor.shared.removeFromCache(
+                    messageId: attachmentIdentity.messageId,
+                    attachmentId: attachmentIdentity.attachmentId,
+                    expectedAccountGeneration: attachmentGeneration
+                )
+            }
         }
     }
 }

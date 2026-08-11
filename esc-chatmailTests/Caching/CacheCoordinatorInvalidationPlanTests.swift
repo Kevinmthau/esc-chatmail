@@ -80,7 +80,14 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
 
         XCTAssertTrue(plan.attachmentPathsToDelete.contains("Attachments/a.jpg"))
         XCTAssertTrue(plan.attachmentPathsToDelete.contains("Previews/a.jpg"))
-        XCTAssertTrue(plan.attachmentIdsToInvalidate.contains("att-1"))
+        XCTAssertTrue(
+            plan.attachmentIdentitiesToInvalidate.contains(
+                CacheCoordinator.CacheInvalidationPlan.AttachmentIdentity(
+                    messageId: "msg-2",
+                    attachmentId: "att-1"
+                )
+            )
+        )
     }
 
     /// GAP: an *updated* (not deleted) message does not invalidate rendered-text
@@ -153,7 +160,14 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
 
         XCTAssertTrue(plan.attachmentPathsToDelete.contains("Attachments/b.pdf"))
         XCTAssertTrue(plan.attachmentPathsToDelete.contains("Previews/b.png"))
-        XCTAssertTrue(plan.attachmentIdsToInvalidate.contains("att-2"))
+        XCTAssertTrue(
+            plan.attachmentIdentitiesToInvalidate.contains(
+                CacheCoordinator.CacheInvalidationPlan.AttachmentIdentity(
+                    messageId: nil,
+                    attachmentId: "att-2"
+                )
+            )
+        )
     }
 
     /// GAP: an *updated* attachment (e.g. download state change) is not acted on
@@ -167,7 +181,7 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
         let plan = computePlan(updated: [attachment])
 
         XCTAssertTrue(plan.attachmentPathsToDelete.isEmpty)
-        XCTAssertTrue(plan.attachmentIdsToInvalidate.isEmpty)
+        XCTAssertTrue(plan.attachmentIdentitiesToInvalidate.isEmpty)
     }
 
     // MARK: - Mixed / empty
@@ -193,8 +207,60 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
         XCTAssertTrue(plan.messageIdsToInvalidate.isEmpty)
         XCTAssertTrue(plan.deletedHTMLArtifacts.isEmpty)
         XCTAssertTrue(plan.attachmentPathsToDelete.isEmpty)
-        XCTAssertTrue(plan.attachmentIdsToInvalidate.isEmpty)
+        XCTAssertTrue(plan.attachmentIdentitiesToInvalidate.isEmpty)
         XCTAssertFalse(plan.shouldClearConversationCache)
         XCTAssertFalse(plan.shouldClearPersonCache)
+    }
+
+    @MainActor
+    func testRetiredAccountContextDoesNotDeleteReopenedAttachmentFile() async throws {
+        let coordinator = CacheCoordinator()
+        let staleContext = try XCTUnwrap(coordinator.captureInvalidationAccountContext())
+        let relativePath = AttachmentPaths.originalPath(
+            idOrUUID: "cache-coordinator-boundary-\(UUID().uuidString)",
+            ext: "bin"
+        )
+        defer { AttachmentPaths.deleteFile(at: relativePath) }
+
+        await coordinator.closeAccountWorkAndAwait()
+        coordinator.reopenAccountWork()
+
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(Data("new-account".utf8), to: relativePath))
+        var plan = CacheCoordinator.CacheInvalidationPlan()
+        plan.attachmentPathsToDelete.insert(relativePath)
+        coordinator.applyInvalidationPlan(plan, accountContext: staleContext)
+
+        XCTAssertEqual(
+            AttachmentPaths.loadData(from: relativePath),
+            Data("new-account".utf8),
+            "A delayed old-account save must not delete a reopened account's artifact"
+        )
+    }
+
+    func testRetiredAttachmentGenerationCannotDeleteReopenedAccountFile() async throws {
+        let cache = AttachmentCacheActor()
+        let capturedGeneration = await cache.captureAccountGeneration()
+        let staleGeneration = try XCTUnwrap(capturedGeneration)
+        let relativePath = AttachmentPaths.originalPath(
+            idOrUUID: "attachment-cache-boundary-\(UUID().uuidString)",
+            ext: "bin"
+        )
+        defer { AttachmentPaths.deleteFile(at: relativePath) }
+
+        await cache.closeAdmission()
+        await cache.reopenAdmission()
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(Data("new-account".utf8), to: relativePath))
+
+        await cache.deleteFile(
+            at: relativePath,
+            expectedAccountGeneration: staleGeneration
+        )
+
+        XCTAssertEqual(
+            AttachmentPaths.loadData(from: relativePath),
+            Data("new-account".utf8)
+        )
     }
 }

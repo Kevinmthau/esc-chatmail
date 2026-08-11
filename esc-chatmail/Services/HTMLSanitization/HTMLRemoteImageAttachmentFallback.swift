@@ -1,6 +1,10 @@
 import Foundation
 import UIKit
 
+struct HTMLRemoteImageAccountGeneration: Equatable, Sendable {
+    fileprivate let value: UInt64
+}
+
 /// Rewrites a narrow set of remote HTML images to data URLs when the host serves them as
 /// downloadable attachments or advertises modern formats (AVIF/WEBP) that WKWebView does not
 /// always decode reliably in newsletter previews.
@@ -85,6 +89,13 @@ actor HTMLRemoteImageAttachmentFallback {
             currentTotalCost += cost
         }
 
+        mutating func removeAll() {
+            values.removeAll()
+            costs.removeAll()
+            usageOrder.removeAll()
+            currentTotalCost = 0
+        }
+
         private mutating func touch(_ key: String) {
             usageOrder.removeAll { $0 == key }
             usageOrder.append(key)
@@ -136,7 +147,13 @@ actor HTMLRemoteImageAttachmentFallback {
     private let requestExecutor: RequestExecutor
     private var rewrittenDataURLCache: CostBoundedStringCache
     private var unchangedURLCache = BoundedSet<String>(maxSize: 500, prunePercentage: 0.2)
-    private var inFlightResolutions: [String: Task<DataURLResolutionResult, Never>] = [:]
+    private struct InFlightResolution: Sendable {
+        let accountGeneration: UInt64
+        let task: Task<DataURLResolutionResult, Never>
+    }
+    private var inFlightResolutions: [String: InFlightResolution] = [:]
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
     private let maxCandidatesPerDocument = 6
     private let maxInlineBytes = 2 * 1024 * 1024
     private let previewEagerResolutionTimeoutNanoseconds: UInt64
@@ -157,19 +174,46 @@ actor HTMLRemoteImageAttachmentFallback {
         self.previewEagerResolutionTimeoutNanoseconds = UInt64(max(0, previewEagerResolutionTimeout) * 1_000_000_000)
     }
 
-    func cachedInlineAttachmentStyleImages(in html: String, senderEmail: String?) -> CachedRewriteResult {
-        cachedImages(in: html, senderEmail: senderEmail, eligibility: .attachmentStyle)
+    func captureAccountGeneration() -> HTMLRemoteImageAccountGeneration? {
+        guard acceptsAccountWork else { return nil }
+        return HTMLRemoteImageAccountGeneration(value: accountGeneration)
     }
 
-    func cachedRiskyModernFormatImages(in html: String, senderEmail: String?) -> CachedRewriteResult {
-        cachedImages(in: html, senderEmail: senderEmail, eligibility: .riskyModernFormat)
+    func cachedInlineAttachmentStyleImages(
+        in html: String,
+        senderEmail: String?,
+        expectedAccountGeneration: HTMLRemoteImageAccountGeneration? = nil
+    ) -> CachedRewriteResult {
+        cachedImages(
+            in: html,
+            senderEmail: senderEmail,
+            eligibility: .attachmentStyle,
+            expectedAccountGeneration: expectedAccountGeneration
+        )
+    }
+
+    func cachedRiskyModernFormatImages(
+        in html: String,
+        senderEmail: String?,
+        expectedAccountGeneration: HTMLRemoteImageAccountGeneration? = nil
+    ) -> CachedRewriteResult {
+        cachedImages(
+            in: html,
+            senderEmail: senderEmail,
+            eligibility: .riskyModernFormat,
+            expectedAccountGeneration: expectedAccountGeneration
+        )
     }
 
     private func cachedImages(
         in html: String,
         senderEmail: String?,
-        eligibility: CandidateEligibility
+        eligibility: CandidateEligibility,
+        expectedAccountGeneration: HTMLRemoteImageAccountGeneration?
     ) -> CachedRewriteResult {
+        guard resolvedAccountGeneration(expectedAccountGeneration) != nil else {
+            return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
+        }
         let matches = Self.imageSourceMatches(in: html)
         guard !matches.isEmpty else {
             return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
@@ -210,7 +254,14 @@ actor HTMLRemoteImageAttachmentFallback {
         )
     }
 
-    func previewInlineAttachmentStyleImages(in html: String, senderEmail: String?) async -> CachedRewriteResult {
+    func previewInlineAttachmentStyleImages(
+        in html: String,
+        senderEmail: String?,
+        expectedAccountGeneration: HTMLRemoteImageAccountGeneration? = nil
+    ) async -> CachedRewriteResult {
+        guard let generation = resolvedAccountGeneration(expectedAccountGeneration) else {
+            return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
+        }
         let matches = Self.imageSourceMatches(in: html)
         guard !matches.isEmpty else {
             return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
@@ -254,8 +305,12 @@ actor HTMLRemoteImageAttachmentFallback {
         let eagerResults = await previewResolvedDataURLs(
             for: eagerResolutionURLs,
             senderBaseURL: senderBaseURL,
-            timeoutNanoseconds: previewEagerResolutionTimeoutNanoseconds
+            timeoutNanoseconds: previewEagerResolutionTimeoutNanoseconds,
+            accountGeneration: generation
         )
+        guard isCurrentAccountGeneration(generation) else {
+            return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
+        }
         for urlString in eagerResolutionURLs {
             switch eagerResults[urlString] ?? .pending {
             case .rewritten(let dataURL):
@@ -278,26 +333,30 @@ actor HTMLRemoteImageAttachmentFallback {
     func inlineAttachmentStyleImages(
         in html: String,
         senderEmail: String?,
-        perURLTimeoutNanoseconds: UInt64? = nil
+        perURLTimeoutNanoseconds: UInt64? = nil,
+        expectedAccountGeneration: HTMLRemoteImageAccountGeneration? = nil
     ) async -> String {
         await inlineImages(
             in: html,
             senderEmail: senderEmail,
             perURLTimeoutNanoseconds: perURLTimeoutNanoseconds,
-            eligibility: .attachmentStyle
+            eligibility: .attachmentStyle,
+            expectedAccountGeneration: expectedAccountGeneration
         )
     }
 
     func inlineRiskyModernFormatImages(
         in html: String,
         senderEmail: String?,
-        perURLTimeoutNanoseconds: UInt64? = nil
+        perURLTimeoutNanoseconds: UInt64? = nil,
+        expectedAccountGeneration: HTMLRemoteImageAccountGeneration? = nil
     ) async -> String {
         await inlineImages(
             in: html,
             senderEmail: senderEmail,
             perURLTimeoutNanoseconds: perURLTimeoutNanoseconds,
-            eligibility: .riskyModernFormat
+            eligibility: .riskyModernFormat,
+            expectedAccountGeneration: expectedAccountGeneration
         )
     }
 
@@ -305,8 +364,10 @@ actor HTMLRemoteImageAttachmentFallback {
         in html: String,
         senderEmail: String?,
         perURLTimeoutNanoseconds: UInt64?,
-        eligibility: CandidateEligibility
+        eligibility: CandidateEligibility,
+        expectedAccountGeneration: HTMLRemoteImageAccountGeneration?
     ) async -> String {
+        guard let generation = resolvedAccountGeneration(expectedAccountGeneration) else { return html }
         let matches = Self.imageSourceMatches(in: html)
         guard !matches.isEmpty else { return html }
 
@@ -317,10 +378,11 @@ actor HTMLRemoteImageAttachmentFallback {
         let rewrittenURLs = await resolveCandidateDataURLs(
             candidateURLs,
             senderBaseURL: senderBaseURL,
-            perURLTimeoutNanoseconds: perURLTimeoutNanoseconds
+            perURLTimeoutNanoseconds: perURLTimeoutNanoseconds,
+            accountGeneration: generation
         )
 
-        guard !rewrittenURLs.isEmpty else { return html }
+        guard isCurrentAccountGeneration(generation), !rewrittenURLs.isEmpty else { return html }
 
         return Self.rewritingHTML(html, matches: matches, replacements: rewrittenURLs)
     }
@@ -328,7 +390,8 @@ actor HTMLRemoteImageAttachmentFallback {
     private func resolveCandidateDataURLs(
         _ candidateURLs: [String],
         senderBaseURL: URL?,
-        perURLTimeoutNanoseconds: UInt64?
+        perURLTimeoutNanoseconds: UInt64?,
+        accountGeneration: UInt64
     ) async -> [String: String] {
         await withTaskGroup(of: (String, String?).self) { group in
             for url in candidateURLs {
@@ -337,7 +400,8 @@ actor HTMLRemoteImageAttachmentFallback {
                     let dataURL = await self.resolvedDataURL(
                         for: url,
                         senderBaseURL: senderBaseURL,
-                        timeoutNanoseconds: perURLTimeoutNanoseconds
+                        timeoutNanoseconds: perURLTimeoutNanoseconds,
+                        accountGeneration: accountGeneration
                     )
                     return (url, dataURL)
                 }
@@ -356,7 +420,8 @@ actor HTMLRemoteImageAttachmentFallback {
     private func previewResolvedDataURLs(
         for urlStrings: [String],
         senderBaseURL: URL?,
-        timeoutNanoseconds: UInt64
+        timeoutNanoseconds: UInt64,
+        accountGeneration: UInt64
     ) async -> [String: PreviewDataURLResolutionResult] {
         guard !urlStrings.isEmpty else { return [:] }
 
@@ -369,7 +434,8 @@ actor HTMLRemoteImageAttachmentFallback {
                     let result = await previewResolvedDataURL(
                         for: urlString,
                         senderBaseURL: senderBaseURL,
-                        timeoutNanoseconds: timeoutNanoseconds
+                        timeoutNanoseconds: timeoutNanoseconds,
+                        accountGeneration: accountGeneration
                     )
                     return (urlString, result)
                 }
@@ -386,8 +452,10 @@ actor HTMLRemoteImageAttachmentFallback {
     private func previewResolvedDataURL(
         for urlString: String,
         senderBaseURL: URL?,
-        timeoutNanoseconds: UInt64
+        timeoutNanoseconds: UInt64,
+        accountGeneration: UInt64
     ) async -> PreviewDataURLResolutionResult {
+        guard isCurrentAccountGeneration(accountGeneration) else { return .unchanged }
         let cacheKey = cacheKey(for: urlString, senderBaseURL: senderBaseURL)
         if let cached = rewrittenDataURLCache.value(forKey: cacheKey) {
             return .rewritten(cached)
@@ -396,7 +464,12 @@ actor HTMLRemoteImageAttachmentFallback {
             return .unchanged
         }
 
-        guard let task = dataURLResolutionTask(for: urlString, senderBaseURL: senderBaseURL, cacheKey: cacheKey) else {
+        guard let task = dataURLResolutionTask(
+            for: urlString,
+            senderBaseURL: senderBaseURL,
+            cacheKey: cacheKey,
+            accountGeneration: accountGeneration
+        ) else {
             return .unchanged
         }
 
@@ -405,7 +478,11 @@ actor HTMLRemoteImageAttachmentFallback {
 
             Task { [self] in
                 let result = await task.value
-                let finalized = finalizeResolution(result, cacheKey: cacheKey)
+                let finalized = finalizeResolution(
+                    result,
+                    cacheKey: cacheKey,
+                    accountGeneration: accountGeneration
+                )
                 switch finalized {
                 case .rewritten(let dataURL):
                     gate.resume(returning: .rewritten(dataURL))
@@ -449,8 +526,10 @@ actor HTMLRemoteImageAttachmentFallback {
     private func resolvedDataURL(
         for urlString: String,
         senderBaseURL: URL?,
-        timeoutNanoseconds: UInt64? = nil
+        timeoutNanoseconds: UInt64? = nil,
+        accountGeneration: UInt64
     ) async -> String? {
+        guard isCurrentAccountGeneration(accountGeneration) else { return nil }
         let cacheKey = cacheKey(for: urlString, senderBaseURL: senderBaseURL)
         if let cached = rewrittenDataURLCache.value(forKey: cacheKey) {
             return cached
@@ -459,7 +538,12 @@ actor HTMLRemoteImageAttachmentFallback {
             return nil
         }
 
-        guard let task = dataURLResolutionTask(for: urlString, senderBaseURL: senderBaseURL, cacheKey: cacheKey) else {
+        guard let task = dataURLResolutionTask(
+            for: urlString,
+            senderBaseURL: senderBaseURL,
+            cacheKey: cacheKey,
+            accountGeneration: accountGeneration
+        ) else {
             return nil
         }
 
@@ -467,11 +551,16 @@ actor HTMLRemoteImageAttachmentFallback {
             return await racedResolvedDataURL(
                 task: task,
                 cacheKey: cacheKey,
-                timeoutNanoseconds: timeoutNanoseconds
+                timeoutNanoseconds: timeoutNanoseconds,
+                accountGeneration: accountGeneration
             )
         }
 
-        switch await finalizeResolution(task, cacheKey: cacheKey) {
+        switch await finalizeResolution(
+            task,
+            cacheKey: cacheKey,
+            accountGeneration: accountGeneration
+        ) {
         case .rewritten(let dataURL):
             return dataURL
         case .unchanged, .transientFailure:
@@ -482,14 +571,19 @@ actor HTMLRemoteImageAttachmentFallback {
     private func racedResolvedDataURL(
         task: Task<DataURLResolutionResult, Never>,
         cacheKey: String,
-        timeoutNanoseconds: UInt64
+        timeoutNanoseconds: UInt64,
+        accountGeneration: UInt64
     ) async -> String? {
         await withCheckedContinuation { continuation in
             let gate = SingleFireContinuationGate<String?>(continuation)
 
             Task { [self] in
                 let result = await task.value
-                let finalized = finalizeResolution(result, cacheKey: cacheKey)
+                let finalized = finalizeResolution(
+                    result,
+                    cacheKey: cacheKey,
+                    accountGeneration: accountGeneration
+                )
                 switch finalized {
                 case .rewritten(let dataURL):
                     gate.resume(returning: dataURL)
@@ -508,10 +602,13 @@ actor HTMLRemoteImageAttachmentFallback {
     private func dataURLResolutionTask(
         for urlString: String,
         senderBaseURL: URL?,
-        cacheKey: String
+        cacheKey: String,
+        accountGeneration: UInt64
     ) -> Task<DataURLResolutionResult, Never>? {
-        if let inFlightTask = inFlightResolutions[cacheKey] {
-            return inFlightTask
+        guard isCurrentAccountGeneration(accountGeneration) else { return nil }
+        if let inFlight = inFlightResolutions[cacheKey],
+           inFlight.accountGeneration == accountGeneration {
+            return inFlight.task
         }
 
         guard let url = URL(string: urlString) else {
@@ -529,23 +626,37 @@ actor HTMLRemoteImageAttachmentFallback {
                 maxInlineBytes: maxInlineBytes
             )
         }
-        inFlightResolutions[cacheKey] = task
+        inFlightResolutions[cacheKey] = InFlightResolution(
+            accountGeneration: accountGeneration,
+            task: task
+        )
         return task
     }
 
     private func finalizeResolution(
         _ task: Task<DataURLResolutionResult, Never>,
-        cacheKey: String
+        cacheKey: String,
+        accountGeneration: UInt64
     ) async -> FinalizedDataURLResolutionResult {
         let result = await task.value
-        return finalizeResolution(result, cacheKey: cacheKey)
+        return finalizeResolution(
+            result,
+            cacheKey: cacheKey,
+            accountGeneration: accountGeneration
+        )
     }
 
     private func finalizeResolution(
         _ result: DataURLResolutionResult,
-        cacheKey: String
+        cacheKey: String,
+        accountGeneration: UInt64
     ) -> FinalizedDataURLResolutionResult {
-        inFlightResolutions[cacheKey] = nil
+        guard isCurrentAccountGeneration(accountGeneration) else {
+            return .transientFailure
+        }
+        if inFlightResolutions[cacheKey]?.accountGeneration == accountGeneration {
+            inFlightResolutions[cacheKey] = nil
+        }
 
         switch result {
         case .rewritten(let dataURL):
@@ -559,6 +670,39 @@ actor HTMLRemoteImageAttachmentFallback {
             Log.debug("Attachment-style remote image fallback failed: \(description)", category: .ui)
             return .transientFailure
         }
+    }
+
+    func closeAccountWorkAndAwait() async {
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+        let activeTasks = inFlightResolutions.values.map(\.task)
+        inFlightResolutions.removeAll()
+        rewrittenDataURLCache.removeAll()
+        unchangedURLCache.removeAll()
+        activeTasks.forEach { $0.cancel() }
+        for task in activeTasks {
+            _ = await task.value
+        }
+    }
+
+    func reopenAccountWork() {
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+    }
+
+    private func isCurrentAccountGeneration(_ generation: UInt64) -> Bool {
+        acceptsAccountWork && generation == accountGeneration
+    }
+
+    private func resolvedAccountGeneration(
+        _ expected: HTMLRemoteImageAccountGeneration?
+    ) -> UInt64? {
+        guard acceptsAccountWork else { return nil }
+        if let expected {
+            guard expected.value == accountGeneration else { return nil }
+            return expected.value
+        }
+        return accountGeneration
     }
 
     private static func resolveDataURL(

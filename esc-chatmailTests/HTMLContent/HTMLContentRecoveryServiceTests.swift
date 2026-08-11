@@ -509,6 +509,102 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
     }
 
+    // Guards the EVICTION half of the scoped-invalidation change in
+    // `HTMLContentRecoveryService.performRecoveryToCompletion`: recovery passes
+    // `invalidatesRenderedMessage: false` to ProcessedTextCache because the
+    // scoped `HTMLContentLoader.shared.invalidateContent(messageId:accountContext:)`
+    // hop is what evicts RenderedMessageCache. This test fails if that hop is
+    // dropped, so a future change cannot silently stop evicting the stale
+    // rendered chat-bubble artifact.
+    //
+    // HONEST SCOPE — this is NOT a revert-check for the account-SCOPING half.
+    // Verified empirically: reverting both hunks of that fix (back to the
+    // unscoped `invalidateContent(messageId:)` + `invalidate(messageId:)`
+    // pair, with no pre-write capture) leaves this test GREEN, because the
+    // unscoped calls evict the same entry in a single-account test.
+    // The scoping only diverges when an account transition lands between the
+    // capture and the invalidation — a window bounded by two `await`s inside
+    // this actor with no injection point, since the method reaches
+    // `HTMLContentLoader.shared`/`ProcessedTextCache.shared` directly rather
+    // than through the injectable `contentHandler`. Covering it needs a
+    // production seam; until then that half rests on parity with the reviewed
+    // implementation in `CanonicalEmailContentLoader.loadCanonicalEmailContent`.
+    // (The companion test in HTMLContentAccountBoundaryTests does pin the
+    // separable half: `invalidatesRenderedMessage: false` really does suppress
+    // ProcessedTextCache's own unscoped rendered hop.)
+    func testRecoverHTMLContent_stillEvictsRenderedMessageArtifactsAfterScopedInvalidation() async {
+        let messageId = "html-recovery-rendered-eviction-\(UUID().uuidString)"
+        let attachmentId = "html-body-\(UUID().uuidString)"
+        let staleSourceSignature = "stale-rendered-source-\(UUID().uuidString)"
+        let variantKey: RenderedMessageVariantKey = "recovery-rendered-eviction"
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>AMNH_RENDERED_EVICTION_TOKEN</h1>
+          <p>Recovered newsletter body.</p>
+        </body>
+        </html>
+        """
+
+        await RenderedMessageCache.shared.storeChatBubbleText(
+            RenderedMessageChatBubbleText(plainText: "Stale bubble", hasRichContent: false),
+            messageId: messageId,
+            sourceSignature: staleSourceSignature,
+            variantKey: variantKey
+        )
+        await ProcessedTextCache.shared.set(
+            messageId: messageId,
+            plainText: "Stale fallback",
+            hasRichContent: false
+        )
+
+        let seededBubble = await RenderedMessageCache.shared.cachedChatBubbleText(
+            messageId: messageId,
+            sourceSignature: staleSourceSignature,
+            variantKey: variantKey
+        )
+        XCTAssertNotNil(seededBubble, "Precondition: the stale rendered artifact must be cached before recovery")
+
+        let mockAPIClient = MockGmailAPIClient()
+        mockAPIClient.getMessageResponses[messageId] = makeHTMLAttachmentMessage(
+            id: messageId,
+            attachmentId: attachmentId
+        )
+        mockAPIClient.attachmentResponses["\(messageId):\(attachmentId)"] = Data(html.utf8)
+
+        // The default Messages directory shares an account boundary with
+        // `HTMLContentLoader.shared.contentHandler`, so the invalidation context
+        // captured inside recovery stays valid for this handler's write.
+        let contentHandler = HTMLContentHandler()
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler
+        )
+
+        let recoveredHTML = await service.recoverHTMLContent(messageId: messageId)
+
+        XCTAssertEqual(recoveredHTML, html)
+
+        let evictedBubble = await RenderedMessageCache.shared.cachedChatBubbleText(
+            messageId: messageId,
+            sourceSignature: staleSourceSignature,
+            variantKey: variantKey
+        )
+        XCTAssertNil(
+            evictedBubble,
+            "The scoped invalidateContent hop must still evict rendered artifacts after recovery rewrites the HTML"
+        )
+
+        let cachedProcessedText = await ProcessedTextCache.shared.get(messageId: messageId)
+        XCTAssertNil(cachedProcessedText)
+
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
+    }
+
     func testRecoverHTMLContent_cachesNoHTMLMissesWithinTTL() async {
         let messageId = "html-recovery-no-html-\(UUID().uuidString)"
         let mockAPIClient = MockGmailAPIClient()
@@ -577,6 +673,126 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
 
         XCTAssertEqual(recovered, html)
         XCTAssertEqual(mockAPIClient.getMessageCallCount, 2)
+    }
+
+    func testAccountTransitionDrainsRecoveryThatAlreadyOutlivedItsDeadline() async throws {
+        let messageId = "html-recovery-expired-transition-\(UUID().uuidString)"
+        let attachmentId = "html-body-\(UUID().uuidString)"
+        let html = "<html><body><p>EXPIRED_OLD_ACCOUNT_HTML</p></body></html>"
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTMLRecoveryExpiredTransition-\(UUID().uuidString)", isDirectory: true)
+        let contentHandler = HTMLContentHandler(messagesDirectory: directory)
+        defer {
+            try? contentHandler.reopenAccountWork()
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let gate = HTMLRecoveryUncooperativeAttachmentGate(data: Data(html.utf8))
+        let mockAPIClient = MockGmailAPIClient()
+        mockAPIClient.getMessageResponses[messageId] = makeHTMLAttachmentMessage(
+            id: messageId,
+            attachmentId: attachmentId
+        )
+        mockAPIClient.getAttachmentOperation = { _, _ in
+            await gate.waitForReleaseIgnoringCancellation()
+        }
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler,
+            recoveryNetworkTimeout: 0.02
+        )
+
+        let recoveryTask = Task {
+            await service.recoverHTMLContent(messageId: messageId)
+        }
+        await gate.waitUntilStarted()
+        let timedOutRecovery = await recoveryTask.value
+        XCTAssertNil(
+            timedOutRecovery,
+            "The caller-facing recovery should return at its deadline"
+        )
+
+        contentHandler.closeAccountWork()
+        try await contentHandler.deleteAllHTMLFromClosedAccount()
+        let drainFinished = HTMLRecoveryThreadSafeFlag()
+        let drainTask = Task {
+            await service.closeAccountWorkAndAwait()
+            drainFinished.set()
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(
+            drainFinished.isSet,
+            "Teardown must retain and drain work after its caller-facing deadline"
+        )
+
+        await gate.release()
+        await drainTask.value
+
+        XCTAssertNil(contentHandler.loadHTML(for: messageId))
+    }
+
+    func testAccountTransitionDrainsUncooperativeRecoveryAndRejectsItsStaleWrite() async throws {
+        let messageId = "html-recovery-account-transition-\(UUID().uuidString)"
+        let attachmentId = "html-body-\(UUID().uuidString)"
+        let html = "<html><body><p>OLD_ACCOUNT_HTML</p></body></html>"
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTMLRecoveryAccountTransition-\(UUID().uuidString)", isDirectory: true)
+        let contentHandler = HTMLContentHandler(messagesDirectory: directory)
+        defer {
+            try? contentHandler.reopenAccountWork()
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let gate = HTMLRecoveryUncooperativeAttachmentGate(data: Data(html.utf8))
+        let mockAPIClient = MockGmailAPIClient()
+        mockAPIClient.getMessageResponses[messageId] = makeHTMLAttachmentMessage(
+            id: messageId,
+            attachmentId: attachmentId
+        )
+        mockAPIClient.getAttachmentOperation = { _, _ in
+            await gate.waitForReleaseIgnoringCancellation()
+        }
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler
+        )
+
+        let recoveryTask = Task {
+            await service.recoverHTMLContent(messageId: messageId)
+        }
+        await gate.waitUntilStarted()
+
+        contentHandler.closeAccountWork()
+        try await contentHandler.deleteAllHTMLFromClosedAccount()
+        let drainFinished = HTMLRecoveryThreadSafeFlag()
+        let drainTask = Task {
+            await service.closeAccountWorkAndAwait()
+            drainFinished.set()
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(
+            drainFinished.isSet,
+            "Account cleanup must wait for a provider call that ignores task cancellation"
+        )
+
+        await gate.release()
+        await drainTask.value
+        let staleRecovery = await recoveryTask.value
+        XCTAssertNil(staleRecovery)
+        XCTAssertNil(contentHandler.loadHTML(for: messageId))
+
+        try contentHandler.reopenAccountWork()
+        await service.reopenAccountWork()
+        mockAPIClient.getAttachmentOperation = nil
+        mockAPIClient.attachmentResponses["\(messageId):\(attachmentId)"] = Data(html.utf8)
+
+        let freshRecovery = await service.recoverHTMLContent(messageId: messageId)
+        XCTAssertEqual(freshRecovery, html)
+        XCTAssertEqual(contentHandler.loadHTML(for: messageId), html)
     }
 
     private func makeHTMLAttachmentMessage(id: String, attachmentId: String) -> GmailMessage {
@@ -750,5 +966,56 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
             ),
             parts: nil
         )
+    }
+}
+
+private actor HTMLRecoveryUncooperativeAttachmentGate {
+    private let data: Data
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Data, Never>] = []
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    func waitForReleaseIgnoringCancellation() async -> Data {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume(returning: data) }
+    }
+}
+
+private final class HTMLRecoveryThreadSafeFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
     }
 }

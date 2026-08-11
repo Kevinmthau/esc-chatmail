@@ -77,8 +77,13 @@ extension HTMLContentLoader {
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode,
         displayPurpose: HTMLDisplayPurpose,
-        originalHTMLPreference: OriginalEmailHTMLPreference
+        originalHTMLPreference: OriginalEmailHTMLPreference,
+        accountGeneration: HTMLContentAccountGeneration,
+        remoteImageAccountGeneration: HTMLRemoteImageAccountGeneration
     ) async -> PreparedLoadResult? {
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
         let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
 
         // Full original-email reader open path (preferHTML): JavaScript is disabled in every
@@ -102,15 +107,21 @@ extension HTMLContentLoader {
 
             let cachedRewrite = await remoteImageAttachmentFallback.cachedRiskyModernFormatImages(
                 in: safeHTML,
-                senderEmail: senderEmail
+                senderEmail: senderEmail,
+                expectedAccountGeneration: remoteImageAccountGeneration
             )
+            guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+                return nil
+            }
             if cachedRewrite.hasPendingUpdates {
                 warmRemoteImageAttachmentFallback(
                     in: safeHTML,
                     currentHTML: cachedRewrite.html,
                     messageId: messageId,
                     senderEmail: senderEmail,
-                    scope: .riskyModernFormat
+                    scope: .riskyModernFormat,
+                    accountGeneration: accountGeneration,
+                    remoteImageAccountGeneration: remoteImageAccountGeneration
                 )
             }
 
@@ -150,6 +161,9 @@ extension HTMLContentLoader {
                 canonicalHTML: sanitizedHTML,
                 includeRenderQuality: true
             )
+            guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+                return nil
+            }
             let evaluation = qualityEvaluator.evaluate(
                 parsedEmail: parsedEmail,
                 html: sanitizedHTML,
@@ -174,14 +188,20 @@ extension HTMLContentLoader {
         case .original:
             let cachedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
                 in: sanitizedHTML,
-                senderEmail: senderEmail
+                senderEmail: senderEmail,
+                expectedAccountGeneration: remoteImageAccountGeneration
             )
+            guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+                return nil
+            }
             if cachedRewrite.hasPendingUpdates {
                 warmRemoteImageAttachmentFallback(
                     in: sanitizedHTML,
                     currentHTML: cachedRewrite.html,
                     messageId: messageId,
-                    senderEmail: senderEmail
+                    senderEmail: senderEmail,
+                    accountGeneration: accountGeneration,
+                    remoteImageAccountGeneration: remoteImageAccountGeneration
                 )
             }
             // Skip a second full sanitize pass when the attachment-image rewrite changed nothing
@@ -200,14 +220,20 @@ extension HTMLContentLoader {
         case .preview:
             let cachedRewrite = await remoteImageAttachmentFallback.previewInlineAttachmentStyleImages(
                 in: sanitizedHTML,
-                senderEmail: senderEmail
+                senderEmail: senderEmail,
+                expectedAccountGeneration: remoteImageAccountGeneration
             )
+            guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+                return nil
+            }
             if cachedRewrite.hasPendingUpdates {
                 warmRemoteImageAttachmentFallback(
                     in: sanitizedHTML,
                     currentHTML: cachedRewrite.html,
                     messageId: messageId,
-                    senderEmail: senderEmail
+                    senderEmail: senderEmail,
+                    accountGeneration: accountGeneration,
+                    remoteImageAccountGeneration: remoteImageAccountGeneration
                 )
             }
             rewrittenHTML = cachedRewrite.html
@@ -235,34 +261,47 @@ extension HTMLContentLoader {
         currentHTML: String,
         messageId: String,
         senderEmail: String?,
-        scope: RemoteImageFallbackWarmupScope = .attachmentStyle
+        scope: RemoteImageFallbackWarmupScope = .attachmentStyle,
+        accountGeneration: HTMLContentAccountGeneration,
+        remoteImageAccountGeneration: HTMLRemoteImageAccountGeneration
     ) {
         let remoteImageAttachmentFallback = self.remoteImageAttachmentFallback
+        let contentHandler = self.contentHandler
         // Warm rewritten image data promptly so a near-immediate reopen can pick up the cached
         // result instead of waiting behind low-priority detached work.
         Task(priority: .userInitiated) {
+            guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+                return
+            }
             let warmedRewrite: HTMLRemoteImageAttachmentFallback.CachedRewriteResult
             switch scope {
             case .attachmentStyle:
                 _ = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
                     in: html,
-                    senderEmail: senderEmail
+                    senderEmail: senderEmail,
+                    expectedAccountGeneration: remoteImageAccountGeneration
                 )
                 warmedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
                     in: html,
-                    senderEmail: senderEmail
+                    senderEmail: senderEmail,
+                    expectedAccountGeneration: remoteImageAccountGeneration
                 )
             case .riskyModernFormat:
                 _ = await remoteImageAttachmentFallback.inlineRiskyModernFormatImages(
                     in: html,
-                    senderEmail: senderEmail
+                    senderEmail: senderEmail,
+                    expectedAccountGeneration: remoteImageAccountGeneration
                 )
                 warmedRewrite = await remoteImageAttachmentFallback.cachedRiskyModernFormatImages(
                     in: html,
-                    senderEmail: senderEmail
+                    senderEmail: senderEmail,
+                    expectedAccountGeneration: remoteImageAccountGeneration
                 )
             }
 
+            guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+                return
+            }
             if !warmedRewrite.hasPendingUpdates, warmedRewrite.html != currentHTML {
                 Log.debug(
                     "Warmed attachment-style remote image fallback for message \(messageId)",

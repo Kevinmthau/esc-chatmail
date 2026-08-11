@@ -387,6 +387,98 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertEqual(recoveryService.recoveryRequestCount, 0)
     }
 
+    func testLoadOriginalEmailSourceDoesNotStartCanonicalLoadInReopenedAccount() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "OriginalEmailCanonicalAccountBoundary-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        let renderedCache = RenderedMessageCache()
+        let canonicalLoader = PausingAccountTransitionCanonicalLoader(
+            contentHandler: handler,
+            pausePoint: .initialLoad
+        )
+        let sourceLoader = OriginalEmailSourceLoader(
+            canonicalContentLoader: canonicalLoader,
+            htmlContentLoader: HTMLContentLoader(
+                contentHandler: handler,
+                sanitizer: .shared,
+                recoveryService: MutableRecoveryService(contentHandler: handler)
+            ),
+            renderedMessageCache: renderedCache
+        )
+        let messageId = "stale-canonical-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let loadTask = Task {
+            await sourceLoader.loadOriginalEmailSourceToCompletion(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: "old account body",
+                senderEmail: "old-account@example.com",
+                subject: "Old account"
+            )
+        }
+
+        await canonicalLoader.waitForPause()
+        handler.closeAccountWork()
+        try await handler.deleteAllHTMLFromClosedAccount()
+        await renderedCache.closeAccountWorkAndClear()
+        try handler.reopenAccountWork()
+        await renderedCache.reopenAccountWork()
+        await canonicalLoader.release()
+
+        let source = await loadTask.value
+        XCTAssertNil(source)
+        XCTAssertNil(handler.loadHTML(for: messageId))
+    }
+
+    func testLoadOriginalEmailSourceDoesNotStartRecoveryInReopenedAccount() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "OriginalEmailRecoveryAccountBoundary-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        let renderedCache = RenderedMessageCache()
+        let canonicalLoader = PausingAccountTransitionCanonicalLoader(
+            contentHandler: handler,
+            pausePoint: .recovery
+        )
+        let sourceLoader = OriginalEmailSourceLoader(
+            canonicalContentLoader: canonicalLoader,
+            htmlContentLoader: HTMLContentLoader(
+                contentHandler: handler,
+                sanitizer: .shared,
+                recoveryService: MutableRecoveryService(contentHandler: handler)
+            ),
+            renderedMessageCache: renderedCache
+        )
+        let messageId = "stale-recovery-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let loadTask = Task {
+            await sourceLoader.loadOriginalEmailSourceToCompletion(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: "old account fallback",
+                senderEmail: "old-account@example.com",
+                subject: "Old account"
+            )
+        }
+
+        await canonicalLoader.waitForPause()
+        handler.closeAccountWork()
+        try await handler.deleteAllHTMLFromClosedAccount()
+        await renderedCache.closeAccountWorkAndClear()
+        try handler.reopenAccountWork()
+        await renderedCache.reopenAccountWork()
+        await canonicalLoader.release()
+
+        let source = await loadTask.value
+        XCTAssertNil(source)
+        XCTAssertNil(handler.loadHTML(for: messageId))
+    }
+
     func testEnsureOriginalEmailAvailable_returnsStoredDecodedHTMLImmediately() async throws {
         let messageId = "original-ensure-cache-hit-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
@@ -1028,6 +1120,172 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
                 remoteImageAttachmentFallback: remoteImageAttachmentFallback
             ),
             renderedMessageCache: renderedMessageCache
+        )
+    }
+}
+
+private actor PausingAccountTransitionCanonicalLoader: CanonicalEmailContentLoading {
+    enum PausePoint: Equatable {
+        case initialLoad
+        case recovery
+    }
+
+    private let contentHandler: HTMLContentHandler
+    private let pausePoint: PausePoint
+    private var didReachPause = false
+    private var isReleased = false
+    private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(contentHandler: HTMLContentHandler, pausePoint: PausePoint) {
+        self.contentHandler = contentHandler
+        self.pausePoint = pausePoint
+    }
+
+    func loadCanonicalEmailContent(
+        messageId: String,
+        bodyStorageURI _: String?,
+        bodyText: String?,
+        allowRecovery _: Bool
+    ) async -> CanonicalEmailContent? {
+        switch pausePoint {
+        case .initialLoad:
+            await pause()
+            return saveCanonicalContent(
+                messageId: messageId,
+                bodyText: bodyText,
+                expectedAccountGeneration: nil
+            )
+        case .recovery:
+            return unusableCanonicalContent(bodyText: bodyText)
+        }
+    }
+
+    func loadCanonicalEmailContent(
+        messageId: String,
+        bodyStorageURI _: String?,
+        bodyText: String?,
+        allowRecovery _: Bool,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
+    ) async -> CanonicalEmailContent? {
+        switch pausePoint {
+        case .initialLoad:
+            await pause()
+            guard let expectedAccountGeneration else { return nil }
+            return saveCanonicalContent(
+                messageId: messageId,
+                bodyText: bodyText,
+                expectedAccountGeneration: expectedAccountGeneration
+            )
+        case .recovery:
+            return unusableCanonicalContent(bodyText: bodyText)
+        }
+    }
+
+    func recoverCanonicalEmailContent(
+        messageId: String,
+        bodyText: String?
+    ) async -> CanonicalEmailContent? {
+        guard pausePoint == .recovery else { return nil }
+        await pause()
+        return saveRecoveredContent(
+            messageId: messageId,
+            bodyText: bodyText,
+            expectedAccountGeneration: nil
+        )
+    }
+
+    func recoverCanonicalEmailContent(
+        messageId: String,
+        bodyText: String?,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
+    ) async -> CanonicalEmailContent? {
+        guard pausePoint == .recovery,
+              let expectedAccountGeneration else {
+            return nil
+        }
+        await pause()
+        return saveRecoveredContent(
+            messageId: messageId,
+            bodyText: bodyText,
+            expectedAccountGeneration: expectedAccountGeneration
+        )
+    }
+
+    func waitForPause() async {
+        guard !didReachPause else { return }
+        await withCheckedContinuation { continuation in
+            pauseWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        isReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func pause() async {
+        didReachPause = true
+        let waiters = pauseWaiters
+        pauseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    private func saveCanonicalContent(
+        messageId: String,
+        bodyText: String?,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
+    ) -> CanonicalEmailContent? {
+        let html = "<html><body>old canonical account content</body></html>"
+        guard contentHandler.saveHTML(
+            html,
+            for: messageId,
+            expectedGeneration: expectedAccountGeneration
+        ) != nil else {
+            return nil
+        }
+        return CanonicalEmailContent(
+            html: html,
+            plainText: bodyText,
+            sourceKind: .html,
+            sourceLocation: .rawSourceHTML
+        )
+    }
+
+    private func unusableCanonicalContent(bodyText: String?) -> CanonicalEmailContent {
+        CanonicalEmailContent(
+            html: "<html><body></body></html>",
+            plainText: bodyText,
+            sourceKind: .html,
+            sourceLocation: .messageFile
+        )
+    }
+
+    private func saveRecoveredContent(
+        messageId: String,
+        bodyText: String?,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
+    ) -> CanonicalEmailContent? {
+        let html = "<html><body>old recovered account content</body></html>"
+        guard contentHandler.saveHTML(
+            html,
+            for: messageId,
+            expectedGeneration: expectedAccountGeneration
+        ) != nil else {
+            return nil
+        }
+        return CanonicalEmailContent(
+            html: html,
+            plainText: bodyText,
+            sourceKind: .recoveredHTML,
+            sourceLocation: .recoveredHTML
         )
     }
 }

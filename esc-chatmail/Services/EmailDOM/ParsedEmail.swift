@@ -5,6 +5,10 @@ struct ParsedEmailKey: Hashable, Sendable {
     let sourceSignature: String
 }
 
+struct ParsedEmailAccountGeneration: Equatable, Sendable {
+    fileprivate let value: UInt64
+}
+
 struct ParsedEmailRenderQualityFacts: Equatable, Sendable {
     let renderableHTML: String
     let metrics: EmailDocumentRenderQualityMetrics
@@ -129,10 +133,60 @@ protocol ParsedEmailProviding: Sendable {
         includePreviewImages: Bool
     ) async -> ParsedEmail?
 
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
+        includeRenderQuality: Bool,
+        includePreviewImages: Bool,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async -> ParsedEmail?
+
+    func captureAccountGeneration() async -> ParsedEmailAccountGeneration?
+    func isAccountGenerationCurrent(_ generation: ParsedEmailAccountGeneration) async -> Bool
+
     func invalidate(messageId: String) async
+    func invalidate(
+        messageId: String,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async
 }
 
 extension ParsedEmailProviding {
+    func captureAccountGeneration() async -> ParsedEmailAccountGeneration? {
+        nil
+    }
+
+    func isAccountGenerationCurrent(_ generation: ParsedEmailAccountGeneration) async -> Bool {
+        false
+    }
+
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
+        includeRenderQuality: Bool,
+        includePreviewImages: Bool,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async -> ParsedEmail? {
+        guard expectedAccountGeneration == nil else { return nil }
+        return await parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: includeRenderQuality,
+            includePreviewImages: includePreviewImages
+        )
+    }
+
+    func invalidate(
+        messageId: String,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async {
+        guard expectedAccountGeneration == nil else { return }
+        await invalidate(messageId: messageId)
+    }
+
     func parsedEmail(
         messageId: String,
         sourceSignature: String,
@@ -151,6 +205,22 @@ extension ParsedEmailProviding {
         messageId: String,
         sourceSignature: String,
         canonicalHTML: String,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async -> ParsedEmail? {
+        await parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: false,
+            includePreviewImages: false,
+            expectedAccountGeneration: expectedAccountGeneration
+        )
+    }
+
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
         includeRenderQuality: Bool
     ) async -> ParsedEmail? {
         await parsedEmail(
@@ -159,6 +229,23 @@ extension ParsedEmailProviding {
             canonicalHTML: canonicalHTML,
             includeRenderQuality: includeRenderQuality,
             includePreviewImages: false
+        )
+    }
+
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
+        includeRenderQuality: Bool,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async -> ParsedEmail? {
+        await parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: includeRenderQuality,
+            includePreviewImages: false,
+            expectedAccountGeneration: expectedAccountGeneration
         )
     }
 }
@@ -172,6 +259,8 @@ actor ParsedEmailProvider: ParsedEmailProviding {
     private var cacheOrder: [ParsedEmailKey] = []
     private var parseAttemptCount = 0
     private var parseFailureCount = 0
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
 
     init(
         countLimit: Int = 256,
@@ -188,6 +277,25 @@ actor ParsedEmailProvider: ParsedEmailProviding {
         includeRenderQuality: Bool = false,
         includePreviewImages: Bool = false
     ) async -> ParsedEmail? {
+        await parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: includeRenderQuality,
+            includePreviewImages: includePreviewImages,
+            expectedAccountGeneration: nil
+        )
+    }
+
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
+        includeRenderQuality: Bool = false,
+        includePreviewImages: Bool = false,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async -> ParsedEmail? {
+        guard accepts(expectedAccountGeneration) else { return nil }
         let key = ParsedEmailKey(messageId: messageId, sourceSignature: sourceSignature)
         let cached = cache[key]
         let cachedHasRequestedFacts = (!includeRenderQuality || cached?.renderQuality != nil)
@@ -236,8 +344,41 @@ actor ParsedEmailProvider: ParsedEmailProviding {
     }
 
     func invalidate(messageId: String) async {
+        await invalidate(messageId: messageId, expectedAccountGeneration: nil)
+    }
+
+    func invalidate(
+        messageId: String,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async {
+        guard accepts(expectedAccountGeneration) else { return }
         cache = cache.filter { $0.key.messageId != messageId }
         cacheOrder.removeAll { $0.messageId == messageId }
+    }
+
+    func clearAll() {
+        cache.removeAll()
+        cacheOrder.removeAll()
+    }
+
+    func closeAccountWorkAndClear() {
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+        clearAll()
+    }
+
+    func reopenAccountWork() {
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+    }
+
+    func captureAccountGeneration() async -> ParsedEmailAccountGeneration? {
+        guard acceptsAccountWork else { return nil }
+        return ParsedEmailAccountGeneration(value: accountGeneration)
+    }
+
+    func isAccountGenerationCurrent(_ generation: ParsedEmailAccountGeneration) async -> Bool {
+        accepts(generation)
     }
 
 #if DEBUG
@@ -257,6 +398,11 @@ actor ParsedEmailProvider: ParsedEmailProviding {
         Set(cache.keys.filter { $0.messageId == messageId }.map(\.sourceSignature))
     }
 #endif
+
+    private func accepts(_ expectedGeneration: ParsedEmailAccountGeneration?) -> Bool {
+        guard acceptsAccountWork else { return false }
+        return expectedGeneration.map { $0.value == accountGeneration } ?? true
+    }
 
     private func pruneStaleEntries(for messageId: String, keeping key: ParsedEmailKey) {
         let staleKeys = cache.keys.filter { $0.messageId == messageId && $0 != key }

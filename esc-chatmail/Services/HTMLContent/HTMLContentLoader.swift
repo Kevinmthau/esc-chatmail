@@ -1,6 +1,13 @@
 import CryptoKit
 import Foundation
 
+struct HTMLContentInvalidationAccountContext: Sendable {
+    let htmlContent: HTMLContentAccountGeneration
+    let resultCache: HTMLContentResultCacheAccountGeneration
+    let renderedMessage: RenderedMessageCacheAccountGeneration
+    let parsedEmail: ParsedEmailAccountGeneration?
+}
+
 enum HTMLContentCleanupMode: String, CaseIterable, Sendable {
     case none
     case quotedOnly
@@ -80,8 +87,8 @@ final class HTMLContentLoader {
     static let contentSourceDidChangeMessageIdUserInfoKey = "messageId"
     static let contentSourceDidChangeSourceSignatureUserInfoKey = "sourceSignature"
 
-    private let contentHandler: HTMLContentHandler
     // Internal (not private) so the +SourcePreparation extension can reach them.
+    let contentHandler: HTMLContentHandler
     let sanitizer: HTMLSanitizerService
     let remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback
     let qualityEvaluator: EmailRenderQualityEvaluator
@@ -109,6 +116,14 @@ final class HTMLContentLoader {
         self.recoveryService = recoveryService
     }
 
+    func captureAccountGeneration() -> HTMLContentAccountGeneration? {
+        contentHandler.captureAccountGeneration()
+    }
+
+    func isAccountGenerationCurrent(_ generation: HTMLContentAccountGeneration) -> Bool {
+        contentHandler.isAccountGenerationCurrent(generation)
+    }
+
     /// Loads HTML content for a message, trying multiple sources
     /// - Parameters:
     ///   - messageId: The message ID to load content for
@@ -126,8 +141,19 @@ final class HTMLContentLoader {
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode = .none,
         displayPurpose: HTMLDisplayPurpose = .preview,
-        originalHTMLPreference: OriginalEmailHTMLPreference = .automatic
+        originalHTMLPreference: OriginalEmailHTMLPreference = .automatic,
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
     ) async -> HTMLLoadResult {
+        guard let accountGeneration = expectedAccountGeneration ?? contentHandler.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration),
+              let resultCacheGeneration = resultCache.captureAccountGeneration() else {
+            return HTMLLoadResult(html: nil, source: .notFound)
+        }
+        guard let recoveryGeneration = await recoveryService.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration),
+              resultCache.isAccountGenerationCurrent(resultCacheGeneration) else {
+            return HTMLLoadResult(html: nil, source: .notFound)
+        }
         let normalizedFallbackText = normalizedMeaningfulPlainText(from: bodyText)
         let variantKey = cacheVariantKey(
             messageId: messageId,
@@ -144,8 +170,11 @@ final class HTMLContentLoader {
 
         // Method 1: Try loading from message ID.
         // Treat empty HTML as unusable so we can fall back to storage URI / recovery / plain text.
-        if contentHandler.htmlFileExists(for: messageId) {
-            if let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)),
+        if contentHandler.htmlFileExists(for: messageId, expectedGeneration: accountGeneration) {
+            if let html = canonicalHTMLSource(from: contentHandler.loadHTML(
+                for: messageId,
+                expectedGeneration: accountGeneration
+            )),
                !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if let result = await cachedOrPreparedHTMLResult(
                     html,
@@ -158,7 +187,9 @@ final class HTMLContentLoader {
                     cleanupMode: cleanupMode,
                     displayPurpose: displayPurpose,
                     originalHTMLPreference: originalHTMLPreference,
-                    variantKey: variantKey
+                    variantKey: variantKey,
+                    accountGeneration: accountGeneration,
+                    resultCacheGeneration: resultCacheGeneration
                 ) {
                     return result
                 }
@@ -171,10 +202,17 @@ final class HTMLContentLoader {
         if let urlString = bodyStorageURI,
            let url = StorageURIResolver.resolve(urlString),
            FileManager.default.fileExists(atPath: url.path) {
-            if let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)),
+            if let html = canonicalHTMLSource(from: contentHandler.loadHTML(
+                from: url,
+                expectedGeneration: accountGeneration
+            )),
                !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if !rejectedHTMLSources.isEmpty {
-                    invalidateCachedResults(messageId: messageId, sources: rejectedHTMLSources)
+                    invalidateCachedResults(
+                        messageId: messageId,
+                        sources: rejectedHTMLSources,
+                        expectedGeneration: resultCacheGeneration
+                    )
                     rejectedHTMLSources.removeAll()
                 }
                 if let result = await cachedOrPreparedHTMLResult(
@@ -188,7 +226,9 @@ final class HTMLContentLoader {
                     cleanupMode: cleanupMode,
                     displayPurpose: displayPurpose,
                     originalHTMLPreference: originalHTMLPreference,
-                    variantKey: variantKey
+                    variantKey: variantKey,
+                    accountGeneration: accountGeneration,
+                    resultCacheGeneration: resultCacheGeneration
                 ) {
                     return result
                 }
@@ -202,7 +242,11 @@ final class HTMLContentLoader {
            let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text) {
             if let html = canonicalHTMLSource(from: rawSourceHTML) {
                 if !rejectedHTMLSources.isEmpty {
-                    invalidateCachedResults(messageId: messageId, sources: rejectedHTMLSources)
+                    invalidateCachedResults(
+                        messageId: messageId,
+                        sources: rejectedHTMLSources,
+                        expectedGeneration: resultCacheGeneration
+                    )
                     rejectedHTMLSources.removeAll()
                 }
                 if let result = await cachedOrPreparedHTMLResult(
@@ -216,7 +260,9 @@ final class HTMLContentLoader {
                     cleanupMode: cleanupMode,
                     displayPurpose: displayPurpose,
                     originalHTMLPreference: originalHTMLPreference,
-                    variantKey: variantKey
+                    variantKey: variantKey,
+                    accountGeneration: accountGeneration,
+                    resultCacheGeneration: resultCacheGeneration
                 ) {
                     return result
                 }
@@ -226,13 +272,24 @@ final class HTMLContentLoader {
         }
 
         if !rejectedHTMLSources.isEmpty {
-            invalidateCachedResults(messageId: messageId) { _ in true }
-        } else if let cachedResult = resultCache.resultForVariant(variantKey as String) {
+            invalidateCachedResults(
+                messageId: messageId,
+                expectedGeneration: resultCacheGeneration
+            ) { _ in true }
+        } else if contentHandler.isAccountGenerationCurrent(accountGeneration),
+                  let cachedResult = resultCache.resultForVariant(
+                      variantKey as String,
+                      expectedGeneration: resultCacheGeneration
+                  ) {
             return cachedResult
         }
 
         // Method 4: Recovery - fetch from Gmail API if local content missing
-        if let recoveredHTML = await recoveryService.recoverHTMLContent(messageId: messageId),
+        if let recoveredHTML = await recoveryService.recoverHTMLContent(
+            messageId: messageId,
+            expectedAccountGeneration: recoveryGeneration
+        ),
+           contentHandler.isAccountGenerationCurrent(accountGeneration),
            let html = canonicalHTMLSource(from: recoveredHTML),
            let result = await cachedOrPreparedHTMLResult(
                html,
@@ -245,9 +302,15 @@ final class HTMLContentLoader {
                cleanupMode: cleanupMode,
                displayPurpose: displayPurpose,
                originalHTMLPreference: originalHTMLPreference,
-               variantKey: variantKey
+               variantKey: variantKey,
+               accountGeneration: accountGeneration,
+               resultCacheGeneration: resultCacheGeneration
            ) {
             return result
+        }
+
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return HTMLLoadResult(html: nil, source: .notFound)
         }
 
         Log.debug("loadContent: All HTML methods failed for \(messageId), falling back to plain text (bodyText=\(bodyText?.count ?? 0) chars)", category: .ui)
@@ -300,8 +363,13 @@ final class HTMLContentLoader {
         cleanupMode: HTMLContentCleanupMode = .none,
         displayPurpose: HTMLDisplayPurpose = .preview,
         originalHTMLPreference: OriginalEmailHTMLPreference = .automatic,
-        timeout: TimeInterval = 5.0
+        timeout: TimeInterval = 5.0,
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
     ) async -> HTMLLoadResult {
+        guard let accountGeneration = expectedAccountGeneration ?? contentHandler.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return HTMLLoadResult(html: nil, source: .notFound)
+        }
         let result = await withSoftTimeout(seconds: timeout) {
             await self.loadContent(
                 messageId: messageId,
@@ -312,8 +380,12 @@ final class HTMLContentLoader {
                 isDarkMode: isDarkMode,
                 cleanupMode: cleanupMode,
                 displayPurpose: displayPurpose,
-                originalHTMLPreference: originalHTMLPreference
+                originalHTMLPreference: originalHTMLPreference,
+                expectedAccountGeneration: accountGeneration
             )
+        }
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return HTMLLoadResult(html: nil, source: .notFound)
         }
         return result ?? HTMLLoadResult(html: nil, source: .notFound)
     }
@@ -342,6 +414,22 @@ final class HTMLContentLoader {
         bodyText: String? = nil,
         allowRecovery: Bool = true
     ) async -> CanonicalEmailContent? {
+        await loadCanonicalEmailContent(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            allowRecovery: allowRecovery,
+            expectedAccountGeneration: nil
+        )
+    }
+
+    func loadCanonicalEmailContent(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String? = nil,
+        allowRecovery: Bool,
+        expectedAccountGeneration: HTMLContentAccountGeneration?
+    ) async -> CanonicalEmailContent? {
         await CanonicalEmailContentLoader(
             contentHandler: contentHandler,
             recoveryService: recoveryService
@@ -349,7 +437,8 @@ final class HTMLContentLoader {
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
-            allowRecovery: allowRecovery
+            allowRecovery: allowRecovery,
+            expectedAccountGeneration: expectedAccountGeneration
         )
     }
 
@@ -362,8 +451,17 @@ final class HTMLContentLoader {
         senderEmail: String? = nil,
         subject: String? = nil,
         isDarkMode: Bool,
-        cleanupMode: HTMLContentCleanupMode = .none
+        cleanupMode: HTMLContentCleanupMode = .none,
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
     ) async -> String? {
+        guard let accountGeneration = expectedAccountGeneration ?? contentHandler.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
+        guard let remoteImageAccountGeneration = await remoteImageAttachmentFallback.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
         guard let normalizedCanonicalHTML = canonicalHTMLSource(from: canonicalHTML) else {
             return nil
         }
@@ -380,8 +478,13 @@ final class HTMLContentLoader {
             isDarkMode: isDarkMode,
             cleanupMode: cleanupMode,
             displayPurpose: .preview,
-            originalHTMLPreference: .automatic
+            originalHTMLPreference: .automatic,
+            accountGeneration: accountGeneration,
+            remoteImageAccountGeneration: remoteImageAccountGeneration
         ) else {
+            return nil
+        }
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
             return nil
         }
 
@@ -422,8 +525,14 @@ final class HTMLContentLoader {
         plainText: String? = nil,
         senderEmail: String? = nil,
         subject: String? = nil,
-        isDarkMode: Bool
+        isDarkMode: Bool,
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
     ) async -> PreparedOriginalHTML? {
+        guard let accountGeneration = expectedAccountGeneration ?? contentHandler.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration),
+              let resultCacheGeneration = resultCache.captureAccountGeneration() else {
+            return nil
+        }
         guard let normalizedCanonicalHTML = canonicalHTMLSource(from: canonicalHTML) else {
             return nil
         }
@@ -451,7 +560,9 @@ final class HTMLContentLoader {
             cleanupMode: .none,
             displayPurpose: .original,
             originalHTMLPreference: .preferHTML,
-            variantKey: variantKey
+            variantKey: variantKey,
+            accountGeneration: accountGeneration,
+            resultCacheGeneration: resultCacheGeneration
         ) else {
             return nil
         }
@@ -530,11 +641,86 @@ final class HTMLContentLoader {
         }
     }
 
+    /// Captures every cache generation needed to invalidate content without an
+    /// old account operation reaching into caches that have since reopened.
+    func captureInvalidationAccountContext(
+        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
+    ) async -> HTMLContentInvalidationAccountContext? {
+        guard let htmlContent = expectedAccountGeneration ?? contentHandler.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(htmlContent),
+              let resultCacheGeneration = resultCache.captureAccountGeneration(),
+              let renderedMessage = await RenderedMessageCache.shared.captureAccountGeneration() else {
+            return nil
+        }
+        let parsedEmail = await parsedEmailProvider.captureAccountGeneration()
+        guard contentHandler.isAccountGenerationCurrent(htmlContent),
+              resultCache.isAccountGenerationCurrent(resultCacheGeneration),
+              await RenderedMessageCache.shared.isAccountGenerationCurrent(renderedMessage) else {
+            return nil
+        }
+        if let parsedEmail,
+           !(await parsedEmailProvider.isAccountGenerationCurrent(parsedEmail)) {
+            return nil
+        }
+        return HTMLContentInvalidationAccountContext(
+            htmlContent: htmlContent,
+            resultCache: resultCacheGeneration,
+            renderedMessage: renderedMessage,
+            parsedEmail: parsedEmail
+        )
+    }
+
     /// Invalidates cached HTML content and awaits shared rendered/parsed cache invalidation.
     func invalidateContent(messageId: String) async {
-        invalidateCachedResults(messageId: messageId) { _ in true }
-        await RenderedMessageCache.shared.invalidate(messageId: messageId, reason: .explicit)
-        await parsedEmailProvider.invalidate(messageId: messageId)
+        guard let accountContext = await captureInvalidationAccountContext() else { return }
+        await invalidateContent(messageId: messageId, accountContext: accountContext)
+    }
+
+    func invalidateContent(
+        messageId: String,
+        accountContext: HTMLContentInvalidationAccountContext
+    ) async {
+        guard contentHandler.isAccountGenerationCurrent(accountContext.htmlContent),
+              resultCache.isAccountGenerationCurrent(accountContext.resultCache),
+              await RenderedMessageCache.shared.isAccountGenerationCurrent(
+                  accountContext.renderedMessage
+              ) else {
+            return
+        }
+        if let parsedEmail = accountContext.parsedEmail,
+           !(await parsedEmailProvider.isAccountGenerationCurrent(parsedEmail)) {
+            return
+        }
+
+        invalidateCachedResults(
+            messageId: messageId,
+            expectedGeneration: accountContext.resultCache
+        ) { _ in true }
+        await RenderedMessageCache.shared.invalidate(
+            messageId: messageId,
+            reason: .explicit,
+            expectedAccountGeneration: accountContext.renderedMessage
+        )
+        if let parsedEmail = accountContext.parsedEmail {
+            await parsedEmailProvider.invalidate(
+                messageId: messageId,
+                expectedAccountGeneration: parsedEmail
+            )
+        }
+    }
+
+    func closeAccountWorkAndClearCaches() async {
+        await remoteImageAttachmentFallback.closeAccountWorkAndAwait()
+        resultCache.closeAccountWorkAndClear()
+        await RenderedMessageCache.shared.closeAccountWorkAndClear()
+        await ParsedEmailProvider.shared.closeAccountWorkAndClear()
+    }
+
+    func reopenAccountWork() async {
+        await remoteImageAttachmentFallback.reopenAccountWork()
+        resultCache.reopenAccountWork()
+        await RenderedMessageCache.shared.reopenAccountWork()
+        await ParsedEmailProvider.shared.reopenAccountWork()
     }
 
     @MainActor
@@ -555,16 +741,25 @@ final class HTMLContentLoader {
 
     private func invalidateCachedResults(
         messageId: String,
-        sources: Set<HTMLLoadResult.HTMLLoadSource>
+        sources: Set<HTMLLoadResult.HTMLLoadSource>,
+        expectedGeneration: HTMLContentResultCacheAccountGeneration? = nil
     ) {
-        invalidateCachedResults(messageId: messageId) { sources.contains($0) }
+        invalidateCachedResults(
+            messageId: messageId,
+            expectedGeneration: expectedGeneration
+        ) { sources.contains($0) }
     }
 
     private func invalidateCachedResults(
         messageId: String,
+        expectedGeneration: HTMLContentResultCacheAccountGeneration? = nil,
         matching shouldInvalidate: (HTMLLoadResult.HTMLLoadSource) -> Bool
     ) {
-        resultCache.invalidate(messageId: messageId, matching: shouldInvalidate)
+        resultCache.invalidate(
+            messageId: messageId,
+            matching: shouldInvalidate,
+            expectedGeneration: expectedGeneration
+        )
     }
 
 #if DEBUG
@@ -593,7 +788,9 @@ final class HTMLContentLoader {
         cleanupMode: HTMLContentCleanupMode,
         displayPurpose: HTMLDisplayPurpose,
         originalHTMLPreference: OriginalEmailHTMLPreference,
-        variantKey: NSString
+        variantKey: NSString,
+        accountGeneration: HTMLContentAccountGeneration,
+        resultCacheGeneration: HTMLContentResultCacheAccountGeneration
     ) async -> HTMLLoadResult? {
         await cacheableOrPreparedHTMLResult(
             html,
@@ -606,7 +803,9 @@ final class HTMLContentLoader {
             cleanupMode: cleanupMode,
             displayPurpose: displayPurpose,
             originalHTMLPreference: originalHTMLPreference,
-            variantKey: variantKey
+            variantKey: variantKey,
+            accountGeneration: accountGeneration,
+            resultCacheGeneration: resultCacheGeneration
         )?.result
     }
 
@@ -621,8 +820,15 @@ final class HTMLContentLoader {
         cleanupMode: HTMLContentCleanupMode,
         displayPurpose: HTMLDisplayPurpose,
         originalHTMLPreference: OriginalEmailHTMLPreference,
-        variantKey: NSString
+        variantKey: NSString,
+        accountGeneration: HTMLContentAccountGeneration,
+        resultCacheGeneration: HTMLContentResultCacheAccountGeneration
     ) async -> CacheableHTMLLoadResult? {
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration),
+              let remoteImageAccountGeneration = await remoteImageAttachmentFallback.captureAccountGeneration(),
+              contentHandler.isAccountGenerationCurrent(accountGeneration) else {
+            return nil
+        }
         let sourceSignature = sourceSignature(for: html)
         let cacheKey = cacheKey(
             variantKey: variantKey,
@@ -630,7 +836,11 @@ final class HTMLContentLoader {
             sourceSignature: sourceSignature
         )
 
-        if let cachedResult = resultCache.result(forKey: cacheKey) {
+        if contentHandler.isAccountGenerationCurrent(accountGeneration),
+           let cachedResult = resultCache.result(
+               forKey: cacheKey,
+               expectedGeneration: resultCacheGeneration
+           ) {
             return CacheableHTMLLoadResult(result: cachedResult, shouldCache: true)
         }
 
@@ -644,8 +854,15 @@ final class HTMLContentLoader {
             isDarkMode: isDarkMode,
             cleanupMode: cleanupMode,
             displayPurpose: displayPurpose,
-            originalHTMLPreference: originalHTMLPreference
+            originalHTMLPreference: originalHTMLPreference,
+            accountGeneration: accountGeneration,
+            remoteImageAccountGeneration: remoteImageAccountGeneration
         ) else {
+            return nil
+        }
+
+        guard contentHandler.isAccountGenerationCurrent(accountGeneration),
+              resultCache.isAccountGenerationCurrent(resultCacheGeneration) else {
             return nil
         }
 
@@ -659,7 +876,9 @@ final class HTMLContentLoader {
                     cacheKey: cacheKey,
                     variantKey: variantKey,
                     messageId: messageId,
-                    sourceSignature: sourceSignature
+                    sourceSignature: sourceSignature,
+                    accountGeneration: accountGeneration,
+                    resultCacheGeneration: resultCacheGeneration
                 ),
                 shouldCache: wrapped.shouldCache
             )
@@ -675,11 +894,15 @@ final class HTMLContentLoader {
         cacheKey: NSString,
         variantKey: NSString,
         messageId: String,
-        sourceSignature: String
+        sourceSignature: String,
+        accountGeneration: HTMLContentAccountGeneration,
+        resultCacheGeneration: HTMLContentResultCacheAccountGeneration
     ) -> HTMLLoadResult {
         let result = HTMLLoadResult(html: html, source: source, sourceSignature: sourceSignature)
 
-        guard shouldCache else {
+        guard shouldCache,
+              contentHandler.isAccountGenerationCurrent(accountGeneration),
+              resultCache.isAccountGenerationCurrent(resultCacheGeneration) else {
             return result
         }
 
@@ -688,7 +911,8 @@ final class HTMLContentLoader {
             cacheKey: cacheKey,
             variantKey: variantKey,
             messageId: messageId,
-            cost: html.utf8.count
+            cost: html.utf8.count,
+            expectedGeneration: resultCacheGeneration
         )
 
         return result

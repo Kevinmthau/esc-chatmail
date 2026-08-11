@@ -151,6 +151,37 @@ final class RenderedMessageCacheTests: XCTestCase {
         XCTAssertEqual(artifacts?.wrappedOriginalHTMLByVariant[variantKey], "<html>fresh</html>")
     }
 
+    func testWrappedOriginalHTMLRejectsStaleAccountGenerationAfterReopen() async throws {
+        let cache = RenderedMessageCache()
+        let capturedOldGeneration = await cache.captureAccountGeneration()
+        let oldGeneration = try XCTUnwrap(capturedOldGeneration)
+        let producer = Counter()
+        let variantKey = RenderedMessageVariantKey("original-account-boundary")
+
+        await cache.closeAccountWorkAndClear()
+        await cache.reopenAccountWork()
+
+        let staleResult = await cache.cacheAwareWrappedOriginalHTML(
+            messageId: "shared-message",
+            sourceSignature: "old-account-source",
+            variantKey: variantKey,
+            expectedAccountGeneration: oldGeneration
+        ) {
+            await producer.increment()
+            return PreparedOriginalHTML(html: "<html>old account</html>", shouldCache: true)
+        }
+
+        let producerCount = await producer.value()
+        let staleArtifacts = await cache.artifacts(
+            messageId: "shared-message",
+            sourceSignature: "old-account-source"
+        )
+
+        XCTAssertNil(staleResult)
+        XCTAssertEqual(producerCount, 0)
+        XCTAssertNil(staleArtifacts)
+    }
+
     func testClearCancelsInFlightWorkAndDoesNotStoreResult() async throws {
         let cache = RenderedMessageCache()
         let gate = AsyncGate()

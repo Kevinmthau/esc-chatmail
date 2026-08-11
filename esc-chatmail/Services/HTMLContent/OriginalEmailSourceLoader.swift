@@ -109,6 +109,8 @@ extension OriginalEmailSourceLoading {
 }
 
 private struct OriginalEmailEnsureRequestKey: Hashable, Sendable {
+    let accountGeneration: HTMLContentAccountGeneration
+    let renderedAccountGeneration: RenderedMessageCacheAccountGeneration
     let messageId: String
     let currentHTMLSourceSignatureFingerprint: String
     let bodyStorageURIFingerprint: String
@@ -117,6 +119,8 @@ private struct OriginalEmailEnsureRequestKey: Hashable, Sendable {
     let subjectFingerprint: String
 
     init(
+        accountGeneration: HTMLContentAccountGeneration,
+        renderedAccountGeneration: RenderedMessageCacheAccountGeneration,
         messageId: String,
         currentHTMLSourceSignature: String?,
         bodyStorageURI: String?,
@@ -124,6 +128,8 @@ private struct OriginalEmailEnsureRequestKey: Hashable, Sendable {
         senderEmail: String?,
         subject: String?
     ) {
+        self.accountGeneration = accountGeneration
+        self.renderedAccountGeneration = renderedAccountGeneration
         self.messageId = messageId
         self.currentHTMLSourceSignatureFingerprint = Self.fingerprint(for: currentHTMLSourceSignature)
         self.bodyStorageURIFingerprint = Self.fingerprint(for: bodyStorageURI)
@@ -172,6 +178,14 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         subject: String?,
         timeout: TimeInterval = 5.0
     ) async -> OriginalEmailSource? {
+        guard let accountGeneration = htmlContentLoader.captureAccountGeneration(),
+              let renderedAccountGeneration = await renderedMessageCache.captureAccountGeneration(),
+              await accountGenerationsAreCurrent(
+                  html: accountGeneration,
+                  rendered: renderedAccountGeneration
+              ) else {
+            return nil
+        }
         // Soft timeout: if the load can't finish in `timeout` seconds, return nil
         // while the underlying work keeps running and warms caches
         // (recoveryTasks, inFlightResolutions) so a later load can succeed.
@@ -189,8 +203,16 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 bodyStorageURI: bodyStorageURI,
                 bodyText: bodyText,
                 senderEmail: senderEmail,
-                subject: subject
+                subject: subject,
+                accountGeneration: accountGeneration,
+                renderedAccountGeneration: renderedAccountGeneration
             )
+        }
+        guard await accountGenerationsAreCurrent(
+            html: accountGeneration,
+            rendered: renderedAccountGeneration
+        ) else {
+            return nil
         }
         return result ?? nil
     }
@@ -202,11 +224,21 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         senderEmail: String?,
         subject: String?
     ) async -> OriginalEmailSource? {
+        guard let accountGeneration = htmlContentLoader.captureAccountGeneration(),
+              let renderedAccountGeneration = await renderedMessageCache.captureAccountGeneration(),
+              await accountGenerationsAreCurrent(
+                  html: accountGeneration,
+                  rendered: renderedAccountGeneration
+              ) else {
+            return nil
+        }
         let currentHTMLSourceSignature = canonicalContentLoader.currentHTMLSourceSignature(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI
         )
         let requestKey = OriginalEmailEnsureRequestKey(
+            accountGeneration: accountGeneration,
+            renderedAccountGeneration: renderedAccountGeneration,
             messageId: messageId,
             currentHTMLSourceSignature: currentHTMLSourceSignature,
             bodyStorageURI: bodyStorageURI,
@@ -218,7 +250,13 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         // Coalesce only identical loader inputs and local source snapshots. The
         // same file/URI can be overwritten while recovery is in flight, and the
         // newer source must load immediately.
-        return await ensureCoordinator.deduplicated(key: requestKey) { [self] in
+        let source = await ensureCoordinator.deduplicated(key: requestKey) { [self] in
+            guard await accountGenerationsAreCurrent(
+                html: accountGeneration,
+                rendered: renderedAccountGeneration
+            ) else {
+                return nil
+            }
             let start = CFAbsoluteTimeGetCurrent()
             OriginalEmailTelemetry.log(
                 event: "original_email_opened",
@@ -231,7 +269,9 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 bodyStorageURI: bodyStorageURI,
                 bodyText: bodyText,
                 senderEmail: senderEmail,
-                subject: subject
+                subject: subject,
+                accountGeneration: accountGeneration,
+                renderedAccountGeneration: renderedAccountGeneration
             )
 
             let duration = CFAbsoluteTimeGetCurrent() - start
@@ -264,6 +304,13 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
 
             return source
         }
+        guard await accountGenerationsAreCurrent(
+            html: accountGeneration,
+            rendered: renderedAccountGeneration
+        ) else {
+            return nil
+        }
+        return source
     }
 
     func loadOriginalEmailSourceToCompletion(
@@ -273,11 +320,53 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         senderEmail: String?,
         subject: String?
     ) async -> OriginalEmailSource? {
+        guard let accountGeneration = htmlContentLoader.captureAccountGeneration(),
+              let renderedAccountGeneration = await renderedMessageCache.captureAccountGeneration(),
+              await accountGenerationsAreCurrent(
+                  html: accountGeneration,
+                  rendered: renderedAccountGeneration
+              ) else {
+            return nil
+        }
+        let source = await loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject,
+            accountGeneration: accountGeneration,
+            renderedAccountGeneration: renderedAccountGeneration
+        )
+        guard await accountGenerationsAreCurrent(
+            html: accountGeneration,
+            rendered: renderedAccountGeneration
+        ) else {
+            return nil
+        }
+        return source
+    }
+
+    private func loadOriginalEmailSourceToCompletion(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        accountGeneration: HTMLContentAccountGeneration,
+        renderedAccountGeneration: RenderedMessageCacheAccountGeneration
+    ) async -> OriginalEmailSource? {
+        guard await accountGenerationsAreCurrent(
+            html: accountGeneration,
+            rendered: renderedAccountGeneration
+        ) else {
+            return nil
+        }
         guard let canonicalContent = await canonicalContentLoader.loadCanonicalEmailContent(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
-            allowRecovery: true
+            allowRecovery: true,
+            expectedAccountGeneration: accountGeneration
         ) else {
             Log.diagnostic(
                 .htmlPreview,
@@ -285,6 +374,12 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 "OriginalEmailSourceLoader message \(messageId): no source",
                 category: .ui
             )
+            return nil
+        }
+        guard await accountGenerationsAreCurrent(
+            html: accountGeneration,
+            rendered: renderedAccountGeneration
+        ) else {
             return nil
         }
 
@@ -297,15 +392,21 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                     senderEmail: senderEmail,
                     subject: subject
                 ),
+                expectedAccountGeneration: renderedAccountGeneration,
                 producer: {
                     await self.prepareOriginalHTMLWithTelemetry(
                         canonicalHTML,
                         content: canonicalContent,
                         messageId: messageId,
                         senderEmail: senderEmail,
-                        subject: subject
+                        subject: subject,
+                        accountGeneration: accountGeneration
                     )
                 }
+           ),
+           await accountGenerationsAreCurrent(
+               html: accountGeneration,
+               rendered: renderedAccountGeneration
            ) {
             let source = OriginalEmailSource(
                 presentation: .html,
@@ -326,16 +427,30 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
             senderEmail: senderEmail,
-            subject: subject
+            subject: subject,
+            accountGeneration: accountGeneration
+           ),
+           await accountGenerationsAreCurrent(
+               html: accountGeneration,
+               rendered: renderedAccountGeneration
            ) {
             log(fallbackSource, messageId: messageId)
             return fallbackSource
         }
 
         if canonicalContent.hasHTMLSource,
+           await accountGenerationsAreCurrent(
+               html: accountGeneration,
+               rendered: renderedAccountGeneration
+           ),
            let recoveredContent = await canonicalContentLoader.recoverCanonicalEmailContent(
             messageId: messageId,
-            bodyText: bodyText
+            bodyText: bodyText,
+            expectedAccountGeneration: accountGeneration
+           ),
+           await accountGenerationsAreCurrent(
+               html: accountGeneration,
+               rendered: renderedAccountGeneration
            ),
            let recoveredHTML = recoveredContent.html,
            recoveredContent.sourceSignature != canonicalContent.sourceSignature,
@@ -347,15 +462,21 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                     senderEmail: senderEmail,
                     subject: subject
                 ),
+                expectedAccountGeneration: renderedAccountGeneration,
                 producer: {
                     await self.prepareOriginalHTMLWithTelemetry(
                         recoveredHTML,
                         content: recoveredContent,
                         messageId: messageId,
                         senderEmail: senderEmail,
-                        subject: subject
+                        subject: subject,
+                        accountGeneration: accountGeneration
                     )
                 }
+           ),
+           await accountGenerationsAreCurrent(
+               html: accountGeneration,
+               rendered: renderedAccountGeneration
            ) {
             let source = OriginalEmailSource(
                 presentation: .html,
@@ -370,7 +491,11 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             return source
         }
 
-        guard let plainText = canonicalContent.plainText else {
+        guard await accountGenerationsAreCurrent(
+                  html: accountGeneration,
+                  rendered: renderedAccountGeneration
+              ),
+              let plainText = canonicalContent.plainText else {
             Log.diagnostic(
                 .htmlPreview,
                 level: .info,
@@ -424,13 +549,26 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         senderEmail: String?,
         subject: String?
     ) async -> WarmedOriginalEmailHTML? {
+        guard let accountGeneration = htmlContentLoader.captureAccountGeneration(),
+              let renderedAccountGeneration = await renderedMessageCache.captureAccountGeneration(),
+              await accountGenerationsAreCurrent(
+                  html: accountGeneration,
+                  rendered: renderedAccountGeneration
+              ) else {
+            return nil
+        }
         guard let canonicalContent = await canonicalContentLoader.loadCanonicalEmailContent(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
-            allowRecovery: false
+            allowRecovery: false,
+            expectedAccountGeneration: accountGeneration
         ),
-              let canonicalHTML = canonicalContent.html else {
+              let canonicalHTML = canonicalContent.html,
+              await accountGenerationsAreCurrent(
+                  html: accountGeneration,
+                  rendered: renderedAccountGeneration
+              ) else {
             return nil
         }
 
@@ -447,15 +585,20 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 senderEmail: senderEmail,
                 subject: subject
             ),
+            expectedAccountGeneration: renderedAccountGeneration,
             producer: {
                 await self.prepareOriginalHTMLWithTelemetry(
                     canonicalHTML,
                     content: canonicalContent,
                     messageId: messageId,
                     senderEmail: senderEmail,
-                    subject: subject
+                    subject: subject,
+                    accountGeneration: accountGeneration
                 )
             }
+        ), await accountGenerationsAreCurrent(
+            html: accountGeneration,
+            rendered: renderedAccountGeneration
         ) else {
             return nil
         }
@@ -488,7 +631,8 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         content: CanonicalEmailContent,
         messageId: String,
         senderEmail: String?,
-        subject: String?
+        subject: String?,
+        accountGeneration: HTMLContentAccountGeneration
     ) async -> PreparedOriginalHTML? {
         let source = telemetrySourceName(sourceLocation: content.sourceLocation)
         let start = CFAbsoluteTimeGetCurrent()
@@ -506,7 +650,8 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             plainText: content.plainText,
             senderEmail: senderEmail,
             subject: subject,
-            isDarkMode: false
+            isDarkMode: false,
+            expectedAccountGeneration: accountGeneration
         )
 
         OriginalEmailTelemetry.log(
@@ -524,7 +669,8 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         bodyStorageURI: String?,
         bodyText: String?,
         senderEmail: String?,
-        subject: String?
+        subject: String?,
+        accountGeneration: HTMLContentAccountGeneration
     ) async -> OriginalEmailSource? {
         let fallback = await htmlContentLoader.loadContentWithTimeout(
             messageId: messageId,
@@ -536,7 +682,8 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             cleanupMode: .none,
             displayPurpose: .original,
             originalHTMLPreference: .preferHTML,
-            timeout: 5.0
+            timeout: 5.0,
+            expectedAccountGeneration: accountGeneration
         )
 
         guard fallback.presentation == .html,
@@ -572,6 +719,16 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         case .qualityFallback, .plainTextFallback, .notFound:
             return nil
         }
+    }
+
+    private func accountGenerationsAreCurrent(
+        html: HTMLContentAccountGeneration,
+        rendered: RenderedMessageCacheAccountGeneration
+    ) async -> Bool {
+        guard htmlContentLoader.isAccountGenerationCurrent(html) else {
+            return false
+        }
+        return await renderedMessageCache.isAccountGenerationCurrent(rendered)
     }
 
     private func log(_ source: OriginalEmailSource, messageId: String) {

@@ -445,6 +445,61 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
         )
         XCTAssertTrue(resolved.contains("src=\"data:image/"))
     }
+
+    func testAccountTransitionDrainsOldResolutionAndDoesNotRestoreItsCache() async {
+        let gate = AccountTransitionRequestGate()
+        let imageData = onePixelPNG
+        let service = HTMLRemoteImageAttachmentFallback { request in
+            await gate.waitForReleaseIgnoringCancellation()
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/open.php?id=old")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/png",
+                    "Content-Disposition": "attachment; filename=\"old.png\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+            return request.httpMethod == "HEAD" ? (Data(), response) : (imageData, response)
+        }
+        let html = #"<img src="https://cdn.example.com/open.php?id=old">"#
+
+        let oldResolution = Task {
+            await service.inlineAttachmentStyleImages(
+                in: html,
+                senderEmail: "old@example.com"
+            )
+        }
+        await gate.waitUntilStarted()
+
+        let closeFinished = RemoteImageFallbackThreadSafeFlag()
+        let closeTask = Task {
+            await service.closeAccountWorkAndAwait()
+            closeFinished.set()
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(
+            closeFinished.isSet,
+            "Account teardown must drain a cancellation-insensitive old image request"
+        )
+
+        await gate.release()
+        await closeTask.value
+        let oldResolutionHTML = await oldResolution.value
+        XCTAssertEqual(oldResolutionHTML, html)
+
+        await service.reopenAccountWork()
+        let freshLookup = await service.cachedInlineAttachmentStyleImages(
+            in: html,
+            senderEmail: "old@example.com"
+        )
+        XCTAssertEqual(freshLookup.html, html)
+        XCTAssertTrue(freshLookup.hasPendingUpdates)
+        XCTAssertTrue(freshLookup.needsWarmup)
+    }
 }
 
 private actor SlowRequestGate {
@@ -465,6 +520,55 @@ private actor SlowRequestGate {
         for continuation in pending {
             continuation.resume()
         }
+    }
+}
+
+private actor AccountTransitionRequestGate {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitForReleaseIgnoringCancellation() async {
+        started = true
+        let startWaiters = startWaiters
+        self.startWaiters.removeAll()
+        startWaiters.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        let releaseWaiters = releaseWaiters
+        self.releaseWaiters.removeAll()
+        releaseWaiters.forEach { $0.resume() }
+    }
+}
+
+private final class RemoteImageFallbackThreadSafeFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
     }
 }
 
