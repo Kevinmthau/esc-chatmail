@@ -674,6 +674,96 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
     }
 
+    // Revert-check: fails if `BackgroundSyncManager.handleHistorySyncError`'s
+    // `APIError.invalidHistoryPageToken` branch stops clearing the persisted continuation
+    // and replaying once from the frozen cursor (success flips to a retry-scheduling abort).
+    func testLegacyHistorySync_rejectedPersistedPageTokenReplaysOnceFromSavedCursor() async throws {
+        let stateManager = makeStateManager()
+        try await stateManager.storeHistoryId(
+            "history-100",
+            accountEmail: "user@example.com"
+        )
+        try stateManager.storeContinuationState(
+            .history(
+                startHistoryId: "history-100",
+                pageToken: "stale-token",
+                accountEmail: "user@example.com"
+            )
+        )
+        apiClient.listHistoryErrorsByPageToken["stale-token"] = APIError.invalidHistoryPageToken
+        apiClient.historyResponse = HistoryResponse(
+            history: nil,
+            nextPageToken: nil,
+            historyId: "history-200"
+        )
+
+        let success = await makeManager().performHistorySync(
+            startHistoryId: "history-100",
+            initialPageToken: "stale-token",
+            isProcessingTask: false,
+            accountEmail: "user@example.com"
+        )
+
+        XCTAssertTrue(success)
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stale-token", nil])
+        XCTAssertNil(stateManager.getContinuationState())
+        let storedHistoryId = await stateManager.getStoredHistoryId()
+        XCTAssertEqual(storedHistoryId, "history-200")
+    }
+
+    // Revert-check: fails if the replay stops passing `initialPageToken: nil` into
+    // `performHistorySync` — the guard could then fire again for the same run and issue
+    // more than the two pinned `listHistory` calls instead of scheduling a retry.
+    func testLegacyHistorySync_repeatedInvalidPageTokenStopsAfterSingleReplay() async throws {
+        let stateManager = makeStateManager()
+        let continuation = BackgroundSyncContinuationState.history(
+            startHistoryId: "history-100",
+            pageToken: "stale-token",
+            accountEmail: "user@example.com"
+        )
+        try stateManager.storeContinuationState(continuation)
+        apiClient.listHistoryErrorsByPageToken["stale-token"] = APIError.invalidHistoryPageToken
+        apiClient.listHistoryError = APIError.invalidHistoryPageToken
+
+        let success = await makeManager().performHistorySync(
+            startHistoryId: "history-100",
+            initialPageToken: "stale-token",
+            isProcessingTask: false,
+            accountEmail: "user@example.com"
+        )
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stale-token", nil])
+        XCTAssertNil(stateManager.getContinuationState())
+        XCTAssertEqual(taskScheduler.retryBackoffs, [60])
+    }
+
+    // HONEST SCOPE: this test survives a full revert of the recovery branch — it pins the
+    // guard's *scope*, failing only if the `invalidHistoryPageToken` match broadens so an
+    // unrelated abort also discards the persisted continuation token.
+    func testLegacyHistorySync_unrelatedAbortDoesNotDiscardPersistedPageToken() async throws {
+        let stateManager = makeStateManager()
+        let continuation = BackgroundSyncContinuationState.history(
+            startHistoryId: "history-100",
+            pageToken: "stale-token",
+            accountEmail: "user@example.com"
+        )
+        try stateManager.storeContinuationState(continuation)
+        apiClient.listHistoryErrorsByPageToken["stale-token"] = APIError.invalidData("bad response")
+
+        let success = await makeManager().performHistorySync(
+            startHistoryId: "history-100",
+            initialPageToken: "stale-token",
+            isProcessingTask: false,
+            accountEmail: "user@example.com"
+        )
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stale-token"])
+        XCTAssertEqual(stateManager.getContinuationState(), continuation)
+        XCTAssertEqual(taskScheduler.retryBackoffs, [60])
+    }
+
     func testHistoryContinuationCompatibility_requiresMatchingAccountAndCursor() {
         let continuationState = BackgroundSyncContinuationState.history(
             startHistoryId: "history-100",

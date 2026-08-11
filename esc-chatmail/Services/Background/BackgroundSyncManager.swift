@@ -313,7 +313,10 @@ final class BackgroundSyncManager {
         }
     }
 
-    private func performHistorySync(
+    /// Performs the retired delta writer's history walk. Internal so its
+    /// persisted-continuation recovery can be pinned without constructing a
+    /// private `BGTask` subclass in tests.
+    func performHistorySync(
         startHistoryId: String,
         initialPageToken: String? = nil,
         isProcessingTask: Bool,
@@ -408,6 +411,26 @@ final class BackgroundSyncManager {
         isProcessingTask: Bool,
         accountEmail: String?
     ) async -> Bool {
+        // A rejected persisted page token does not invalidate the frozen
+        // history cursor. Drop only that token and replay from the cursor once;
+        // the recursive call has no initial token, which bounds recovery if
+        // Gmail rejects the replay too.
+        if initialPageToken != nil,
+           let apiError = error as? APIError,
+           case .invalidHistoryPageToken = apiError {
+            stateManager.clearContinuationState()
+            Log.warning(
+                "Cleared rejected background history continuation and replaying from its saved cursor",
+                category: .background
+            )
+            return await performHistorySync(
+                startHistoryId: startHistoryId,
+                initialPageToken: nil,
+                isProcessingTask: isProcessingTask,
+                accountEmail: accountEmail
+            )
+        }
+
         let action = errorHandler.handleError(error)
 
         switch action {

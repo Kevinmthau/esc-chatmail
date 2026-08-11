@@ -100,6 +100,10 @@ extension GmailAPIClient {
     }
 
     private nonisolated static func isAmbiguousSendFailure(_ error: Error) -> Bool {
+        if error is GmailAPIClient.RetryCancelledBeforeRetransmission {
+            return false
+        }
+
         if error is CancellationError {
             return true
         }
