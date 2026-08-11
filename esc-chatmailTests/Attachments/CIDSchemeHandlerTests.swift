@@ -63,13 +63,18 @@ final class CIDSchemeHandlerTests: XCTestCase {
         XCTAssertEqual(fallbackTask.receivedData, transparentPixel)
         XCTAssertEqual(apiClient.getAttachmentCallCount, 0)
 
-        let localPath = AttachmentPaths.originalPath(idOrUUID: "att-cid-later-local-\(UUID().uuidString)", ext: "png")
+        let attachmentId = "att-cid-later-local"
+        let localPath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentId,
+            ext: "png"
+        )
         let localData = Data([0x89, 0x50, 0x4E, 0x47, 0x44])
         XCTAssertTrue(AttachmentPaths.saveData(localData, to: localPath))
         defer { AttachmentPaths.deleteFile(at: localPath) }
 
         _ = AttachmentBuilder()
-            .withId("att-cid-later-local")
+            .withId(attachmentId)
             .withFilename("later.png")
             .withMimeType("image/png")
             .withContentId("later@example.com")
@@ -145,6 +150,13 @@ final class CIDSchemeHandlerTests: XCTestCase {
         defer { AttachmentPaths.deleteFile(at: persistedLocalURL) }
 
         XCTAssertEqual(AttachmentPaths.loadData(from: persistedLocalURL), imageData)
+        XCTAssertTrue(
+            AttachmentPaths.usesRemoteIdentity(
+                persistedLocalURL,
+                messageId: message.id,
+                attachmentId: attachment.id!
+            )
+        )
     }
 
     func testOnDemandFallbackFailureRefreshesFailedTimestamp() async throws {
@@ -212,7 +224,15 @@ final class CIDSchemeHandlerTests: XCTestCase {
         let apiClient = MockGmailAPIClient()
         apiClient.attachmentResponses["\(message.id):\(attachment.id!)"] = imageData
         apiClient.artificialDelay = 0.15
-        defer { AttachmentPaths.deleteFile(at: AttachmentPaths.originalPath(idOrUUID: "att-cid-cancel", ext: "png")) }
+        defer {
+            AttachmentPaths.deleteFile(
+                at: AttachmentPaths.originalPath(
+                    messageId: message.id,
+                    attachmentId: "att-cid-cancel",
+                    ext: "png"
+                )
+            )
+        }
 
         let unexpectedCompletion = expectation(description: "stopped cid scheme task should not complete")
         unexpectedCompletion.isInverted = true
@@ -261,7 +281,15 @@ final class CIDSchemeHandlerTests: XCTestCase {
         let apiClient = MockGmailAPIClient()
         apiClient.attachmentResponses["\(message.id):\(attachment.id!)"] = imageData
         apiClient.artificialDelay = 0.1
-        defer { AttachmentPaths.deleteFile(at: AttachmentPaths.originalPath(idOrUUID: "att-cid-coalesce", ext: "png")) }
+        defer {
+            AttachmentPaths.deleteFile(
+                at: AttachmentPaths.originalPath(
+                    messageId: message.id,
+                    attachmentId: "att-cid-coalesce",
+                    ext: "png"
+                )
+            )
+        }
 
         let firstFinished = expectation(description: "first cid scheme task finished")
         let secondFinished = expectation(description: "second cid scheme task finished")
@@ -292,17 +320,22 @@ final class CIDSchemeHandlerTests: XCTestCase {
 
     func testCIDResolutionUsesObjectIDAfterViewContextObjectsAreReleased() async throws {
         AttachmentPaths.setupDirectories()
-        let localPath = AttachmentPaths.originalPath(idOrUUID: "cid-objectid-\(UUID().uuidString)", ext: "png")
-        let localData = Data([0x89, 0x50, 0x4E, 0x47, 0x11])
-        XCTAssertTrue(AttachmentPaths.saveData(localData, to: localPath))
-        defer { AttachmentPaths.deleteFile(at: localPath) }
-
         var message: Message? = MessageBuilder()
             .withId("message-cid-objectid")
             .withAttachments()
             .build(in: context)
+        let attachmentId = "att-cid-objectid"
+        let localPath = AttachmentPaths.originalPath(
+            messageId: try XCTUnwrap(message).id,
+            attachmentId: attachmentId,
+            ext: "png"
+        )
+        let localData = Data([0x89, 0x50, 0x4E, 0x47, 0x11])
+        XCTAssertTrue(AttachmentPaths.saveData(localData, to: localPath))
+        defer { AttachmentPaths.deleteFile(at: localPath) }
+
         AttachmentBuilder()
-            .withId("att-cid-objectid")
+            .withId(attachmentId)
             .withFilename("objectid.png")
             .withMimeType("image/png")
             .withContentId("objectid@example.com")
@@ -348,7 +381,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withAttachments()
             .build(in: context)
         AttachmentBuilder()
-            .withId("att-cid-local")
+            .withId("local_cid-attachment")
             .withFilename("local.png")
             .withMimeType("image/png")
             .withContentId("local@example.com")
@@ -382,6 +415,127 @@ final class CIDSchemeHandlerTests: XCTestCase {
         XCTAssertEqual(apiClient.getAttachmentCallCount, 0)
     }
 
+    func testLegacySynthesizedInlinePathDoesNotRenderSiblingMessageBytes() async throws {
+        AttachmentPaths.setupDirectories()
+        let attachmentID = "local_inline_reused-metadata-hash"
+        let legacyPath = AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "png")
+        let staleData = Data([0x89, 0x50, 0x4E, 0x47, 0x33])
+        XCTAssertTrue(AttachmentPaths.saveData(staleData, to: legacyPath))
+        defer { AttachmentPaths.deleteFile(at: legacyPath) }
+
+        let message = MessageBuilder()
+            .withId("message-cid-legacy-inline")
+            .withAttachments()
+            .build(in: context)
+        AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("inline.png")
+            .withMimeType("image/png")
+            .withContentId("legacy-inline@example.com")
+            .downloaded()
+            .withLocalURL(legacyPath)
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        let didFinish = expectation(description: "legacy inline cid uses safe fallback")
+        let task = MockURLSchemeTask(
+            url: try XCTUnwrap(URL(string: "cid:legacy-inline@example.com")),
+            didComplete: { didFinish.fulfill() }
+        )
+        let stack = testStack!
+        let handler = CIDSchemeHandler(
+            message: message,
+            apiClient: apiClient,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+
+        handler.webView(WKWebView(), start: task)
+
+        await fulfillment(of: [didFinish], timeout: 2.0)
+        XCTAssertNil(task.error)
+        XCTAssertEqual(task.response?.mimeType, "image/gif")
+        XCTAssertNotEqual(task.receivedData, staleData)
+        XCTAssertEqual(apiClient.getMessageCallCount, 1)
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 0)
+    }
+
+    func testLegacySynthesizedInlineCIDRecoversOnlyAuthoritativeMessageBytes() async throws {
+        AttachmentPaths.setupDirectories()
+        let messageID = "message-cid-legacy-inline-recovery"
+        let authoritativeData = Data([0x89, 0x50, 0x4E, 0x47, 0x45, 0x53, 0x43])
+        let recoveredMessage = makeSynthesizedInlineMessage(
+            messageID: messageID,
+            data: authoritativeData,
+            partID: "2.1",
+            filename: "inline.png",
+            mimeType: "image/png",
+            contentID: "legacy-recovery@example.com"
+        )
+        let legacyPath = AttachmentPaths.originalPath(
+            idOrUUID: recoveredMessage.attachmentID,
+            ext: "png"
+        )
+        let staleSiblingData = Data("stale sibling bytes".utf8)
+        XCTAssertTrue(AttachmentPaths.saveData(staleSiblingData, to: legacyPath))
+
+        let message = MessageBuilder()
+            .withId(messageID)
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId(recoveredMessage.attachmentID)
+            .withFilename("inline.png")
+            .withMimeType("image/png")
+            .withContentId("legacy-recovery@example.com")
+            .downloaded()
+            .withLocalURL(legacyPath)
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        apiClient.getMessageResponses[messageID] = recoveredMessage.message
+        let didFinish = expectation(description: "legacy synthesized cid recovery finished")
+        let task = MockURLSchemeTask(
+            url: try XCTUnwrap(URL(string: "cid:legacy-recovery@example.com")),
+            didComplete: { didFinish.fulfill() }
+        )
+        let stack = testStack!
+        let handler = CIDSchemeHandler(
+            message: message,
+            apiClient: apiClient,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+
+        handler.webView(WKWebView(), start: task)
+
+        await fulfillment(of: [didFinish], timeout: 2.0)
+        let persistedPath: String? = try await testStack.performBackgroundTask { context in
+            (try? context.existingObject(with: attachment.objectID) as? Attachment)?.localURL
+        }
+        defer {
+            AttachmentPaths.deleteFile(at: legacyPath)
+            AttachmentPaths.deleteFile(at: persistedPath)
+        }
+
+        XCTAssertNil(task.error)
+        XCTAssertEqual(task.response?.mimeType, "image/png")
+        XCTAssertEqual(task.receivedData, authoritativeData)
+        XCTAssertNotEqual(task.receivedData, staleSiblingData)
+        XCTAssertEqual(apiClient.getMessageCallCount, 1)
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 0)
+        XCTAssertTrue(
+            AttachmentPaths.isReadableStoragePath(
+                persistedPath,
+                messageId: messageID,
+                attachmentId: recoveredMessage.attachmentID
+            )
+        )
+        XCTAssertEqual(AttachmentPaths.loadData(from: persistedPath), authoritativeData)
+    }
+
     private func waitUntil(
         timeout: TimeInterval,
         file: StaticString = #filePath,
@@ -407,6 +561,62 @@ final class CIDSchemeHandlerTests: XCTestCase {
             }
             return (attachment.state, attachment.lastDownloadFailedAt)
         }
+    }
+
+    private func makeSynthesizedInlineMessage(
+        messageID: String,
+        data: Data,
+        partID: String,
+        filename: String,
+        mimeType: String,
+        contentID: String
+    ) -> (attachmentID: String, message: GmailMessage) {
+        let attachmentID = AttachmentPaths.synthesizedInlineAttachmentID(
+            partId: partID,
+            trimmedFilename: filename,
+            mimeType: mimeType,
+            contentId: contentID,
+            size: data.count
+        )
+        let encodedData = data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let part = MessagePart(
+            partId: partID,
+            mimeType: mimeType,
+            filename: filename,
+            headers: [
+                MessageHeader(name: "Content-ID", value: "<\(contentID)>"),
+                MessageHeader(name: "Content-Disposition", value: "inline")
+            ],
+            body: MessageBody(
+                size: data.count,
+                data: encodedData,
+                attachmentId: nil
+            ),
+            parts: nil
+        )
+        return (
+            attachmentID,
+            GmailMessage(
+                id: messageID,
+                threadId: "thread-\(messageID)",
+                labelIds: ["INBOX"],
+                snippet: nil,
+                historyId: nil,
+                internalDate: nil,
+                payload: MessagePart(
+                    partId: "",
+                    mimeType: "multipart/related",
+                    filename: nil,
+                    headers: nil,
+                    body: nil,
+                    parts: [part]
+                ),
+                sizeEstimate: data.count
+            )
+        )
     }
 }
 

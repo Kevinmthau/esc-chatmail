@@ -51,15 +51,28 @@ enum InlineCIDAttachmentPrefetchScheduler {
     static func schedule(
         _ request: InlineCIDAttachmentPrefetchRequest,
         in context: NSManagedObjectContext,
-        prefetcher: InlineCIDAttachmentPrefetcher = .shared
+        prefetcher: InlineCIDAttachmentPrefetcher = .shared,
+        accountWorkRegistry: AttachmentAccountWorkRegistry = .shared
     ) {
         guard !request.isEmpty else { return }
+        guard let admission = accountWorkRegistry.captureAdmissionToken() else { return }
 
         if !context.hasChanges {
-            Task(priority: .utility) {
-                await prefetcher.prefetch(request)
-            }
+            startPrefetch(
+                [request],
+                admission: admission,
+                prefetcher: prefetcher,
+                accountWorkRegistry: accountWorkRegistry
+            )
             return
+        }
+
+        if let existingObserver = context.userInfo[contextSaveObserverUserInfoKey]
+            as? PendingInlineCIDAttachmentPrefetchSaveObserver,
+           !existingObserver.matches(admission) {
+            existingObserver.invalidate()
+            context.userInfo.removeObject(forKey: pendingRequestsUserInfoKey)
+            context.userInfo.removeObject(forKey: contextSaveObserverUserInfoKey)
         }
 
         var pending = context.userInfo[pendingRequestsUserInfoKey] as? [String: InlineCIDAttachmentPrefetchRequest] ?? [:]
@@ -73,7 +86,9 @@ enum InlineCIDAttachmentPrefetchScheduler {
         if context.userInfo[contextSaveObserverUserInfoKey] == nil {
             context.userInfo[contextSaveObserverUserInfoKey] = PendingInlineCIDAttachmentPrefetchSaveObserver(
                 context: context,
-                prefetcher: prefetcher
+                prefetcher: prefetcher,
+                accountWorkRegistry: accountWorkRegistry,
+                admission: admission
             )
         }
     }
@@ -83,8 +98,19 @@ enum InlineCIDAttachmentPrefetchScheduler {
         return Array(pending.values)
     }
 
+    static func pendingAdmissionToken(
+        in context: NSManagedObjectContext
+    ) -> AttachmentAccountWorkAdmissionToken? {
+        let observer = context.userInfo[contextSaveObserverUserInfoKey]
+            as? PendingInlineCIDAttachmentPrefetchSaveObserver
+        return observer?.admissionToken
+    }
+
     fileprivate static func takePendingRequests(from context: NSManagedObjectContext) -> [InlineCIDAttachmentPrefetchRequest] {
+        let observer = context.userInfo[contextSaveObserverUserInfoKey]
+            as? PendingInlineCIDAttachmentPrefetchSaveObserver
         defer {
+            observer?.invalidate()
             context.userInfo.removeObject(forKey: pendingRequestsUserInfoKey)
             context.userInfo.removeObject(forKey: contextSaveObserverUserInfoKey)
         }
@@ -92,18 +118,44 @@ enum InlineCIDAttachmentPrefetchScheduler {
         let pending = context.userInfo[pendingRequestsUserInfoKey] as? [String: InlineCIDAttachmentPrefetchRequest] ?? [:]
         return Array(pending.values)
     }
+
+    fileprivate static func startPrefetch(
+        _ requests: [InlineCIDAttachmentPrefetchRequest],
+        admission: AttachmentAccountWorkAdmissionToken,
+        prefetcher: InlineCIDAttachmentPrefetcher,
+        accountWorkRegistry: AttachmentAccountWorkRegistry
+    ) {
+        _ = accountWorkRegistry.startDetachedOperation(
+            for: admission,
+            priority: .utility
+        ) { generation in
+            guard generation.isActive else { return }
+            await prefetcher.prefetch(requests, generation: generation)
+        }
+    }
 }
 
 private final class PendingInlineCIDAttachmentPrefetchSaveObserver: NSObject {
     private weak var context: NSManagedObjectContext?
     private let prefetcher: InlineCIDAttachmentPrefetcher
+    private let accountWorkRegistry: AttachmentAccountWorkRegistry
+    private let admission: AttachmentAccountWorkAdmissionToken
+    private var isObserving = true
+
+    var admissionToken: AttachmentAccountWorkAdmissionToken {
+        admission
+    }
 
     init(
         context: NSManagedObjectContext,
-        prefetcher: InlineCIDAttachmentPrefetcher
+        prefetcher: InlineCIDAttachmentPrefetcher,
+        accountWorkRegistry: AttachmentAccountWorkRegistry,
+        admission: AttachmentAccountWorkAdmissionToken
     ) {
         self.context = context
         self.prefetcher = prefetcher
+        self.accountWorkRegistry = accountWorkRegistry
+        self.admission = admission
         super.init()
         NotificationCenter.default.addObserver(
             self,
@@ -114,6 +166,16 @@ private final class PendingInlineCIDAttachmentPrefetchSaveObserver: NSObject {
     }
 
     deinit {
+        invalidate()
+    }
+
+    func matches(_ admission: AttachmentAccountWorkAdmissionToken) -> Bool {
+        self.admission == admission
+    }
+
+    func invalidate() {
+        guard isObserving else { return }
+        isObserving = false
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -121,12 +183,14 @@ private final class PendingInlineCIDAttachmentPrefetchSaveObserver: NSObject {
         guard let context else { return }
 
         let requests = InlineCIDAttachmentPrefetchScheduler.takePendingRequests(from: context)
-        NotificationCenter.default.removeObserver(self)
         guard !requests.isEmpty else { return }
 
-        Task(priority: .utility) {
-            await prefetcher.prefetch(requests)
-        }
+        InlineCIDAttachmentPrefetchScheduler.startPrefetch(
+            requests,
+            admission: admission,
+            prefetcher: prefetcher,
+            accountWorkRegistry: accountWorkRegistry
+        )
     }
 }
 
@@ -184,19 +248,42 @@ actor InlineCIDAttachmentPrefetcher {
     }
 
     func prefetch(_ requests: [InlineCIDAttachmentPrefetchRequest]) async {
+        await prefetch(requests, generation: nil)
+    }
+
+    func prefetch(
+        _ requests: [InlineCIDAttachmentPrefetchRequest],
+        generation: AttachmentAccountWorkGeneration
+    ) async {
+        await prefetch(requests, generation: Optional(generation))
+    }
+
+    private func prefetch(
+        _ requests: [InlineCIDAttachmentPrefetchRequest],
+        generation: AttachmentAccountWorkGeneration?
+    ) async {
         for request in requests {
-            await prefetch(request)
+            guard isActive(generation) else { return }
+            await prefetch(request, generation: generation)
         }
     }
 
     func prefetch(_ request: InlineCIDAttachmentPrefetchRequest) async {
-        guard !request.isEmpty else { return }
+        await prefetch(request, generation: nil)
+    }
+
+    private func prefetch(
+        _ request: InlineCIDAttachmentPrefetchRequest,
+        generation: AttachmentAccountWorkGeneration?
+    ) async {
+        guard !request.isEmpty, isActive(generation) else { return }
 
         let context = makeBackgroundContext()
         let candidates = await candidates(for: request, in: context)
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty, isActive(generation) else { return }
 
         for candidate in candidates {
+            guard isActive(generation) else { return }
             guard beginPrefetch(candidate.key) else {
                 Log.debug(
                     "InlineCIDAttachmentPrefetcher: duplicate eager fetch skipped for message \(candidate.messageId) attachment \(candidate.attachmentID)",
@@ -205,13 +292,32 @@ actor InlineCIDAttachmentPrefetcher {
                 continue
             }
 
-            Log.debug(
-                "InlineCIDAttachmentPrefetcher: eager fetch started for message \(candidate.messageId) cid=\(candidate.normalizedContentID ?? "nil") attachment=\(candidate.attachmentID)",
-                category: .attachment
+            await download(
+                candidate,
+                in: context,
+                generation: generation
             )
-            await downloadAttachment(candidate.objectID, candidate.messageId, context)
-            finishPrefetch(candidate.key)
         }
+    }
+
+    private func download(
+        _ candidate: PrefetchCandidate,
+        in context: NSManagedObjectContext,
+        generation: AttachmentAccountWorkGeneration?
+    ) async {
+        defer { finishPrefetch(candidate.key) }
+        guard isActive(generation) else { return }
+
+        Log.debug(
+            "InlineCIDAttachmentPrefetcher: eager fetch started for message \(candidate.messageId) cid=\(candidate.normalizedContentID ?? "nil") attachment=\(candidate.attachmentID)",
+            category: .attachment
+        )
+        await downloadAttachment(candidate.objectID, candidate.messageId, context)
+    }
+
+    private func isActive(_ generation: AttachmentAccountWorkGeneration?) -> Bool {
+        guard !Task.isCancelled else { return false }
+        return generation?.isActive ?? true
     }
 
     private func beginPrefetch(_ key: PrefetchKey) -> Bool {
@@ -284,7 +390,8 @@ actor InlineCIDAttachmentPrefetcher {
                     continue
                 }
 
-                guard !attachmentID.hasPrefix("local_") else {
+                guard !attachmentID.hasPrefix("local_") ||
+                        attachmentID.hasPrefix("local_inline_") else {
                     continue
                 }
 
@@ -349,7 +456,14 @@ actor InlineCIDAttachmentPrefetcher {
     }
 
     private static func hasUsableLocalFile(_ attachment: Attachment) -> Bool {
-        guard let localURL = attachment.localURL,
+        guard let messageId = attachment.message?.id,
+              let attachmentId = attachment.id,
+              let localURL = attachment.localURL,
+              AttachmentPaths.isReadableStoragePath(
+                  localURL,
+                  messageId: messageId,
+                  attachmentId: attachmentId
+              ),
               let fileURL = AttachmentPaths.fullURL(for: localURL) else {
             return false
         }

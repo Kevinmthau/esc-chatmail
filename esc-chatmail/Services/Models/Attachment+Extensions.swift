@@ -40,6 +40,18 @@ extension Attachment {
         previewURL
     }
 
+    /// Collision-safe local path for rendering or opening attachment bytes.
+    /// Legacy ID-only paths for remote attachments remain persisted only long
+    /// enough to trigger migration and must never be exposed to a reader.
+    var readableLocalURLValue: String? {
+        readableStoragePath(localURL)
+    }
+
+    /// Collision-safe preview path for rendering attachment thumbnails.
+    var readablePreviewURLValue: String? {
+        readableStoragePath(previewURL)
+    }
+
     /// Type-safe accessor for filename with default
     var filenameValue: String {
         filename
@@ -70,7 +82,36 @@ extension Attachment {
         guard state == .downloaded || state == .uploaded else { return false }
         guard let localPath = localURL else { return true }
         guard let fullURL = AttachmentPaths.fullURL(for: localPath) else { return true }
-        return !FileManager.default.fileExists(atPath: fullURL.path)
+        guard FileManager.default.fileExists(atPath: fullURL.path) else { return true }
+
+        // Files written before remote attachment storage became message-scoped
+        // can alias a sibling message that reuses the same Gmail attachment ID.
+        // Lazily replace the file when the attachment next appears instead of
+        // exposing bytes that may have been overwritten by a sibling message.
+        let requiresMessageScopedIdentity = !isLocalAttachment ||
+            (id?.hasPrefix("local_inline_") ?? false)
+        if requiresMessageScopedIdentity {
+            guard let messageId = message?.id, let attachmentId = id else {
+                return true
+            }
+            if !AttachmentPaths.usesRemoteIdentity(
+                localPath,
+                messageId: messageId,
+                attachmentId: attachmentId
+            ) {
+                return true
+            }
+            if let previewPath = previewURL,
+               !AttachmentPaths.usesRemoteIdentity(
+                   previewPath,
+                   messageId: messageId,
+                   attachmentId: attachmentId
+               ) {
+                return true
+            }
+        }
+
+        return false
     }
 
     /// Whether this attachment is likely a signature/logo image (small dimensions or tiny file size)
@@ -104,5 +145,17 @@ extension Attachment {
             width: width,
             height: height
         )
+    }
+
+    private func readableStoragePath(_ path: String?) -> String? {
+        guard let attachmentId = id,
+              AttachmentPaths.isReadableStoragePath(
+                  path,
+                  messageId: message?.id,
+                  attachmentId: attachmentId
+              ) else {
+            return nil
+        }
+        return path
     }
 }

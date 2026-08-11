@@ -101,7 +101,13 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         // Load attachment data from disk first.
-        if let localPath = attachment.localURL,
+        if let attachmentId = attachment.attachmentId,
+           let localPath = attachment.localURL,
+           AttachmentPaths.isReadableStoragePath(
+               localPath,
+               messageId: attachment.messageId,
+               attachmentId: attachmentId
+           ),
            let data = AttachmentPaths.loadData(from: localPath) {
             guard activeTasks.isActive(taskID) else { return }
             Log.debug("CIDSchemeHandler: eager/local hit for Content-ID: \(contentId)", category: .ui)
@@ -187,7 +193,8 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
     ) async -> Data? {
         guard let attachmentId = attachment.attachmentId,
               !attachmentId.isEmpty,
-              !attachmentId.hasPrefix("local_") else {
+              !attachmentId.hasPrefix("local_") ||
+                attachmentId.hasPrefix("local_inline_") else {
             return nil
         }
 
@@ -198,7 +205,26 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         )
 
         return await fetchCoalescer.data(for: key) { [apiClientOverride, makeBackgroundContext] in
-            await Self.fetchAndPersistMissingAttachmentData(
+            if apiClientOverride == nil {
+                return await Self.fetchUsingTrackedDownloader(
+                    messageId: attachment.messageId,
+                    attachmentObjectID: attachment.objectID,
+                    makeBackgroundContext: makeBackgroundContext
+                )
+            }
+
+            if attachmentId.hasPrefix("local_inline_"),
+               let apiClientOverride {
+                return await SynthesizedInlineAttachmentRecovery.recover(
+                    messageId: attachment.messageId,
+                    requestedAttachmentObjectID: attachment.objectID,
+                    requestedAttachmentId: attachmentId,
+                    apiClient: apiClientOverride,
+                    makeBackgroundContext: makeBackgroundContext
+                )
+            }
+
+            return await Self.fetchAndPersistMissingAttachmentData(
                 messageId: attachment.messageId,
                 attachmentId: attachmentId,
                 mimeType: attachment.mimeType,
@@ -208,6 +234,23 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
                 makeBackgroundContext: makeBackgroundContext
             )
         }
+    }
+
+    /// Production fallback shares AttachmentDownloader's account-transition
+    /// generation and drain boundary. Tests with an injected API client retain
+    /// the focused direct-fetch path below.
+    private static func fetchUsingTrackedDownloader(
+        messageId: String,
+        attachmentObjectID: NSManagedObjectID,
+        makeBackgroundContext: @Sendable () -> NSManagedObjectContext
+    ) async -> Data? {
+        let backgroundContext = makeBackgroundContext()
+        let downloader = await MainActor.run { AttachmentDownloader.shared }
+        return await downloader.downloadAttachmentData(
+            attachmentObjectID: attachmentObjectID,
+            messageId: messageId,
+            in: backgroundContext
+        )
     }
 
     private static func fetchAndPersistMissingAttachmentData(
@@ -232,7 +275,11 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
 
             let filenameExt = (filename as NSString).pathExtension.lowercased()
             let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: mimeType) : filenameExt
-            let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
+            let originalPath = AttachmentPaths.originalPath(
+                messageId: messageId,
+                attachmentId: attachmentId,
+                ext: ext
+            )
 
             guard AttachmentPaths.saveData(data, to: originalPath) else {
                 return data

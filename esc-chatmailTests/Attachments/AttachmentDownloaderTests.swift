@@ -166,8 +166,926 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(persistedState.state, .failed)
         let failedAt = try XCTUnwrap(persistedState.lastDownloadFailedAt)
         XCTAssertGreaterThanOrEqual(failedAt, beforeDownload)
-        XCTAssertFalse(downloader.activeDownloads.contains("att-download-retry-failure"))
-        XCTAssertNil(downloader.downloadProgress["att-download-retry-failure"])
+        XCTAssertFalse(
+            downloader.isDownloading(
+                messageId: message.id,
+                attachmentId: attachment.id
+            )
+        )
+        XCTAssertNil(
+            downloader.downloadProgress(
+                messageId: message.id,
+                attachmentId: attachment.id
+            )
+        )
+    }
+
+    @MainActor
+    func testCancelAndAwaitAllDownloadsWaitsForSuspendedAutomaticRequestAndPreventsSuccessWrite() async throws {
+        let message = MessageBuilder()
+            .withId("message-cancelled-automatic-download")
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("att-cancelled-automatic-download")
+            .withFilename("cancelled.txt")
+            .withMimeType("text/plain")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let request = SuspendedAttachmentRequest(outcome: .success(Data("old account".utf8)))
+        let apiClient = MockGmailAPIClient()
+        apiClient.getAttachmentOperation = { _, _ in
+            try await request.perform()
+        }
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
+        )
+
+        downloader.schedulePendingAttachmentDownloads()
+        await request.waitUntilStarted()
+        XCTAssertTrue(
+            downloader.isDownloading(
+                messageId: message.id,
+                attachmentId: attachment.id
+            )
+        )
+
+        let cleanupFinished = AttachmentCleanupFlag()
+        let cleanupTask = Task { @MainActor in
+            await downloader.cancelAndAwaitAllDownloads()
+            cleanupFinished.set()
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+
+        XCTAssertFalse(
+            cleanupFinished.isSet,
+            "Cleanup must await even an attachment request that ignores task cancellation"
+        )
+        XCTAssertTrue(
+            downloader.isDownloading(
+                messageId: message.id,
+                attachmentId: attachment.id
+            )
+        )
+
+        await request.release()
+        await cleanupTask.value
+
+        let persistedState = try await fetchAttachmentState(objectID: attachment.objectID)
+        XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 1)
+        XCTAssertEqual(persistedState.state, .queued)
+        XCTAssertNil(persistedState.lastDownloadFailedAt)
+        XCTAssertNil(persistedState.localURL)
+        XCTAssertNil(persistedState.previewURL)
+        XCTAssertFalse(
+            downloader.isDownloading(
+                messageId: message.id,
+                attachmentId: attachment.id
+            )
+        )
+        XCTAssertNil(
+            downloader.downloadProgress(
+                messageId: message.id,
+                attachmentId: attachment.id
+            )
+        )
+    }
+
+    @MainActor
+    func testCancelAndAwaitAllDownloadsDrainsManualRequestWithoutRetryOrFailureWrite() async throws {
+        let message = MessageBuilder()
+            .withId("message-cancelled-automatic-retry")
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("att-cancelled-automatic-retry")
+            .withFilename("cancelled.dat")
+            .withMimeType("application/octet-stream")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let request = SuspendedAttachmentRequest(outcome: .failure)
+        let apiClient = MockGmailAPIClient()
+        apiClient.getAttachmentOperation = { _, _ in
+            try await request.perform()
+        }
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            maxRetryAttempts: 3,
+            baseRetryDelay: 0
+        )
+
+        let manualDownloadTask = Task { @MainActor in
+            await downloader.downloadAttachmentIfNeeded(for: attachment)
+        }
+        await request.waitUntilStarted()
+        let cleanupFinished = AttachmentCleanupFlag()
+        let cleanupTask = Task { @MainActor in
+            await downloader.cancelAndAwaitAllDownloads()
+            cleanupFinished.set()
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(
+            cleanupFinished.isSet,
+            "Teardown must drain a manual writer it does not own as a Task"
+        )
+        await request.release()
+        await cleanupTask.value
+        await manualDownloadTask.value
+
+        let persistedState = try await fetchAttachmentState(objectID: attachment.objectID)
+        XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 1)
+        XCTAssertEqual(persistedState.state, .queued)
+        XCTAssertNil(persistedState.lastDownloadFailedAt)
+        XCTAssertNil(persistedState.localURL)
+        XCTAssertNil(persistedState.previewURL)
+        let observedCancellation = await request.observedCancellation
+        XCTAssertTrue(
+            observedCancellation,
+            "Teardown must cancel the downloader-owned task running the manual/CID operation"
+        )
+    }
+
+    @MainActor
+    func testCancelAndAwaitAllDownloadsDrainsCIDReadAfterDownloadPersistence() async throws {
+        let message = MessageBuilder()
+            .withId("message-cid-read-drain")
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("att-cid-read-drain")
+            .withFilename("cid.txt")
+            .withMimeType("text/plain")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let downloadedData = Data("old account CID".utf8)
+        let apiClient = MockGmailAPIClient()
+        apiClient.attachmentResponses["\(message.id):\(attachment.id!)"] = downloadedData
+        let readGate = SuspendedAttachmentRequest(outcome: .success(downloadedData))
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            loadAttachmentData: { _ in try? await readGate.perform() }
+        )
+        let backgroundContext = testStack.newBackgroundContext()
+        defer {
+            AttachmentPaths.deleteFile(
+                at: AttachmentPaths.originalPath(
+                    messageId: message.id,
+                    attachmentId: "att-cid-read-drain",
+                    ext: "txt"
+                )
+            )
+        }
+
+        let cidReadTask = Task { @MainActor in
+            await downloader.downloadAttachmentData(
+                attachmentObjectID: attachment.objectID,
+                messageId: message.id,
+                in: backgroundContext
+            )
+        }
+        await readGate.waitUntilStarted()
+
+        let cleanupFinished = AttachmentCleanupFlag()
+        let cleanupTask = Task { @MainActor in
+            await downloader.cancelAndAwaitAllDownloads()
+            cleanupFinished.set()
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(
+            cleanupFinished.isSet,
+            "Account cleanup must wait for the CID file-read continuation"
+        )
+
+        await readGate.release()
+        await cleanupTask.value
+        let result = await cidReadTask.value
+
+        XCTAssertNil(result, "A CID read invalidated by teardown must not publish old-account bytes")
+        XCTAssertTrue(cleanupFinished.isSet)
+    }
+
+    @MainActor
+    func testConcurrentCIDReadsJoinTheSameDownloadAndBothReturnData() async throws {
+        let message = MessageBuilder()
+            .withId("message-concurrent-cid")
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("att-concurrent-cid")
+            .withFilename("inline.txt")
+            .withMimeType("text/plain")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let downloadedData = Data("shared CID bytes".utf8)
+        let request = SuspendedAttachmentRequest(outcome: .success(downloadedData))
+        let apiClient = MockGmailAPIClient()
+        apiClient.getAttachmentOperation = { _, _ in
+            try await request.perform()
+        }
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            )
+        )
+        let firstContext = testStack.newBackgroundContext()
+        let secondContext = testStack.newBackgroundContext()
+        defer {
+            AttachmentPaths.deleteFile(
+                at: AttachmentPaths.originalPath(
+                    messageId: message.id,
+                    attachmentId: "att-concurrent-cid",
+                    ext: "txt"
+                )
+            )
+        }
+
+        let firstRead = Task { @MainActor in
+            await downloader.downloadAttachmentData(
+                attachmentObjectID: attachment.objectID,
+                messageId: message.id,
+                in: firstContext
+            )
+        }
+        await request.waitUntilStarted()
+
+        let secondRead = Task { @MainActor in
+            await downloader.downloadAttachmentData(
+                attachmentObjectID: attachment.objectID,
+                messageId: message.id,
+                in: secondContext
+            )
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            apiClient.getAttachmentCallCountSnapshot(),
+            1,
+            "A concurrent CID reader must join rather than start or skip the active download"
+        )
+
+        await request.release()
+        let firstData = await firstRead.value
+        let secondData = await secondRead.value
+
+        XCTAssertEqual(firstData, downloadedData)
+        XCTAssertEqual(secondData, downloadedData)
+        XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 1)
+    }
+
+    @MainActor
+    func testCancelledCoalescedCIDReadReturnsBeforeOwnerDownloadCompletes() async throws {
+        let message = MessageBuilder()
+            .withId("message-cancelled-cid-waiter")
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("att-cancelled-cid-waiter")
+            .withFilename("inline.txt")
+            .withMimeType("text/plain")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let downloadedData = Data("owner CID bytes".utf8)
+        let request = SuspendedAttachmentRequest(outcome: .success(downloadedData))
+        let apiClient = MockGmailAPIClient()
+        apiClient.getAttachmentOperation = { _, _ in
+            try await request.perform()
+        }
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            )
+        )
+        let expectedPath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: "att-cancelled-cid-waiter",
+            ext: "txt"
+        )
+        defer { AttachmentPaths.deleteFile(at: expectedPath) }
+
+        let firstRead = Task { @MainActor in
+            await downloader.downloadAttachmentData(
+                attachmentObjectID: attachment.objectID,
+                messageId: message.id,
+                in: testStack.newBackgroundContext()
+            )
+        }
+        await request.waitUntilStarted()
+
+        let waiterFinished = AttachmentCleanupFlag()
+        let secondRead = Task { @MainActor in
+            defer { waiterFinished.set() }
+            return await downloader.downloadAttachmentData(
+                attachmentObjectID: attachment.objectID,
+                messageId: message.id,
+                in: testStack.newBackgroundContext()
+            )
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 1)
+
+        secondRead.cancel()
+        for _ in 0..<100 where !waiterFinished.isSet {
+            await Task.yield()
+        }
+
+        XCTAssertTrue(
+            waiterFinished.isSet,
+            "A cancelled coalesced reader must be removed and resumed without waiting for the owner request"
+        )
+        if !waiterFinished.isSet {
+            // Avoid hanging the test on the exact regression being asserted.
+            await request.release()
+        }
+        let cancelledWaiterData = await secondRead.value
+        XCTAssertNil(cancelledWaiterData)
+
+        await request.release()
+        let ownerData = await firstRead.value
+        XCTAssertEqual(ownerData, downloadedData)
+        XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 1)
+    }
+
+    @MainActor
+    func testPendingSweepRecoversLegacySynthesizedInlineStorageForForwarding() async throws {
+        AttachmentPaths.setupDirectories()
+        let messageID = "message-legacy-inline-forwarding"
+        let authoritativeData = Data("authoritative inline forwarding bytes".utf8)
+        let recoveredMessage = makeSynthesizedInlineMessage(
+            messageID: messageID,
+            data: authoritativeData,
+            partID: "1.2",
+            filename: "forwarded.txt",
+            mimeType: "text/plain",
+            contentID: "forwarded-inline@example.com"
+        )
+        let legacyPath = AttachmentPaths.originalPath(
+            idOrUUID: recoveredMessage.attachmentID,
+            ext: "txt"
+        )
+        let staleSiblingData = Data("stale sibling message bytes".utf8)
+        XCTAssertTrue(AttachmentPaths.saveData(staleSiblingData, to: legacyPath))
+
+        let message = MessageBuilder()
+            .withId(messageID)
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId(recoveredMessage.attachmentID)
+            .withFilename("forwarded.txt")
+            .withMimeType("text/plain")
+            .withContentId("forwarded-inline@example.com")
+            .downloaded()
+            .withLocalURL(legacyPath)
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        apiClient.getMessageResponses[messageID] = recoveredMessage.message
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            )
+        )
+
+        await downloader.enqueueAllPendingAttachments()
+
+        let persistedState = try await fetchAttachmentState(
+            objectID: attachment.objectID
+        )
+        let recoveredPath = try XCTUnwrap(persistedState.localURL)
+        defer {
+            AttachmentPaths.deleteFile(at: legacyPath)
+            AttachmentPaths.deleteFile(at: recoveredPath)
+        }
+
+        XCTAssertNotEqual(recoveredPath, legacyPath)
+        XCTAssertTrue(
+            AttachmentPaths.isReadableStoragePath(
+                recoveredPath,
+                messageId: messageID,
+                attachmentId: recoveredMessage.attachmentID
+            )
+        )
+        XCTAssertEqual(AttachmentPaths.loadData(from: recoveredPath), authoritativeData)
+        XCTAssertNotEqual(AttachmentPaths.loadData(from: recoveredPath), staleSiblingData)
+        XCTAssertEqual(apiClient.getMessageCallCountSnapshot(), 1)
+        XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 0)
+
+        context.refresh(attachment, mergeChanges: true)
+        let forwardingInfo = try XCTUnwrap(
+            OutboundAttachmentContextBuilder(viewContext: context)
+                .buildInlineAttachmentInfos(from: [attachment])
+                .first
+        )
+        XCTAssertEqual(forwardingInfo.localURL, recoveredPath)
+        XCTAssertEqual(AttachmentPaths.loadData(from: forwardingInfo.localURL), authoritativeData)
+    }
+
+    @MainActor
+    func testConcurrentSynthesizedInlineSiblingReadsShareMessageRecoveryAfterOwnerCancellation() async throws {
+        AttachmentPaths.setupDirectories()
+        let messageID = "message-concurrent-inline-siblings-\(UUID().uuidString)"
+        let firstData = Data("first inline sibling".utf8)
+        let secondData = Data("second inline sibling".utf8)
+        let firstRecovered = makeSynthesizedInlineMessage(
+            messageID: messageID,
+            data: firstData,
+            partID: "1.1",
+            filename: "first.txt",
+            mimeType: "text/plain",
+            contentID: "first-inline@example.com"
+        )
+        let secondRecovered = makeSynthesizedInlineMessage(
+            messageID: messageID,
+            data: secondData,
+            partID: "1.2",
+            filename: "second.txt",
+            mimeType: "text/plain",
+            contentID: "second-inline@example.com"
+        )
+        let firstPart = try XCTUnwrap(firstRecovered.message.payload?.parts?.first)
+        let secondPart = try XCTUnwrap(secondRecovered.message.payload?.parts?.first)
+        let recoveredMessage = GmailMessage(
+            id: messageID,
+            threadId: "thread-\(messageID)",
+            labelIds: ["INBOX"],
+            snippet: nil,
+            historyId: nil,
+            internalDate: nil,
+            payload: MessagePart(
+                partId: "",
+                mimeType: "multipart/related",
+                filename: nil,
+                headers: nil,
+                body: nil,
+                parts: [firstPart, secondPart]
+            ),
+            sizeEstimate: firstData.count + secondData.count
+        )
+
+        let message = MessageBuilder()
+            .withId(messageID)
+            .withAttachments()
+            .build(in: context)
+        let firstAttachment = AttachmentBuilder()
+            .withId(firstRecovered.attachmentID)
+            .withFilename("first.txt")
+            .withMimeType("text/plain")
+            .withContentId("first-inline@example.com")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        let secondAttachment = AttachmentBuilder()
+            .withId(secondRecovered.attachmentID)
+            .withFilename("second.txt")
+            .withMimeType("text/plain")
+            .withContentId("second-inline@example.com")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let firstPath = AttachmentPaths.originalPath(
+            messageId: messageID,
+            attachmentId: firstRecovered.attachmentID,
+            ext: "txt"
+        )
+        let secondPath = AttachmentPaths.originalPath(
+            messageId: messageID,
+            attachmentId: secondRecovered.attachmentID,
+            ext: "txt"
+        )
+        defer {
+            AttachmentPaths.deleteFile(at: firstPath)
+            AttachmentPaths.deleteFile(at: secondPath)
+        }
+
+        let apiClient = MockGmailAPIClient()
+        let messageRequest = SuspendedMessageRequest(message: recoveredMessage)
+        apiClient.getMessageOperation = { _, _ in
+            await messageRequest.perform()
+        }
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            )
+        )
+
+        let ownerFinished = AttachmentCleanupFlag()
+        let ownerRead = Task { @MainActor in
+            defer { ownerFinished.set() }
+            return await downloader.downloadAttachmentData(
+                attachmentObjectID: firstAttachment.objectID,
+                messageId: messageID,
+                in: testStack.newBackgroundContext()
+            )
+        }
+        await messageRequest.waitUntilStarted()
+        XCTAssertEqual(apiClient.getMessageCallCountSnapshot(), 1)
+
+        let siblingRead = Task { @MainActor in
+            await downloader.downloadAttachmentData(
+                attachmentObjectID: secondAttachment.objectID,
+                messageId: messageID,
+                in: testStack.newBackgroundContext()
+            )
+        }
+        for _ in 0..<100 where apiClient.getMessageCallCountSnapshot() == 1 {
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            apiClient.getMessageCallCountSnapshot(),
+            1,
+            "Synthesized inline siblings must join the message-level recovery"
+        )
+
+        ownerRead.cancel()
+        for _ in 0..<100 where !ownerFinished.isSet {
+            await Task.yield()
+        }
+        XCTAssertTrue(
+            ownerFinished.isSet,
+            "A canceled CID owner must stop waiting while shared recovery continues for siblings"
+        )
+        if !ownerFinished.isSet {
+            // Avoid hanging the test on the exact regression being asserted.
+            await messageRequest.release()
+        }
+        let ownerResult = await ownerRead.value
+        XCTAssertNil(ownerResult)
+
+        await messageRequest.release()
+        let siblingResult = await siblingRead.value
+
+        XCTAssertEqual(siblingResult, secondData)
+        XCTAssertEqual(apiClient.getMessageCallCountSnapshot(), 1)
+
+        let firstState = try await fetchAttachmentState(objectID: firstAttachment.objectID)
+        let secondState = try await fetchAttachmentState(objectID: secondAttachment.objectID)
+        XCTAssertEqual(firstState.state, .downloaded)
+        XCTAssertEqual(secondState.state, .downloaded)
+        XCTAssertEqual(firstState.localURL, firstPath)
+        XCTAssertEqual(secondState.localURL, secondPath)
+        XCTAssertEqual(AttachmentPaths.loadData(from: firstPath), firstData)
+        XCTAssertEqual(AttachmentPaths.loadData(from: secondPath), secondData)
+    }
+
+    func testSynthesizedInlineRecoveredMetadataClampsToInt16Bounds() {
+        XCTAssertEqual(
+            SynthesizedInlineAttachmentRecovery.persistedImageDimension(
+                CGFloat(Int16.max) + 10_000
+            ),
+            Int16.max
+        )
+        XCTAssertEqual(
+            SynthesizedInlineAttachmentRecovery.persistedImageDimension(1_024.4),
+            1_024
+        )
+        XCTAssertEqual(
+            SynthesizedInlineAttachmentRecovery.persistedPDFPageCount(Int.max),
+            Int16.max
+        )
+        XCTAssertEqual(
+            SynthesizedInlineAttachmentRecovery.persistedPDFPageCount(12),
+            12
+        )
+    }
+
+    @MainActor
+    func testCIDReadDoesNotReturnLegacyPathAfterRedownloadFails() async throws {
+        let message = MessageBuilder()
+            .withId("message-cid-legacy-failure")
+            .withAttachments()
+            .build(in: context)
+        let attachmentID = "attachment-cid-legacy-failure"
+        let legacyPath = AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "png")
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("legacy.png")
+            .withMimeType("image/png")
+            .downloaded()
+            .withLocalURL(legacyPath)
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let staleBytes = Data("another message's bytes".utf8)
+        let downloader = AttachmentDownloader(
+            apiClient: MockGmailAPIClient(),
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            maxRetryAttempts: 1,
+            baseRetryDelay: 0,
+            loadAttachmentData: { path in
+                path == legacyPath ? staleBytes : nil
+            }
+        )
+
+        let result = await downloader.downloadAttachmentData(
+            attachmentObjectID: attachment.objectID,
+            messageId: message.id,
+            in: testStack.newBackgroundContext()
+        )
+
+        XCTAssertNil(result)
+        let persistedState = try await fetchAttachmentState(objectID: attachment.objectID)
+        XCTAssertEqual(persistedState.state, .failed)
+        XCTAssertEqual(persistedState.localURL, legacyPath)
+    }
+
+    @MainActor
+    func testSuccessfulMigrationClearsLegacyPreviewWhenThumbnailCannotBeGenerated() async throws {
+        let message = MessageBuilder()
+            .withId("message-preview-migration")
+            .withAttachments()
+            .build(in: context)
+        let attachmentID = "attachment-preview-migration-\(UUID().uuidString)"
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("invalid.png")
+            .withMimeType("image/png")
+            .downloaded()
+            .withLocalURL(AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "png"))
+            .withPreviewURL(AttachmentPaths.previewPath(idOrUUID: attachmentID))
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        apiClient.attachmentResponses["\(message.id):\(attachmentID)"] = Data("not an image".utf8)
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            )
+        )
+        let expectedOriginalPath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentID,
+            ext: "png"
+        )
+        defer {
+            AttachmentPaths.deleteFile(at: expectedOriginalPath)
+            AttachmentPaths.deleteFile(
+                at: AttachmentPaths.previewPath(
+                    messageId: message.id,
+                    attachmentId: attachmentID
+                )
+            )
+        }
+
+        await downloader.downloadAttachment(
+            attachmentObjectID: attachment.objectID,
+            messageId: message.id,
+            in: testStack.newBackgroundContext()
+        )
+
+        let persistedState = try await fetchAttachmentState(objectID: attachment.objectID)
+        XCTAssertEqual(persistedState.state, .downloaded)
+        XCTAssertEqual(persistedState.localURL, expectedOriginalPath)
+        XCTAssertNil(persistedState.previewURL)
+
+        context.refresh(attachment, mergeChanges: true)
+        XCTAssertFalse(attachment.needsRedownload)
+    }
+
+    @MainActor
+    func testConcurrentReusedAttachmentIDKeepsMessageFilesAndRollbackIsolated() async throws {
+        let sharedAttachmentID = "shared-remote-attachment-\(UUID().uuidString)"
+        let firstMessage = MessageBuilder()
+            .withId("message-shared-attachment-first")
+            .withAttachments()
+            .build(in: context)
+        let secondMessage = MessageBuilder()
+            .withId("message-shared-attachment-second")
+            .withAttachments()
+            .build(in: context)
+        let failingMessage = MessageBuilder()
+            .withId("message-shared-attachment-failing")
+            .withAttachments()
+            .build(in: context)
+        let firstAttachment = AttachmentBuilder()
+            .withId(sharedAttachmentID)
+            .withFilename("first.dat")
+            .withMimeType("application/octet-stream")
+            .queued()
+            .forMessage(firstMessage)
+            .build(in: context)
+        let secondAttachment = AttachmentBuilder()
+            .withId(sharedAttachmentID)
+            .withFilename("second.dat")
+            .withMimeType("application/octet-stream")
+            .queued()
+            .forMessage(secondMessage)
+            .build(in: context)
+        let failingAttachment = AttachmentBuilder()
+            .withId(sharedAttachmentID)
+            .withFilename("failing.dat")
+            .withMimeType("application/octet-stream")
+            .queued()
+            .forMessage(failingMessage)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let firstData = Data("first message bytes".utf8)
+        let secondData = Data("second message bytes".utf8)
+        let requestGate = MessageScopedAttachmentRequestGate(
+            outcomes: [
+                firstMessage.id: .success(firstData),
+                secondMessage.id: .success(secondData),
+                failingMessage.id: .failure
+            ]
+        )
+        let apiClient = MockGmailAPIClient()
+        apiClient.getAttachmentOperation = { messageId, _ in
+            try await requestGate.perform(messageId: messageId)
+        }
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            maxRetryAttempts: 1,
+            baseRetryDelay: 0
+        )
+
+        let firstTask = Task { @MainActor in
+            await downloader.downloadAttachment(
+                attachmentObjectID: firstAttachment.objectID,
+                messageId: firstMessage.id,
+                in: testStack.newBackgroundContext()
+            )
+        }
+        let secondTask = Task { @MainActor in
+            await downloader.downloadAttachment(
+                attachmentObjectID: secondAttachment.objectID,
+                messageId: secondMessage.id,
+                in: testStack.newBackgroundContext()
+            )
+        }
+        let failingTask = Task { @MainActor in
+            await downloader.downloadAttachment(
+                attachmentObjectID: failingAttachment.objectID,
+                messageId: failingMessage.id,
+                in: testStack.newBackgroundContext()
+            )
+        }
+
+        await requestGate.waitUntilStarted(count: 3)
+
+        XCTAssertTrue(
+            downloader.isDownloading(
+                messageId: firstMessage.id,
+                attachmentId: sharedAttachmentID
+            )
+        )
+        XCTAssertTrue(
+            downloader.isDownloading(
+                messageId: secondMessage.id,
+                attachmentId: sharedAttachmentID
+            )
+        )
+        XCTAssertTrue(
+            downloader.isDownloading(
+                messageId: failingMessage.id,
+                attachmentId: sharedAttachmentID
+            )
+        )
+
+        await requestGate.release(messageId: firstMessage.id)
+        await firstTask.value
+
+        // Revert-check: replacing isDownloading(messageId:attachmentId:) with
+        // attachment-ID-only state makes this completed message inherit either
+        // sibling's still-active spinner.
+        XCTAssertFalse(
+            downloader.isDownloading(
+                messageId: firstMessage.id,
+                attachmentId: sharedAttachmentID
+            )
+        )
+        XCTAssertNil(
+            downloader.downloadProgress(
+                messageId: firstMessage.id,
+                attachmentId: sharedAttachmentID
+            )
+        )
+        XCTAssertTrue(
+            downloader.isDownloading(
+                messageId: secondMessage.id,
+                attachmentId: sharedAttachmentID
+            )
+        )
+        XCTAssertTrue(
+            downloader.isDownloading(
+                messageId: failingMessage.id,
+                attachmentId: sharedAttachmentID
+            )
+        )
+
+        await requestGate.release(messageId: secondMessage.id)
+        await secondTask.value
+
+        let firstState = try await fetchAttachmentState(objectID: firstAttachment.objectID)
+        let secondState = try await fetchAttachmentState(objectID: secondAttachment.objectID)
+        let firstPath = try XCTUnwrap(firstState.localURL)
+        let secondPath = try XCTUnwrap(secondState.localURL)
+        defer {
+            AttachmentPaths.deleteFile(at: firstPath)
+            AttachmentPaths.deleteFile(at: secondPath)
+        }
+
+        XCTAssertNotEqual(firstPath, secondPath)
+        XCTAssertEqual(AttachmentPaths.loadData(from: firstPath), firstData)
+        XCTAssertEqual(AttachmentPaths.loadData(from: secondPath), secondData)
+
+        // Release a sibling failure only after both successful files exist.
+        // Its rollback must not delete either successful message's bytes.
+        await requestGate.release(messageId: failingMessage.id)
+        await failingTask.value
+
+        let failingState = try await fetchAttachmentState(objectID: failingAttachment.objectID)
+        XCTAssertEqual(failingState.state, .failed)
+        XCTAssertNil(failingState.localURL)
+        XCTAssertEqual(AttachmentPaths.loadData(from: firstPath), firstData)
+        XCTAssertEqual(AttachmentPaths.loadData(from: secondPath), secondData)
+    }
+
+    @MainActor
+    func testCleanupOrphanedFilesCannotStartWhileAccountDownloadsAreSuspended() async throws {
+        let attachmentID = "teardown-orphan-\(UUID().uuidString)"
+        let relativePath = AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "dat")
+        let fileURL = try XCTUnwrap(AttachmentPaths.fullURL(for: relativePath))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("old account".utf8), to: relativePath))
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let downloader = AttachmentDownloader(
+            apiClient: MockGmailAPIClient(),
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
+        )
+        await downloader.cancelAndAwaitAllDownloads()
+
+        await downloader.cleanupOrphanedFiles()
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: fileURL.path),
+            "A maintenance task arriving during account teardown must be rejected before deleting files"
+        )
+    }
+
+    @MainActor
+    func testReopenAdmissionRecreatesDirectoriesAfterAccountCleanup() async {
+        let directoryPreparation = SynchronousCallCounter()
+        let downloader = AttachmentDownloader(
+            apiClient: MockGmailAPIClient(),
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            prepareDownloadDirectories: {
+                directoryPreparation.increment()
+            }
+        )
+        XCTAssertEqual(directoryPreparation.count, 1)
+
+        await downloader.cancelAndAwaitAllDownloads()
+        downloader.reopenAdmission()
+
+        XCTAssertEqual(
+            directoryPreparation.count,
+            2,
+            "Same-process sign-in must recreate directories removed by account cleanup"
+        )
     }
 
     // MARK: - Query Tests
@@ -948,24 +1866,28 @@ final class AttachmentDownloaderTests: XCTestCase {
     // MARK: - Batch Size Tests
 
     func testFetchAttachments_usesBatchSize() throws {
-        // Create many attachments
-        for i in 0..<100 {
-            let _ = AttachmentBuilder()
-                .withId("att-\(i)")
-                .queued()
-                .build(in: context)
+        try context.performAndWait {
+            // Create many attachments
+            for i in 0..<100 {
+                let _ = AttachmentBuilder()
+                    .withId("att-\(i)")
+                    .queued()
+                    .build(in: context)
+            }
+
+            try context.save()
+
+            // Fetch with batch size (like AttachmentDownloader does)
+            let request = Attachment.fetchRequest()
+            request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
+            request.fetchBatchSize = 10
+
+            // Keep the fetched managed objects scoped to their context queue;
+            // releasing a large batch off-queue can race Core Data's async
+            // reference-queue cleanup during XCTest teardown.
+            let results = try context.fetch(request)
+            XCTAssertEqual(results.count, 100)
         }
-
-        try testStack.saveViewContext()
-
-        // Fetch with batch size (like AttachmentDownloader does)
-        let request = Attachment.fetchRequest()
-        request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
-        request.fetchBatchSize = 10
-
-        let results = try context.fetch(request)
-
-        XCTAssertEqual(results.count, 100)
     }
 
     // MARK: - Cleanup Tests
@@ -1015,12 +1937,244 @@ final class AttachmentDownloaderTests: XCTestCase {
 
     private func fetchAttachmentState(
         objectID: NSManagedObjectID
-    ) async throws -> (state: Attachment.State, lastDownloadFailedAt: Date?) {
+    ) async throws -> (
+        state: Attachment.State,
+        lastDownloadFailedAt: Date?,
+        localURL: String?,
+        previewURL: String?
+    ) {
         try await testStack.performBackgroundTask { context in
             guard let attachment = try context.existingObject(with: objectID) as? Attachment else {
                 throw NSError(domain: "AttachmentDownloaderTests", code: 1)
             }
-            return (attachment.state, attachment.lastDownloadFailedAt)
+            return (
+                attachment.state,
+                attachment.lastDownloadFailedAt,
+                attachment.localURL,
+                attachment.previewURL
+            )
         }
+    }
+
+    private func makeSynthesizedInlineMessage(
+        messageID: String,
+        data: Data,
+        partID: String,
+        filename: String,
+        mimeType: String,
+        contentID: String
+    ) -> (attachmentID: String, message: GmailMessage) {
+        let attachmentID = AttachmentPaths.synthesizedInlineAttachmentID(
+            partId: partID,
+            trimmedFilename: filename,
+            mimeType: mimeType,
+            contentId: contentID,
+            size: data.count
+        )
+        let encodedData = data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let part = MessagePart(
+            partId: partID,
+            mimeType: mimeType,
+            filename: filename,
+            headers: [
+                MessageHeader(name: "Content-ID", value: "<\(contentID)>"),
+                MessageHeader(name: "Content-Disposition", value: "inline")
+            ],
+            body: MessageBody(
+                size: data.count,
+                data: encodedData,
+                attachmentId: nil
+            ),
+            parts: nil
+        )
+        return (
+            attachmentID,
+            GmailMessage(
+                id: messageID,
+                threadId: "thread-\(messageID)",
+                labelIds: ["INBOX"],
+                snippet: nil,
+                historyId: nil,
+                internalDate: nil,
+                payload: MessagePart(
+                    partId: "",
+                    mimeType: "multipart/related",
+                    filename: nil,
+                    headers: nil,
+                    body: nil,
+                    parts: [part]
+                ),
+                sizeEstimate: data.count
+            )
+        )
+    }
+}
+
+private actor SuspendedMessageRequest {
+    private let message: GmailMessage
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(message: GmailMessage) {
+        self.message = message
+    }
+
+    func perform() async -> GmailMessage {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+        return message
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private actor SuspendedAttachmentRequest {
+    enum Outcome: Sendable {
+        case success(Data)
+        case failure
+    }
+
+    private let outcome: Outcome
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var observedCancellation = false
+
+    init(outcome: Outcome) {
+        self.outcome = outcome
+    }
+
+    func perform() async throws -> Data {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+        observedCancellation = Task.isCancelled
+
+        switch outcome {
+        case .success(let data):
+            return data
+        case .failure:
+            throw APIError.serverError(503)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private actor MessageScopedAttachmentRequestGate {
+    enum Outcome: Sendable {
+        case success(Data)
+        case failure
+    }
+
+    private let outcomes: [String: Outcome]
+    private var startedMessageIDs = Set<String>()
+    private var startWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var releaseWaiters: [String: CheckedContinuation<Void, Never>] = [:]
+
+    init(outcomes: [String: Outcome]) {
+        self.outcomes = outcomes
+    }
+
+    func perform(messageId: String) async throws -> Data {
+        startedMessageIDs.insert(messageId)
+        let readyWaiters = startWaiters.filter { startedMessageIDs.count >= $0.count }
+        startWaiters.removeAll { startedMessageIDs.count >= $0.count }
+        readyWaiters.forEach { $0.continuation.resume() }
+
+        await withCheckedContinuation { continuation in
+            releaseWaiters[messageId] = continuation
+        }
+
+        switch outcomes[messageId] {
+        case .success(let data):
+            return data
+        case .failure:
+            throw APIError.serverError(503)
+        case nil:
+            throw APIError.notFound("Unconfigured message \(messageId)")
+        }
+    }
+
+    func waitUntilStarted(count: Int) async {
+        guard startedMessageIDs.count < count else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append((count, continuation))
+        }
+    }
+
+    func release(messageId: String) {
+        releaseWaiters.removeValue(forKey: messageId)?.resume()
+    }
+}
+
+private final class AttachmentCleanupFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+}
+
+private final class SynchronousCallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
     }
 }

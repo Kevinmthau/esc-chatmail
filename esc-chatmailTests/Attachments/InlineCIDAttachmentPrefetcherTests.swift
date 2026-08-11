@@ -49,19 +49,144 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
         XCTAssertEqual(calls.first?.objectURI, attachment.objectID.uriRepresentation().absoluteString)
     }
 
+    func testSaveTriggeredPrefetchRetainsOldAdmissionAndIsRejectedAfterReopen() async throws {
+        let message = MessageBuilder()
+            .withId("message-inline-prefetch-account-transition")
+            .withAttachments()
+            .build(in: context)
+        AttachmentBuilder()
+            .withId("att-inline-prefetch-account-transition")
+            .withFilename("logo.png")
+            .withMimeType("image/png")
+            .withContentId("transition@example.com")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let registry = AttachmentAccountWorkRegistry(admissionOpen: true)
+        let recorder = InlineCIDDownloadRecorder()
+        let unexpectedDownload = InlineCIDPrefetchFlag()
+        let prefetcher = makePrefetcher(
+            recorder: recorder,
+            downloadAttachment: { _, _, _ in
+                unexpectedDownload.set()
+            }
+        )
+
+        message.subject = "Marks the context dirty so prefetch waits for save"
+        InlineCIDAttachmentPrefetchScheduler.schedule(
+            InlineCIDAttachmentPrefetchRequest(
+                messageId: message.id,
+                contentIDs: ["transition@example.com"]
+            ),
+            in: context,
+            prefetcher: prefetcher,
+            accountWorkRegistry: registry
+        )
+
+        let oldAdmission = try XCTUnwrap(
+            InlineCIDAttachmentPrefetchScheduler.pendingAdmissionToken(in: context)
+        )
+        XCTAssertEqual(
+            InlineCIDAttachmentPrefetchScheduler.pendingRequests(in: context).count,
+            1
+        )
+
+        await registry.cancelAndAwaitAll()
+        XCTAssertTrue(registry.reopenAdmission())
+        let newAdmission = try XCTUnwrap(registry.captureAdmissionToken())
+        XCTAssertNotEqual(oldAdmission, newAdmission)
+
+        try testStack.saveViewContext()
+
+        XCTAssertTrue(InlineCIDAttachmentPrefetchScheduler.pendingRequests(in: context).isEmpty)
+        XCTAssertNil(InlineCIDAttachmentPrefetchScheduler.pendingAdmissionToken(in: context))
+        XCTAssertEqual(registry.activeOperationCount, 0)
+        XCTAssertFalse(unexpectedDownload.isSet)
+        await registry.cancelAndAwaitAll()
+    }
+
+    func testScheduledPrefetchIsCancelledAndDrainedBeforeAccountCleanupContinues() async throws {
+        let message = MessageBuilder()
+            .withId("message-inline-prefetch-drain")
+            .withAttachments()
+            .build(in: context)
+        AttachmentBuilder()
+            .withId("att-inline-prefetch-drain")
+            .withFilename("logo.png")
+            .withMimeType("image/png")
+            .withContentId("drain@example.com")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let registry = AttachmentAccountWorkRegistry(admissionOpen: true)
+        let recorder = InlineCIDDownloadRecorder()
+        let downloadGate = InlineCIDPrefetchGate()
+        let teardownFinished = InlineCIDPrefetchFlag()
+        let prefetcher = makePrefetcher(
+            recorder: recorder,
+            downloadAttachment: { _, _, _ in
+                await downloadGate.waitUntilReleased()
+            }
+        )
+
+        message.subject = "Marks the context dirty so prefetch waits for save"
+        InlineCIDAttachmentPrefetchScheduler.schedule(
+            InlineCIDAttachmentPrefetchRequest(
+                messageId: message.id,
+                contentIDs: ["drain@example.com"]
+            ),
+            in: context,
+            prefetcher: prefetcher,
+            accountWorkRegistry: registry
+        )
+        XCTAssertEqual(registry.activeOperationCount, 0)
+        XCTAssertEqual(
+            InlineCIDAttachmentPrefetchScheduler.pendingRequests(in: context).count,
+            1
+        )
+
+        try testStack.saveViewContext()
+        XCTAssertEqual(registry.activeOperationCount, 1)
+        await downloadGate.waitUntilStarted()
+
+        let teardownTask = Task {
+            await registry.cancelAndAwaitAll()
+            teardownFinished.set()
+        }
+        while registry.captureAdmissionToken() != nil {
+            await Task.yield()
+        }
+
+        XCTAssertFalse(
+            teardownFinished.isSet,
+            "Account cleanup must await an in-flight inline CID prefetch"
+        )
+
+        await downloadGate.release()
+        await teardownTask.value
+
+        XCTAssertTrue(teardownFinished.isSet)
+        XCTAssertTrue(registry.reopenAdmission())
+    }
+
     func testPrefetch_doesNotRefetchAlreadyCachedInlineAttachment() async throws {
         AttachmentPaths.setupDirectories()
+        let message = MessageBuilder()
+            .withId("message-inline-prefetch-cached")
+            .withAttachments()
+            .build(in: context)
         let cachedPath = AttachmentPaths.originalPath(
-            idOrUUID: "att-inline-cached-\(UUID().uuidString)",
+            messageId: message.id,
+            attachmentId: "att-inline-cached",
             ext: "png"
         )
         XCTAssertTrue(AttachmentPaths.saveData(Data([0x01, 0x02, 0x03]), to: cachedPath))
         defer { AttachmentPaths.deleteFile(at: cachedPath) }
 
-        let message = MessageBuilder()
-            .withId("message-inline-prefetch-cached")
-            .withAttachments()
-            .build(in: context)
         AttachmentBuilder()
             .withId("att-inline-cached")
             .withFilename("logo.png")
@@ -85,6 +210,52 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
 
         let calls = await recorder.calls()
         XCTAssertEqual(calls.count, 0)
+    }
+
+    func testPrefetchQueuesLegacySynthesizedInlineAttachmentForVerifiedRecovery() async throws {
+        AttachmentPaths.setupDirectories()
+        let message = MessageBuilder()
+            .withId("message-inline-prefetch-legacy-synthesized")
+            .withAttachments()
+            .build(in: context)
+        let attachmentID = "local_inline_legacy-prefetch"
+        let legacyPath = AttachmentPaths.originalPath(
+            idOrUUID: attachmentID,
+            ext: "png"
+        )
+        XCTAssertTrue(
+            AttachmentPaths.saveData(Data("untrusted sibling bytes".utf8), to: legacyPath)
+        )
+        defer { AttachmentPaths.deleteFile(at: legacyPath) }
+
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("inline.png")
+            .withMimeType("image/png")
+            .withContentId("legacy-prefetch@example.com")
+            .downloaded()
+            .withLocalURL(legacyPath)
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let recorder = InlineCIDDownloadRecorder()
+        let prefetcher = makePrefetcher(recorder: recorder)
+
+        await prefetcher.prefetch(
+            InlineCIDAttachmentPrefetchRequest(
+                messageId: message.id,
+                contentIDs: ["legacy-prefetch@example.com"]
+            )
+        )
+
+        let calls = await recorder.calls()
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.messageId, message.id)
+        XCTAssertEqual(
+            calls.first?.objectURI,
+            attachment.objectID.uriRepresentation().absoluteString
+        )
     }
 
     func testPrefetch_missingAttachmentMetadataFailsGracefully() async throws {
@@ -307,5 +478,48 @@ private actor InlineCIDDownloadRecorder {
 
     func calls() -> [(messageId: String, objectURI: String)] {
         recordedCalls
+    }
+}
+
+private actor InlineCIDPrefetchGate {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilReleased() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private final class InlineCIDPrefetchFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.withLock { value }
+    }
+
+    func set() {
+        lock.withLock { value = true }
     }
 }
