@@ -420,10 +420,126 @@ final class EmailPreviewPipelineTests: XCTestCase {
         XCTAssertFalse(secondPayload.html.contains("Plain fallback token"))
         XCTAssertFalse(secondPayload.previewCacheKey.contains("plainText:"))
     }
+
+    func testLoadPreviewRejectsSourceThatCompletesAfterAccountReopen() async throws {
+        let htmlLoader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            recoveryService: NoopHTMLContentRecoverer()
+        )
+        let sourceLoader = SuspendedEmailPreviewSourceLoader(
+            source: EmailPreviewSource(
+                messageId: "shared-message",
+                sourceSignature: "old-account-source",
+                canonicalHTML: "<html><body>OLD_ACCOUNT_PREVIEW</body></html>",
+                plainText: "Old account preview",
+                extractedText: "Old account preview",
+                extractedImages: [],
+                htmlSummary: EmailPreviewHTMLSummary(
+                    h1Text: nil,
+                    h2Text: nil,
+                    titleText: nil,
+                    preheaderText: nil,
+                    actionLinkTexts: []
+                ),
+                classification: EmailPreviewClassification(
+                    kind: .personToPerson,
+                    newsletterScore: 0,
+                    transactionalScore: 0,
+                    signals: []
+                )
+            )
+        )
+        let pipeline = EmailPreviewPipeline(
+            previewSourceLoader: sourceLoader,
+            htmlContentLoader: htmlLoader,
+            renderedMessageCache: renderedMessageCache
+        )
+        let request = EmailPreviewPipelineRequest(
+            messageId: "shared-message",
+            bodyStorageURI: nil,
+            bodyText: "Old account preview",
+            cleanedSnippet: nil,
+            senderName: "Old Sender",
+            senderEmail: "old@example.com",
+            subject: "Old account",
+            isNewsletter: false,
+            isForwardedEmail: true,
+            cleanupMode: .none,
+            isDarkMode: false
+        )
+
+        let loadTask = Task {
+            await pipeline.loadPreview(request: request)
+        }
+        await sourceLoader.waitUntilStarted()
+
+        contentHandler.closeAccountWork()
+        try await contentHandler.deleteAllHTMLFromClosedAccount()
+        await renderedMessageCache.closeAccountWorkAndClear()
+        try contentHandler.reopenAccountWork()
+        await renderedMessageCache.reopenAccountWork()
+
+        await sourceLoader.resume()
+        let preview = await loadTask.value
+
+        XCTAssertNil(preview)
+        let artifacts = await renderedMessageCache.artifacts(
+            messageId: "shared-message",
+            sourceSignature: "old-account-source"
+        )
+        XCTAssertNil(artifacts)
+    }
 }
 
 private struct NoopHTMLContentRecoverer: HTMLContentRecovering {
     func recoverHTMLContent(messageId: String) async -> String? {
         nil
+    }
+}
+
+private actor SuspendedEmailPreviewSourceLoader: EmailPreviewSourceLoading {
+    private let source: EmailPreviewSource
+    private var didStart = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var shouldRelease = false
+
+    init(source: EmailPreviewSource) {
+        self.source = source
+    }
+
+    func loadPreviewSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        allowRecovery: Bool
+    ) async -> EmailPreviewSource? {
+        didStart = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+
+        if !shouldRelease {
+            await withCheckedContinuation { continuation in
+                releaseContinuation = continuation
+            }
+        }
+        return source
+    }
+
+    func waitUntilStarted() async {
+        guard !didStart else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func resume() {
+        shouldRelease = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }

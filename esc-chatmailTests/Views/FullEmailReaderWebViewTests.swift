@@ -451,19 +451,109 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertFalse(coordinator.hasAdoptedPrerenderedWebViewForTesting)
     }
 
+    func testAccountTransitionScrubsFreshReaderAndRejectsStalePaintCallback() async throws {
+        let oldAccountMarker = "PRIVATE_FRESH_READER_\(UUID().uuidString)"
+        let message = makeMessage(id: "fresh-reader")
+        let paintConfirmer = DeferredPaintConfirmer()
+        var loadFinishedCount = 0
+        let reader = makeReader(
+            message: message,
+            htmlContent: "<html><body>\(oldAccountMarker)</body></html>",
+            onLoadFinished: { loadFinishedCount += 1 }
+        )
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            reader,
+            paintConfirmer: paintConfirmer
+        )
+        let cidHandler = CIDSchemeHandler(message: message)
+        coordinator.cidHandler = cidHandler
+        let webView = LayoutAwareWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 390, height: 600),
+            configuration: FullInteractiveEmailWebView.makeConfiguration(cidHandler: cidHandler)
+        )
+        webView.navigationDelegate = coordinator
+        FullEmailReaderAccountBoundaryRegistry.shared.register(
+            webView: webView,
+            coordinator: coordinator
+        )
+        webView.loadHTMLString(reader.htmlContent, baseURL: URL(string: "about:blank"))
+        try await waitForBody(in: webView) { $0.contains(oldAccountMarker) }
+
+        for _ in 0..<100 where paintConfirmer.confirmPaintCallCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 1)
+
+        let manager = FullEmailWebViewManager()
+        await manager.clearForAccountTransition()
+        manager.reopenAccountWork()
+        coordinator.updateParent(reader)
+        paintConfirmer.completeNext()
+
+        let bodyText = try await webView.evaluateJavaScript("document.body.innerText") as? String
+
+        XCTAssertTrue(coordinator.isInvalidatedForAccountTransitionForTesting)
+        XCTAssertEqual(coordinator.parent.htmlContent, "")
+        XCTAssertNil(coordinator.parent.message)
+        XCTAssertNil(coordinator.cidHandler)
+        XCTAssertNil(cidHandler.message)
+        XCTAssertNil(webView.navigationDelegate)
+        XCTAssertNil(webView.onLayoutChange)
+        XCTAssertFalse(bodyText?.contains(oldAccountMarker) == true)
+        XCTAssertEqual(loadFinishedCount, 0)
+    }
+
+    func testNormalDismantleScrubsFreshReader() {
+        let message = makeMessage(id: "fresh-reader-dismantle")
+        let reader = makeReader(message: message)
+        let coordinator = FullEmailReaderWebView.Coordinator(reader)
+        let cidHandler = CIDSchemeHandler(message: message)
+        coordinator.cidHandler = cidHandler
+        let webView = LayoutAwareWKWebView(
+            frame: .zero,
+            configuration: FullInteractiveEmailWebView.makeConfiguration(cidHandler: cidHandler)
+        )
+        webView.navigationDelegate = coordinator
+        webView.onLayoutChange = { _ in }
+
+        FullEmailReaderWebView.dismantleUIView(webView, coordinator: coordinator)
+
+        XCTAssertTrue(coordinator.isInvalidatedForAccountTransitionForTesting)
+        XCTAssertNil(coordinator.parent.message)
+        XCTAssertNil(cidHandler.message)
+        XCTAssertNil(webView.navigationDelegate)
+        XCTAssertNil(webView.onLayoutChange)
+    }
+
     private func makeReader(
         message: Message?,
+        htmlContent: String? = nil,
         sourceSignature: String? = "sha256:source",
         onLoadFinished: (() -> Void)? = nil,
         onLoadFailed: (() -> Void)? = nil
     ) -> FullEmailReaderWebView {
         FullEmailReaderWebView(
-            htmlContent: defaultReaderHTML,
+            htmlContent: htmlContent ?? defaultReaderHTML,
             sourceSignature: sourceSignature,
             message: message,
             onLoadFinished: onLoadFinished,
             onLoadFailed: onLoadFailed
         )
+    }
+
+    private func waitForBody(
+        in webView: WKWebView,
+        satisfying predicate: (String) -> Bool
+    ) async throws {
+        for _ in 0..<100 {
+            if let value = try? await webView.evaluateJavaScript("document.body.innerText"),
+               let bodyText = value as? String,
+               predicate(bodyText) {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for the expected full-reader DOM")
     }
 
     private var defaultReaderHTML: String {

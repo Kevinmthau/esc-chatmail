@@ -119,6 +119,50 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         XCTAssertNotNil(loaded.flatMap { UIImage(data: $0.imageData) })
     }
 
+    func testCacheRejectsStaleGenerationAfterCloseAndReopen() async throws {
+        let cache = EmailPreviewSnapshotCache(cacheDirectory: tempDirectory)
+        let capturedGeneration = await cache.captureAccountGeneration()
+        let oldGeneration = try XCTUnwrap(capturedGeneration)
+
+        _ = await cache.store(
+            image: makeImage(color: .systemBlue),
+            displayHeight: 188,
+            pixelScale: 2,
+            for: "old-snapshot",
+            expectedAccountGeneration: oldGeneration
+        )
+
+        try await cache.closeAccountWorkAndClear()
+        try await cache.reopenAccountWork()
+
+        let staleLoad = await cache.load(
+            for: "old-snapshot",
+            expectedAccountGeneration: oldGeneration
+        )
+        let staleStore = await cache.store(
+            image: makeImage(color: .systemOrange),
+            displayHeight: 220,
+            pixelScale: 2,
+            for: "stale-write",
+            expectedAccountGeneration: oldGeneration
+        )
+        XCTAssertNil(staleLoad)
+        XCTAssertNil(staleStore)
+        let staleWrite = await cache.load(for: "stale-write")
+        XCTAssertNil(staleWrite)
+
+        let capturedFreshGeneration = await cache.captureAccountGeneration()
+        let freshGeneration = try XCTUnwrap(capturedFreshGeneration)
+        let freshStore = await cache.store(
+            image: makeImage(color: .systemGreen),
+            displayHeight: 206,
+            pixelScale: 2,
+            for: "fresh-write",
+            expectedAccountGeneration: freshGeneration
+        )
+        XCTAssertNotNil(freshStore)
+    }
+
     func testExpiredSnapshotIsNotLoaded() async {
         let cache = EmailPreviewSnapshotCache(
             cacheDirectory: tempDirectory,
@@ -596,6 +640,69 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         let counts = EmailPreviewSnapshotDiagnostics.countsForTesting()
         XCTAssertEqual(counts.renderSuccesses, 0)
         XCTAssertEqual(counts.renderFailures, 0)
+
+    }
+
+    @MainActor
+    func testViewModelDoesNotPublishOrStoreRenderCompletedAfterCacheReopen() async throws {
+        EmailPreviewSnapshotDiagnostics.resetForTesting()
+
+        let cache = EmailPreviewSnapshotCache(cacheDirectory: tempDirectory)
+        let html = "<html><body>Old account preview</body></html>"
+        let renderer = DelayedSnapshotRenderer()
+        let viewModel = EmailPreviewSnapshotViewModel(cache: cache, renderer: renderer)
+        let renderStarted = expectation(description: "old-account render started")
+        renderer.onStart = {
+            renderStarted.fulfill()
+        }
+
+        let task = Task { @MainActor in
+            await viewModel.loadSnapshot(
+                htmlContent: html,
+                previewCacheKey: "shared-message|old-source|mode:html-preview",
+                isDarkMode: false,
+                senderEmail: nil,
+                message: nil,
+                messageId: "shared-message",
+                containerWidth: 280
+            )
+        }
+
+        await fulfillment(of: [renderStarted], timeout: 1.0)
+        let request = try XCTUnwrap(renderer.requests.first)
+
+        try await cache.closeAccountWorkAndClear()
+        try await cache.reopenAccountWork()
+        renderer.succeed(
+            with: EmailPreviewSnapshotResult(
+                image: makeImage(color: .systemOrange),
+                displayHeight: 220,
+                pixelScale: 2,
+                cacheKey: request.cacheKey
+            )
+        )
+        await task.value
+
+        XCTAssertNil(viewModel.snapshotImage)
+        XCTAssertNil(viewModel.completedCacheKey)
+        XCTAssertFalse(viewModel.didFail)
+        let staleCachedSnapshot = await cache.load(for: request.cacheKey)
+        XCTAssertNil(staleCachedSnapshot)
+        let counts = EmailPreviewSnapshotDiagnostics.countsForTesting()
+        XCTAssertEqual(counts.renderSuccesses, 0)
+        XCTAssertEqual(counts.renderFailures, 0)
+
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "shared-message|old-source|mode:html-preview",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "shared-message",
+            containerWidth: 280
+        )
+        XCTAssertEqual(renderer.requests.count, 1)
+        XCTAssertFalse(viewModel.didFail)
     }
 
     @MainActor
@@ -828,6 +935,70 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         XCTAssertEqual(startedKeys, ["queued-first"])
     }
 
+    @MainActor
+    func testSnapshotRenderSchedulerCloseDrainsOldOperationBeforeReopen() async throws {
+        let scheduler = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 1)
+        let oldGeneration = try XCTUnwrap(scheduler.captureAccountGeneration())
+        let renderStarted = expectation(description: "old render operation started")
+        var operationContinuation: CheckedContinuation<Void, Never>?
+        var closeFinished = false
+
+        let renderTask = Task { @MainActor in
+            try await scheduler.render(
+                request: makeSnapshotRequest(cacheKey: "old-account-render"),
+                expectedAccountGeneration: oldGeneration
+            ) {
+                renderStarted.fulfill()
+                await withCheckedContinuation { continuation in
+                    operationContinuation = continuation
+                }
+                return self.makeSnapshotResult(
+                    cacheKey: "old-account-render",
+                    color: .systemOrange
+                )
+            }
+        }
+        await fulfillment(of: [renderStarted], timeout: 1.0)
+
+        let closeTask = Task { @MainActor in
+            await scheduler.closeAccountWorkAndAwait()
+            closeFinished = true
+        }
+        await Task.yield()
+
+        XCTAssertFalse(closeFinished)
+        XCTAssertNil(scheduler.captureAccountGeneration())
+        scheduler.reopenAccountWork()
+        XCTAssertNil(scheduler.captureAccountGeneration())
+
+        operationContinuation?.resume()
+        operationContinuation = nil
+        await closeTask.value
+
+        do {
+            _ = try await renderTask.value
+            XCTFail("Expected old-account render to throw CancellationError")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+
+        scheduler.reopenAccountWork()
+        let freshGeneration = try XCTUnwrap(scheduler.captureAccountGeneration())
+        XCTAssertFalse(scheduler.isAccountGenerationCurrent(oldGeneration))
+        let freshResult = try await scheduler.render(
+            request: makeSnapshotRequest(cacheKey: "fresh-account-render"),
+            expectedAccountGeneration: freshGeneration
+        ) {
+            self.makeSnapshotResult(
+                cacheKey: "fresh-account-render",
+                color: .systemGreen
+            )
+        }
+        XCTAssertEqual(freshResult.cacheKey, "fresh-account-render")
+    }
+
     // WebKit's content processes spawn lazily on the first full render in the
     // test host, and on a loaded CI runner that cold start alone can exceed
     // the renderer's 5s budget (PR #115's run lost
@@ -1038,9 +1209,14 @@ private final class DelayedSnapshotRenderer: EmailPreviewSnapshotRendering {
     var onStart: (() -> Void)?
     private(set) var requests: [EmailPreviewSnapshotRequest] = []
     private var continuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>?
+    private var didStartRender = false
 
     func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult {
         requests.append(request)
+        guard !didStartRender else {
+            throw StubSnapshotRenderer.Error.unexpectedRender
+        }
+        didStartRender = true
         onStart?()
         return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation

@@ -151,6 +151,8 @@ private final class OriginalEmailLoadViewModel {
             return .retryableFailure(reason)
         case .unrecoverableFailure(_, let reason):
             return .unrecoverableFailure(reason)
+        case .invalidated:
+            return .unrecoverableFailure("account_transition")
         }
     }
 

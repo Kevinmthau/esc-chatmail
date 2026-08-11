@@ -77,6 +77,15 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         )
     }
 
+    func testChatExitIsBlockedWhileReplySendPreflightOwnsDraft() {
+        // Revert-check: removing the isSending gate from
+        // ChatView.allowsConversationExit makes this test fail.
+        // HONEST SCOPE: XCTest cannot inspect the navigation modifier; this
+        // pins the policy shared by the native back gate and action menu.
+        XCTAssertFalse(ChatView.allowsConversationExit(isSending: true))
+        XCTAssertTrue(ChatView.allowsConversationExit(isSending: false))
+    }
+
     func testChatDismissesOnlyHiddenArchivedConversationWithNoVisibleMessages() {
         let archivedAt = Date()
 
@@ -85,7 +94,8 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
                 hidden: true,
                 archivedAt: archivedAt,
                 lastMessageDate: nil,
-                hasDraft: false
+                hasDraft: false,
+                isSending: false
             )
         )
         XCTAssertFalse(
@@ -93,7 +103,8 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
                 hidden: false,
                 archivedAt: archivedAt,
                 lastMessageDate: nil,
-                hasDraft: false
+                hasDraft: false,
+                isSending: false
             )
         )
         XCTAssertFalse(
@@ -101,7 +112,8 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
                 hidden: true,
                 archivedAt: nil,
                 lastMessageDate: nil,
-                hasDraft: false
+                hasDraft: false,
+                isSending: false
             )
         )
         XCTAssertFalse(
@@ -109,7 +121,8 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
                 hidden: true,
                 archivedAt: archivedAt,
                 lastMessageDate: Date(),
-                hasDraft: false
+                hasDraft: false,
+                isSending: false
             )
         )
         XCTAssertFalse(
@@ -117,7 +130,17 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
                 hidden: true,
                 archivedAt: archivedAt,
                 lastMessageDate: nil,
-                hasDraft: true
+                hasDraft: true,
+                isSending: false
+            )
+        )
+        XCTAssertFalse(
+            ChatView.shouldDismissDrainedConversation(
+                hidden: true,
+                archivedAt: archivedAt,
+                lastMessageDate: nil,
+                hasDraft: false,
+                isSending: true
             )
         )
     }

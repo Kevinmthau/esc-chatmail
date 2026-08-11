@@ -2074,6 +2074,103 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
     }
+
+    func testLoadContent_accountTransitionWhileAnalysisIsSuspendedDoesNotRecoverOrRepopulateCaches() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MessageBubbleLoaderAccountBoundary-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        let processedTextCache = ProcessedTextCache()
+        let renderedMessageCache = RenderedMessageCache()
+        let htmlAnalysisCache = MessageBubbleHTMLAnalysisCache()
+        let recoveryService = CountingHTMLContentRecoverer(recoveredHTMLByMessageID: [
+            "shared-message": "<html><body>STALE_RECOVERY_TOKEN</body></html>"
+        ])
+        let parsedEmailProvider = SuspendedParsedEmailProvider()
+        let htmlContentLoader = HTMLContentLoader(
+            contentHandler: handler,
+            recoveryService: recoveryService
+        )
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            processedTextCache: processedTextCache,
+            htmlContentHandler: handler,
+            htmlContentLoader: htmlContentLoader,
+            htmlContentRecoveryService: recoveryService,
+            htmlAnalysisCache: htmlAnalysisCache,
+            parsedEmailProvider: parsedEmailProvider,
+            renderedMessageCache: renderedMessageCache
+        )
+        defer {
+            try? handler.reopenAccountWork()
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertNotNil(
+            handler.saveHTML(
+                "<html><body><img src=\"cid:old-account\">OLD_ACCOUNT_TOKEN</body></html>",
+                for: "shared-message"
+            )
+        )
+        let request = MessageBubbleContentRequest(
+            messageID: "shared-message",
+            bodyText: nil,
+            bodyStorageURI: nil,
+            cleanedSnippet: "old snippet",
+            snippet: "old snippet",
+            subject: "Old account",
+            senderName: "Old Sender",
+            hasHTMLSource: true,
+            hasAttachments: true,
+            isFromMe: false,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            effectiveSenderEmail: "old@example.com",
+            attachmentSnapshots: []
+        )
+
+        let loadTask = Task {
+            await loader.loadContent(from: request)
+        }
+        await parsedEmailProvider.waitUntilEntered()
+
+        handler.closeAccountWork()
+        try await handler.deleteAllHTMLFromClosedAccount()
+        htmlAnalysisCache.closeAccountWorkAndClear()
+        await processedTextCache.closeAccountWorkAndClear()
+        let renderedCacheCloseTask = Task {
+            await renderedMessageCache.closeAccountWorkAndClear()
+        }
+        await Task.yield()
+        await parsedEmailProvider.resume()
+        await renderedCacheCloseTask.value
+
+        try handler.reopenAccountWork()
+        htmlAnalysisCache.reopenAccountWork()
+        await processedTextCache.reopenAccountWork()
+        await renderedMessageCache.reopenAccountWork()
+
+        let result = await loadTask.value
+        XCTAssertNil(result.fullTextContent)
+        XCTAssertFalse(result.hasRichHTMLContent)
+        XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
+        let recoveryCallCount = await recoveryService.recoveryCallCount()
+        XCTAssertEqual(recoveryCallCount, 0)
+
+        let capturedProcessedGeneration = await processedTextCache.captureAccountGeneration()
+        let freshProcessedGeneration = try XCTUnwrap(capturedProcessedGeneration)
+        let processedEntry = await processedTextCache.get(
+            messageId: "shared-message",
+            sourceSignature: "empty",
+            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            expectedAccountGeneration: freshProcessedGeneration
+        )
+        XCTAssertNil(processedEntry)
+        let renderedArtifacts = await renderedMessageCache.artifacts(
+            messageId: "shared-message",
+            sourceSignature: "empty"
+        )
+        XCTAssertNil(renderedArtifacts)
+    }
 }
 
 private final class MockBubbleContactsResolver: ContactsResolving, @unchecked Sendable {
@@ -2116,6 +2213,73 @@ private actor CountingHTMLContentRecoverer: HTMLContentRecovering {
 
     func recoveryCallCount() -> Int {
         callCount
+    }
+}
+
+private actor SuspendedParsedEmailProvider: ParsedEmailProviding {
+    private var entered = false
+    private var enteredContinuations: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var shouldRelease = false
+
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
+        includeRenderQuality: Bool,
+        includePreviewImages: Bool
+    ) async -> ParsedEmail? {
+        entered = true
+        let continuations = enteredContinuations
+        enteredContinuations.removeAll()
+        continuations.forEach { $0.resume() }
+
+        if !shouldRelease {
+            await withCheckedContinuation { continuation in
+                releaseContinuation = continuation
+            }
+        }
+
+        return try? ParsedEmail.parse(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: includeRenderQuality,
+            includePreviewImages: includePreviewImages
+        )
+    }
+
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
+        includeRenderQuality: Bool,
+        includePreviewImages: Bool,
+        expectedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async -> ParsedEmail? {
+        guard expectedAccountGeneration == nil else { return nil }
+        return await parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: includeRenderQuality,
+            includePreviewImages: includePreviewImages
+        )
+    }
+
+    func invalidate(messageId: String) async {}
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { continuation in
+            enteredContinuations.append(continuation)
+        }
+    }
+
+    func resume() {
+        shouldRelease = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }
 

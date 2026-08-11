@@ -138,6 +138,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
     private var activeRequest: ActiveRequest?
     private var failedAttemptsByCacheKey: [String: FailedAttempt] = [:]
     private var retryTasksByCacheKey: [String: Task<Void, Never>] = [:]
+    private var accountGenerationAnchor: EmailPreviewSnapshotCacheAccountGeneration?
 
     private struct ActiveRequest {
         let generation: Int
@@ -147,6 +148,12 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
     private struct FailedAttempt {
         let count: Int
         let nextRetryAt: Date
+    }
+
+    private struct AccountGenerations {
+        let snapshotCache: EmailPreviewSnapshotCacheAccountGeneration
+        let renderedMessageCache: RenderedMessageCacheAccountGeneration
+        let snapshotRenderer: EmailPreviewSnapshotRenderAccountGeneration?
     }
 
     init(
@@ -183,13 +190,29 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             isDarkMode: isDarkMode
         )
 
+        let resolvedRenderer = renderer ?? EmailPreviewSnapshotRenderer.shared
+        guard let accountGenerations = await captureAccountGenerations(
+            renderer: resolvedRenderer,
+            requiresRendererGeneration: renderer == nil
+        ) else {
+            return
+        }
+        guard acceptsAccountGeneration(accountGenerations.snapshotCache) else {
+            return
+        }
+
         let generation = beginRequest(cacheKey: cacheKey, containerWidth: containerWidth)
 
         guard completedCacheKey != cacheKey || didFail else {
             return
         }
 
-        guard isActive(generation: generation, cacheKey: cacheKey) else {
+        guard await isActive(
+            generation: generation,
+            cacheKey: cacheKey,
+            accountGenerations: accountGenerations,
+            renderer: resolvedRenderer
+        ) else {
             return
         }
 
@@ -202,8 +225,16 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             displayHeight = HTMLPreviewSizing.defaultPreviewHeight
         }
 
-        if let cached = await cache.load(for: cacheKey) {
-            guard isActive(generation: generation, cacheKey: cacheKey) else {
+        if let cached = await cache.load(
+            for: cacheKey,
+            expectedAccountGeneration: accountGenerations.snapshotCache
+        ) {
+            guard await isActive(
+                generation: generation,
+                cacheKey: cacheKey,
+                accountGenerations: accountGenerations,
+                renderer: resolvedRenderer
+            ) else {
                 return
             }
 
@@ -212,16 +243,27 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                     cacheKey: cacheKey,
                     messageId: diagnosticMessageId
                 )
-                guard isActive(generation: generation, cacheKey: cacheKey) else {
+                guard await isActive(
+                    generation: generation,
+                    cacheKey: cacheKey,
+                    accountGenerations: accountGenerations,
+                    renderer: resolvedRenderer
+                ) else {
                     return
                 }
                 await recordSnapshotMetadata(
                     cached,
                     previewCacheKey: previewCacheKey,
                     snapshotCacheKey: cacheKey,
-                    messageId: diagnosticMessageId
+                    messageId: diagnosticMessageId,
+                    expectedAccountGeneration: accountGenerations.renderedMessageCache
                 )
-                guard isActive(generation: generation, cacheKey: cacheKey) else {
+                guard await isActive(
+                    generation: generation,
+                    cacheKey: cacheKey,
+                    accountGenerations: accountGenerations,
+                    renderer: resolvedRenderer
+                ) else {
                     return
                 }
                 snapshotImage = image
@@ -237,7 +279,12 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 reason: "invalid-image-data"
             )
         } else {
-            guard isActive(generation: generation, cacheKey: cacheKey) else {
+            guard await isActive(
+                generation: generation,
+                cacheKey: cacheKey,
+                accountGenerations: accountGenerations,
+                renderer: resolvedRenderer
+            ) else {
                 return
             }
 
@@ -254,8 +301,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
 
         let renderStart = CFAbsoluteTimeGetCurrent()
         do {
-            let renderer = renderer ?? EmailPreviewSnapshotRenderer.shared
-            let result = try await renderer.render(
+            let result = try await resolvedRenderer.render(
                 request: EmailPreviewSnapshotRequest(
                     html: htmlContent,
                     cacheKey: cacheKey,
@@ -263,11 +309,17 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                     isDarkMode: isDarkMode,
                     senderEmail: senderEmail,
                     message: message
-                )
+                ),
+                expectedAccountGeneration: accountGenerations.snapshotRenderer
             )
 
             guard result.cacheKey == cacheKey,
-                  isActive(generation: generation, cacheKey: cacheKey) else {
+                  await isActive(
+                    generation: generation,
+                    cacheKey: cacheKey,
+                    accountGenerations: accountGenerations,
+                    renderer: resolvedRenderer
+                  ) else {
                 return
             }
 
@@ -275,10 +327,16 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 image: result.image,
                 displayHeight: result.displayHeight,
                 pixelScale: result.pixelScale,
-                for: result.cacheKey
+                for: result.cacheKey,
+                expectedAccountGeneration: accountGenerations.snapshotCache
             )
 
-            guard isActive(generation: generation, cacheKey: cacheKey) else {
+            guard await isActive(
+                generation: generation,
+                cacheKey: cacheKey,
+                accountGenerations: accountGenerations,
+                renderer: resolvedRenderer
+            ) else {
                 return
             }
 
@@ -290,16 +348,27 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 cacheStored: cached != nil
             )
             if let cached {
-                guard isActive(generation: generation, cacheKey: cacheKey) else {
+                guard await isActive(
+                    generation: generation,
+                    cacheKey: cacheKey,
+                    accountGenerations: accountGenerations,
+                    renderer: resolvedRenderer
+                ) else {
                     return
                 }
                 await recordSnapshotMetadata(
                     cached,
                     previewCacheKey: previewCacheKey,
                     snapshotCacheKey: result.cacheKey,
-                    messageId: diagnosticMessageId
+                    messageId: diagnosticMessageId,
+                    expectedAccountGeneration: accountGenerations.renderedMessageCache
                 )
-                guard isActive(generation: generation, cacheKey: cacheKey) else {
+                guard await isActive(
+                    generation: generation,
+                    cacheKey: cacheKey,
+                    accountGenerations: accountGenerations,
+                    renderer: resolvedRenderer
+                ) else {
                     return
                 }
             }
@@ -310,7 +379,12 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
-            guard isActive(generation: generation, cacheKey: cacheKey) else {
+            guard await isActive(
+                generation: generation,
+                cacheKey: cacheKey,
+                accountGenerations: accountGenerations,
+                renderer: resolvedRenderer
+            ) else {
                 return
             }
 
@@ -344,6 +418,89 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func captureAccountGenerations(
+        renderer: any EmailPreviewSnapshotRendering,
+        requiresRendererGeneration: Bool
+    ) async -> AccountGenerations? {
+        guard let snapshotCache = await cache.captureAccountGeneration(),
+              let renderedMessageCache = await RenderedMessageCache.shared.captureAccountGeneration() else {
+            return nil
+        }
+        let snapshotRenderer = renderer.captureAccountGeneration()
+        guard !requiresRendererGeneration || snapshotRenderer != nil else {
+            return nil
+        }
+        let generations = AccountGenerations(
+            snapshotCache: snapshotCache,
+            renderedMessageCache: renderedMessageCache,
+            snapshotRenderer: snapshotRenderer
+        )
+        guard await accountGenerationsAreCurrent(generations, renderer: renderer) else {
+            return nil
+        }
+        return generations
+    }
+
+    private func isActive(
+        generation: Int,
+        cacheKey: String,
+        accountGenerations: AccountGenerations,
+        renderer: any EmailPreviewSnapshotRendering
+    ) async -> Bool {
+        guard isActive(generation: generation, cacheKey: cacheKey) else {
+            return false
+        }
+        return await accountGenerationsAreCurrent(accountGenerations, renderer: renderer)
+    }
+
+    private func accountGenerationsAreCurrent(
+        _ generations: AccountGenerations,
+        renderer: any EmailPreviewSnapshotRendering
+    ) async -> Bool {
+        let cacheIsCurrent = await cache.isAccountGenerationCurrent(generations.snapshotCache)
+        let renderedCacheIsCurrent = await RenderedMessageCache.shared.isAccountGenerationCurrent(
+            generations.renderedMessageCache
+        )
+        guard cacheIsCurrent, renderedCacheIsCurrent else {
+            revokeAccountWork()
+            return false
+        }
+        if let snapshotRenderer = generations.snapshotRenderer {
+            guard renderer.isAccountGenerationCurrent(snapshotRenderer) else {
+                revokeAccountWork()
+                return false
+            }
+        }
+        return true
+    }
+
+    private func acceptsAccountGeneration(
+        _ generation: EmailPreviewSnapshotCacheAccountGeneration
+    ) -> Bool {
+        if let accountGenerationAnchor {
+            guard accountGenerationAnchor == generation else {
+                revokeAccountWork()
+                return false
+            }
+        } else {
+            accountGenerationAnchor = generation
+        }
+        return true
+    }
+
+    private func revokeAccountWork() {
+        loadGeneration &+= 1
+        activeRequest = nil
+        snapshotImage = nil
+        displayHeight = HTMLPreviewSizing.defaultPreviewHeight
+        completedCacheKey = nil
+        lastContainerWidth = 0
+        didFail = false
+        failedAttemptsByCacheKey.removeAll()
+        retryTasksByCacheKey.values.forEach { $0.cancel() }
+        retryTasksByCacheKey.removeAll()
     }
 
     private func shouldAttemptRender(cacheKey: String) -> Bool {
@@ -413,7 +570,8 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
         _ entry: EmailPreviewSnapshotCacheEntry,
         previewCacheKey: String,
         snapshotCacheKey: String,
-        messageId: String?
+        messageId: String?,
+        expectedAccountGeneration: RenderedMessageCacheAccountGeneration
     ) async {
         guard let messageId,
               let sourceSignature = Self.sourceSignature(
@@ -432,7 +590,8 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             ),
             messageId: messageId,
             sourceSignature: sourceSignature,
-            variantKey: RenderedMessageVariantKey("snapshot:\(snapshotCacheKey)")
+            variantKey: RenderedMessageVariantKey("snapshot:\(snapshotCacheKey)"),
+            expectedAccountGeneration: expectedAccountGeneration
         )
     }
 

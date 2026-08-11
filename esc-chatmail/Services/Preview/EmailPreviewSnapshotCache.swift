@@ -9,6 +9,10 @@ struct EmailPreviewSnapshotCacheEntry: Equatable, Sendable {
     let createdAt: Date
 }
 
+struct EmailPreviewSnapshotCacheAccountGeneration: Equatable, Sendable {
+    fileprivate let value: UInt64
+}
+
 enum EmailPreviewSnapshotCacheKey {
     static let rendererVersion = CacheVersioning.previewSnapshotRendererVersion
 
@@ -57,6 +61,10 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
     private let fileManager: FileManager
     private let cleanupTask = PeriodicCleanupTask()
     private var isCleaningUp = false
+    private var activeCleanupID: UUID?
+    private var activeCleanupTask: Task<Void, Never>?
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
 
     init(
         cacheDirectory: URL? = nil,
@@ -84,7 +92,11 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
         }
     }
 
-    func load(for cacheKey: String) -> EmailPreviewSnapshotCacheEntry? {
+    func load(
+        for cacheKey: String,
+        expectedAccountGeneration: EmailPreviewSnapshotCacheAccountGeneration? = nil
+    ) -> EmailPreviewSnapshotCacheEntry? {
+        guard accepts(expectedAccountGeneration) else { return nil }
         let paths = paths(for: cacheKey)
         guard fileManager.fileExists(atPath: paths.image.path),
               fileManager.fileExists(atPath: paths.metadata.path),
@@ -117,8 +129,10 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
         image: UIImage,
         displayHeight: CGFloat,
         pixelScale: CGFloat,
-        for cacheKey: String
+        for cacheKey: String,
+        expectedAccountGeneration: EmailPreviewSnapshotCacheAccountGeneration? = nil
     ) -> EmailPreviewSnapshotCacheEntry? {
+        guard accepts(expectedAccountGeneration) else { return nil }
         guard let imageData = image.jpegData(compressionQuality: 0.82) ?? image.pngData() else {
             return nil
         }
@@ -161,22 +175,73 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
         Self.createDirectoryIfNeeded(at: cacheDirectory, fileManager: fileManager)
     }
 
+    func captureAccountGeneration() -> EmailPreviewSnapshotCacheAccountGeneration? {
+        guard acceptsAccountWork else { return nil }
+        return EmailPreviewSnapshotCacheAccountGeneration(value: accountGeneration)
+    }
+
+    func isAccountGenerationCurrent(
+        _ generation: EmailPreviewSnapshotCacheAccountGeneration
+    ) -> Bool {
+        accepts(generation)
+    }
+
+    func closeAccountWorkAndClear() async throws {
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+        let cleanupID = activeCleanupID
+        let cleanupTask = activeCleanupTask
+        await cleanupTask?.value
+        if activeCleanupID == cleanupID {
+            activeCleanupID = nil
+            activeCleanupTask = nil
+            isCleaningUp = false
+        }
+        if fileManager.fileExists(atPath: cacheDirectory.path) {
+            try fileManager.removeItem(at: cacheDirectory)
+        }
+    }
+
+    func reopenAccountWork() throws {
+        try fileManager.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+    }
+
     func performCleanup() async {
-        guard !isCleaningUp else { return }
+        guard acceptsAccountWork, !isCleaningUp else { return }
         isCleaningUp = true
         let cacheDirectory = self.cacheDirectory
         let maxCacheAge = self.maxCacheAge
         let maxCacheSize = self.maxCacheSize
         let fileManager = self.fileManager
-        await Task.detached(priority: .utility) {
+        let cleanupID = UUID()
+        let task = Task.detached(priority: .utility) {
             Self.performCleanup(
                 cacheDirectory: cacheDirectory,
                 maxCacheAge: maxCacheAge,
                 maxCacheSize: maxCacheSize,
                 fileManager: fileManager
             )
-        }.value
-        isCleaningUp = false
+        }
+        activeCleanupID = cleanupID
+        activeCleanupTask = task
+        await task.value
+        if activeCleanupID == cleanupID {
+            activeCleanupID = nil
+            activeCleanupTask = nil
+            isCleaningUp = false
+        }
+    }
+
+    private func accepts(
+        _ expectedGeneration: EmailPreviewSnapshotCacheAccountGeneration?
+    ) -> Bool {
+        guard acceptsAccountWork else { return false }
+        return expectedGeneration.map { $0.value == accountGeneration } ?? true
     }
 
     private func paths(for cacheKey: String) -> (image: URL, metadata: URL) {

@@ -43,6 +43,10 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
         FullInteractiveEmailWebView.applySettings(to: webView)
         FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
+        FullEmailReaderAccountBoundaryRegistry.shared.register(
+            webView: webView,
+            coordinator: context.coordinator
+        )
         return webView
     }
 
@@ -63,12 +67,13 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
         FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
         context.coordinator.adoptAlreadyLoadedContent(htmlContent, messageId: message?.id)
+        FullEmailReaderAccountBoundaryRegistry.shared.register(
+            webView: webView,
+            coordinator: context.coordinator
+        )
 
-        let onAdopted = onAdoptedPrerendered
-        let onLoadFinished = onLoadFinished
-        DispatchQueue.main.async {
-            onAdopted?()
-            onLoadFinished?()
+        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
+            coordinator?.completeAdoptionCallbacksIfActive()
         }
         return webView
     }
@@ -81,7 +86,13 @@ struct FullEmailReaderWebView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
-        coordinator.reclaimPrerenderedWebViewIfNeeded(uiView)
+        let wasRehosted = coordinator.reclaimPrerenderedWebViewIfNeeded(uiView)
+        if wasRehosted {
+            coordinator.detachAfterSuccessfulCheckin()
+        } else {
+            coordinator.scrubForAccountBoundary(uiView)
+        }
+        FullEmailReaderAccountBoundaryRegistry.shared.unregister(webView: uiView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -115,6 +126,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         private var observedMessageObjectID: NSManagedObjectID?
         private var cachedReferencedInlineCIDs: Set<String>?
         private var cachedReferencedInlineCIDsHTML: String?
+        private var isInvalidated = false
         /// Holds strong reference to the cid: scheme handler.
         var cidHandler: CIDSchemeHandler?
         /// Set when this coordinator adopted a pre-rendered WebView from `FullEmailWebViewManager`,
@@ -149,12 +161,18 @@ struct FullEmailReaderWebView: UIViewRepresentable {
             adoptedPrerenderedMessageId != nil
         }
 
+        var isInvalidatedForAccountTransitionForTesting: Bool {
+            isInvalidated
+        }
+
         func updateParent(_ parent: FullEmailReaderWebView) {
+            guard !isInvalidated else { return }
             self.parent = parent
             cidHandler?.message = parent.message
         }
 
         func observeAttachmentAvailabilityChanges(reloading webView: WKWebView) {
+            guard !isInvalidated else { return }
             guard let message = parent.message,
                   let context = message.managedObjectContext else {
                 stopObservingAttachmentAvailabilityChanges()
@@ -246,7 +264,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func loadContent(in webView: WKWebView) {
-            guard !isLoading else { return }
+            guard !isInvalidated, !isLoading else { return }
             isLoading = true
             shouldReloadAfterCurrentLoad = false
             recordLoadedSignature()
@@ -256,6 +274,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func loadContentIfReady(in webView: WKWebView) {
+            guard !isInvalidated else { return }
             let windowPresent = webView.window != nil
             let width = webView.bounds.width
             let height = webView.bounds.height
@@ -303,6 +322,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func recordLoadedSignature() {
+            guard !isInvalidated else { return }
             coordination.recordLoadedSignature(
                 content: parent.htmlContent,
                 reloadSignature: reloadSignature()
@@ -312,6 +332,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         /// Marks an adopted pre-rendered WebView's content as already loaded so `needsReload` is false
         /// and no live paint confirmation occurs at display time. The instance is already painted off-screen.
         func adoptAlreadyLoadedContent(_ html: String, messageId: String?) {
+            guard !isInvalidated else { return }
             coordination.adoptAlreadyLoadedContent(
                 content: html,
                 reloadSignature: reloadSignature()
@@ -323,12 +344,59 @@ struct FullEmailReaderWebView: UIViewRepresentable {
 
         /// Returns an adopted pre-rendered WebView to the pool when the reader is dismantled, so a
         /// re-open stays instant. No-op for freshly-created (non-adopted) WebViews.
-        func reclaimPrerenderedWebViewIfNeeded(_ webView: WKWebView) {
+        @discardableResult
+        func reclaimPrerenderedWebViewIfNeeded(_ webView: WKWebView) -> Bool {
             guard let messageId = adoptedPrerenderedMessageId else {
-                return
+                return false
             }
             adoptedPrerenderedMessageId = nil
-            parent.webViewAdoptionProvider?.checkin(messageId: messageId, webView: webView)
+            return parent.webViewAdoptionProvider?.checkin(messageId: messageId, webView: webView) == true
+        }
+
+        func completeAdoptionCallbacksIfActive() {
+            guard !isInvalidated else { return }
+            parent.onAdoptedPrerendered?()
+            parent.onLoadFinished?()
+        }
+
+        /// Releases the live coordinator's account-owned state while preserving a WebView that the
+        /// manager has successfully reclaimed into its bounded off-screen pool.
+        func detachAfterSuccessfulCheckin() {
+            invalidateCoordinatorState()
+        }
+
+        /// Used for both account cleanup and normal destruction of a fresh (non-pooled) reader.
+        func scrubForAccountBoundary(_ webView: WKWebView) {
+            invalidateCoordinatorState()
+            webView.stopLoading()
+            webView.navigationDelegate = nil
+            if let layoutAwareWebView = webView as? LayoutAwareWKWebView {
+                layoutAwareWebView.onLayoutChange = nil
+            }
+            webView.loadHTMLString("", baseURL: URL(string: "about:blank"))
+        }
+
+        private func invalidateCoordinatorState() {
+            guard !isInvalidated else { return }
+            isInvalidated = true
+            stopObservingAttachmentAvailabilityChanges()
+            resetPaintConfirmationState()
+            isLoading = false
+            shouldReloadAfterCurrentLoad = false
+            adoptedPrerenderedMessageId = nil
+            cachedReferencedInlineCIDs = nil
+            cachedReferencedInlineCIDsHTML = nil
+            cidHandler?.message = nil
+            cidHandler = nil
+            parent = FullEmailReaderWebView(
+                htmlContent: "",
+                sourceSignature: nil,
+                message: nil,
+                webViewAdoptionProvider: nil,
+                onLoadFinished: nil,
+                onLoadFailed: nil,
+                onAdoptedPrerendered: nil
+            )
         }
 
         func recordFinishedLoad() {
@@ -383,6 +451,10 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard !isInvalidated else {
+                decisionHandler(.cancel)
+                return
+            }
             // The decision logic lives in the shared, unit-tested `FullInteractiveEmailWebView`
             // `navigationDecision` so this live reader and the off-screen warm delegate stay in
             // lockstep. This wrapper only performs the WebKit-side side effects: opening external
@@ -407,6 +479,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard !isInvalidated else { return }
             isLoading = false
             recordFinishedLoad()
             confirmPaintIfNeeded(in: webView)
@@ -416,11 +489,13 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            guard !isInvalidated else { return }
             // A committed navigation has not necessarily painted the new document. Keep the
             // placeholder until didFinish starts a snapshot-backed paint confirmation.
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            guard !isInvalidated else { return }
             isLoading = false
             let didResetLoad = resetLoadedSignatureAfterFailure(for: error)
             if didResetLoad {
@@ -431,6 +506,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            guard !isInvalidated else { return }
             isLoading = false
             let didResetLoad = resetLoadedSignatureAfterFailure(for: error)
             if didResetLoad {
@@ -606,7 +682,7 @@ enum InlineCIDAttachmentAvailabilityFingerprint {
     }
 
     private static func hasUsableLocalFile(_ attachment: Attachment) -> Bool {
-        guard let localURL = attachment.localURL,
+        guard let localURL = attachment.readableLocalURLValue,
               let fileURL = AttachmentPaths.fullURL(for: localURL) else {
             return false
         }

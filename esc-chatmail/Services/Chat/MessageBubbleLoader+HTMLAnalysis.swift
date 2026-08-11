@@ -2,39 +2,79 @@ import CryptoKit
 import Foundation
 
 extension MessageBubbleLoader {
-    func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) async -> MessageBubbleHTMLAnalysis {
-        let variantKey = RenderedMessageVariantKey(htmlAnalysisCacheKey(for: request))
-        let sourceSignature = renderedSourceSignature(for: request)
+    func cachedHTMLAnalysis(
+        for request: MessageBubbleContentRequest,
+        accountContext: MessageBubbleAccountWorkContext
+    ) async -> MessageBubbleHTMLAnalysis {
+        let fallback = MessageBubbleHTMLAnalysis.placeholder(hasHTMLSource: request.hasHTMLSource)
+        guard await isAccountWorkContextCurrent(accountContext) else {
+            return fallback
+        }
+        let variantKey = RenderedMessageVariantKey(htmlAnalysisCacheKey(
+            for: request,
+            accountContext: accountContext
+        ))
+        let sourceSignature = renderedSourceSignature(
+            for: request,
+            accountContext: accountContext
+        )
 
         let analysis = await renderedMessageCache.htmlAnalysis(
             messageId: request.messageID,
             sourceSignature: sourceSignature,
-            variantKey: variantKey
+            variantKey: variantKey,
+            expectedAccountGeneration: accountContext.renderedMessage
         ) {
-            if let cached = self.htmlAnalysisCache.value(forKey: variantKey.rawValue) {
+            if let cached = self.htmlAnalysisCache.value(
+                forKey: variantKey.rawValue,
+                expectedGeneration: accountContext.htmlAnalysis
+            ) {
                 return cached
             }
 
-            return await self.buildHTMLAnalysis(for: request)
-        } ?? .placeholder(hasHTMLSource: request.hasHTMLSource)
+            return await self.buildHTMLAnalysis(
+                for: request,
+                accountContext: accountContext
+            )
+        } ?? fallback
 
-        htmlAnalysisCache.setValue(analysis, forKey: variantKey.rawValue)
+        guard await isAccountWorkContextCurrent(accountContext) else {
+            return fallback
+        }
+
+        htmlAnalysisCache.setValue(
+            analysis,
+            forKey: variantKey.rawValue,
+            expectedGeneration: accountContext.htmlAnalysis
+        )
         return analysis
     }
 
-    private func buildHTMLAnalysis(for request: MessageBubbleContentRequest) async -> MessageBubbleHTMLAnalysis {
-        let canonicalContent = await canonicalContentForAnalysisIfNeeded(for: request)
+    private func buildHTMLAnalysis(
+        for request: MessageBubbleContentRequest,
+        accountContext: MessageBubbleAccountWorkContext
+    ) async -> MessageBubbleHTMLAnalysis {
+        let fallback = MessageBubbleHTMLAnalysis.placeholder(hasHTMLSource: request.hasHTMLSource)
+        guard await isAccountWorkContextCurrent(accountContext) else { return fallback }
+        let canonicalContent = await canonicalContentForAnalysisIfNeeded(
+            for: request,
+            accountContext: accountContext
+        )
+        guard await isAccountWorkContextCurrent(accountContext) else { return fallback }
         let canonicalHTML = canonicalContent?.html
         let parsedEmail: ParsedEmail?
         if let canonicalHTML, let canonicalContent {
             parsedEmail = await parsedEmailProvider.parsedEmail(
                 messageId: request.messageID,
                 sourceSignature: canonicalContent.sourceSignature,
-                canonicalHTML: canonicalHTML
+                canonicalHTML: canonicalHTML,
+                expectedAccountGeneration: accountContext.parsedEmail
             )
         } else {
             parsedEmail = nil
         }
+
+        guard await isAccountWorkContextCurrent(accountContext) else { return fallback }
 
         let analysis = MessageBubbleHTMLAnalysisBuilder.build(
             canonicalHTML: canonicalHTML,
@@ -52,7 +92,10 @@ extension MessageBubbleLoader {
         return analysis
     }
 
-    private func canonicalContentForAnalysisIfNeeded(for request: MessageBubbleContentRequest) async -> CanonicalEmailContent? {
+    private func canonicalContentForAnalysisIfNeeded(
+        for request: MessageBubbleContentRequest,
+        accountContext: MessageBubbleAccountWorkContext
+    ) async -> CanonicalEmailContent? {
         let needsCanonicalHTML =
             request.hasAttachments ||
             !request.attachmentSnapshots.isEmpty ||
@@ -61,7 +104,10 @@ extension MessageBubbleLoader {
             !request.hasHTMLSource &&
             (
                 request.bodyStorageURI != nil ||
-                htmlContentHandler.htmlFileExists(for: request.messageID)
+                htmlContentHandler.htmlFileExists(
+                    for: request.messageID,
+                    expectedGeneration: accountContext.htmlContent
+                )
             )
 
         guard needsCanonicalHTML || shouldResolveMissingHTMLHint else {
@@ -70,7 +116,10 @@ extension MessageBubbleLoader {
 
         guard request.hasHTMLSource ||
                 request.bodyStorageURI != nil ||
-                htmlContentHandler.htmlFileExists(for: request.messageID) else {
+                htmlContentHandler.htmlFileExists(
+                    for: request.messageID,
+                    expectedGeneration: accountContext.htmlContent
+                ) else {
             return nil
         }
 
@@ -78,14 +127,19 @@ extension MessageBubbleLoader {
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
             bodyText: request.bodyText,
-            allowRecovery: false
+            allowRecovery: false,
+            expectedAccountGeneration: accountContext.htmlContent
         )
     }
 
-    private func htmlAnalysisCacheKey(for request: MessageBubbleContentRequest) -> String {
+    private func htmlAnalysisCacheKey(
+        for request: MessageBubbleContentRequest,
+        accountContext: MessageBubbleAccountWorkContext
+    ) -> String {
         let htmlSourceSignature = htmlContentHandler.htmlSourceSignature(
             messageId: request.messageID,
-            bodyStorageURI: request.bodyStorageURI
+            bodyStorageURI: request.bodyStorageURI,
+            expectedGeneration: accountContext.htmlContent
         )
         // Sender identity is deliberately absent: the analysis output does not
         // depend on it (calendar-card eligibility is sender-independent).
@@ -102,12 +156,16 @@ extension MessageBubbleLoader {
         ].joined(separator: "|")
     }
 
-    func renderedSourceSignature(for request: MessageBubbleContentRequest) -> String {
+    func renderedSourceSignature(
+        for request: MessageBubbleContentRequest,
+        accountContext: MessageBubbleAccountWorkContext? = nil
+    ) -> String {
         ProcessedTextCache.contentSourceSignature(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
             bodyText: request.bodyText,
-            handler: htmlContentHandler
+            handler: htmlContentHandler,
+            expectedAccountGeneration: accountContext?.htmlContent
         )
     }
 

@@ -18,6 +18,10 @@ struct EmailPreviewSnapshotResult {
     let cacheKey: String
 }
 
+struct EmailPreviewSnapshotRenderAccountGeneration: Equatable, Sendable {
+    fileprivate let value: UInt64
+}
+
 enum EmailPreviewSnapshotRenderError: Error {
     case invalidWidth
     case navigationFailed(Error)
@@ -41,6 +45,34 @@ enum EmailPreviewSnapshotAppearance {
 @MainActor
 protocol EmailPreviewSnapshotRendering: AnyObject {
     func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult
+
+    func render(
+        request: EmailPreviewSnapshotRequest,
+        expectedAccountGeneration: EmailPreviewSnapshotRenderAccountGeneration?
+    ) async throws -> EmailPreviewSnapshotResult
+
+    func captureAccountGeneration() -> EmailPreviewSnapshotRenderAccountGeneration?
+    func isAccountGenerationCurrent(_ generation: EmailPreviewSnapshotRenderAccountGeneration) -> Bool
+}
+
+extension EmailPreviewSnapshotRendering {
+    func render(
+        request: EmailPreviewSnapshotRequest,
+        expectedAccountGeneration: EmailPreviewSnapshotRenderAccountGeneration?
+    ) async throws -> EmailPreviewSnapshotResult {
+        guard expectedAccountGeneration == nil else {
+            throw CancellationError()
+        }
+        return try await render(request: request)
+    }
+
+    func captureAccountGeneration() -> EmailPreviewSnapshotRenderAccountGeneration? {
+        nil
+    }
+
+    func isAccountGenerationCurrent(_ generation: EmailPreviewSnapshotRenderAccountGeneration) -> Bool {
+        false
+    }
 }
 
 @MainActor
@@ -49,6 +81,17 @@ protocol EmailPreviewSnapshotRenderScheduling: AnyObject {
         request: EmailPreviewSnapshotRequest,
         operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult
     ) async throws -> EmailPreviewSnapshotResult
+
+    func render(
+        request: EmailPreviewSnapshotRequest,
+        expectedAccountGeneration: EmailPreviewSnapshotRenderAccountGeneration?,
+        operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult
+    ) async throws -> EmailPreviewSnapshotResult
+
+    func captureAccountGeneration() -> EmailPreviewSnapshotRenderAccountGeneration?
+    func isAccountGenerationCurrent(_ generation: EmailPreviewSnapshotRenderAccountGeneration) -> Bool
+    func closeAccountWorkAndAwait() async
+    func reopenAccountWork()
 }
 
 @MainActor
@@ -58,6 +101,7 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
     private final class ScheduledRender {
         let id = UUID()
         let request: EmailPreviewSnapshotRequest
+        let accountGeneration: EmailPreviewSnapshotRenderAccountGeneration
         let operation: @MainActor () async throws -> EmailPreviewSnapshotResult
         var continuations: [UUID: CheckedContinuation<EmailPreviewSnapshotResult, Error>] = [:]
         var isRunning = false
@@ -65,9 +109,11 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
 
         init(
             request: EmailPreviewSnapshotRequest,
+            accountGeneration: EmailPreviewSnapshotRenderAccountGeneration,
             operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult
         ) {
             self.request = request
+            self.accountGeneration = accountGeneration
             self.operation = operation
         }
     }
@@ -76,8 +122,11 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
     private var runningCount = 0
     private var queue: [ScheduledRender] = []
     private var inFlightByCacheKey: [String: ScheduledRender] = [:]
+    private var allWorkByID: [UUID: ScheduledRender] = [:]
     private var pendingWaiterIDs: Set<UUID> = []
     private var cancelledPendingWaiterIDs: Set<UUID> = []
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
 
     init(maxConcurrentRenders: Int) {
         self.maxConcurrentRenders = max(1, maxConcurrentRenders)
@@ -87,7 +136,26 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
         request: EmailPreviewSnapshotRequest,
         operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult
     ) async throws -> EmailPreviewSnapshotResult {
+        guard let generation = captureAccountGeneration() else {
+            throw CancellationError()
+        }
+        return try await render(
+            request: request,
+            expectedAccountGeneration: generation,
+            operation: operation
+        )
+    }
+
+    func render(
+        request: EmailPreviewSnapshotRequest,
+        expectedAccountGeneration: EmailPreviewSnapshotRenderAccountGeneration?,
+        operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult
+    ) async throws -> EmailPreviewSnapshotResult {
         try Task.checkCancellation()
+        guard let generation = expectedAccountGeneration ?? captureAccountGeneration(),
+              isAccountGenerationCurrent(generation) else {
+            throw CancellationError()
+        }
 
         let waiterID = UUID()
         let cacheKey = request.cacheKey
@@ -97,6 +165,7 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
             try await withCheckedThrowingContinuation { continuation in
                 enqueue(
                     request: request,
+                    accountGeneration: generation,
                     operation: operation,
                     waiterID: waiterID,
                     continuation: continuation
@@ -111,6 +180,7 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
 
     private func enqueue(
         request: EmailPreviewSnapshotRequest,
+        accountGeneration: EmailPreviewSnapshotRenderAccountGeneration,
         operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult,
         waiterID: UUID,
         continuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>
@@ -119,28 +189,41 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
 
         let wasCancelledBeforeEnqueue = cancelledPendingWaiterIDs.remove(waiterID) != nil
         guard !Task.isCancelled,
-              !wasCancelledBeforeEnqueue else {
+              !wasCancelledBeforeEnqueue,
+              isAccountGenerationCurrent(accountGeneration) else {
             continuation.resume(throwing: CancellationError())
             return
         }
 
         if let existing = inFlightByCacheKey[request.cacheKey] {
+            guard existing.accountGeneration == accountGeneration else {
+                continuation.resume(throwing: CancellationError())
+                return
+            }
             existing.continuations[waiterID] = continuation
             return
         }
 
-        let work = ScheduledRender(request: request, operation: operation)
+        let work = ScheduledRender(
+            request: request,
+            accountGeneration: accountGeneration,
+            operation: operation
+        )
         work.continuations[waiterID] = continuation
         inFlightByCacheKey[request.cacheKey] = work
+        allWorkByID[work.id] = work
         queue.append(work)
         startAvailableWork()
     }
 
     private func startAvailableWork() {
-        while runningCount < maxConcurrentRenders, !queue.isEmpty {
+        while acceptsAccountWork, runningCount < maxConcurrentRenders, !queue.isEmpty {
             let work = queue.removeFirst()
-            guard !work.continuations.isEmpty else {
+            guard !work.continuations.isEmpty,
+                  isAccountGenerationCurrent(work.accountGeneration) else {
+                cancelContinuations(for: work)
                 removeInFlightReference(for: work)
+                allWorkByID.removeValue(forKey: work.id)
                 continue
             }
 
@@ -185,6 +268,7 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
         } else {
             queue.removeAll { $0.id == work.id }
             removeInFlightReference(for: work)
+            allWorkByID.removeValue(forKey: work.id)
         }
     }
 
@@ -199,6 +283,7 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
         work.isRunning = false
         runningCount = max(0, runningCount - 1)
         removeInFlightReference(for: work)
+        allWorkByID.removeValue(forKey: work.id)
 
         let continuations = Array(work.continuations.values)
         work.continuations.removeAll()
@@ -207,6 +292,52 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
         }
 
         startAvailableWork()
+    }
+
+    func captureAccountGeneration() -> EmailPreviewSnapshotRenderAccountGeneration? {
+        guard acceptsAccountWork else { return nil }
+        return EmailPreviewSnapshotRenderAccountGeneration(value: accountGeneration)
+    }
+
+    func isAccountGenerationCurrent(_ generation: EmailPreviewSnapshotRenderAccountGeneration) -> Bool {
+        acceptsAccountWork && generation.value == accountGeneration
+    }
+
+    func closeAccountWorkAndAwait() async {
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+
+        let work = Array(allWorkByID.values)
+        queue.removeAll()
+        inFlightByCacheKey.removeAll()
+        pendingWaiterIDs.removeAll()
+        cancelledPendingWaiterIDs.removeAll()
+        for item in work {
+            cancelContinuations(for: item)
+            item.task?.cancel()
+            if !item.isRunning {
+                allWorkByID.removeValue(forKey: item.id)
+            }
+        }
+        for task in work.compactMap(\.task) {
+            await task.value
+        }
+        allWorkByID.removeAll()
+        runningCount = 0
+    }
+
+    func reopenAccountWork() {
+        guard allWorkByID.isEmpty, runningCount == 0 else { return }
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+    }
+
+    private func cancelContinuations(for work: ScheduledRender) {
+        let continuations = Array(work.continuations.values)
+        work.continuations.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: CancellationError())
+        }
     }
 
     private func removeInFlightReference(for work: ScheduledRender) {
@@ -228,8 +359,21 @@ final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
     }
 
     func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult {
+        guard let generation = captureAccountGeneration() else {
+            throw CancellationError()
+        }
+        return try await render(request: request, expectedAccountGeneration: generation)
+    }
+
+    func render(
+        request: EmailPreviewSnapshotRequest,
+        expectedAccountGeneration: EmailPreviewSnapshotRenderAccountGeneration?
+    ) async throws -> EmailPreviewSnapshotResult {
         try Task.checkCancellation()
-        return try await scheduler.render(request: request) {
+        return try await scheduler.render(
+            request: request,
+            expectedAccountGeneration: expectedAccountGeneration
+        ) {
             try Task.checkCancellation()
             let session = try EmailPreviewSnapshotRenderSession(request: request)
             return try await withTaskCancellationHandler {
@@ -240,6 +384,22 @@ final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
                 }
             }
         }
+    }
+
+    func captureAccountGeneration() -> EmailPreviewSnapshotRenderAccountGeneration? {
+        scheduler.captureAccountGeneration()
+    }
+
+    func isAccountGenerationCurrent(_ generation: EmailPreviewSnapshotRenderAccountGeneration) -> Bool {
+        scheduler.isAccountGenerationCurrent(generation)
+    }
+
+    func closeAccountWorkAndAwait() async {
+        await scheduler.closeAccountWorkAndAwait()
+    }
+
+    func reopenAccountWork() {
+        scheduler.reopenAccountWork()
     }
 }
 
@@ -352,6 +512,8 @@ private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDel
         settleTask = nil
         webView.stopLoading()
         webView.navigationDelegate = nil
+        cidHandler.message = nil
+        webView.loadHTMLString("", baseURL: URL(string: "about:blank"))
         continuation?.resume(with: result)
         continuation = nil
     }

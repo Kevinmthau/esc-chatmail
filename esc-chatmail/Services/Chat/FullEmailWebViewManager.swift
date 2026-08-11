@@ -533,8 +533,16 @@ enum FullEmailOpenPayloadReuseValidator {
     }
 }
 
+struct FullEmailAccountWorkGeneration: Equatable, Sendable {
+    fileprivate let value: UInt64
+}
+
 @MainActor
 protocol FullEmailOpening: AnyObject {
+    func captureAccountWorkGeneration() -> FullEmailAccountWorkGeneration?
+
+    func registerOpenSession(_ session: FullEmailOpenSession)
+
     func preparedOpenArtifact(
         request: OriginalEmailWarmRequest,
         message: Message?,
@@ -548,18 +556,45 @@ protocol FullEmailOpening: AnyObject {
         width: CGFloat
     )
 
+    func prepaintAfterExplicitOpen(
+        request: OriginalEmailWarmRequest,
+        message: Message,
+        artifact: EmailReaderArtifact,
+        width: CGFloat,
+        expectedAccountGeneration: FullEmailAccountWorkGeneration?
+    )
+
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async
 
     func prewarmOnOpen(message: Message, width: CGFloat?)
 }
 
 extension FullEmailOpening {
+    func captureAccountWorkGeneration() -> FullEmailAccountWorkGeneration? { nil }
+
+    func registerOpenSession(_ session: FullEmailOpenSession) {}
+
     func prepaintAfterExplicitOpen(
         request: OriginalEmailWarmRequest,
         message: Message,
         artifact: EmailReaderArtifact,
         width: CGFloat
     ) {}
+
+    func prepaintAfterExplicitOpen(
+        request: OriginalEmailWarmRequest,
+        message: Message,
+        artifact: EmailReaderArtifact,
+        width: CGFloat,
+        expectedAccountGeneration: FullEmailAccountWorkGeneration?
+    ) {
+        prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            artifact: artifact,
+            width: width
+        )
+    }
 
     func prewarmOnOpen(message: Message, width: CGFloat?) {}
 
@@ -576,7 +611,218 @@ protocol FullEmailWebViewAdopting: AnyObject {
         width: CGFloat
     ) -> FullEmailWebViewManager.Checkout?
 
-    func checkin(messageId: String, webView: WKWebView)
+    @discardableResult
+    func checkin(messageId: String, webView: WKWebView) -> Bool
+}
+
+// MARK: - Live full-reader account boundary
+
+/// Tracks the on-screen full-reader WebViews that are not necessarily owned by the pre-render pool.
+/// Records are weak so normal SwiftUI lifetime remains authoritative; account cleanup uses the
+/// registry only to synchronously scrub every still-live reader and then boundedly verify that its
+/// old document has been replaced.
+@MainActor
+final class FullEmailReaderAccountBoundaryRegistry {
+    static let shared = FullEmailReaderAccountBoundaryRegistry()
+
+    private final class Record {
+        weak var webView: LayoutAwareWKWebView?
+        weak var coordinator: FullEmailReaderWebView.Coordinator?
+
+        init(webView: LayoutAwareWKWebView, coordinator: FullEmailReaderWebView.Coordinator) {
+            self.webView = webView
+            self.coordinator = coordinator
+        }
+    }
+
+    private var records: [ObjectIdentifier: Record] = [:]
+
+    func register(
+        webView: LayoutAwareWKWebView,
+        coordinator: FullEmailReaderWebView.Coordinator
+    ) {
+        purgeReleasedRecords()
+        records[ObjectIdentifier(webView)] = Record(webView: webView, coordinator: coordinator)
+    }
+
+    func unregister(webView: WKWebView) {
+        records.removeValue(forKey: ObjectIdentifier(webView))
+    }
+
+    func clearForAccountTransition(
+        additionallyAwaiting additionalWebViews: [LayoutAwareWKWebView] = []
+    ) async {
+        let liveRecords = Array(records.values)
+        records.removeAll(keepingCapacity: false)
+
+        var webViewsByID = Dictionary(
+            uniqueKeysWithValues: additionalWebViews.map { (ObjectIdentifier($0), $0) }
+        )
+        for record in liveRecords {
+            guard let webView = record.webView else { continue }
+            webViewsByID[ObjectIdentifier(webView)] = webView
+            if let coordinator = record.coordinator {
+                coordinator.scrubForAccountBoundary(webView)
+            } else {
+                Self.scrubUncoordinated(webView)
+            }
+        }
+
+        await Self.awaitBlankDocuments(in: Array(webViewsByID.values))
+    }
+
+    private func purgeReleasedRecords() {
+        records = records.filter { $0.value.webView != nil }
+    }
+
+    private static func scrubUncoordinated(_ webView: LayoutAwareWKWebView) {
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.onLayoutChange = nil
+        webView.loadHTMLString("", baseURL: URL(string: "about:blank"))
+    }
+
+    /// `WKWebView.loadHTMLString` is asynchronous. Account cleanup does not wait indefinitely for a
+    /// damaged WebKit process, but it does yield long enough for healthy readers to replace their DOM.
+    private static func awaitBlankDocuments(in webViews: [LayoutAwareWKWebView]) async {
+        let awaiter = FullEmailBlankDocumentAwaiter(webViews: webViews) { webView, completion in
+            webView.evaluateJavaScript("document.body ? document.body.innerHTML : ''") { value, _ in
+                completion(value as? String)
+            }
+        }
+        await awaiter.wait()
+    }
+}
+
+/// Bounded callback coordinator for the account-boundary DOM verification pass.
+///
+/// WebKit's async `evaluateJavaScript` bridge cannot provide a hard deadline when its completion
+/// handler never arrives. This coordinator uses the callback API directly, probes all readers in
+/// parallel, and owns the single deadline for the whole pass. Late callbacks hold only a weak
+/// reference and are ignored after settlement, so they cannot retain the waiter or restart polling.
+@MainActor
+final class FullEmailBlankDocumentAwaiter {
+    typealias Evaluator = (LayoutAwareWKWebView, @escaping (String?) -> Void) -> Void
+
+    private let evaluator: Evaluator
+    private let timeoutNanoseconds: UInt64
+    private let retryNanoseconds: UInt64
+    private var pendingByID: [ObjectIdentifier: LayoutAwareWKWebView] = [:]
+    private var outstandingIDs: Set<ObjectIdentifier> = []
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
+    private var isFinished = false
+
+    init(
+        webViews: [LayoutAwareWKWebView],
+        timeoutNanoseconds: UInt64 = 1_000_000_000,
+        retryNanoseconds: UInt64 = 10_000_000,
+        evaluator: @escaping Evaluator
+    ) {
+        self.timeoutNanoseconds = timeoutNanoseconds
+        self.retryNanoseconds = retryNanoseconds
+        self.evaluator = evaluator
+        for webView in webViews {
+            pendingByID[ObjectIdentifier(webView)] = webView
+        }
+    }
+
+    func wait() async {
+        guard !pendingByID.isEmpty, !isFinished else { return }
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                install(continuation)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.finish()
+            }
+        }
+    }
+
+    private func install(_ continuation: CheckedContinuation<Void, Never>) {
+        guard !isFinished else {
+            continuation.resume()
+            return
+        }
+
+        precondition(self.continuation == nil, "A blank-document waiter may only be awaited once")
+        self.continuation = continuation
+        guard !Task.isCancelled else {
+            finish()
+            return
+        }
+
+        timeoutTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+            } catch {
+                return
+            }
+            finish()
+        }
+        probePendingDocuments()
+    }
+
+    private func probePendingDocuments() {
+        guard !isFinished, outstandingIDs.isEmpty else { return }
+        guard !pendingByID.isEmpty else {
+            finish()
+            return
+        }
+
+        let pending = Array(pendingByID)
+        outstandingIDs = Set(pending.map(\.key))
+        for (id, webView) in pending {
+            evaluator(webView) { [weak self] bodyHTML in
+                Task { @MainActor [weak self] in
+                    self?.didEvaluateDocument(id: id, bodyHTML: bodyHTML)
+                }
+            }
+        }
+    }
+
+    private func didEvaluateDocument(id: ObjectIdentifier, bodyHTML: String?) {
+        guard !isFinished, outstandingIDs.remove(id) != nil else { return }
+        if bodyHTML?.isEmpty == true {
+            pendingByID.removeValue(forKey: id)
+        }
+
+        guard outstandingIDs.isEmpty else { return }
+        guard !pendingByID.isEmpty else {
+            finish()
+            return
+        }
+
+        retryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: retryNanoseconds)
+            } catch {
+                return
+            }
+            retryTask = nil
+            probePendingDocuments()
+        }
+    }
+
+    private func finish() {
+        guard !isFinished else { return }
+        isFinished = true
+        timeoutTask?.cancel()
+        retryTask?.cancel()
+        timeoutTask = nil
+        retryTask = nil
+        pendingByID.removeAll(keepingCapacity: false)
+        outstandingIDs.removeAll(keepingCapacity: false)
+
+        let continuation = continuation
+        self.continuation = nil
+        continuation?.resume()
+    }
 }
 
 // MARK: - Pure LRU bookkeeping
@@ -752,6 +998,20 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     private var bookkeeping: FullEmailWebViewPoolBookkeeping
     private var remoteImageFallbackBookkeeping = FullEmailRemoteImageFallbackBookkeeping()
     private var remoteImageFallbackMessages: [String: Message] = [:]
+    private var acceptsAccountWork = true
+    private var accountGeneration: UInt64 = 0
+    private var activeWarmOperations: Set<UUID> = []
+    private var warmDrainWaiters: [CheckedContinuation<Void, Never>] = []
+    private var prewarmTasks: [UUID: Task<Void, Never>] = [:]
+    private var openSessions: [ObjectIdentifier: WeakOpenSession] = [:]
+
+    private final class WeakOpenSession {
+        weak var value: FullEmailOpenSession?
+
+        init(_ value: FullEmailOpenSession) {
+            self.value = value
+        }
+    }
 
     init(capacity: Int = 4, loader: OriginalEmailSourceLoader = .shared) {
         self.capacity = max(1, capacity)
@@ -784,11 +1044,31 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     // MARK: Warming
 
+    func captureAccountWorkGeneration() -> FullEmailAccountWorkGeneration? {
+        guard acceptsAccountWork else { return nil }
+        return FullEmailAccountWorkGeneration(value: accountGeneration)
+    }
+
+    func registerOpenSession(_ session: FullEmailOpenSession) {
+        openSessions = openSessions.filter { $0.value.value != nil }
+        guard acceptsAccountWork else {
+            _ = session.invalidateForAccountTransition()
+            return
+        }
+        openSessions[ObjectIdentifier(session)] = WeakOpenSession(session)
+    }
+
     /// Resolves the locally-available wrapped original HTML (no network recovery) and keeps a prepared
     /// payload ready for the reader. When active WebView adoption is explicitly enabled, also
     /// pre-renders an off-screen WebView. Cheap to call repeatedly: it no-ops when up-to-date state is
     /// already warm.
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {
+        guard acceptsAccountWork else { return }
+        let warmOperationID = UUID()
+        let generation = accountGeneration
+        activeWarmOperations.insert(warmOperationID)
+        defer { finishWarmOperation(warmOperationID) }
+
         let remoteImageFallbackGeneration = remoteImageFallbackBookkeeping.generation(for: request.messageId)
         rememberRemoteImageFallbackWarmContext(request: request, message: message, width: width)
 
@@ -798,7 +1078,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             bodyText: request.bodyText,
             senderEmail: request.senderEmail,
             subject: request.subject
-        ) else {
+        ), isCurrentAccountGeneration(generation) else {
             if remoteImageFallbackBookkeeping.isCurrent(
                 messageId: request.messageId,
                 generation: remoteImageFallbackGeneration
@@ -819,6 +1099,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
                entries[request.messageId] == nil {
                 forgetRemoteImageFallbackWarmContext(messageId: request.messageId)
             }
+            return
+        }
+        guard isCurrentAccountGeneration(generation) else {
             return
         }
         guard remoteImageFallbackBookkeeping.isCurrent(
@@ -899,6 +1182,27 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         artifact: EmailReaderArtifact,
         width: CGFloat
     ) {
+        guard let generation = captureAccountWorkGeneration() else { return }
+        prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            artifact: artifact,
+            width: width,
+            expectedAccountGeneration: generation
+        )
+    }
+
+    func prepaintAfterExplicitOpen(
+        request: OriginalEmailWarmRequest,
+        message: Message,
+        artifact: EmailReaderArtifact,
+        width: CGFloat,
+        expectedAccountGeneration: FullEmailAccountWorkGeneration?
+    ) {
+        guard let expectedAccountGeneration,
+              isCurrentAccountGeneration(expectedAccountGeneration.value) else {
+            return
+        }
         guard case .html(let html) = artifact.body else {
             return
         }
@@ -976,6 +1280,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     /// Fire-and-forget warm for a message that is about to be opened (e.g. on tap). This prepares the
     /// wrapped original HTML for a later open without blocking synchronous UI code.
     func prewarmOnOpen(message: Message, width: CGFloat?) {
+        guard acceptsAccountWork else { return }
+        let generation = accountGeneration
+        let taskID = UUID()
         let request = OriginalEmailWarmRequest(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
@@ -983,22 +1290,27 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             senderEmail: message.senderEmail,
             subject: message.subject
         )
-        Task { @MainActor in
-            await warm(request: request, message: message, width: width)
-            guard let prepared = preparedOpenArtifact(
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.prewarmTasks.removeValue(forKey: taskID) }
+            guard self.isCurrentAccountGeneration(generation) else { return }
+            await self.warm(request: request, message: message, width: width)
+            guard self.isCurrentAccountGeneration(generation) else { return }
+            guard let prepared = self.preparedOpenArtifact(
                 request: request,
                 message: message,
                 width: width
             ) else {
                 return
             }
-            prepaintAfterExplicitOpen(
+            self.prepaintAfterExplicitOpen(
                 request: request,
                 message: message,
                 artifact: prepared.artifact,
                 width: width ?? 0
             )
         }
+        prewarmTasks[taskID] = task
     }
 
     // MARK: Checkout / checkin
@@ -1010,6 +1322,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         message: Message?,
         width: CGFloat?
     ) -> EmailReaderPreparedArtifact? {
+        guard acceptsAccountWork else { return nil }
         guard let preparedEntry = preparedPayloads.entry(for: request.messageId) else {
             logOpenPayloadMiss(
                 messageId: request.messageId,
@@ -1091,6 +1404,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         message: Message?,
         width: CGFloat
     ) -> Checkout? {
+        guard acceptsAccountWork else { return nil }
         guard canCheckoutActiveWebView(messageId: messageId) else {
             logCheckoutMiss(messageId: messageId, reason: "adoption_disabled")
             return nil
@@ -1146,17 +1460,21 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     /// Reclaims a previously checked-out WebView when the reader is dismissed, re-hosting it off-screen
     /// so a re-open is instant. Discards it if the pool no longer tracks it (evicted while displayed).
-    func checkin(messageId: String, webView: WKWebView) {
-        guard let entry = entries[messageId], entry.webView === webView else {
-            return
+    func checkin(messageId: String, webView: WKWebView) -> Bool {
+        guard acceptsAccountWork,
+              let entry = entries[messageId],
+              entry.webView === webView else {
+            return false
         }
 
         entry.isCheckedOut = false
+        entry.cidHandler.message = nil
         entry.webView.navigationDelegate = entry.delegate
         entry.webView.onLayoutChange = nil
         entry.webView.scrollView.setContentOffset(.zero, animated: false)
         host.host(entry.webView, width: CGFloat(entry.key.widthBucket))
         applyEvictions(bookkeeping.touch(messageId))
+        return entries[messageId] === entry
     }
 
     // MARK: Invalidation
@@ -1181,12 +1499,63 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         }
     }
 
+    /// Account transitions may discard even a currently checked-out reader:
+    /// retaining it would keep the previous account's full HTML document alive
+    /// after durable local cleanup has completed.
+    func clearForAccountTransition() async {
+        acceptsAccountWork = false
+        accountGeneration &+= 1
+        let tasks = Array(prewarmTasks.values)
+        tasks.forEach { $0.cancel() }
+        let sessions = openSessions.values.compactMap(\.value)
+        openSessions.removeAll(keepingCapacity: false)
+        let sessionSourceTasks = sessions.flatMap { $0.invalidateForAccountTransition() }
+        let entryWebViews = entries.values.map(\.webView)
+
+        for entry in entries.values {
+            teardown(entry)
+        }
+        entries.removeAll()
+        preparedPayloads.removeAll()
+        bookkeeping.removeAll()
+        remoteImageFallbackBookkeeping.removeAllWarmContexts()
+        remoteImageFallbackMessages.removeAll()
+
+        await FullEmailReaderAccountBoundaryRegistry.shared.clearForAccountTransition(
+            additionallyAwaiting: entryWebViews
+        )
+
+        for task in tasks {
+            await task.value
+        }
+        _ = await withSoftTimeout(seconds: 1.0) {
+            for task in sessionSourceTasks {
+                _ = await task.value
+            }
+        }
+        if !activeWarmOperations.isEmpty {
+            await withCheckedContinuation { continuation in
+                warmDrainWaiters.append(continuation)
+            }
+        }
+        prewarmTasks.removeAll()
+    }
+
+    func reopenAccountWork() {
+        guard activeWarmOperations.isEmpty else { return }
+        accountGeneration &+= 1
+        acceptsAccountWork = true
+    }
+
     private func handleRemoteImageFallbackDidWarm(messageId: String) async {
+        guard acceptsAccountWork else { return }
+        let generation = accountGeneration
         remoteImageFallbackBookkeeping.markFallbackWarmed(messageId: messageId)
         let warmContext = remoteImageFallbackBookkeeping.warmContext(for: messageId)
         preparedPayloads.remove(messageId)
         removeEntry(messageId: messageId)
         await loader.invalidateWarmedOriginalEmailSource(messageId: messageId)
+        guard isCurrentAccountGeneration(generation) else { return }
 
         guard let warmContext else {
             return
@@ -1375,6 +1744,11 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         entry.webView.stopLoading()
         entry.webView.navigationDelegate = nil
         entry.webView.onLayoutChange = nil
+        entry.cidHandler.message = nil
+        // A checked-out reader may still retain this WKWebView after the pool
+        // drops its entry. Replace the old account's live DOM immediately so a
+        // later SwiftUI dismantle/checkin cannot leave that content resident.
+        entry.webView.loadHTMLString("", baseURL: URL(string: "about:blank"))
         host.remove(entry.webView)
     }
 
@@ -1417,6 +1791,20 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         )
     }
 
+    private func isCurrentAccountGeneration(_ generation: UInt64) -> Bool {
+        acceptsAccountWork && generation == accountGeneration
+    }
+
+    private func finishWarmOperation(_ id: UUID) {
+        activeWarmOperations.remove(id)
+        guard activeWarmOperations.isEmpty, !warmDrainWaiters.isEmpty else {
+            return
+        }
+        let waiters = warmDrainWaiters
+        warmDrainWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+    }
+
     // Test seams.
     var trackedMessageIdsForTesting: Set<String> {
         Set(entries.keys).union(preparedPayloads.messageIds)
@@ -1436,6 +1824,14 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     func hasPrerenderedWebViewEntryForTesting(messageId: String) -> Bool {
         entries[messageId] != nil
+    }
+
+    func webViewForTesting(messageId: String) -> LayoutAwareWKWebView? {
+        entries[messageId]?.webView
+    }
+
+    func markInitialLoadFinishedForTesting(messageId: String) {
+        entries[messageId]?.didFinishInitialLoad = true
     }
 }
 

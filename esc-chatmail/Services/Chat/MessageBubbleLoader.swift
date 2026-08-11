@@ -1,5 +1,14 @@
 import Foundation
 
+struct MessageBubbleAccountWorkContext: Sendable {
+    let htmlContent: HTMLContentAccountGeneration
+    let htmlAnalysis: MessageBubbleHTMLAnalysisAccountGeneration
+    let parsedEmail: ParsedEmailAccountGeneration?
+    let processedText: ProcessedTextCacheAccountGeneration
+    let renderedMessage: RenderedMessageCacheAccountGeneration
+    let recovery: HTMLContentRecoveryAccountGeneration
+}
+
 /// Deliberately a plain Sendable class, NOT an actor: the loader is stateless
 /// (all dependencies are lets; caches synchronize internally), and bubble
 /// loads are per-row CPU-bound work (HTML analysis) that must not serialize
@@ -55,7 +64,13 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
     }
 
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
-        let htmlAnalysis = await cachedHTMLAnalysis(for: request)
+        guard let accountContext = await captureAccountWorkContext() else {
+            return unavailableContentResult()
+        }
+        let htmlAnalysis = await cachedHTMLAnalysis(for: request, accountContext: accountContext)
+        guard await isAccountWorkContextCurrent(accountContext) else {
+            return unavailableContentResult()
+        }
         let forwardedDisplayContent = forwardedDisplayContent(from: request)
         let storedChatPreviewText = nonEmptyText(request.chatPreviewText)
         let loadedContent: (plainText: String?, hasRichContent: Bool)
@@ -66,14 +81,20 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
                 plainText: nil,
                 hasRichContent: await loadRichContentClassification(
                     from: request,
-                    resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
+                    resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource,
+                    accountContext: accountContext
                 )
             )
         } else {
             loadedContent = await loadCompatibilityContent(
                 from: request,
-                resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
+                resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource,
+                accountContext: accountContext
             )
+        }
+
+        guard await isAccountWorkContextCurrent(accountContext) else {
+            return unavailableContentResult()
         }
 
         let fullTextContent: String?
@@ -101,6 +122,53 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
             ),
             forwardedDisplayContent: forwardedDisplayContent,
             htmlAnalysis: htmlAnalysis
+        )
+    }
+
+    func captureAccountWorkContext() async -> MessageBubbleAccountWorkContext? {
+        guard let htmlContent = htmlContentHandler.captureAccountGeneration(),
+              let htmlAnalysis = htmlAnalysisCache.captureAccountGeneration(),
+              let processedText = await processedTextCache.captureAccountGeneration(),
+              let renderedMessage = await renderedMessageCache.captureAccountGeneration(),
+              let recovery = await htmlContentRecoveryService.captureAccountGeneration() else {
+            return nil
+        }
+        let parsedEmail = await parsedEmailProvider.captureAccountGeneration()
+
+        let context = MessageBubbleAccountWorkContext(
+            htmlContent: htmlContent,
+            htmlAnalysis: htmlAnalysis,
+            parsedEmail: parsedEmail,
+            processedText: processedText,
+            renderedMessage: renderedMessage,
+            recovery: recovery
+        )
+        return await isAccountWorkContextCurrent(context) ? context : nil
+    }
+
+    func isAccountWorkContextCurrent(_ context: MessageBubbleAccountWorkContext) async -> Bool {
+        guard htmlContentHandler.isAccountGenerationCurrent(context.htmlContent),
+              htmlAnalysisCache.isAccountGenerationCurrent(context.htmlAnalysis),
+              await processedTextCache.isAccountGenerationCurrent(context.processedText),
+              await renderedMessageCache.isAccountGenerationCurrent(context.renderedMessage),
+              await htmlContentRecoveryService.isAccountGenerationCurrent(context.recovery) else {
+            return false
+        }
+        if let parsedEmail = context.parsedEmail,
+           !(await parsedEmailProvider.isAccountGenerationCurrent(parsedEmail)) {
+            return false
+        }
+        return htmlContentHandler.isAccountGenerationCurrent(context.htmlContent) &&
+            htmlAnalysisCache.isAccountGenerationCurrent(context.htmlAnalysis)
+    }
+
+    private func unavailableContentResult() -> MessageBubbleContentResult {
+        MessageBubbleContentResult(
+            fullTextContent: nil,
+            hasRichHTMLContent: false,
+            sharedDocumentLinks: [],
+            forwardedDisplayContent: nil,
+            htmlAnalysis: .placeholder(hasHTMLSource: false)
         )
     }
 

@@ -44,6 +44,11 @@ final class EmailPreviewPipeline: @unchecked Sendable {
     private let netlifyDeployPreviewBuilder: NetlifyDeployPreviewBuilder
     private let renderedMessageCache: RenderedMessageCache
 
+    private struct AccountGenerations: Sendable {
+        let html: HTMLContentAccountGeneration
+        let rendered: RenderedMessageCacheAccountGeneration
+    }
+
     init(
         previewSourceLoader: any EmailPreviewSourceLoading = EmailPreviewSourceLoader.shared,
         htmlContentLoader: HTMLContentLoader = .shared,
@@ -63,16 +68,25 @@ final class EmailPreviewPipeline: @unchecked Sendable {
     }
 
     func loadPreview(request: EmailPreviewPipelineRequest) async -> EmailPreviewRenderModel? {
+        guard let accountGenerations = await captureAccountGenerations() else {
+            return nil
+        }
         guard let previewSource = await previewSourceLoader.loadPreviewSource(
             messageId: request.messageId,
             bodyStorageURI: request.bodyStorageURI,
             bodyText: request.bodyText,
             senderEmail: request.senderEmail,
             subject: request.subject,
-            allowRecovery: true
+            allowRecovery: true,
+            expectedHTMLAccountGeneration: accountGenerations.html,
+            expectedRenderedAccountGeneration: accountGenerations.rendered
         ),
-              previewSource.canonicalHTML != nil else {
-            if let fallbackPreview = await loadFallbackHTMLPreview(request: request) {
+              previewSource.canonicalHTML != nil,
+              await accountGenerationsAreCurrent(accountGenerations) else {
+            if let fallbackPreview = await loadFallbackHTMLPreview(
+                request: request,
+                accountGenerations: accountGenerations
+            ) {
                 return fallbackPreview
             }
 
@@ -85,21 +99,34 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             return nil
         }
 
-        return await renderedMessageCache.previewRenderModel(
+        let preview = await renderedMessageCache.previewRenderModel(
             messageId: request.messageId,
             sourceSignature: previewSource.sourceSignature,
-            variantKey: previewRenderVariantKey(for: request)
+            variantKey: previewRenderVariantKey(for: request),
+            expectedAccountGeneration: accountGenerations.rendered
         ) {
-            await self.buildPreview(previewSource: previewSource, request: request)
+            await self.buildPreview(
+                previewSource: previewSource,
+                request: request,
+                accountGenerations: accountGenerations
+            )
         }
+        guard await accountGenerationsAreCurrent(accountGenerations) else {
+            return nil
+        }
+        return preview
     }
 
     private func buildPreview(
         previewSource: EmailPreviewSource,
-        request: EmailPreviewPipelineRequest
+        request: EmailPreviewPipelineRequest,
+        accountGenerations: AccountGenerations
     ) async -> EmailPreviewRenderModel? {
         guard let canonicalHTML = previewSource.canonicalHTML else {
-            return await loadFallbackHTMLPreview(request: request)
+            return await loadFallbackHTMLPreview(
+                request: request,
+                accountGenerations: accountGenerations
+            )
         }
 
         let classification = previewSource.classification
@@ -181,6 +208,7 @@ final class EmailPreviewPipeline: @unchecked Sendable {
                 request: request,
                 previewSource: previewSource
             ),
+            expectedAccountGeneration: accountGenerations.rendered,
             producer: {
             guard let previewHTML = await self.htmlContentLoader.preparePreviewHTML(
                 fromCanonicalHTML: canonicalHTML,
@@ -189,7 +217,8 @@ final class EmailPreviewPipeline: @unchecked Sendable {
                 senderEmail: request.senderEmail,
                 subject: request.subject,
                 isDarkMode: request.isDarkMode,
-                cleanupMode: request.cleanupMode
+                cleanupMode: request.cleanupMode,
+                expectedAccountGeneration: accountGenerations.html
             ) else {
                 return nil
             }
@@ -204,9 +233,15 @@ final class EmailPreviewPipeline: @unchecked Sendable {
                 )
             )
         }) else {
-            return await loadFallbackHTMLPreview(request: request)
+            return await loadFallbackHTMLPreview(
+                request: request,
+                accountGenerations: accountGenerations
+            )
         }
 
+        guard await accountGenerationsAreCurrent(accountGenerations) else {
+            return nil
+        }
         return .html(payload)
     }
 
@@ -244,7 +279,8 @@ final class EmailPreviewPipeline: @unchecked Sendable {
     }
 
     private func loadFallbackHTMLPreview(
-        request: EmailPreviewPipelineRequest
+        request: EmailPreviewPipelineRequest,
+        accountGenerations: AccountGenerations
     ) async -> EmailPreviewRenderModel? {
         let fallback = await htmlContentLoader.loadContentWithTimeout(
             messageId: request.messageId,
@@ -255,11 +291,13 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             isDarkMode: request.isDarkMode,
             cleanupMode: request.cleanupMode,
             displayPurpose: .preview,
-            timeout: 5.0
+            timeout: 5.0,
+            expectedAccountGeneration: accountGenerations.html
         )
 
         guard fallback.presentation == .html,
-              let html = fallback.html else {
+              let html = fallback.html,
+              await accountGenerationsAreCurrent(accountGenerations) else {
             return nil
         }
 
@@ -281,6 +319,21 @@ final class EmailPreviewPipeline: @unchecked Sendable {
                 )
             )
         )
+    }
+
+    private func captureAccountGenerations() async -> AccountGenerations? {
+        guard let html = htmlContentLoader.captureAccountGeneration(),
+              let rendered = await renderedMessageCache.captureAccountGeneration() else {
+            return nil
+        }
+        return AccountGenerations(html: html, rendered: rendered)
+    }
+
+    private func accountGenerationsAreCurrent(_ generations: AccountGenerations) async -> Bool {
+        guard htmlContentLoader.isAccountGenerationCurrent(generations.html) else {
+            return false
+        }
+        return await renderedMessageCache.isAccountGenerationCurrent(generations.rendered)
     }
 
     private func previewRenderVariantKey(for request: EmailPreviewPipelineRequest) -> RenderedMessageVariantKey {

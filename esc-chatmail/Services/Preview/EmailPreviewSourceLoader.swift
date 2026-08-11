@@ -10,6 +10,39 @@ protocol EmailPreviewSourceLoading: Sendable {
         subject: String?,
         allowRecovery: Bool
     ) async -> EmailPreviewSource?
+
+    func loadPreviewSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        allowRecovery: Bool,
+        expectedHTMLAccountGeneration: HTMLContentAccountGeneration?,
+        expectedRenderedAccountGeneration: RenderedMessageCacheAccountGeneration?
+    ) async -> EmailPreviewSource?
+}
+
+extension EmailPreviewSourceLoading {
+    func loadPreviewSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        allowRecovery: Bool,
+        expectedHTMLAccountGeneration: HTMLContentAccountGeneration?,
+        expectedRenderedAccountGeneration: RenderedMessageCacheAccountGeneration?
+    ) async -> EmailPreviewSource? {
+        await loadPreviewSource(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject,
+            allowRecovery: allowRecovery
+        )
+    }
 }
 
 final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Sendable {
@@ -43,13 +76,58 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
         subject: String?,
         allowRecovery: Bool = true
     ) async -> EmailPreviewSource? {
+        guard let htmlAccountGeneration = htmlContentLoader.captureAccountGeneration(),
+              let renderedAccountGeneration = await renderedMessageCache.captureAccountGeneration() else {
+            return nil
+        }
+        return await loadPreviewSource(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject,
+            allowRecovery: allowRecovery,
+            expectedHTMLAccountGeneration: htmlAccountGeneration,
+            expectedRenderedAccountGeneration: renderedAccountGeneration
+        )
+    }
+
+    func loadPreviewSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        allowRecovery: Bool,
+        expectedHTMLAccountGeneration: HTMLContentAccountGeneration?,
+        expectedRenderedAccountGeneration: RenderedMessageCacheAccountGeneration?
+    ) async -> EmailPreviewSource? {
+        let renderedGeneration = if let expectedRenderedAccountGeneration {
+            expectedRenderedAccountGeneration
+        } else {
+            await renderedMessageCache.captureAccountGeneration()
+        }
+        guard let htmlAccountGeneration = expectedHTMLAccountGeneration ?? htmlContentLoader.captureAccountGeneration(),
+              htmlContentLoader.isAccountGenerationCurrent(htmlAccountGeneration),
+              let renderedAccountGeneration = renderedGeneration,
+              await renderedMessageCache.isAccountGenerationCurrent(renderedAccountGeneration) else {
+            return nil
+        }
+        let parsedAccountGeneration = await parsedEmailProvider.captureAccountGeneration()
+
         guard let canonicalContent = await htmlContentLoader.loadCanonicalEmailContent(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
-            allowRecovery: allowRecovery
+            allowRecovery: allowRecovery,
+            expectedAccountGeneration: htmlAccountGeneration
         ),
-              let canonicalHTML = canonicalContent.html else {
+              let canonicalHTML = canonicalContent.html,
+              await accountGenerationsAreCurrent(
+                html: htmlAccountGeneration,
+                rendered: renderedAccountGeneration,
+                parsed: parsedAccountGeneration
+              ) else {
             return nil
         }
 
@@ -63,19 +141,32 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             )
         )
 
-        return await renderedMessageCache.previewSource(
+        let source = await renderedMessageCache.previewSource(
             messageId: messageId,
             sourceSignature: sourceSignature,
-            variantKey: variantKey
+            variantKey: variantKey,
+            expectedAccountGeneration: renderedAccountGeneration
         ) {
             await self.buildPreviewSource(
                 messageId: messageId,
                 canonicalContent: canonicalContent,
                 canonicalHTML: canonicalHTML,
                 senderEmail: senderEmail,
-                subject: subject
+                subject: subject,
+                htmlAccountGeneration: htmlAccountGeneration,
+                renderedAccountGeneration: renderedAccountGeneration,
+                parsedAccountGeneration: parsedAccountGeneration
             )
         }
+
+        guard await accountGenerationsAreCurrent(
+            html: htmlAccountGeneration,
+            rendered: renderedAccountGeneration,
+            parsed: parsedAccountGeneration
+        ) else {
+            return nil
+        }
+        return source
     }
 
     private func buildPreviewSource(
@@ -83,15 +174,33 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
         canonicalContent: CanonicalEmailContent,
         canonicalHTML: String,
         senderEmail: String?,
-        subject: String?
-    ) async -> EmailPreviewSource {
+        subject: String?,
+        htmlAccountGeneration: HTMLContentAccountGeneration,
+        renderedAccountGeneration: RenderedMessageCacheAccountGeneration,
+        parsedAccountGeneration: ParsedEmailAccountGeneration?
+    ) async -> EmailPreviewSource? {
+        guard await accountGenerationsAreCurrent(
+            html: htmlAccountGeneration,
+            rendered: renderedAccountGeneration,
+            parsed: parsedAccountGeneration
+        ) else {
+            return nil
+        }
         let parsedEmail = await parsedEmailProvider.parsedEmail(
             messageId: messageId,
             sourceSignature: canonicalContent.sourceSignature,
             canonicalHTML: canonicalHTML,
             includeRenderQuality: false,
-            includePreviewImages: true
+            includePreviewImages: true,
+            expectedAccountGeneration: parsedAccountGeneration
         )
+        guard await accountGenerationsAreCurrent(
+            html: htmlAccountGeneration,
+            rendered: renderedAccountGeneration,
+            parsed: parsedAccountGeneration
+        ) else {
+            return nil
+        }
         let extractedContent = EmailPreviewContentExtractor.extract(
             canonicalHTML: canonicalHTML,
             bodyText: canonicalContent.plainText,
@@ -128,6 +237,21 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
         )
 
         return source
+    }
+
+    private func accountGenerationsAreCurrent(
+        html: HTMLContentAccountGeneration,
+        rendered: RenderedMessageCacheAccountGeneration,
+        parsed: ParsedEmailAccountGeneration?
+    ) async -> Bool {
+        guard htmlContentLoader.isAccountGenerationCurrent(html),
+              await renderedMessageCache.isAccountGenerationCurrent(rendered) else {
+            return false
+        }
+        if let parsed {
+            return await parsedEmailProvider.isAccountGenerationCurrent(parsed)
+        }
+        return true
     }
 
     private static func previewMode(

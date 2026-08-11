@@ -54,6 +54,8 @@ struct FullEmailReaderView: View {
             failureContent(placeholder: placeholder, allowsRetry: true)
         case .unrecoverableFailure(let placeholder, reason: _):
             failureContent(placeholder: placeholder, allowsRetry: false)
+        case .invalidated:
+            Color.clear
         }
     }
 
@@ -89,34 +91,38 @@ struct FullEmailReaderView: View {
     /// placeholder and cross-fading the placeholder out once the WebView reports paint-confirmed readiness.
     @ViewBuilder
     private func loadedHTMLContent(artifact: EmailReaderArtifact, readerWidth: CGFloat) -> some View {
-        let html = artifact.body.content
-        let contentSignature = artifact.renderSignature
-        ZStack {
-            HTMLMessageView(
-                message: session.message,
-                html: html,
-                sourceSignature: artifact.sourceSignature,
-                readerWidth: readerWidth,
-                webViewAdoptionProvider: session.webViewAdoptionProvider,
-                onLoadFinished: handleWebViewPainted,
-                onLoadFailed: handleWebViewLoadFailed,
-                onAdoptedPrerendered: handleAdoptedPrerendered
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if let message = session.message {
+            let html = artifact.body.content
+            let contentSignature = artifact.renderSignature
+            ZStack {
+                HTMLMessageView(
+                    message: message,
+                    html: html,
+                    sourceSignature: artifact.sourceSignature,
+                    readerWidth: readerWidth,
+                    webViewAdoptionProvider: session.webViewAdoptionProvider,
+                    onLoadFinished: handleWebViewPainted,
+                    onLoadFailed: handleWebViewLoadFailed,
+                    onAdoptedPrerendered: handleAdoptedPrerendered
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let snapshotPlaceholder, !webViewPainted {
-                snapshotPlaceholderView(snapshotPlaceholder)
-                    .transition(.opacity)
-                    .allowsHitTesting(false)
+                if let snapshotPlaceholder, !webViewPainted {
+                    snapshotPlaceholderView(snapshotPlaceholder)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
             }
-        }
-        .onAppear {
-            handleLoadedContentSignature(contentSignature)
-            session.prepareForMeasuredReaderWidth(readerWidth)
-        }
-        .onChange(of: contentSignature) { _, newSignature in
-            handleLoadedContentSignature(newSignature)
-            session.prepareForMeasuredReaderWidth(readerWidth)
+            .onAppear {
+                handleLoadedContentSignature(contentSignature)
+                session.prepareForMeasuredReaderWidth(readerWidth)
+            }
+            .onChange(of: contentSignature) { _, newSignature in
+                handleLoadedContentSignature(newSignature)
+                session.prepareForMeasuredReaderWidth(readerWidth)
+            }
+        } else {
+            Color.clear
         }
     }
 
@@ -190,7 +196,8 @@ struct FullEmailReaderView: View {
 
     private func loadSnapshotPlaceholder() async {
         guard snapshotPlaceholder == nil,
-              let metadata = await RenderedMessageCache.shared.latestSnapshotMetadata(messageId: session.message.id),
+              let message = session.message,
+              let metadata = await RenderedMessageCache.shared.latestSnapshotMetadata(messageId: message.id),
               let entry = await EmailPreviewSnapshotCache.shared.load(for: metadata.snapshotCacheKey),
               let image = UIImage(data: entry.imageData),
               !Task.isCancelled else {

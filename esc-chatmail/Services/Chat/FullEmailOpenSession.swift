@@ -14,6 +14,15 @@ struct FullEmailPlaceholder: Equatable, Sendable {
     let previewText: String?
     let date: Date?
 
+    static let redacted = FullEmailPlaceholder(
+        messageId: "",
+        subject: "",
+        senderName: nil,
+        senderEmail: nil,
+        previewText: nil,
+        date: nil
+    )
+
     var senderDisplayText: String {
         senderName ?? senderEmail ?? "Unknown Sender"
     }
@@ -34,6 +43,22 @@ struct FullEmailPlaceholder: Equatable, Sendable {
         self.senderEmail = metadata.senderEmail
         self.previewText = metadata.previewText
         self.date = metadata.date
+    }
+
+    private init(
+        messageId: String,
+        subject: String,
+        senderName: String?,
+        senderEmail: String?,
+        previewText: String?,
+        date: Date?
+    ) {
+        self.messageId = messageId
+        self.subject = subject
+        self.senderName = senderName
+        self.senderEmail = senderEmail
+        self.previewText = previewText
+        self.date = date
     }
 
     private static func previewText(for message: Message) -> String? {
@@ -112,12 +137,13 @@ enum FullEmailReaderState: Equatable {
     case loadedArtifact(EmailReaderArtifact, placeholder: FullEmailPlaceholder)
     case retryableFailure(FullEmailPlaceholder, reason: String)
     case unrecoverableFailure(FullEmailPlaceholder, reason: String)
+    case invalidated
 
     var hasLoadedContent: Bool {
         switch self {
         case .preparedArtifact, .loadedArtifact:
             return true
-        case .loading, .recovering, .retryableFailure, .unrecoverableFailure:
+        case .loading, .recovering, .retryableFailure, .unrecoverableFailure, .invalidated:
             return false
         }
     }
@@ -127,7 +153,7 @@ enum FullEmailReaderState: Equatable {
         case .preparedArtifact(let artifact, placeholder: _),
              .loadedArtifact(let artifact, placeholder: _):
             return artifact
-        case .loading, .recovering, .retryableFailure, .unrecoverableFailure:
+        case .loading, .recovering, .retryableFailure, .unrecoverableFailure, .invalidated:
             return nil
         }
     }
@@ -221,6 +247,8 @@ enum OriginalEmailContentSourceReloadPolicy {
         switch readerState {
         case .preparedArtifact, .loading, .recovering, .loadedArtifact, .retryableFailure, .unrecoverableFailure:
             return true
+        case .invalidated:
+            return false
         }
     }
 }
@@ -228,13 +256,25 @@ enum OriginalEmailContentSourceReloadPolicy {
 @MainActor
 final class FullEmailOpenSession: ObservableObject, Identifiable {
     let id: NSManagedObjectID
-    let messageId: String
+    private(set) var messageId: String
     let messageObjectID: NSManagedObjectID
-    let message: Message
-    let request: OriginalEmailWarmRequest
-    let initialArtifact: EmailReaderArtifact?
-    let immediatePlaceholder: FullEmailPlaceholder
-    let webViewAdoptionProvider: (any FullEmailWebViewAdopting)?
+    private(set) var message: Message?
+    private var retainedRequest: OriginalEmailWarmRequest?
+    private(set) var initialArtifact: EmailReaderArtifact?
+    private var retainedImmediatePlaceholder: FullEmailPlaceholder?
+    private weak var retainedWebViewAdoptionProvider: (any FullEmailWebViewAdopting)?
+
+    var request: OriginalEmailWarmRequest {
+        retainedRequest ?? Self.redactedWarmRequest
+    }
+
+    var immediatePlaceholder: FullEmailPlaceholder {
+        retainedImmediatePlaceholder ?? .redacted
+    }
+
+    var webViewAdoptionProvider: (any FullEmailWebViewAdopting)? {
+        retainedWebViewAdoptionProvider
+    }
 
     @Published private(set) var readerState: FullEmailReaderState
     @Published private(set) var loadingGeneration = 0
@@ -243,20 +283,42 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     private let originalEmailSourceLoader: any OriginalEmailSourceLoading
     private let loadTimeout: TimeInterval
     private let recoveringDelay: TimeInterval
-    private let fullEmailOpener: (any FullEmailOpening)?
-    private let onSourceLoaded: @MainActor (Message, OriginalEmailSource) -> Void
+    private weak var fullEmailOpener: (any FullEmailOpening)?
+    private var fullEmailAccountGeneration: FullEmailAccountWorkGeneration?
+    private var onSourceLoaded: (@MainActor (Message, OriginalEmailSource) -> Void)?
     private var activeBaseLoadKey: String?
     private var activeLoadTaskKey: String?
     private var timedOutSourceObservationTask: Task<Void, Never>?
+    private var timedOutSourceTaskID: UUID?
     private var readerStartLogged = false
     private var prepaintedArtifactWidthKeys: Set<PrepaintedReaderArtifactWidthKey> = []
+    private var activeSourceTasks: [UUID: Task<OriginalEmailSource?, Never>] = [:]
+    private(set) var isInvalidatedForAccountTransition = false
+
+    private static let redactedWarmRequest = OriginalEmailWarmRequest(
+        messageId: "",
+        bodyStorageURI: nil,
+        bodyText: nil,
+        senderEmail: nil,
+        subject: nil
+    )
 
     var hasImmediateVisualSurface: Bool {
-        initialArtifact != nil || !immediatePlaceholder.subject.isEmpty
+        !isInvalidatedForAccountTransition
+            && (initialArtifact != nil || !immediatePlaceholder.subject.isEmpty)
     }
 
     var loadRequest: OriginalEmailLoadRequest {
-        OriginalEmailLoadRequest(
+        guard let message else {
+            return OriginalEmailLoadRequest(
+                messageId: "",
+                bodyStorageURI: nil,
+                bodyText: nil,
+                subject: nil,
+                senderEmail: nil
+            )
+        }
+        return OriginalEmailLoadRequest(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
@@ -293,11 +355,12 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         self.messageId = message.id
         self.messageObjectID = message.objectID
         self.message = message
-        self.request = request
+        self.retainedRequest = request
         self.initialArtifact = validInitialArtifact
-        self.immediatePlaceholder = immediatePlaceholder
-        self.webViewAdoptionProvider = fullEmailOpener as? any FullEmailWebViewAdopting
+        self.retainedImmediatePlaceholder = immediatePlaceholder
+        self.retainedWebViewAdoptionProvider = fullEmailOpener as? any FullEmailWebViewAdopting
         self.fullEmailOpener = fullEmailOpener
+        self.fullEmailAccountGeneration = fullEmailOpener?.captureAccountWorkGeneration()
         self.originalEmailSourceLoader = originalEmailSourceLoader
         self.loadTimeout = originalEmailLoadTimeout
         self.recoveringDelay = recoveringDelay
@@ -316,15 +379,22 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
             self.activeBaseLoadKey = nil
             self.activeLoadTaskKey = nil
         }
+
+        fullEmailOpener?.registerOpenSession(self)
     }
 
     deinit {
         timedOutSourceObservationTask?.cancel()
+        activeSourceTasks.values.forEach { $0.cancel() }
     }
 
     @discardableResult
     func loadReaderContent() async -> OriginalEmailSource? {
-        Log.diagnostic(.htmlPreview, level: .info, "FullEmailOpenSession loading message \(message.id)", category: .ui)
+        guard !isInvalidatedForAccountTransition, message != nil else {
+            return nil
+        }
+        let loadedMessageId = messageId
+        Log.diagnostic(.htmlPreview, level: .info, "FullEmailOpenSession loading message \(loadedMessageId)", category: .ui)
         if initialArtifact != nil {
             logReaderStartIfNeeded(mode: "prepared_html")
         }
@@ -334,7 +404,7 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
             missingSourceRecoveryPolicy: .keepRecoveringWhileActive
         )
 
-        guard !Task.isCancelled else {
+        guard !Task.isCancelled, !isInvalidatedForAccountTransition else {
             return source
         }
 
@@ -347,7 +417,7 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
             Log.diagnostic(
                 .htmlPreview,
                 level: .info,
-                "FullEmailOpenSession loaded message \(message.id) sourceKind=\(source.sourceKind.rawValue) sourceLocation=\(source.sourceLocation.rawValue) presentation=\(source.presentation.rawValue) hasHTML=\(source.html != nil)",
+                "FullEmailOpenSession loaded message \(loadedMessageId) sourceKind=\(source.sourceKind.rawValue) sourceLocation=\(source.sourceLocation.rawValue) presentation=\(source.presentation.rawValue) hasHTML=\(source.html != nil)",
                 category: .ui
             )
         } else if initialArtifact == nil {
@@ -358,7 +428,9 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     }
 
     func prepareForMeasuredReaderWidth(_ width: CGFloat) {
-        guard width > 1 else {
+        guard !isInvalidatedForAccountTransition,
+              width > 1,
+              let message else {
             return
         }
 
@@ -384,7 +456,8 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
             request: request,
             message: message,
             artifact: artifact,
-            width: width
+            width: width,
+            expectedAccountGeneration: fullEmailAccountGeneration
         )
     }
 
@@ -393,6 +466,9 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         for request: OriginalEmailLoadRequest,
         missingSourceRecoveryPolicy: OriginalEmailMissingSourceRecoveryPolicy = .markUnavailableAfterRetries
     ) async -> OriginalEmailSource? {
+        guard !isInvalidatedForAccountTransition, message != nil else {
+            return nil
+        }
         let taskBaseLoadKey = request.identity.baseLoadKey
         let taskLoadKey = loadTaskKey(for: request)
         let shouldReset = activeBaseLoadKey != taskBaseLoadKey
@@ -400,7 +476,7 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         activeBaseLoadKey = taskBaseLoadKey
         activeLoadTaskKey = taskLoadKey
         // A new load supersedes any pending late-source observer from a prior load.
-        timedOutSourceObservationTask?.cancel()
+        cancelTimedOutSourceObservation()
         if shouldReset {
             activeHTMLSourceSignature = nil
         }
@@ -418,13 +494,22 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         }
         defer { recoveringTask.cancel() }
 
-        let sourceTask = ensureSourceTask(for: request)
+        let sourceTaskID = UUID()
+        let sourceTask = ensureSourceTask(for: request, id: sourceTaskID)
+        var sourceTaskWasHandedToObserver = false
+        defer {
+            if !sourceTaskWasHandedToObserver {
+                sourceTask.cancel()
+                activeSourceTasks.removeValue(forKey: sourceTaskID)
+            }
+        }
         let timedLoadResult = await ensureSource(
             from: sourceTask,
             timeout: loadTimeout
         )
 
         guard !Task.isCancelled,
+              !isInvalidatedForAccountTransition,
               activeLoadTaskKey == taskLoadKey else {
             return nil
         }
@@ -440,11 +525,17 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
                 source = await waitForSourceWhileActive(sourceTask)
 
                 guard !Task.isCancelled,
+                      !isInvalidatedForAccountTransition,
                       activeLoadTaskKey == taskLoadKey else {
                     return nil
                 }
             } else if !shouldPreserveLoadedContent {
-                observeTimedOutSource(sourceTask, taskLoadKey: taskLoadKey)
+                observeTimedOutSource(
+                    sourceTask,
+                    sourceTaskID: sourceTaskID,
+                    taskLoadKey: taskLoadKey
+                )
+                sourceTaskWasHandedToObserver = true
             }
         }
 
@@ -463,17 +554,20 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     }
 
     func retry() {
+        guard !isInvalidatedForAccountTransition else { return }
         readerState = .loading(immediatePlaceholder)
         loadingGeneration &+= 1
     }
 
     func reloadPreservingContent() {
+        guard !isInvalidatedForAccountTransition else { return }
         loadingGeneration &+= 1
     }
 
     func reloadIfRemoteImageFallbackWarmed(_ notification: Notification) {
+        guard !isInvalidatedForAccountTransition else { return }
         guard let warmedMessageId = notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String,
-              warmedMessageId == message.id else {
+              warmedMessageId == messageId else {
             return
         }
 
@@ -481,11 +575,12 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     }
 
     func reloadIfContentSourceChanged(_ notification: Notification) {
+        guard !isInvalidatedForAccountTransition else { return }
         let changedMessageId = notification.userInfo?[HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey] as? String
         let changedSourceSignature = notification.userInfo?[HTMLContentLoader.contentSourceDidChangeSourceSignatureUserInfoKey] as? String
         guard OriginalEmailContentSourceReloadPolicy.shouldReload(
             changedMessageId: changedMessageId,
-            currentMessageId: message.id,
+            currentMessageId: messageId,
             changedSourceSignature: changedSourceSignature,
             activeSourceSignature: activeHTMLSourceSignature,
             readerState: readerState
@@ -502,32 +597,53 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
 
     private func observeTimedOutSource(
         _ sourceTask: Task<OriginalEmailSource?, Never>,
+        sourceTaskID: UUID,
         taskLoadKey: String
     ) {
-        timedOutSourceObservationTask?.cancel()
+        cancelTimedOutSourceObservation()
+        timedOutSourceTaskID = sourceTaskID
         timedOutSourceObservationTask = Task { [weak self] in
             let source = await sourceTask.value
+            guard let self else { return }
+            self.activeSourceTasks.removeValue(forKey: sourceTaskID)
+            if self.timedOutSourceTaskID == sourceTaskID {
+                self.timedOutSourceTaskID = nil
+                self.timedOutSourceObservationTask = nil
+            }
             // The class is @MainActor, so we resume on the main actor here. Bail if a
             // newer load superseded/cancelled this observer (or the session went
             // away) before the timed-out source finally resolved.
-            guard !Task.isCancelled, let self, let source else {
+            guard !Task.isCancelled, let source else {
                 return
             }
             self.applyTimedOutSourceIfCurrent(source, taskLoadKey: taskLoadKey)
         }
     }
 
+    private func cancelTimedOutSourceObservation() {
+        timedOutSourceObservationTask?.cancel()
+        if let timedOutSourceTaskID {
+            activeSourceTasks[timedOutSourceTaskID]?.cancel()
+        }
+        timedOutSourceObservationTask = nil
+        timedOutSourceTaskID = nil
+    }
+
     private func applyTimedOutSourceIfCurrent(_ source: OriginalEmailSource, taskLoadKey: String) {
-        guard activeLoadTaskKey == taskLoadKey else {
+        guard !isInvalidatedForAccountTransition,
+              activeLoadTaskKey == taskLoadKey else {
             return
         }
 
         acceptLoadedSource(source)
     }
 
-    private func ensureSourceTask(for request: OriginalEmailLoadRequest) -> Task<OriginalEmailSource?, Never> {
+    private func ensureSourceTask(
+        for request: OriginalEmailLoadRequest,
+        id: UUID
+    ) -> Task<OriginalEmailSource?, Never> {
         let loader = self.originalEmailSourceLoader
-        return Task(priority: .userInitiated) {
+        let task = Task(priority: .userInitiated) {
             await loader.ensureOriginalEmailAvailable(
                 messageId: request.messageId,
                 bodyStorageURI: request.bodyStorageURI,
@@ -536,6 +652,8 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
                 subject: request.subject
             )
         }
+        activeSourceTasks[id] = task
+        return task
     }
 
     private func ensureSource(
@@ -556,7 +674,8 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     }
 
     private func markRecoveringIfCurrent(taskLoadKey: String) {
-        guard activeLoadTaskKey == taskLoadKey else {
+        guard !isInvalidatedForAccountTransition,
+              activeLoadTaskKey == taskLoadKey else {
             return
         }
         if case .loading = readerState {
@@ -565,6 +684,7 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     }
 
     private func applyLoadedSource(_ source: OriginalEmailSource) {
+        guard !isInvalidatedForAccountTransition, let message else { return }
         guard let artifact = EmailReaderArtifact.make(
             messageID: message.id,
             source: source,
@@ -584,22 +704,57 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     }
 
     private func acceptLoadedSource(_ source: OriginalEmailSource) {
+        guard !isInvalidatedForAccountTransition, let message else { return }
         activeHTMLSourceSignature = source.sourceSignature
         applyLoadedSource(source)
-        onSourceLoaded(message, source)
+        onSourceLoaded?(message, source)
     }
 
     private func logReaderStartIfNeeded(mode: String) {
-        guard !readerStartLogged else {
+        guard !isInvalidatedForAccountTransition,
+              !readerStartLogged else {
             return
         }
 
         readerStartLogged = true
         OriginalEmailTelemetry.log(
             event: "reader_started",
-            messageId: message.id,
+            messageId: messageId,
             detail: "mode=\(mode)"
         )
+    }
+
+    /// Permanently detaches this session from the account that created it. A session is a presentation
+    /// object, so it is never revived after sign-out/re-auth; a later account receives a new session.
+    @discardableResult
+    func invalidateForAccountTransition() -> [Task<OriginalEmailSource?, Never>] {
+        guard !isInvalidatedForAccountTransition else { return [] }
+        isInvalidatedForAccountTransition = true
+
+        cancelTimedOutSourceObservation()
+        let sourceTasks = Array(activeSourceTasks.values)
+        sourceTasks.forEach { $0.cancel() }
+        activeSourceTasks.removeAll(keepingCapacity: false)
+
+        readerState = .invalidated
+        loadingGeneration &+= 1
+        activeHTMLSourceSignature = nil
+        activeBaseLoadKey = nil
+        activeLoadTaskKey = nil
+        prepaintedArtifactWidthKeys.removeAll(keepingCapacity: false)
+        readerStartLogged = false
+
+        message = nil
+        messageId = ""
+        retainedRequest = nil
+        initialArtifact = nil
+        retainedImmediatePlaceholder = nil
+        retainedWebViewAdoptionProvider = nil
+        fullEmailOpener = nil
+        fullEmailAccountGeneration = nil
+        onSourceLoaded = nil
+
+        return sourceTasks
     }
 
     private static func updateBodyStorageURIIfNeeded(for message: Message, source: OriginalEmailSource) {

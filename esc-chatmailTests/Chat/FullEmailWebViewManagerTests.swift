@@ -269,6 +269,75 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
 
 @MainActor
 final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
+    func testBlankDocumentAwaiterBoundsWholeProbeWhenCallbacksNeverArrive() async {
+        let webViews = (0..<2).map { _ in
+            LayoutAwareWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+        var evaluationCount = 0
+        var deferredCompletions: [(String?) -> Void] = []
+        let awaiter = FullEmailBlankDocumentAwaiter(
+            webViews: webViews,
+            timeoutNanoseconds: 50_000_000,
+            retryNanoseconds: 1_000_000
+        ) { _, completion in
+            evaluationCount += 1
+            deferredCompletions.append(completion)
+        }
+
+        let start = Date()
+        await awaiter.wait()
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(evaluationCount, webViews.count)
+        XCTAssertLessThan(
+            elapsed,
+            1.0,
+            "The single deadline must bound all readers even when no WebKit callback arrives"
+        )
+
+        deferredCompletions.forEach { $0("") }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertEqual(
+            evaluationCount,
+            webViews.count,
+            "Late callbacks must not restart polling after the deadline settles"
+        )
+    }
+
+    func testBlankDocumentAwaiterCancellationUnblocksNeverCompletingProbe() async {
+        let webView = LayoutAwareWKWebView(
+            frame: .zero,
+            configuration: WKWebViewConfiguration()
+        )
+        var evaluationStarted = false
+        var deferredCompletion: ((String?) -> Void)?
+        let awaiter = FullEmailBlankDocumentAwaiter(
+            webViews: [webView],
+            timeoutNanoseconds: 5_000_000_000
+        ) { _, completion in
+            evaluationStarted = true
+            deferredCompletion = completion
+        }
+        let waitTask = Task { await awaiter.wait() }
+
+        for _ in 0..<20 where !evaluationStarted {
+            await Task.yield()
+        }
+        XCTAssertTrue(evaluationStarted)
+
+        let start = Date()
+        waitTask.cancel()
+        await waitTask.value
+        XCTAssertLessThan(
+            Date().timeIntervalSince(start),
+            1.0,
+            "Cancellation must settle the continuation without waiting for the deadline"
+        )
+
+        deferredCompletion?("")
+        await Task.yield()
+    }
+
     func testWarmWithoutWidthStoresPayloadWithoutWebViewEntry() async throws {
         // Adoption is on by default, but warming without a width still cannot create an off-screen
         // WebView entry: there is no target width to render at, so only the open payload is prepared.
@@ -464,6 +533,204 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         XCTAssertTrue(manager.hasRemoteImageFallbackWarmContextForTesting(messageId: secondMessageId))
 
         manager.clear()
+    }
+
+    func testAccountTransitionClearsPayloadsAndBlocksNewWarmStateUntilReopen() async throws {
+        let messagesDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "FullEmailWebViewManagerAccountTransition-\(UUID().uuidString)"
+        )
+        let contentHandler = HTMLContentHandler(messagesDirectory: messagesDirectory)
+        defer {
+            try? FileManager.default.removeItem(at: messagesDirectory)
+        }
+
+        let messageId = "account-transition-\(UUID().uuidString)"
+        _ = contentHandler.saveHTML(simpleHTML(title: "Old account"), for: messageId)
+        let manager = FullEmailWebViewManager(loader: makeLoader(contentHandler: contentHandler))
+        let request = makeRequest(messageId: messageId)
+        let oldGeneration = try XCTUnwrap(manager.captureAccountWorkGeneration())
+        await manager.warm(request: request, message: nil, width: nil)
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+
+        await manager.clearForAccountTransition()
+        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
+
+        let testStack = TestCoreDataStack()
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withSubject("Subject")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .withBody("Body")
+            .build(in: testStack.viewContext)
+        let artifact = makeArtifact(message: message, html: simpleHTML(title: "Blocked"))
+        manager.prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            artifact: artifact,
+            width: 390,
+            expectedAccountGeneration: oldGeneration
+        )
+        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
+
+        manager.reopenAccountWork()
+        manager.prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            artifact: artifact,
+            width: 390,
+            expectedAccountGeneration: oldGeneration
+        )
+        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
+
+        let newGeneration = try XCTUnwrap(manager.captureAccountWorkGeneration())
+        manager.prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            artifact: artifact,
+            width: 390,
+            expectedAccountGeneration: newGeneration
+        )
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        manager.clear()
+    }
+
+    func testAccountTransitionInvalidatesLiveSessionAndReleasesAccountContent() async throws {
+        let testStack = TestCoreDataStack()
+        let oldAccountMarker = "PRIVATE_SESSION_\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId("session-account-transition-\(UUID().uuidString)")
+            .withSubject(oldAccountMarker)
+            .withSender(email: "old-account@example.com", name: oldAccountMarker)
+            .withBody(oldAccountMarker)
+            .build(in: testStack.viewContext)
+        let request = OriginalEmailWarmRequest(
+            messageId: message.id,
+            bodyStorageURI: "file:///tmp/\(oldAccountMarker).html",
+            bodyText: oldAccountMarker,
+            senderEmail: "old-account@example.com",
+            subject: oldAccountMarker
+        )
+        let artifact = makeArtifact(message: message, html: simpleHTML(title: oldAccountMarker))
+        let manager = FullEmailWebViewManager()
+        let session = FullEmailOpenSession(
+            message: message,
+            request: request,
+            initialArtifact: artifact,
+            immediatePlaceholder: FullEmailPlaceholder(message: message),
+            fullEmailOpener: manager
+        )
+
+        XCTAssertTrue(session.message === message)
+        XCTAssertEqual(session.request.subject, oldAccountMarker)
+        XCTAssertEqual(session.initialArtifact, artifact)
+        XCTAssertEqual(session.immediatePlaceholder.subject, oldAccountMarker)
+
+        await manager.clearForAccountTransition()
+
+        XCTAssertTrue(session.isInvalidatedForAccountTransition)
+        XCTAssertEqual(session.readerState, .invalidated)
+        XCTAssertNil(session.message)
+        XCTAssertEqual(session.messageId, "")
+        XCTAssertEqual(session.request.messageId, "")
+        XCTAssertNil(session.request.bodyStorageURI)
+        XCTAssertNil(session.request.bodyText)
+        XCTAssertNil(session.request.senderEmail)
+        XCTAssertNil(session.request.subject)
+        XCTAssertNil(session.initialArtifact)
+        XCTAssertEqual(session.immediatePlaceholder, .redacted)
+        XCTAssertNil(session.activeHTMLSourceSignature)
+        XCTAssertFalse(session.hasImmediateVisualSurface)
+
+        manager.reopenAccountWork()
+        session.retry()
+        session.prepareForMeasuredReaderWidth(390)
+        XCTAssertEqual(session.readerState, .invalidated)
+        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: message.id))
+    }
+
+    func testAccountTransitionScrubsCheckedOutWebViewAndCIDAssociation() async throws {
+        let testStack = TestCoreDataStack()
+        let messageId = "checked-out-account-transition-\(UUID().uuidString)"
+        let oldAccountMarker = "PRIVATE_OLD_ACCOUNT_\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withSubject("Subject")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .withBody("Body")
+            .build(in: testStack.viewContext)
+        let html = simpleHTML(title: oldAccountMarker)
+        let request = makeRequest(messageId: messageId)
+        let artifact = makeArtifact(message: message, html: html)
+        let manager = FullEmailWebViewManager()
+
+        manager.prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            artifact: artifact,
+            width: 390
+        )
+
+        var renderedOldDOM = false
+        for _ in 0..<100 {
+            if let webView = manager.webViewForTesting(messageId: messageId),
+               let value = try? await webView.evaluateJavaScript("document.body.innerText"),
+               let bodyText = value as? String,
+               bodyText.contains(oldAccountMarker) {
+                renderedOldDOM = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(renderedOldDOM, "The regression must begin with the old account DOM loaded")
+
+        manager.markInitialLoadFinishedForTesting(messageId: messageId)
+        let checkout = try XCTUnwrap(
+            manager.checkout(
+                messageId: messageId,
+                sourceSignature: artifact.sourceSignature,
+                wrappedHTML: html,
+                message: message,
+                width: 390
+            )
+        )
+        XCTAssertTrue(checkout.cidHandler.message === message)
+        let reader = FullEmailReaderWebView(
+            htmlContent: html,
+            sourceSignature: artifact.sourceSignature,
+            readerWidth: 390,
+            message: message,
+            webViewAdoptionProvider: manager
+        )
+        let coordinator = FullEmailReaderWebView.Coordinator(reader)
+        coordinator.cidHandler = checkout.cidHandler
+        coordinator.adoptAlreadyLoadedContent(html, messageId: messageId)
+        checkout.webView.navigationDelegate = coordinator
+        FullEmailReaderAccountBoundaryRegistry.shared.register(
+            webView: checkout.webView,
+            coordinator: coordinator
+        )
+
+        await manager.clearForAccountTransition()
+
+        XCTAssertNil(checkout.cidHandler.message)
+        XCTAssertTrue(coordinator.isInvalidatedForAccountTransitionForTesting)
+        XCTAssertFalse(coordinator.hasAdoptedPrerenderedWebViewForTesting)
+        XCTAssertEqual(coordinator.parent.htmlContent, "")
+        XCTAssertNil(coordinator.parent.message)
+        manager.reopenAccountWork()
+        XCTAssertFalse(manager.checkin(messageId: messageId, webView: checkout.webView))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        var oldDOMWasScrubbed = false
+        for _ in 0..<100 {
+            if let value = try? await checkout.webView.evaluateJavaScript("document.body.innerText"),
+               let bodyText = value as? String,
+               !bodyText.contains(oldAccountMarker) {
+                oldDOMWasScrubbed = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(oldDOMWasScrubbed)
     }
 
     private func makeLoader(contentHandler: HTMLContentHandler) -> OriginalEmailSourceLoader {
