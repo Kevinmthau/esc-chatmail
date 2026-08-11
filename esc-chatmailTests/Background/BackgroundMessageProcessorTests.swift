@@ -123,6 +123,76 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertFalse(changeSet.messageIdsToFetch.contains("m1"))
     }
 
+    func testProcessHistoryChanges_fetchesOnlyExactExcludedCommittedSendEcho() async throws {
+        let stack = TestCoreDataStack()
+        let conversation = ConversationBuilder.simple(in: stack.viewContext)
+        let matchingRemoteID = "background-remote-trash"
+        let unrelatedRemoteID = "background-unrelated-trash"
+        let mutationRecord = stack.viewContext.insertTestObject(
+            OutboundSendMutationRecord.self
+        )
+        mutationRecord.id = "background-optimistic-send"
+        mutationRecord.createdAt = Date()
+        mutationRecord.hidden = false
+        mutationRecord.newlyInsertedConversation = false
+        mutationRecord.remoteCommittedMessageId = matchingRemoteID
+        mutationRecord.remoteCommittedThreadId = "background-remote-thread"
+        try stack.saveViewContext()
+
+        let matchingMessage = GmailMessage(
+            id: matchingRemoteID,
+            threadId: "background-remote-thread",
+            labelIds: ["SENT", "TRASH"],
+            snippet: "Committed send already trashed",
+            historyId: nil,
+            internalDate: nil,
+            payload: nil,
+            sizeEstimate: nil
+        )
+        let unrelatedMessage = GmailMessage(
+            id: unrelatedRemoteID,
+            threadId: "background-unrelated-thread",
+            labelIds: ["TRASH"],
+            snippet: nil,
+            historyId: nil,
+            internalDate: nil,
+            payload: nil,
+            sizeEstimate: nil
+        )
+        let apiClient = MockGmailAPIClient()
+        apiClient.addMessage(matchingMessage)
+        apiClient.addMessage(unrelatedMessage)
+        let syncCoordinator = MockBackgroundSyncCoordinator(
+            seedConversationObjectID: conversation.objectID
+        )
+        let processor = BackgroundMessageProcessor(
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            saveContext: { stack.saveIfNeeded(context: $0) },
+            apiClient: apiClient,
+            syncCoordinator: syncCoordinator
+        )
+        let history = HistoryRecord(
+            id: "background-excluded-history",
+            messages: nil,
+            messagesAdded: [
+                HistoryMessageAdded(message: matchingMessage),
+                HistoryMessageAdded(message: unrelatedMessage)
+            ],
+            messagesDeleted: nil,
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+
+        let result = await processor.processHistoryChanges(histories: [history])
+
+        XCTAssertEqual(apiClient.getMessageCalledIds, [matchingRemoteID])
+        XCTAssertEqual(syncCoordinator.savedMessageContextIDs.count, 1)
+        XCTAssertEqual(
+            result,
+            BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 0)
+        )
+    }
+
     func testProcessHistoryChanges_usesSingleContextForDeleteFetchAndRollups() async throws {
         let stack = TestCoreDataStack()
         let seedConversation = ConversationBuilder.simple(in: stack.viewContext)

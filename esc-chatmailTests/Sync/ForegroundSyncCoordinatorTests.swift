@@ -27,6 +27,162 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
     }
 
+    func testStart_triggerImmediateSyncDefersUntilAccountTransitionBoundaryReopens() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 90
+        )
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let boundaryWaitStarted = expectation(description: "waiting for account transition")
+        let deferredSyncStarted = expectation(description: "deferred sync started")
+        let boundary = AsyncGate()
+        syncEngine.requestResults = [.alreadyInProgress, .started]
+        syncEngine.onWaitForCurrentSyncToComplete = {
+            boundaryWaitStarted.fulfill()
+            await boundary.wait()
+        }
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            let result = syncEngine.requestResults.removeFirst()
+            if result == .started {
+                deferredSyncStarted.fulfill()
+            }
+            return result
+        }
+
+        coordinator.start(reason: "authBecameAuthenticated", triggerImmediateSync: true)
+
+        await fulfillment(of: [boundaryWaitStarted], timeout: 1.0)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
+
+        await boundary.open()
+        await fulfillment(of: [deferredSyncStarted], timeout: 1.0)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
+    }
+
+    func testCompletedHistorySliceNeedingFollowUpStartsImmediateContinuation() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 3_600,
+            maxImmediateFollowUpRuns: 2
+        )
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let firstSliceStarted = expectation(description: "first history slice")
+        let continuationStarted = expectation(description: "history continuation")
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            if syncEngine.triggerIncrementalSyncIfPossibleCalls == 1 {
+                firstSliceStarted.fulfill()
+            } else if syncEngine.triggerIncrementalSyncIfPossibleCalls == 2 {
+                continuationStarted.fulfill()
+            }
+            return .started
+        }
+
+        coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
+        await fulfillment(of: [firstSliceStarted], timeout: 1.0)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
+
+        syncEngine.completeRequest(at: 0, needsFollowUp: true)
+
+        await fulfillment(of: [continuationStarted], timeout: 1.0)
+        XCTAssertEqual(
+            syncEngine.triggerIncrementalSyncIfPossibleCalls,
+            2,
+            "The durable next-page checkpoint should be consumed without waiting for the periodic timer"
+        )
+
+        syncEngine.completeRequest(at: 1, needsFollowUp: false)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
+    }
+
+    func testImmediateHistoryContinuationStopsAfterDefaultThreeFollowUps() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 3_600
+        )
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let firstSliceStarted = expectation(description: "first history slice")
+        let secondSliceStarted = expectation(description: "second history slice")
+        let thirdSliceStarted = expectation(description: "third history slice")
+        let fourthSliceStarted = expectation(description: "fourth history slice")
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            switch syncEngine.triggerIncrementalSyncIfPossibleCalls {
+            case 1: firstSliceStarted.fulfill()
+            case 2: secondSliceStarted.fulfill()
+            case 3: thirdSliceStarted.fulfill()
+            case 4: fourthSliceStarted.fulfill()
+            default: break
+            }
+            return .started
+        }
+
+        coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
+        await fulfillment(of: [firstSliceStarted], timeout: 1.0)
+
+        syncEngine.completeRequest(at: 0, needsFollowUp: true)
+        await fulfillment(of: [secondSliceStarted], timeout: 1.0)
+
+        syncEngine.completeRequest(at: 1, needsFollowUp: true)
+        await fulfillment(of: [thirdSliceStarted], timeout: 1.0)
+
+        syncEngine.completeRequest(at: 2, needsFollowUp: true)
+        await fulfillment(of: [fourthSliceStarted], timeout: 1.0)
+
+        syncEngine.completeRequest(at: 3, needsFollowUp: true)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(
+            syncEngine.triggerIncrementalSyncIfPossibleCalls,
+            4,
+            "Persistent held progress must fall back to the periodic loop instead of spinning forever"
+        )
+    }
+
+    func testPostSendSyncForcesRequestInsideMinimumGap() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 3_600
+        )
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let initialSyncStarted = expectation(description: "initial sync")
+        let postSendSyncStarted = expectation(description: "post-send sync")
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            switch syncEngine.triggerIncrementalSyncIfPossibleCalls {
+            case 1: initialSyncStarted.fulfill()
+            case 2: postSendSyncStarted.fulfill()
+            default: break
+            }
+            return .started
+        }
+
+        coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
+        await fulfillment(of: [initialSyncStarted], timeout: 1.0)
+
+        try? await coordinator.performIncrementalSync()
+
+        await fulfillment(of: [postSendSyncStarted], timeout: 1.0)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
+    }
+
     func testStart_triggerImmediateSyncWhileLoopRunning_isThrottled() async {
         let syncEngine = MockForegroundSyncEngine()
         let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
@@ -237,9 +393,12 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
 
 @MainActor
 private final class MockForegroundSyncEngine: ForegroundSyncPerforming {
+    private typealias Completion = @MainActor @Sendable (Bool) -> Void
+
     var requestResults: [ForegroundSyncRequestResult] = [.started]
     var onWaitForCurrentSyncToComplete: (() async -> Void)?
     var onTriggerIncrementalSyncIfPossible: (() async -> ForegroundSyncRequestResult)?
+    private var completions: [Completion] = []
     private(set) var waitForCurrentSyncToCompleteCalls = 0
     private(set) var triggerIncrementalSyncIfPossibleCalls = 0
 
@@ -250,8 +409,11 @@ private final class MockForegroundSyncEngine: ForegroundSyncPerforming {
         }
     }
 
-    func triggerIncrementalSyncIfPossible() async -> ForegroundSyncRequestResult {
+    func triggerIncrementalSyncIfPossible(
+        completion: @escaping @MainActor @Sendable (Bool) -> Void
+    ) async -> ForegroundSyncRequestResult {
         triggerIncrementalSyncIfPossibleCalls += 1
+        completions.append(completion)
         if let onTriggerIncrementalSyncIfPossible {
             return await onTriggerIncrementalSyncIfPossible()
         }
@@ -261,6 +423,10 @@ private final class MockForegroundSyncEngine: ForegroundSyncPerforming {
         }
 
         return .started
+    }
+
+    func completeRequest(at index: Int, needsFollowUp: Bool) {
+        completions[index](needsFollowUp)
     }
 }
 

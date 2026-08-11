@@ -6,33 +6,90 @@ import CoreData
 extension MessagePersister {
     func remoteCommittedSendMutationResolutions(
         for remoteMessageIDs: Set<String>,
+        sentMessageIDsByRemoteID: [String: String],
         in context: NSManagedObjectContext
-    ) async -> [String: RemoteCommittedSendMutationResolution] {
+    ) async throws -> [String: RemoteCommittedSendMutationResolution] {
         guard !remoteMessageIDs.isEmpty else { return [:] }
 
-        return await context.perform {
+        return try await context.perform {
             let request = OutboundSendMutationRecord.fetchRequest()
-            request.predicate = NSPredicate(
-                format: "remoteCommittedMessageId IN %@",
-                Array(remoteMessageIDs)
+            var predicates: [NSPredicate] = [
+                NSPredicate(
+                    format: "remoteCommittedMessageId IN %@",
+                    Array(remoteMessageIDs)
+                )
+            ]
+            let candidateOptimisticIDs = Set(
+                sentMessageIDsByRemoteID.values.compactMap(
+                    MimeBuilder.optimisticMessageID(from:)
+                )
+            )
+            if !candidateOptimisticIDs.isEmpty {
+                predicates.append(
+                    NSCompoundPredicate(andPredicateWithSubpredicates: [
+                        NSPredicate(
+                            format: "remoteCommittedMessageId IN %@",
+                            [
+                                OutboundSendRemoteState.inFlightMessageID,
+                                OutboundSendRemoteState.ambiguousMessageID,
+                                OutboundSendRemoteState.notSentMessageID
+                            ]
+                        ),
+                        NSPredicate(
+                            format: "id IN %@",
+                            Array(candidateOptimisticIDs)
+                        )
+                    ])
+                )
+            }
+            request.predicate = NSCompoundPredicate(
+                orPredicateWithSubpredicates: predicates
             )
             request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
             request.includesPendingChanges = true
 
-            let records: [OutboundSendMutationRecord]
-            do {
-                records = try context.fetch(request)
-            } catch {
-                Log.error(
-                    "Failed to fetch remote committed send mutation routes",
-                    category: .coreData,
-                    error: error
-                )
-                return [:]
+            let records = try context.fetch(request)
+
+            var recordsByRemoteMessageID = Dictionary(grouping: records.filter {
+                !OutboundSendRemoteState.isLocalMarker($0.remoteCommittedMessageId)
+            }) {
+                $0.remoteCommittedMessageId ?? ""
             }
 
-            let recordsByRemoteMessageID = Dictionary(grouping: records) {
-                $0.remoteCommittedMessageId ?? ""
+            let remoteIDsByRFCMessageID = Dictionary(
+                grouping: sentMessageIDsByRemoteID.keys,
+                by: { sentMessageIDsByRemoteID[$0] ?? "" }
+            )
+            for record in records
+                where OutboundSendRemoteState.isLocalMarker(record.remoteCommittedMessageId) {
+                let expectedMessageID = MimeBuilder.messageId(
+                    forOptimisticMessageID: record.id
+                )
+                for remoteMessageID in remoteIDsByRFCMessageID[expectedMessageID] ?? [] {
+                    recordsByRemoteMessageID[remoteMessageID, default: []].append(record)
+                }
+            }
+
+            let matchedOptimisticIDs = Set(
+                recordsByRemoteMessageID.values.flatMap { $0.map(\.id) }
+            )
+            let optimisticMessagesByID: [String: Message]
+            if matchedOptimisticIDs.isEmpty {
+                optimisticMessagesByID = [:]
+            } else {
+                let messageRequest = Message.fetchRequest()
+                messageRequest.predicate = NSPredicate(
+                    format: "id IN %@",
+                    Array(matchedOptimisticIDs)
+                )
+                messageRequest.relationshipKeyPathsForPrefetching = ["conversation"]
+                messageRequest.includesPendingChanges = true
+                let optimisticMessages = try context.fetch(messageRequest)
+                var messagesByID: [String: Message] = [:]
+                for message in optimisticMessages where messagesByID[message.id] == nil {
+                    messagesByID[message.id] = message
+                }
+                optimisticMessagesByID = messagesByID
             }
             var resolutions: [String: RemoteCommittedSendMutationResolution] = [:]
             resolutions.reserveCapacity(recordsByRemoteMessageID.count)
@@ -89,8 +146,27 @@ extension MessagePersister {
                     )
                 }
 
+                var supersededOptimisticMessages: [
+                    NSManagedObjectID: SupersededOptimisticMessage
+                ] = [:]
+                for record in matchingRecords {
+                    guard let message = optimisticMessagesByID[record.id] else {
+                        continue
+                    }
+                    let wasNewlyInserted =
+                        (supersededOptimisticMessages[message.objectID]?
+                            .newlyInsertedConversation ?? true)
+                        && record.newlyInsertedConversation
+                    supersededOptimisticMessages[message.objectID] =
+                        SupersededOptimisticMessage(
+                            optimisticMessageID: record.id,
+                            newlyInsertedConversation: wasNewlyInserted
+                        )
+                }
+
                 resolutions[remoteMessageID] = RemoteCommittedSendMutationResolution(
                     recordObjectIDs: matchingRecords.map(\.objectID),
+                    supersededOptimisticMessages: supersededOptimisticMessages,
                     anchoredListConversationObjectID: anchoredListConversationObjectID,
                     anchoredListId: anchoredListId,
                     shouldConsumeAfterPersistence:
@@ -102,11 +178,56 @@ extension MessagePersister {
         }
     }
 
+    @discardableResult
     nonisolated func consumeRemoteCommittedSendMutation(
         _ resolution: RemoteCommittedSendMutationResolution?,
+        requiresResolvedPersistenceRoute: Bool = true,
         in context: NSManagedObjectContext
-    ) {
-        guard let resolution, resolution.shouldConsumeAfterPersistence else { return }
+    ) -> Set<NSManagedObjectID> {
+        guard let resolution,
+              !requiresResolvedPersistenceRoute || resolution.shouldConsumeAfterPersistence else {
+            return []
+        }
+
+        var affectedConversations: [NSManagedObjectID: (Conversation, Bool)] = [:]
+        for (messageObjectID, candidate) in
+            resolution.supersededOptimisticMessages {
+            guard let message = try? context.existingObject(
+                with: messageObjectID
+            ) as? Message,
+            !message.isDeleted else {
+                continue
+            }
+            // API-success reconciliation may rename this exact row to Gmail's
+            // ID after resolution captured its objectID. Refreshing with merge
+            // preserves the sync update while exposing that durable rename; in
+            // that case this is now the real remote row, not a superseded local
+            // optimistic row, and deleting it would advance sync with no message.
+            context.refresh(message, mergeChanges: true)
+            guard !message.isDeleted,
+                  message.id == candidate.optimisticMessageID else {
+                continue
+            }
+            if let conversation = message.conversation {
+                let existing = affectedConversations[conversation.objectID]
+                affectedConversations[conversation.objectID] = (
+                    conversation,
+                    (existing?.1 ?? true) && candidate.newlyInsertedConversation
+                )
+            }
+            context.delete(message)
+        }
+        context.processPendingChanges()
+
+        for (_, (conversation, wasNewlyInserted)) in affectedConversations
+            where !conversation.isDeleted {
+            let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
+            if wasNewlyInserted && remainingMessages.isEmpty {
+                context.delete(conversation)
+            } else {
+                ConversationRollupSnapshot.make(from: Set(remainingMessages)).apply(to: conversation)
+            }
+        }
 
         for recordObjectID in resolution.recordObjectIDs {
             guard let record = try? context.existingObject(
@@ -117,6 +238,7 @@ extension MessagePersister {
             }
             context.delete(record)
         }
+        return Set(affectedConversations.keys)
     }
 
     private nonisolated static func resolveMutationConversation(
@@ -177,31 +299,46 @@ extension MessagePersister {
     func deleteExistingMessageIfPresent(
         id: String,
         modificationTransaction: ModificationTracker.Transaction?,
+        remoteCommittedSendMutation: RemoteCommittedSendMutationResolution? = nil,
         in context: NSManagedObjectContext
     ) async -> Bool {
-        let (succeeded, modifiedConversationID): (Bool, NSManagedObjectID?) = await context.perform {
+        let (succeeded, modifiedConversationIDs): (Bool, Set<NSManagedObjectID>) = await context.perform {
             let request = Message.fetchRequest()
             request.predicate = MessagePredicates.id(id)
             request.fetchLimit = 1
             request.relationshipKeyPathsForPrefetching = ["conversation"]
 
             do {
-                guard let message = try context.fetch(request).first else {
-                    return (true, nil)
+                var modifiedConversationIDs = Set<NSManagedObjectID>()
+                if let message = try context.fetch(request).first {
+                    if let conversationID = message.conversation?.objectID {
+                        modifiedConversationIDs.insert(conversationID)
+                    }
+                    context.delete(message)
                 }
 
-                let conversationID = message.conversation?.objectID
-                context.delete(message)
-                return (true, conversationID)
+                // An excluded remote echo has no message to route, so a missing
+                // legacy list anchor cannot justify retaining its optimistic
+                // graph. Delete the exact remote row (if any), superseded local
+                // row/conversation, and mutation record in this one context
+                // transaction; the caller's cursor advances in the same save.
+                modifiedConversationIDs.formUnion(
+                    self.consumeRemoteCommittedSendMutation(
+                        remoteCommittedSendMutation,
+                        requiresResolvedPersistenceRoute: false,
+                        in: context
+                    )
+                )
+                return (true, modifiedConversationIDs)
             } catch {
                 Log.error("Failed to delete excluded mailbox message \(id)", category: .coreData, error: error)
-                return (false, nil)
+                return (false, [])
             }
         }
 
-        if let modifiedConversationID {
-            await ModificationTracker.shared.trackModifiedConversation(
-                modifiedConversationID,
+        if !modifiedConversationIDs.isEmpty {
+            await ModificationTracker.shared.trackModifiedConversations(
+                modifiedConversationIDs,
                 in: modificationTransaction
             )
         }
@@ -221,7 +358,8 @@ extension MessagePersister {
                 let didPersistInlineData = persistInlineAttachmentData(
                     inlineData,
                     info: info,
-                    attachment: attachment
+                    attachment: attachment,
+                    messageId: message.id
                 )
                 if !didPersistInlineData {
                     context.delete(attachment)
@@ -253,7 +391,8 @@ extension MessagePersister {
     nonisolated func persistInlineAttachmentData(
         _ inlineData: Data,
         info: AttachmentInfo,
-        attachment: Attachment
+        attachment: Attachment,
+        messageId: String
     ) -> Bool {
         AttachmentPaths.setupDirectories()
 
@@ -263,7 +402,11 @@ extension MessagePersister {
 
         let filenameExt = (info.filename as NSString).pathExtension.lowercased()
         let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: info.mimeType) : filenameExt
-        let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
+        let originalPath = AttachmentPaths.originalPath(
+            messageId: messageId,
+            attachmentId: attachmentId,
+            ext: ext
+        )
 
         guard AttachmentPaths.saveData(inlineData, to: originalPath) else {
             return false
@@ -283,12 +426,17 @@ extension MessagePersister {
             attachment.pageCount = Int16(clamping: pageCount)
         }
 
+        var savedPreviewPath: String?
         if let thumbnailData = ImageProcessor.generateThumbnail(from: inlineData, mimeType: info.mimeType) {
-            let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentId)
+            let previewPath = AttachmentPaths.previewPath(
+                messageId: messageId,
+                attachmentId: attachmentId
+            )
             if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
-                attachment.previewURL = previewPath
+                savedPreviewPath = previewPath
             }
         }
+        attachment.previewURL = savedPreviewPath
 
         attachment.state = .downloaded
         attachment.lastDownloadFailedAt = nil

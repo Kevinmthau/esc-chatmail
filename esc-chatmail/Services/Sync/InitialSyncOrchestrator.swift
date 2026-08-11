@@ -42,6 +42,7 @@ final class InitialSyncOrchestrator {
     private let attachmentDownloader: AttachmentDownloader
     private let coreDataStack: CoreDataStack
     private let failureTracker: SyncFailureTracker
+    private let failureCounterStore: SyncFailureCounterCheckpointStore
     private let performanceLogger: CoreDataPerformanceLogger
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
     /// Creates the run's sync context. Injectable so tests can drive a full
@@ -63,6 +64,7 @@ final class InitialSyncOrchestrator {
         attachmentDownloader: AttachmentDownloader,
         coreDataStack: CoreDataStack,
         failureTracker: SyncFailureTracker = .shared,
+        failureCounterStore: SyncFailureCounterCheckpointStore = SyncFailureCounterCheckpointStore(),
         performanceLogger: CoreDataPerformanceLogger = .shared,
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
         makeSyncContext: (() -> NSManagedObjectContext)? = nil
@@ -74,6 +76,7 @@ final class InitialSyncOrchestrator {
         self.attachmentDownloader = attachmentDownloader
         self.coreDataStack = coreDataStack
         self.failureTracker = failureTracker
+        self.failureCounterStore = failureCounterStore
         self.performanceLogger = performanceLogger
         self.rollupMutationSerializer = rollupMutationSerializer
         self.makeSyncContext = makeSyncContext ?? { coreDataStack.newBackgroundContext() }
@@ -108,6 +111,15 @@ final class InitialSyncOrchestrator {
             sendAsAliases = validSendAsAliases
             myAliases = await AliasManager.shared.setAliases(Set([profile.emailAddress] + aliases))
             await SendAsAliasManager.shared.setAliases(validSendAsAliases)
+            // Load migration state before saveAccount stages a new Account:
+            // only a previously committed matching account may import the
+            // legacy UserDefaults count.
+            let legacyFailureCount = await failureTracker.consecutiveFailureCount
+            let durableFailureCounter = try await failureCounterStore.load(
+                accountEmail: profile.emailAddress,
+                legacyConsecutiveFailureCount: legacyFailureCount,
+                in: context
+            )
             try await messagePersister.saveAccount(
                 profile: profile,
                 aliases: aliases,
@@ -155,6 +167,7 @@ final class InitialSyncOrchestrator {
                 profile: profile,
                 labelIds: labelIds,
                 modificationTransaction: modificationTransaction,
+                priorFailureCount: durableFailureCounter.consecutiveFailureCount,
                 context: context
             )
             let syncCompletedWithWarnings = completion.hadWarnings
@@ -204,21 +217,18 @@ final class InitialSyncOrchestrator {
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
 
             // The save above committed the staged ledger state; only now may the
-            // tracker's success state change. On the warnings path there is no
-            // plan — deferred rows stay tracked and the counter stands.
+            // tracker's success state change. A held warnings plan is a no-op;
+            // an escape-hatch plan rearms the abandoned-message drain only after
+            // its ledger transition, counter reset, and cursor are durable.
             if let advancePlan = completion.advancePlan {
                 await failureTracker.commit(advancePlan)
             }
+            await failureTracker.retireLegacyCounterState()
 
             let conversationCount = await countConversations(in: context)
 
-            // Record successful sync time
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-
             // Queue attachment downloads
-            Task {
-                await attachmentDownloader.enqueueAllPendingAttachments()
-            }
+            attachmentDownloader.schedulePendingAttachmentDownloads()
 
             let totalDuration = CFAbsoluteTimeGetCurrent() - syncStartTime
             performanceLogger.endOperation("InitialSync", signpostID: signpostID)
@@ -349,6 +359,7 @@ final class InitialSyncOrchestrator {
         profile: GmailProfile,
         labelIds: Set<String>,
         modificationTransaction: ModificationTracker.Transaction,
+        priorFailureCount: Int = 0,
         context: NSManagedObjectContext
     ) async throws -> InitialSyncCompletionOutcome {
         if result.hasFailures {
@@ -380,7 +391,7 @@ final class InitialSyncOrchestrator {
             )
 
             if disposition.hadWarnings {
-                log.warning("\(stillFailedIds.count) messages permanently failed - keeping historyId unset so initial sync can retry safely")
+                log.warning("\(stillFailedIds.count) messages remain failed after initial-sync retry")
                 // Stages deferred ledger rows into the sync context; they commit
                 // with the run's final save. There is no cursor yet, so no
                 // sourceHistoryId to stamp.
@@ -390,11 +401,44 @@ final class InitialSyncOrchestrator {
                     sourceHistoryId: nil,
                     in: context
                 )
-                return InitialSyncCompletionOutcome(hadWarnings: true, advancePlan: nil)
+                let proposedFailureCount = Self.incrementedFailureCount(
+                    after: priorFailureCount
+                )
+                let advancePlan = await failureTracker.planHistoryAdvance(
+                    hadFailures: true,
+                    consecutiveFailureCount: proposedFailureCount,
+                    in: context
+                )
+                try await failureCounterStore.stage(
+                    consecutiveFailureCount: advancePlan.shouldAdvance
+                        ? 0
+                        : proposedFailureCount,
+                    accountEmail: profile.emailAddress,
+                    in: context
+                )
+                if advancePlan.shouldAdvance {
+                    log.warning("Initial-sync failure threshold reached - advancing historyId with failed messages staged for abandonment")
+                    await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+                } else {
+                    log.warning("Keeping historyId unset so initial sync can retry failed messages")
+                }
+                return InitialSyncCompletionOutcome(
+                    hadWarnings: true,
+                    advancePlan: advancePlan
+                )
             }
 
-            let advancePlan = await failureTracker.planHistoryAdvance(hadFailures: false, in: context)
+            let advancePlan = await failureTracker.planHistoryAdvance(
+                hadFailures: false,
+                consecutiveFailureCount: 0,
+                in: context
+            )
             if advancePlan.shouldAdvance {
+                try await failureCounterStore.stage(
+                    consecutiveFailureCount: 0,
+                    accountEmail: profile.emailAddress,
+                    in: context
+                )
                 log.info("All failed messages recovered on retry - advancing historyId")
                 await messagePersister.setAccountHistoryId(profile.historyId, in: context)
             } else {
@@ -406,8 +450,17 @@ final class InitialSyncOrchestrator {
             )
         }
 
-        let advancePlan = await failureTracker.planHistoryAdvance(hadFailures: false, in: context)
+        let advancePlan = await failureTracker.planHistoryAdvance(
+            hadFailures: false,
+            consecutiveFailureCount: 0,
+            in: context
+        )
         if advancePlan.shouldAdvance {
+            try await failureCounterStore.stage(
+                consecutiveFailureCount: 0,
+                accountEmail: profile.emailAddress,
+                in: context
+            )
             log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
             await messagePersister.setAccountHistoryId(profile.historyId, in: context)
         } else {
@@ -434,6 +487,11 @@ final class InitialSyncOrchestrator {
             shouldAdvanceHistoryId: permanentlyFailedCount == 0,
             hadWarnings: permanentlyFailedCount > 0
         )
+    }
+
+    nonisolated private static func incrementedFailureCount(after count: Int) -> Int {
+        let threshold = Swift.max(SyncConfig.maxConsecutiveSyncFailures, 1)
+        return Swift.min(Swift.max(count, 0), threshold - 1) + 1
     }
 
     private func countConversations(in context: NSManagedObjectContext) async -> Int {

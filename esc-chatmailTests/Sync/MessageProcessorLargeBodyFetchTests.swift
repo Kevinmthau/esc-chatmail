@@ -193,6 +193,28 @@ final class MessageProcessorLargeBodyFetchTests: XCTestCase {
         }
     }
 
+    func testAuthenticationFailureDuringSalvageProbeStillAborts() async {
+        let script = FetchScript([
+            .success(Data("large body".utf8)),
+            .failure(APIError.authenticationError),
+        ])
+        let processor = MessageProcessor(fetchAttachmentData: { _, _ in try script.next() })
+
+        do {
+            _ = try await processor.processGmailMessage(
+                makeLargeBodyMessageWithProbeOnlyPart(),
+                myAliases: []
+            )
+            XCTFail("An account authentication failure must abort even from the salvage probe")
+        } catch let error as APIError {
+            guard case .authenticationError = error else {
+                return XCTFail("Expected authenticationError, got \(error)")
+            }
+        } catch {
+            XCTFail("Expected APIError.authenticationError, got \(error)")
+        }
+    }
+
     func testSalvageProbeReusesAlreadyFetchedBody() async throws {
         let body = "The complete large plain-text body"
         // Exactly one scripted result: the salvage sweep re-walks the part

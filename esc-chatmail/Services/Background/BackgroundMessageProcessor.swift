@@ -103,7 +103,34 @@ final class BackgroundMessageProcessor {
         in context: NSManagedObjectContext? = nil
     ) async -> BackgroundMessageProcessingResult {
         let context = context ?? makeBackgroundContext()
-        let changeSet = Self.buildChangeSet(from: histories)
+        let baseChangeSet = Self.buildChangeSet(from: histories)
+        let excludedSendEchoIDs: Set<String>
+        do {
+            excludedSendEchoIDs = try await HistoryProcessor
+                .excludedRemoteSendEchoMessageIDs(
+                    from: histories,
+                    in: context
+                )
+        } catch {
+            // Treat a failed mutation lookup like any other history-processing
+            // failure so the background cursor cannot advance past an echo
+            // whose optimistic graph may still require convergence.
+            Log.error(
+                "Background history processing failed to resolve excluded send echoes",
+                category: .background,
+                error: error
+            )
+            return BackgroundMessageProcessingResult(
+                fetchedCount: 0,
+                failedFetchCount: 1
+            )
+        }
+        let changeSet = BackgroundHistoryChangeSet(
+            messageIdsToFetch: baseChangeSet.messageIdsToFetch
+                .union(excludedSendEchoIDs)
+                .subtracting(baseChangeSet.messageIdsToDelete),
+            messageIdsToDelete: baseChangeSet.messageIdsToDelete
+        )
         var fetchResult = BackgroundMessageProcessingResult.empty
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
         let syncCoordinator = await MainActor.run { self.syncCoordinator }

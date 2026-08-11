@@ -2330,20 +2330,47 @@ final class MessagePersisterUpdateTests: XCTestCase {
     }
 
     func testUpdateExistingMessage_reconcilesOptimisticLocalRegularAttachmentWithoutDuplication() async throws {
+        let testID = UUID().uuidString
+        let messageID = "message-regular-attachment-merge-\(testID)"
+        let localAttachmentID = "local_photo_attachment_\(testID)"
+        let remoteAttachmentID = "real_attachment_\(testID)"
+        let originalData = Data("offline-original-\(testID)".utf8)
+        let previewData = Data("offline-preview-\(testID)".utf8)
+        let localOriginalPath = AttachmentPaths.originalPath(idOrUUID: localAttachmentID, ext: "jpg")
+        let localPreviewPath = AttachmentPaths.previewPath(idOrUUID: localAttachmentID)
+        let remoteOriginalPath = AttachmentPaths.originalPath(
+            messageId: messageID,
+            attachmentId: remoteAttachmentID,
+            ext: "jpg"
+        )
+        let remotePreviewPath = AttachmentPaths.previewPath(
+            messageId: messageID,
+            attachmentId: remoteAttachmentID
+        )
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(originalData, to: localOriginalPath))
+        XCTAssertTrue(AttachmentPaths.saveData(previewData, to: localPreviewPath))
+        defer {
+            AttachmentPaths.deleteFile(at: localOriginalPath)
+            AttachmentPaths.deleteFile(at: localPreviewPath)
+            AttachmentPaths.deleteFile(at: remoteOriginalPath)
+            AttachmentPaths.deleteFile(at: remotePreviewPath)
+        }
+
         let conversation = ConversationBuilder.simple(in: context)
         let existingMessage = MessageBuilder()
-            .withId("message-regular-attachment-merge")
+            .withId(messageID)
             .inConversation(conversation)
             .withAttachments()
             .build(in: context)
 
         let optimisticAttachment = AttachmentBuilder()
-            .withId("local_photo_attachment")
+            .withId(localAttachmentID)
             .withFilename("photo.jpg")
             .withMimeType("image/jpeg")
             .withByteSize(2_048)
-            .withLocalURL("Attachments/local_photo_attachment.jpg")
-            .withPreviewURL("Previews/local_photo_attachment.jpg")
+            .withLocalURL(localOriginalPath)
+            .withPreviewURL(localPreviewPath)
             .forMessage(existingMessage)
             .build(in: context)
         optimisticAttachment.state = .uploaded
@@ -2363,7 +2390,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             hasAttachments: true,
             attachmentInfo: [
                 AttachmentInfo(
-                    id: "real_attachment_1",
+                    id: remoteAttachmentID,
                     filename: "photo.jpg",
                     mimeType: "image/jpeg",
                     size: 2_048,
@@ -2382,9 +2409,14 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(existingMessage.attachmentsArray.count, 1)
 
         let savedAttachment = try XCTUnwrap(existingMessage.attachmentsArray.first)
-        XCTAssertEqual(savedAttachment.id, "real_attachment_1")
-        XCTAssertEqual(savedAttachment.localURL, "Attachments/local_photo_attachment.jpg")
-        XCTAssertEqual(savedAttachment.previewURL, "Previews/local_photo_attachment.jpg")
+        XCTAssertEqual(savedAttachment.id, remoteAttachmentID)
+        XCTAssertEqual(savedAttachment.localURL, remoteOriginalPath)
+        XCTAssertEqual(savedAttachment.previewURL, remotePreviewPath)
+        XCTAssertEqual(savedAttachment.readableLocalURLValue, remoteOriginalPath)
+        XCTAssertEqual(savedAttachment.readablePreviewURLValue, remotePreviewPath)
+        XCTAssertEqual(AttachmentPaths.loadData(from: savedAttachment.readableLocalURLValue), originalData)
+        XCTAssertEqual(AttachmentPaths.loadData(from: savedAttachment.readablePreviewURLValue), previewData)
+        XCTAssertFalse(savedAttachment.needsRedownload)
         XCTAssertEqual(savedAttachment.state, .uploaded)
     }
 
@@ -2444,6 +2476,87 @@ final class MessagePersisterUpdateTests: XCTestCase {
 
         AttachmentPaths.deleteFile(at: savedAttachment.localURL)
         AttachmentPaths.deleteFile(at: savedAttachment.previewURL)
+    }
+
+    func testUpdateExistingMessage_migratesLegacySynthesizedInlineDataToCompositePath() async throws {
+        let inlineImageData = try XCTUnwrap(
+            Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII=")
+        )
+        let conversation = ConversationBuilder.simple(in: context)
+        let message = MessageBuilder()
+            .withId("inline-data-migration-message")
+            .inConversation(conversation)
+            .withAttachments()
+            .build(in: context)
+        let attachmentID = "local_inline_migration"
+        let legacyPath = AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "png")
+        let legacyPreviewPath = AttachmentPaths.previewPath(idOrUUID: attachmentID)
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(Data("stale".utf8), to: legacyPath))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("stale-preview".utf8), to: legacyPreviewPath))
+
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("inline.png")
+            .withMimeType("image/png")
+            .withContentId("inline-migration")
+            .withLocalURL(legacyPath)
+            .withPreviewURL(legacyPreviewPath)
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+
+        let processedMessage = ProcessedMessage(
+            id: message.id,
+            gmThreadId: message.gmThreadId,
+            snippet: message.snippet,
+            cleanedSnippet: message.cleanedSnippet,
+            internalDate: message.internalDate,
+            headers: ProcessedHeaders(),
+            htmlBody: nil,
+            plainTextBody: message.bodyText,
+            labelIds: [],
+            isUnread: message.isUnread,
+            isNewsletter: message.isNewsletter,
+            hasAttachments: true,
+            attachmentInfo: [
+                AttachmentInfo(
+                    id: attachmentID,
+                    filename: "inline.png",
+                    mimeType: "image/png",
+                    size: inlineImageData.count,
+                    contentId: "inline-migration",
+                    inlineData: inlineImageData
+                )
+            ]
+        )
+        let expectedPath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentID,
+            ext: "png"
+        )
+        let expectedPreviewPath = AttachmentPaths.previewPath(
+            messageId: message.id,
+            attachmentId: attachmentID
+        )
+        defer {
+            AttachmentPaths.deleteFile(at: legacyPath)
+            AttachmentPaths.deleteFile(at: legacyPreviewPath)
+            AttachmentPaths.deleteFile(at: expectedPath)
+            AttachmentPaths.deleteFile(at: expectedPreviewPath)
+        }
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(attachment.localURL, expectedPath)
+        XCTAssertEqual(attachment.previewURL, expectedPreviewPath)
+        XCTAssertEqual(AttachmentPaths.loadData(from: attachment.localURL), inlineImageData)
+        XCTAssertFalse(attachment.needsRedownload)
     }
 
     private func addConversationParticipant(person: Person, to conversation: Conversation) {

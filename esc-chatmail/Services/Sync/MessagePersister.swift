@@ -101,8 +101,14 @@ final class MessagePersisterReroutedSourceRollupBuffer: @unchecked Sendable {
 /// - `MessagePersister+Participants.swift` - Participant handling
 /// - `MessagePersister+Helpers.swift` - Helper methods
 actor MessagePersister {
+    struct SupersededOptimisticMessage {
+        let optimisticMessageID: String
+        let newlyInsertedConversation: Bool
+    }
+
     struct RemoteCommittedSendMutationResolution {
         let recordObjectIDs: [NSManagedObjectID]
+        let supersededOptimisticMessages: [NSManagedObjectID: SupersededOptimisticMessage]
         let anchoredListConversationObjectID: NSManagedObjectID?
         let anchoredListId: String?
         let shouldConsumeAfterPersistence: Bool
@@ -152,7 +158,9 @@ actor MessagePersister {
     /// Outcome of the side-effect-free preparation phase, ready for serialized persistence.
     enum PreparedMessage: Sendable {
         /// Message belongs to an excluded mailbox (spam/draft/trash) and should be removed locally.
-        case excludedMailbox(id: String, label: String)
+        /// Preserve its RFC Message-ID so an excluded echo can still resolve an
+        /// in-flight/ambiguous optimistic send by deterministic identity.
+        case excludedMailbox(id: String, label: String, rfcMessageID: String?)
         /// Message was processed and is ready to be created or updated.
         case processed(ProcessedMessage)
         /// Processing failed; nothing to persist.
@@ -188,13 +196,22 @@ actor MessagePersister {
             sendAsAliases: sendAsAliases
         )
         let remoteCommittedSendMutation: RemoteCommittedSendMutationResolution?
-        if case .processed(let processedMessage) = prepared {
-            remoteCommittedSendMutation = await remoteCommittedSendMutationResolutions(
-                for: [processedMessage.id],
+        do {
+            remoteCommittedSendMutation = try await remoteCommittedSendMutationResolutions(
+                for: Self.remoteSendEchoMessageIDs(in: [prepared]),
+                sentMessageIDsByRemoteID: Self.sentMessageIDsByRemoteID(in: [prepared]),
                 in: context
-            )[processedMessage.id]
-        } else {
-            remoteCommittedSendMutation = nil
+            )[Self.messageId(of: prepared)]
+        } catch {
+            // The lookup cannot be collapsed into "no matching mutation": that
+            // could advance a cursor while an optimistic graph remains hidden
+            // behind an unreadable route table.
+            Log.error(
+                "Failed to resolve remote committed send mutation",
+                category: .coreData,
+                error: error
+            )
+            return .failed
         }
         return try await persist(
             prepared,
@@ -217,8 +234,8 @@ actor MessagePersister {
     /// - Returns: the per-ID persistence report; every message in
     ///   `gmailMessages` lands in exactly one bucket. Throws only on
     ///   run-fatal conditions — schema/model failures that would fail every
-    ///   message identically, or `APIError.quotaExhausted` from a large-body
-    ///   fetch (account-scoped; the batch gets no verdict and the run aborts).
+    ///   message identically, or an account-scoped API failure from a
+    ///   large-body fetch (the batch gets no verdict and the run aborts).
     @discardableResult
     func saveMessages(
         _ gmailMessages: [GmailMessage],
@@ -235,14 +252,27 @@ actor MessagePersister {
             myAliases: myAliases,
             sendAsAliases: sendAsAliases
         )
-        let processedMessageIDs = Set(prepared.compactMap { outcome -> String? in
-            guard case .processed(let processedMessage) = outcome else { return nil }
-            return processedMessage.id
-        })
-        let remoteCommittedSendMutations = await remoteCommittedSendMutationResolutions(
-            for: processedMessageIDs,
-            in: context
-        )
+        let remoteCommittedSendMutations: [
+            String: RemoteCommittedSendMutationResolution
+        ]
+        do {
+            remoteCommittedSendMutations = try await remoteCommittedSendMutationResolutions(
+                for: Self.remoteSendEchoMessageIDs(in: prepared),
+                sentMessageIDsByRemoteID: Self.sentMessageIDsByRemoteID(in: prepared),
+                in: context
+            )
+        } catch {
+            Log.error(
+                "Failed to resolve remote committed send mutations",
+                category: .coreData,
+                error: error
+            )
+            var report = MessagePersistenceReport()
+            for outcome in prepared {
+                report.record(Self.messageId(of: outcome), .failed)
+            }
+            return report
+        }
 
         // One batch fetch primes the context's Person cache so the
         // per-participant find-or-create calls during persistence become
@@ -267,12 +297,9 @@ actor MessagePersister {
                 myAliases: myAliases,
                 modificationTransaction: modificationTransaction,
                 reroutedSourceRollupBuffer: reroutedSourceRollupBuffer,
-                remoteCommittedSendMutation: {
-                    guard case .processed(let processedMessage) = outcome else {
-                        return nil
-                    }
-                    return remoteCommittedSendMutations[processedMessage.id]
-                }(),
+                remoteCommittedSendMutation: remoteCommittedSendMutations[
+                    Self.messageId(of: outcome)
+                ],
                 in: context
             )
             report.record(Self.messageId(of: outcome), disposition)
@@ -289,7 +316,7 @@ actor MessagePersister {
 
     private nonisolated static func messageId(of prepared: PreparedMessage) -> String {
         switch prepared {
-        case .excludedMailbox(let id, _): return id
+        case .excludedMailbox(let id, _, _): return id
         case .unprocessable(let id): return id
         case .bodyFetchFailed(let id): return id
         case .processed(let processedMessage): return processedMessage.id
@@ -315,14 +342,71 @@ actor MessagePersister {
         return Array(emails)
     }
 
+    nonisolated static func sentMessageIDsByRemoteID(
+        in processedMessages: [ProcessedMessage]
+    ) -> [String: String] {
+        var result: [String: String] = [:]
+        for message in processedMessages
+            where message.headers.isFromMe && message.labelIds.contains("SENT") {
+            guard let messageID = message.headers.messageId,
+                  !messageID.isEmpty else {
+                continue
+            }
+            result[message.id] = messageID
+        }
+        return result
+    }
+
+    /// IDs eligible to resolve a retained optimistic send. Failed preparation
+    /// outcomes must not consume a mutation because no remote verdict was
+    /// durably applied for them.
+    private nonisolated static func remoteSendEchoMessageIDs(
+        in prepared: [PreparedMessage]
+    ) -> Set<String> {
+        Set(prepared.compactMap { outcome in
+            switch outcome {
+            case .processed(let message):
+                return message.id
+            case .excludedMailbox(let id, _, _):
+                return id
+            case .unprocessable, .bodyFetchFailed:
+                return nil
+            }
+        })
+    }
+
+    /// RFC Message-IDs used for exact deterministic echo matching. Processed
+    /// messages retain the stricter SENT/from-me gate; excluded messages cannot
+    /// be fully processed, but their raw header is still sufficient to decode
+    /// the optimistic UUID and match the corresponding mutation record.
+    private nonisolated static func sentMessageIDsByRemoteID(
+        in prepared: [PreparedMessage]
+    ) -> [String: String] {
+        var result = sentMessageIDsByRemoteID(
+            in: prepared.compactMap { outcome in
+                guard case .processed(let message) = outcome else { return nil }
+                return message
+            }
+        )
+        for outcome in prepared {
+            guard case .excludedMailbox(let id, _, let rfcMessageID) = outcome,
+                  let rfcMessageID,
+                  MimeBuilder.optimisticMessageID(from: rfcMessageID) != nil else {
+                continue
+            }
+            result[id] = rfcMessageID
+        }
+        return result
+    }
+
     // MARK: - Preparation (concurrency-safe, no Core Data writes)
 
     /// Processes a Gmail message into a `PreparedMessage`. Performs no Core Data writes,
     /// so it is safe to run concurrently across many messages.
-    /// - Throws: `APIError.quotaExhausted` when a large-body fetch reports the
-    ///   account's quota exhausted. Account-scoped: the run must abort with no
-    ///   per-message verdict (mirrors `MessageFetcher.fetchBatch`'s quota
-    ///   throw) so the next scheduled sync retries after the window resets.
+    /// - Throws: authentication, revoked-credential, or quota errors from a
+    ///   large-body fetch. These are account-scoped: the run must abort with no
+    ///   per-message verdict (mirroring `MessageFetcher.fetchBatch`) so account
+    ///   recovery happens before the message is attempted again.
     ///   Every other body-fetch failure is a per-message verdict:
     ///   `.bodyFetchFailed`, persisted as `.failed`.
     nonisolated func prepareMessage(
@@ -332,7 +416,14 @@ actor MessagePersister {
     ) async throws -> PreparedMessage {
         if let messageLabelIds = gmailMessage.labelIds,
            let excludedMailboxLabel = messageLabelIds.first(where: Self.excludedMailboxLabelIDs.contains) {
-            return .excludedMailbox(id: gmailMessage.id, label: excludedMailboxLabel)
+            let rfcMessageID = gmailMessage.payload?.headers?.first {
+                $0.name.caseInsensitiveCompare("Message-ID") == .orderedSame
+            }?.value
+            return .excludedMailbox(
+                id: gmailMessage.id,
+                label: excludedMailboxLabel,
+                rfcMessageID: rfcMessageID
+            )
         }
 
         // Debug: Log incoming message details
@@ -349,7 +440,7 @@ actor MessagePersister {
                 sendAsAliases: sendAsAliases
             )
         } catch {
-            if let apiError = error as? APIError, case .quotaExhausted = apiError {
+            if let apiError = error as? APIError, apiError.isAccountScopedSyncAbort {
                 throw apiError
             }
             if error is CancellationError {
@@ -370,10 +461,10 @@ actor MessagePersister {
     }
 
     /// Prepares messages concurrently with bounded parallelism, preserving input order.
-    /// - Throws: `APIError.quotaExhausted` from any message's preparation. The
-    ///   first quota signal cancels the remaining preparation tasks and the
+    /// - Throws: an account-scoped API error from any message's preparation.
+    ///   The first signal cancels the remaining preparation tasks and the
     ///   whole batch gets no verdict — the run aborts before persistence, so
-    ///   the unadvanced cursor re-fetches the batch next sync.
+    ///   the unadvanced cursor re-fetches the batch after account recovery.
     nonisolated func prepareMessagesConcurrently(
         _ gmailMessages: [GmailMessage],
         myAliases: Set<String>,
@@ -432,10 +523,11 @@ actor MessagePersister {
         in context: NSManagedObjectContext
     ) async throws -> MessagePersistDisposition {
         switch prepared {
-        case .excludedMailbox(let id, let label):
+        case .excludedMailbox(let id, let label, _):
             let removedCleanly = await deleteExistingMessageIfPresent(
                 id: id,
                 modificationTransaction: modificationTransaction,
+                remoteCommittedSendMutation: remoteCommittedSendMutation,
                 in: context
             )
             guard removedCleanly else {

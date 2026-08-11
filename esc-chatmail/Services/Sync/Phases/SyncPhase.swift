@@ -62,14 +62,24 @@ struct SyncPhaseContext {
     }
 }
 
-/// Result of history collection phase
+/// One bounded history-list request. `pageToken` resumes a model-v3
+/// foreground checkpoint while `startHistoryId` remains the frozen Account
+/// cursor until the terminal slice commits.
+struct HistoryCollectionRequest {
+    let startHistoryId: String
+    let pageToken: String?
+}
+
+/// Result of one bounded history collection slice.
 struct HistoryCollectionResult {
     let newMessageIds: [String]
     let records: [HistoryRecord]
     let latestHistoryId: String
-    /// True if history collection was truncated due to page limit.
-    /// When truncated, latestHistoryId returns the starting ID so next sync retries from same point.
-    let wasTruncated: Bool
+    /// Gmail's token for the next slice. A non-nil token means the Account
+    /// cursor must remain frozen and this token must be durably checkpointed.
+    let nextPageToken: String?
+
+    var wasTruncated: Bool { nextPageToken != nil }
 }
 
 // Note: BatchProcessingResult is defined in BatchProcessor.swift

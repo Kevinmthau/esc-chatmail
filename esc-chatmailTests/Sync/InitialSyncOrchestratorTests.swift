@@ -373,6 +373,11 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         // A previous failing attempt left durable deferred rows and a counter.
         let previousRun = coreDataStack.newBackgroundContext()
         await failureTracker.recordFailure(fetchFailedIds: ["stale-1", "stale-2"], in: previousRun)
+        try await SyncFailureCounterCheckpointStore().stage(
+            consecutiveFailureCount: 1,
+            accountEmail: profile.emailAddress,
+            in: previousRun
+        )
         try await coreDataStack.saveAsync(context: previousRun)
 
         let context = coreDataStack.newBackgroundContext()
@@ -421,6 +426,8 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         let lastSuccessfulSyncTime = await failureTracker.lastSuccessfulSyncTime
         XCTAssertEqual(consecutiveFailureCount, 0)
         XCTAssertNotNil(lastSuccessfulSyncTime)
+        let durableFailureCount = try await fetchFailureCounter(in: context)
+        XCTAssertEqual(durableFailureCount, 0)
 
         let staleRowCount: Int = await context.perform {
             let request = NSFetchRequest<NSManagedObject>(entityName: "AbandonedSyncMessage")
@@ -439,12 +446,11 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
     }
 
-    /// The warnings path: a retry that still fails must stage durable deferred
-    /// rows into the sync context (committed by the run's final save), count
-    /// the strike, keep historyId unset, and return NO advance plan — initial
-    /// sync never abandons and never claims success it did not have.
+    /// A permanent initial-sync failure holds immediately below the escape
+    /// threshold, then atomically abandons the failed row and establishes the
+    /// history cursor when the threshold is reached.
     @MainActor
-    func testHandleSyncCompletion_permanentFailureStagesDeferredRowsWithoutAdvancing() async throws {
+    func testHandleSyncCompletion_permanentFailureHoldsThenEscapesAtThreshold() async throws {
         let profile = GmailProfile(
             emailAddress: "initial-sync-test@example.com",
             messagesTotal: 1,
@@ -490,8 +496,14 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         )
         try await coreDataStack.saveAsync(context: context)
 
+        let threshold = SyncConfig.maxConsecutiveSyncFailures
+        guard threshold > 1 else {
+            XCTFail("The boundary regression requires a hold below the escape threshold")
+            return
+        }
+
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
-        let completion = try await sut.handleSyncCompletion(
+        let heldCompletion = try await sut.handleSyncCompletion(
             result: BatchProcessingResult(
                 totalProcessed: 1,
                 successfulCount: 0,
@@ -500,11 +512,13 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
             profile: profile,
             labelIds: ["INBOX"],
             modificationTransaction: modificationTransaction,
+            priorFailureCount: threshold - 2,
             context: context
         )
 
-        XCTAssertTrue(completion.hadWarnings)
-        XCTAssertNil(completion.advancePlan, "The warnings path must not carry a success plan to commit")
+        XCTAssertTrue(heldCompletion.hadWarnings)
+        let heldPlan = try XCTUnwrap(heldCompletion.advancePlan)
+        XCTAssertEqual(heldPlan.outcome, .held)
 
         // The rows are staged only — durable via the run's final save.
         try await coreDataStack.saveAsync(context: context)
@@ -526,7 +540,9 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         XCTAssertEqual(rows.first?.failureClass, AbandonedSyncMessage.FailureClass.fetchFailed.rawValue)
 
         let consecutiveFailureCount = await failureTracker.consecutiveFailureCount
-        XCTAssertEqual(consecutiveFailureCount, 1, "The failed attempt must count toward tracking")
+        XCTAssertEqual(consecutiveFailureCount, 0, "Ledger staging must not mutate UserDefaults")
+        let durableFailureCount = try await fetchFailureCounter(in: context)
+        XCTAssertEqual(durableFailureCount, threshold - 1, "The failed attempt must count durably")
         let lastSuccessfulSyncTime = await failureTracker.lastSuccessfulSyncTime
         XCTAssertNil(lastSuccessfulSyncTime, "No success state may be recorded on the warnings path")
 
@@ -535,9 +551,155 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
             request.fetchLimit = 1
             return (try? context.fetch(request).first)?.historyId
         }
-        XCTAssertNil(historyId, "Permanent failures must keep historyId unset so initial sync retries")
+        XCTAssertNil(historyId, "A failure below the threshold must keep historyId unset")
+
+        let abandonedNotification = expectation(
+            forNotification: .syncMessagesAbandoned,
+            object: nil
+        ) { note in
+            (note.userInfo?["count"] as? Int) == 1
+        }
+        let escapedCompletion = try await sut.handleSyncCompletion(
+            result: BatchProcessingResult(
+                totalProcessed: 1,
+                successfulCount: 0,
+                failedIds: ["never-recovers"]
+            ),
+            profile: profile,
+            labelIds: ["INBOX"],
+            modificationTransaction: modificationTransaction,
+            priorFailureCount: threshold - 1,
+            context: context
+        )
+
+        XCTAssertTrue(escapedCompletion.hadWarnings)
+        let escapedPlan = try XCTUnwrap(escapedCompletion.advancePlan)
+        XCTAssertEqual(escapedPlan.outcome, .advancedAbandoning(count: 1))
+
+        try await coreDataStack.saveAsync(context: context)
+        await failureTracker.commit(escapedPlan)
+        await fulfillment(of: [abandonedNotification], timeout: 5)
+
+        let escapedRows: [(id: String, state: String?, reason: String?)] = await context.perform {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "AbandonedSyncMessage")
+            request.includesPendingChanges = false
+            let records = (try? context.fetch(request)) ?? []
+            return records.map {
+                (
+                    id: $0.value(forKey: "gmailMessageId") as? String ?? "",
+                    state: $0.value(forKey: "state") as? String,
+                    reason: $0.value(forKey: "reason") as? String
+                )
+            }
+        }
+        XCTAssertEqual(escapedRows.map(\.id), ["never-recovers"])
+        XCTAssertEqual(escapedRows.first?.state, AbandonedSyncMessage.State.abandoned.rawValue)
+        XCTAssertEqual(escapedRows.first?.reason, "Max sync failures reached")
+        let escapedFailureCount = try await fetchFailureCounter(in: context)
+        XCTAssertEqual(escapedFailureCount, 0)
+
+        let escapedHistoryId: String? = await context.perform {
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            request.includesPendingChanges = false
+            return (try? context.fetch(request).first)?.historyId
+        }
+        XCTAssertEqual(escapedHistoryId, profile.historyId)
+        let successfulSyncTime = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNotNil(successfulSyncTime)
 
         await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+    }
+
+    /// A warnings completion is not a successful sync: without a committed
+    /// history cursor, stamping "now" would make reconciliation and history
+    /// recovery start after the message this run failed to fetch.
+    @MainActor
+    func testPerformSync_warningRunDoesNotRecordSuccessOrNarrowReconciliationWindow() async throws {
+        let defaults = UserDefaults.standard
+        let successKey = SyncConfig.lastSuccessfulSyncTimeKey
+        let cleanupKey = "hasDoneDuplicateCleanupV1"
+        let previousSuccess = defaults.object(forKey: successKey)
+        let previousCleanup = defaults.object(forKey: cleanupKey)
+        defer {
+            if let previousSuccess {
+                defaults.set(previousSuccess, forKey: successKey)
+            } else {
+                defaults.removeObject(forKey: successKey)
+            }
+            if let previousCleanup {
+                defaults.set(previousCleanup, forKey: cleanupKey)
+            } else {
+                defaults.removeObject(forKey: cleanupKey)
+            }
+        }
+
+        let priorSuccessfulSync = Date().addingTimeInterval(-2 * 60 * 60).timeIntervalSince1970
+        let installTimestamp = priorSuccessfulSync - 10 * 60 * 60
+        defaults.set(priorSuccessfulSync, forKey: successKey)
+        defaults.set(true, forKey: cleanupKey)
+
+        let profile = GmailProfile(
+            emailAddress: "initial-sync-warning@example.com",
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "history-must-remain-unset"
+        )
+        let apiClient = MockGmailAPIClient()
+        apiClient.profileResponse = profile
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "never-recovers", threadId: "thread-1")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageErrors["never-recovers"] = APIError.timeout
+
+        let conversationManager = ConversationManager(
+            currentUserEmail: { profile.emailAddress }
+        )
+        let messagePersister = MessagePersister(
+            coreDataStack: coreDataStack,
+            saveHTML: { _, _ in nil },
+            conversationManager: conversationManager
+        )
+        let sut = InitialSyncOrchestrator(
+            messageFetcher: MessageFetcher(apiClient: apiClient, clock: FakeSyncClock()),
+            messagePersister: messagePersister,
+            conversationManager: conversationManager,
+            dataCleanupService: DataCleanupService(
+                coreDataStack: coreDataStack,
+                conversationManager: conversationManager,
+                migrationFlags: InMemoryMigrationFlagStore(),
+                identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
+            ),
+            attachmentDownloader: AttachmentDownloader(apiClient: apiClient),
+            coreDataStack: coreDataStack,
+            failureTracker: SyncFailureTracker(defaults: self.defaults, coreDataStack: coreDataStack),
+            performanceLogger: .shared
+        )
+
+        let result = try await sut.performSync { _, _ in }
+
+        XCTAssertTrue(result.hadWarnings)
+        XCTAssertEqual(defaults.double(forKey: successKey), priorSuccessfulSync, accuracy: 0.001)
+        XCTAssertEqual(
+            SyncTimeCalculator.calculateStartTime(
+                config: .reconciliation,
+                installTimestamp: installTimestamp
+            ),
+            priorSuccessfulSync - SyncConfig.timestampBufferSeconds,
+            accuracy: 1.0,
+            "A warning run must preserve the last verified reconciliation lower bound"
+        )
+
+        let context = coreDataStack.newBackgroundContext()
+        let historyId: String? = await context.perform {
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            request.includesPendingChanges = false
+            return (try? context.fetch(request).first)?.historyId
+        }
+        XCTAssertNil(historyId)
     }
 
     /// The success-commit contract through the FULL entry point: `performSync`
@@ -612,9 +774,16 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         // A previous failing attempt left a strike and a durable deferred row.
         let previousRun = coreDataStack.newBackgroundContext()
         await failureTracker.recordFailure(fetchFailedIds: ["stale-1"], in: previousRun)
+        try await SyncFailureCounterCheckpointStore().stage(
+            consecutiveFailureCount: 1,
+            accountEmail: profile.emailAddress,
+            in: previousRun
+        )
         try await coreDataStack.saveAsync(context: previousRun)
         let seededFailureCount = await failureTracker.consecutiveFailureCount
-        XCTAssertEqual(seededFailureCount, 1, "Positive control: the prior strike must be seeded")
+        XCTAssertEqual(seededFailureCount, 0)
+        let seededDurableFailureCount = try await fetchFailureCounter(in: previousRun)
+        XCTAssertEqual(seededDurableFailureCount, 1, "Positive control: the prior strike must be seeded")
 
         let result = try await sut.performSync { _, _ in }
 
@@ -623,7 +792,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         let consecutiveFailureCount = await failureTracker.consecutiveFailureCount
         XCTAssertEqual(
             consecutiveFailureCount, 0,
-            "A clean run must commit its advance plan and reset the strike counter"
+            "A clean run must not resurrect the retired UserDefaults counter"
         )
         let lastSuccessfulSyncTime = await failureTracker.lastSuccessfulSyncTime
         XCTAssertNotNil(
@@ -646,5 +815,32 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
             return (try? context.fetch(request).first)?.historyId
         }
         XCTAssertEqual(historyId, profile.historyId)
+        let durableFailureCount = try await fetchFailureCounter(in: context)
+        XCTAssertEqual(durableFailureCount, 0, "A clean run must reset the durable strike counter")
+    }
+
+    private func fetchFailureCounter(
+        in context: NSManagedObjectContext
+    ) async throws -> Int? {
+        struct Payload: Decodable {
+            let version: Int
+            let consecutiveFailureCount: Int
+        }
+
+        return try await context.perform {
+            let request = SyncCheckpoint.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "kind == %@",
+                SyncFailureCounterCheckpoint.kind
+            )
+            guard let row = try context.fetch(request).first,
+                  let json = row.pendingMessageIdsJSON,
+                  let data = json.data(using: .utf8) else {
+                return nil
+            }
+            let payload = try JSONDecoder().decode(Payload.self, from: data)
+            guard payload.version == 1 else { return nil }
+            return payload.consecutiveFailureCount
+        }
     }
 }

@@ -2,13 +2,14 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
-/// End-to-end characterization of incremental sync's historyId cursor
-/// decision, pinned before the reliability refactor changes the contract:
+/// End-to-end coverage of incremental sync's durable history executor:
 ///
 /// - a clean run advances the cursor to Gmail's latest historyId,
 /// - fetch failures freeze the cursor (below the 3-strikes threshold),
-/// - a truncated history collection freezes the cursor WITHOUT consulting the
-///   failure tracker (no success recorded, no failure counted).
+/// - bounded history slices resume from model-v3 checkpoints across fresh
+///   orchestrators, and
+/// - the strike count commits in a dedicated model-v3 counter row with the
+///   deferred ledger and cursor/progress transition.
 final class IncrementalSyncCursorTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
@@ -90,6 +91,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
 
         XCTAssertEqual(result.newMessagesCount, 1)
+        XCTAssertFalse(result.needsFollowUp)
         let historyId = await fetchAccountHistoryId()
         XCTAssertEqual(historyId, "2000")
         let lastSuccess = await failureTracker.lastSuccessfulSyncTime
@@ -121,18 +123,23 @@ final class IncrementalSyncCursorTests: XCTestCase {
         apiClient.getMessageErrors["m-bad"] = APIError.timeout
 
         let sut = makeOrchestrator()
-        _ = try await sut.performSync(
+        let result = try await sut.performSync(
             progressHandler: { _, _ in },
             initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
         )
 
+        XCTAssertTrue(result.needsFollowUp)
         let historyId = await fetchAccountHistoryId()
         XCTAssertEqual(
             historyId, Self.startingHistoryId,
             "A run with unfetched messages must not advance the cursor past them"
         )
-        let consecutive = await failureTracker.consecutiveFailureCount
-        XCTAssertEqual(consecutive, 1, "The failed run must count toward the escape threshold")
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint, "The first history slice retries from the frozen cursor")
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 1)
+        let legacyConsecutive = await failureTracker.consecutiveFailureCount
+        XCTAssertEqual(legacyConsecutive, 0, "Production strikes must not live in UserDefaults")
         let lastSuccess = await failureTracker.lastSuccessfulSyncTime
         XCTAssertNil(lastSuccess)
     }
@@ -221,8 +228,10 @@ final class IncrementalSyncCursorTests: XCTestCase {
             historyId, Self.startingHistoryId,
             "A fetched-but-unpersisted message must freeze the cursor"
         )
-        let consecutive = await failureTracker.consecutiveFailureCount
-        XCTAssertEqual(consecutive, 1, "Persistence failures must count toward the escape threshold")
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint)
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 1)
     }
 
     /// A deterministically malformed payload (no payload/headers) can never
@@ -269,29 +278,259 @@ final class IncrementalSyncCursorTests: XCTestCase {
     }
 
     @MainActor
-    func testTruncatedHistoryFreezesCursorWithoutConsultingFailureTracker() async throws {
-        apiClient.setHistoryResponsesByPageToken(makeOverflowingHistoryPages(pageCount: 50))
-        for index in 0..<50 {
+    func testCheckpointedHistoryResumesAcrossFreshOrchestrators() async throws {
+        apiClient.setHistoryResponsesByPageToken(makeHistoryPages(pageCount: 3))
+        for index in 0..<3 {
             apiClient.getMessageResponses["m\(index)"] = makeFullMessage(id: "m\(index)")
         }
 
-        let sut = makeOrchestrator()
-        _ = try await sut.performSync(
+        let first = makeOrchestrator(historyPageLimit: 2)
+        let firstResult = try await first.performSync(
             progressHandler: { _, _ in },
             initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
         )
 
-        let historyId = await fetchAccountHistoryId()
-        XCTAssertEqual(
-            historyId, Self.startingHistoryId,
-            "A truncated collection must retry from the same cursor next run"
+        XCTAssertTrue(firstResult.hadWarnings, "A continuation is incomplete, not terminal success")
+        XCTAssertTrue(firstResult.needsFollowUp)
+        let firstHistoryId = await fetchAccountHistoryId()
+        XCTAssertEqual(firstHistoryId, Self.startingHistoryId)
+        let firstCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertEqual(firstCheckpoint?.pageToken, "p2")
+        let firstDurableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(firstDurableFailureCount, 0)
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), [nil, "p1"])
+        let firstLastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNil(firstLastSuccess)
+
+        // Simulate a process-style restart of every in-memory executor/tracker
+        // object. Core Data is the only progress source that survives.
+        failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        let second = makeOrchestrator(historyPageLimit: 2)
+        let secondResult = try await second.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
         )
-        // The truncation short-circuit skips the tracker entirely: the run is
-        // neither a success (no timestamp) nor a failure (no strike).
-        let consecutive = await failureTracker.consecutiveFailureCount
-        XCTAssertEqual(consecutive, 0)
-        let lastSuccess = await failureTracker.lastSuccessfulSyncTime
-        XCTAssertNil(lastSuccess)
+
+        XCTAssertFalse(secondResult.hadWarnings)
+        XCTAssertFalse(secondResult.needsFollowUp)
+        let terminalHistoryId = await fetchAccountHistoryId()
+        XCTAssertEqual(terminalHistoryId, "4002")
+        let terminalCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(terminalCheckpoint)
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), [nil, "p1", "p2"])
+        let savedMessage0 = await messageExists(id: "m0")
+        let savedMessage1 = await messageExists(id: "m1")
+        let savedMessage2 = await messageExists(id: "m2")
+        XCTAssertTrue(savedMessage0)
+        XCTAssertTrue(savedMessage1)
+        XCTAssertTrue(savedMessage2)
+        let terminalLastSuccess = await failureTracker.lastSuccessfulSyncTime
+        XCTAssertNotNil(terminalLastSuccess)
+    }
+
+    @MainActor
+    func testFiftyOneHistoryPagesCompleteAcrossFreshOrchestrators() async throws {
+        let pageCount = 51
+        apiClient.setHistoryResponsesByPageToken(makeHistoryPages(pageCount: pageCount))
+        for index in 0..<pageCount {
+            apiClient.getMessageResponses["m\(index)"] = makeFullMessage(id: "m\(index)")
+        }
+
+        for sliceIndex in 0..<5 {
+            failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+            let result = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+
+            XCTAssertTrue(result.hadWarnings)
+            let frozenHistoryId = await fetchAccountHistoryId()
+            XCTAssertEqual(frozenHistoryId, Self.startingHistoryId)
+            let checkpoint = try await fetchHistoryCheckpoint()
+            XCTAssertEqual(checkpoint?.pageToken, "p\((sliceIndex + 1) * 10)")
+            let durableFailureCount = try await fetchFailureCounter()
+            XCTAssertEqual(durableFailureCount, 0)
+        }
+
+        failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        let terminalResult = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertFalse(terminalResult.hadWarnings)
+        let terminalHistoryId = await fetchAccountHistoryId()
+        XCTAssertEqual(terminalHistoryId, "4050")
+        let terminalCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(terminalCheckpoint)
+        XCTAssertEqual(apiClient.listHistoryCalls.count, pageCount)
+        XCTAssertEqual(
+            [0, 10, 20, 30, 40, 50].map { apiClient.listHistoryCalls[$0].pageToken },
+            [nil, "p10", "p20", "p30", "p40", "p50"]
+        )
+        let lastPageMessageExists = await messageExists(id: "m50")
+        XCTAssertTrue(lastPageMessageExists, "The page beyond the former 50-page cap must be durable")
+    }
+
+    @MainActor
+    func testRejectedStoredPageTokenReplaysExactlyOnceFromFrozenCursor() async throws {
+        try await seedHistoryCheckpoint(pageToken: "stale-token")
+        try await seedFailureCounter(1)
+        apiClient.listHistoryErrorsByPageToken["stale-token"] = APIError.invalidHistoryPageToken
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stale-token", nil])
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000")
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint)
+    }
+
+    @MainActor
+    func testRepeatedInvalidPageTokenStopsAfterOneReplay() async throws {
+        try await seedHistoryCheckpoint(pageToken: "stale-token")
+        try await seedFailureCounter(1)
+        apiClient.listHistoryErrorsByPageToken["stale-token"] = APIError.invalidHistoryPageToken
+        // The stored-token request consumes the keyed error first; the one
+        // allowed replay from nil then consumes this global error.
+        apiClient.listHistoryError = APIError.invalidHistoryPageToken
+
+        do {
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("The failed replay must propagate")
+        } catch APIError.invalidHistoryPageToken {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stale-token", nil])
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint, "The rejected persisted token is durably discarded before replay")
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 1)
+    }
+
+    @MainActor
+    func testUnrelatedInvalidDataOnStoredTokenDoesNotReplay() async throws {
+        try await seedHistoryCheckpoint(pageToken: "stored-token")
+        try await seedFailureCounter(1)
+        apiClient.listHistoryErrorsByPageToken["stored-token"] = APIError.invalidData(
+            "unrelated invalid request"
+        )
+
+        do {
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Unrelated invalidData must abort")
+        } catch let APIError.invalidData(message) {
+            XCTAssertTrue(message.contains("unrelated"))
+        }
+
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stored-token"])
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertEqual(checkpoint?.pageToken, "stored-token")
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 1)
+    }
+
+    @MainActor
+    func testAuthenticatedAccountMismatchAbortsBeforeAnyGmailRequest() async throws {
+        let sut = makeOrchestrator(authenticatedAccountEmail: { "other@example.com" })
+
+        do {
+            _ = try await sut.performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Cross-account sync must abort")
+        } catch let error as IncrementalSyncAccountError {
+            guard case .authenticatedAccountMismatch = error else {
+                return XCTFail("Unexpected account error: \(error)")
+            }
+        }
+
+        XCTAssertEqual(apiClient.listHistoryCallCount, 0)
+        XCTAssertEqual(apiClient.getMessageCallCount, 0)
+    }
+
+    @MainActor
+    func testAuthenticatedAccountMismatchWithNilCursorAbortsBeforeInitialFallback() async throws {
+        try await setAccountHistoryId(nil)
+        let fallbackCalled = LockedFlag()
+        let sut = makeOrchestrator(authenticatedAccountEmail: { "other@example.com" })
+
+        do {
+            _ = try await sut.performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { fallbackCalled.set() }
+            )
+            XCTFail("A surviving row for another account must not trigger initial sync")
+        } catch let error as IncrementalSyncAccountError {
+            guard case .authenticatedAccountMismatch = error else {
+                return XCTFail("Unexpected account error: \(error)")
+            }
+        }
+
+        XCTAssertFalse(fallbackCalled.value)
+        XCTAssertEqual(apiClient.listHistoryCallCount, 0)
+        XCTAssertEqual(apiClient.getMessageCallCount, 0)
+    }
+
+    @MainActor
+    func testInitialSyncFallbackWithoutDurableHistoryRequestsImmediateFollowUp() async throws {
+        try await setAccountHistoryId(nil)
+        let sut = makeOrchestrator()
+
+        let result = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: {}
+        )
+
+        XCTAssertTrue(result.hadWarnings)
+        XCTAssertTrue(
+            result.needsFollowUp,
+            "An incomplete initial fallback must retain prompt-retry intent"
+        )
+    }
+
+    @MainActor
+    func testInitialSyncFallbackWithDurableHistoryCompletesCleanly() async throws {
+        try await setAccountHistoryId(nil)
+        let sut = makeOrchestrator()
+
+        let result = try await sut.performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: {
+                try await self.setAccountHistoryId("fresh-history")
+            }
+        )
+
+        XCTAssertFalse(result.hadWarnings)
+        XCTAssertFalse(result.needsFollowUp)
     }
 
     // MARK: - Durable ledger scenarios
@@ -322,6 +561,10 @@ final class IncrementalSyncCursorTests: XCTestCase {
             rows.first?.sourceHistoryId, Self.startingHistoryId,
             "The row must record the frozen cursor position that produced it"
         )
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint)
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 1)
     }
 
     /// PR #143's accepted gap, closed by the makeSyncContext seam: through a
@@ -397,12 +640,13 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertNil(lastSuccess, "commit(plan) must not run after a failed save")
         let consecutive = await failureTracker.consecutiveFailureCount
         XCTAssertEqual(consecutive, 0, "A clean run records no failure even when its save fails")
+        let failedSaveCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(failedSaveCheckpoint)
     }
 
     /// The failure-side mirror of testFailingRunCommitsDeferredLedgerRowsWithFrozenCursor:
     /// when the final save fails, the staged deferred rows die with the
-    /// context (nothing reaches the store), while the consecutive-failure
-    /// counter keeps its documented conservative mid-run bump.
+    /// context (nothing reaches the store), including its checkpointed strike.
     @MainActor
     func testFailedFinalSaveDiscardsStagedDeferredRows() async throws {
         apiClient.setHistoryResponsesByPageToken([
@@ -452,11 +696,208 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(historyId, Self.startingHistoryId)
         let consecutive = await failureTracker.consecutiveFailureCount
         XCTAssertEqual(
-            consecutive, 1,
-            "The counter's mid-run bump is deliberately conservative and survives a failed save"
+            consecutive, 0,
+            "The retired UserDefaults counter must not change before a failed save"
         )
+        let failedStrikeCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(failedStrikeCheckpoint)
+        let failedDurableFailureCount = try await fetchFailureCounter()
+        XCTAssertNil(failedDurableFailureCount, "The durable strike dies with the failed save")
         let lastSuccess = await failureTracker.lastSuccessfulSyncTime
         XCTAssertNil(lastSuccess)
+    }
+
+    @MainActor
+    func testFailedContinuationSaveRetainsPriorTokenCounterAndCursor() async throws {
+        try await seedHistoryCheckpoint(pageToken: "p-old")
+        try await seedFailureCounter(2)
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: "p-old",
+                response: makeDeletionHistoryResponse(
+                    nextPageToken: "p-new",
+                    historyId: "2000"
+                )
+            )
+        ])
+        let failingContext = makeFailingSaveContext()
+
+        do {
+            _ = try await makeOrchestrator(makeSyncContext: { failingContext }).performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Expected the final save to fail")
+        } catch {
+            // Expected.
+        }
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertEqual(checkpoint?.pageToken, "p-old")
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 2)
+    }
+
+    @MainActor
+    func testFailedTerminalSaveRetainsPriorTokenCounterAndCursor() async throws {
+        try await seedHistoryCheckpoint(pageToken: "p-old")
+        try await seedFailureCounter(2)
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: "p-old",
+                response: makeDeletionHistoryResponse(
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        let failingContext = makeFailingSaveContext()
+
+        do {
+            _ = try await makeOrchestrator(makeSyncContext: { failingContext }).performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Expected the final save to fail")
+        } catch {
+            // Expected.
+        }
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertEqual(checkpoint?.pageToken, "p-old")
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 2)
+    }
+
+    @MainActor
+    func testFailedSaveKeepsLegacyCounterAvailableForMigrationRetry() async throws {
+        defaults.set(
+            SyncConfig.maxConsecutiveSyncFailures - 1,
+            forKey: SyncConfig.consecutiveFailuresKey
+        )
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-bad"))],
+                            messagesDeleted: [
+                                HistoryMessageDeleted(
+                                    message: MessageListItem(id: "m-unknown", threadId: "t-unknown")
+                                )
+                            ],
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        apiClient.getMessageErrors["m-bad"] = APIError.timeout
+        let failingContext = makeFailingSaveContext()
+
+        do {
+            _ = try await makeOrchestrator(makeSyncContext: { failingContext }).performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Expected the final save to fail")
+        } catch {
+            // Expected.
+        }
+
+        XCTAssertEqual(
+            defaults.integer(forKey: SyncConfig.consecutiveFailuresKey),
+            SyncConfig.maxConsecutiveSyncFailures - 1
+        )
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertNil(durableFailureCount, "The unsaved migration row must roll back")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let ledgerRows = await fetchLedgerRows()
+        XCTAssertTrue(ledgerRows.isEmpty)
+    }
+
+    @MainActor
+    func testCancellationDuringMessageFetchRetainsCheckpointAndFreshRunResumes() async throws {
+        try await seedHistoryCheckpoint(pageToken: "p-old")
+        try await seedFailureCounter(1)
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: "p-old",
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-slow"))],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        apiClient.getMessageResponses["m-slow"] = makeFullMessage(id: "m-slow")
+        apiClient.artificialDelay = 0.25
+
+        let task = Task {
+            try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+        }
+        for _ in 0..<100 where apiClient.getMessageCallCountSnapshot() == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertGreaterThan(
+            apiClient.getMessageCallCountSnapshot(),
+            0,
+            "The cancellation must occur during message fan-out"
+        )
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        var checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertEqual(checkpoint?.pageToken, "p-old")
+        var durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 1)
+        var historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+
+        apiClient.artificialDelay = 0
+        failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertEqual(apiClient.listHistoryCalls.last?.pageToken, "p-old")
+        checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint)
+        durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 0)
+        historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000")
     }
 
     /// The escape hatch's atomicity contract: at the threshold, the cursor
@@ -464,10 +905,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// the counters reset only afterwards.
     @MainActor
     func testEscapeHatchCommitsAbandonmentWithAdvancedCursor() async throws {
-        defaults.set(
-            SyncConfig.maxConsecutiveSyncFailures - 1,
-            forKey: SyncConfig.consecutiveFailuresKey
-        )
+        try await seedFailureCounter(SyncConfig.maxConsecutiveSyncFailures - 1)
         apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-stuck"))
         apiClient.getMessageErrors["m-stuck"] = APIError.timeout
 
@@ -494,6 +932,87 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
         let consecutive = await failureTracker.consecutiveFailureCount
         XCTAssertEqual(consecutive, 0)
+        let escapedCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(escapedCheckpoint)
+        let escapedFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(escapedFailureCount, 0)
+    }
+
+    @MainActor
+    func testFailureCounterSurvivesFreshTrackersAndAdvancesOnlyAtThreshold() async throws {
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-stuck"))
+        apiClient.getMessageErrors["m-stuck"] = APIError.timeout
+        for expectedCount in 1..<SyncConfig.maxConsecutiveSyncFailures {
+            failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+
+            let checkpoint = try await fetchHistoryCheckpoint()
+            XCTAssertNil(checkpoint)
+            let durableFailureCount = try await fetchFailureCounter()
+            XCTAssertEqual(durableFailureCount, expectedCount)
+            let historyId = await fetchAccountHistoryId()
+            XCTAssertEqual(historyId, Self.startingHistoryId)
+            let legacyCount = await failureTracker.consecutiveFailureCount
+            XCTAssertEqual(legacyCount, 0, "The pre-v3 counter is retired after the first durable save")
+        }
+
+        let abandonedNotification = expectation(
+            forNotification: .syncMessagesAbandoned,
+            object: nil
+        ) { note in
+            (note.userInfo?["count"] as? Int) == 1
+        }
+        failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        await fulfillment(of: [abandonedNotification], timeout: 5)
+
+        let terminalHistoryId = await fetchAccountHistoryId()
+        XCTAssertEqual(terminalHistoryId, "2000")
+        let terminalCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(terminalCheckpoint)
+        let terminalFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(terminalFailureCount, 0)
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.abandoned.rawValue)
+    }
+
+    @MainActor
+    func testLegacyCounterImportsOnceAndParticipatesInAtomicEscape() async throws {
+        defaults.set(
+            SyncConfig.maxConsecutiveSyncFailures - 1,
+            forKey: SyncConfig.consecutiveFailuresKey
+        )
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-legacy-stuck"))
+        apiClient.getMessageErrors["m-legacy-stuck"] = APIError.timeout
+
+        let abandonedNotification = expectation(
+            forNotification: .syncMessagesAbandoned,
+            object: nil
+        ) { note in
+            (note.userInfo?["count"] as? Int) == 1
+        }
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        await fulfillment(of: [abandonedNotification], timeout: 5)
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000")
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 0)
+        XCTAssertNil(
+            defaults.object(forKey: SyncConfig.consecutiveFailuresKey),
+            "Legacy state is removed only after the durable counter transaction saves"
+        )
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.abandoned.rawValue)
     }
 
     /// Deferred rows from an earlier failing run are removed by the next clean
@@ -501,7 +1020,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     @MainActor
     func testCleanRunClearsPreviouslyDeferredRows() async throws {
         try await seedLedgerRow(id: "previously-failing", state: .deferred)
-        defaults.set(1, forKey: SyncConfig.consecutiveFailuresKey)
+        try await seedFailureCounter(1)
         apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
         apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
 
@@ -515,6 +1034,10 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty, "A clean run must clear recovered deferred rows")
         let consecutive = await failureTracker.consecutiveFailureCount
         XCTAssertEqual(consecutive, 0)
+        let cleanCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(cleanCheckpoint)
+        let cleanFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(cleanFailureCount, 0)
         let historyId = await fetchAccountHistoryId()
         XCTAssertEqual(historyId, "2000")
     }
@@ -565,6 +1088,53 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertTrue(recovered, "The recovered message must be durably persisted")
     }
 
+    /// An abandoned-message retry runs after this history slice's messages
+    /// are staged. An account-wide auth failure there must abort the entire
+    /// run before any cursor/counter/ledger movement. A history message saved
+    /// by the executor's earlier, explicitly durable intermediate flush may
+    /// remain; the frozen cursor safely replays that idempotent upsert.
+    @MainActor
+    func testAbandonedDrainAuthenticationFailureAbortsWithoutSpendingRecoveryState() async throws {
+        try await seedLedgerRow(id: "blocked-by-auth", state: .abandoned)
+        try await seedFailureCounter(2)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+        apiClient.getMessageResponses["blocked-by-auth"] = makeLargeBodyMessage(id: "blocked-by-auth")
+
+        let sut = makeOrchestrator(
+            messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
+                throw APIError.authenticationError
+            })
+        )
+        do {
+            _ = try await sut.performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("The account-wide authentication error must abort the run")
+        } catch let error as APIError {
+            guard case .authenticationError = error else {
+                return XCTFail("Expected authenticationError, got \(error)")
+            }
+        }
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint)
+        let failureCount = try await fetchFailureCounter()
+        XCTAssertEqual(failureCount, 2, "The aborted run must not spend or reset the durable strike count")
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.gmailMessageId, "blocked-by-auth")
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.abandoned.rawValue)
+        let durablySavedSubset = await messageExists(id: "m-new")
+        XCTAssertTrue(
+            durablySavedSubset,
+            "The earlier committed subset remains safe because the frozen cursor will replay it idempotently"
+        )
+    }
+
     // MARK: - History-recovery scenarios
 
     /// A clean recovery run advances the cursor to the profile's historyId,
@@ -574,7 +1144,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     @MainActor
     func testCleanRecoveryAdvancesCursorAndCommitsSuccess() async throws {
         try await seedLedgerRow(id: "previously-failing", state: .deferred)
-        defaults.set(1, forKey: SyncConfig.consecutiveFailuresKey)
+        try await seedFailureCounter(1)
 
         apiClient.listHistoryError = APIError.historyIdExpired
         apiClient.listMessagesResponse = MessagesListResponse(
@@ -597,6 +1167,10 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
 
         XCTAssertTrue(result.hadWarnings, "Recovery runs report warnings")
+        XCTAssertFalse(
+            result.needsFollowUp,
+            "A recovery warning is terminal when its replacement cursor advanced"
+        )
         let historyId = await fetchAccountHistoryId()
         XCTAssertEqual(historyId, "7777", "A clean recovery advances to the profile historyId")
         let recovered = await messageExists(id: "m-rec")
@@ -605,6 +1179,10 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty, "A clean recovery clears recovered deferred rows")
         let consecutive = await failureTracker.consecutiveFailureCount
         XCTAssertEqual(consecutive, 0, "Recovery success must reset the counter after the save")
+        let recoveryCheckpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(recoveryCheckpoint)
+        let recoveryFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(recoveryFailureCount, 0)
         let lastSuccess = await failureTracker.lastSuccessfulSyncTime
         XCTAssertNotNil(lastSuccess)
     }
@@ -772,11 +1350,12 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
 
         let sut = makeOrchestrator()
-        _ = try await sut.performSync(
+        let result = try await sut.performSync(
             progressHandler: { _, _ in },
             initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
         )
 
+        XCTAssertTrue(result.needsFollowUp)
         let historyId = await fetchAccountHistoryId()
         XCTAssertEqual(
             historyId, Self.startingHistoryId,
@@ -788,8 +1367,12 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue)
         XCTAssertEqual(rows.first?.failureClass, AbandonedSyncMessage.FailureClass.fetchFailed.rawValue)
         XCTAssertNil(rows.first?.sourceHistoryId, "The expired cursor is not a meaningful source position")
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint)
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount, 1)
         let consecutive = await failureTracker.consecutiveFailureCount
-        XCTAssertEqual(consecutive, 1, "The failed recovery must count toward the escape threshold")
+        XCTAssertEqual(consecutive, 0, "Recovery strikes are checkpointed, not stored in UserDefaults")
         let lastSuccess = await failureTracker.lastSuccessfulSyncTime
         XCTAssertNil(lastSuccess)
     }
@@ -807,9 +1390,29 @@ final class IncrementalSyncCursorTests: XCTestCase {
         try await coreDataStack.saveAsync(context: context)
     }
 
+    private func setAccountHistoryId(_ historyId: String?) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await context.perform {
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            guard let account = try context.fetch(request).first else {
+                throw NSError(
+                    domain: "IncrementalSyncCursorTests",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing test account"]
+                )
+            }
+            account.historyId = historyId
+        }
+        try await coreDataStack.saveAsync(context: context)
+    }
+
     @MainActor
     private func makeOrchestrator(
         conversationCreationError: Error? = nil,
+        historyPageLimit: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
+        authenticatedAccountEmail: (() -> String?)? = nil,
+        messageProcessor: MessageProcessor = MessageProcessor(),
         makeSyncContext: (() -> NSManagedObjectContext)? = nil
     ) -> IncrementalSyncOrchestrator {
         let conversationManager: ConversationManager
@@ -827,6 +1430,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
         }
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
+            messageProcessor: messageProcessor,
             saveHTML: { _, _ in nil },
             conversationManager: conversationManager
         )
@@ -848,6 +1452,8 @@ final class IncrementalSyncCursorTests: XCTestCase {
             ),
             coreDataStack: coreDataStack,
             failureTracker: failureTracker,
+            historyPageLimit: historyPageLimit,
+            authenticatedAccountEmail: authenticatedAccountEmail,
             makeSyncContext: makeSyncContext
         )
     }
@@ -891,9 +1497,35 @@ final class IncrementalSyncCursorTests: XCTestCase {
             .build()
     }
 
-    /// 50 pages that all carry a nextPageToken, so the collection phase hits
-    /// its page cap with more history remaining and reports truncation.
-    private func makeOverflowingHistoryPages(pageCount: Int) -> [(pageToken: String?, response: HistoryResponse)] {
+    /// Forces the persister to make an account-scoped attachment API request
+    /// after the abandoned ID itself was fetched successfully.
+    private func makeLargeBodyMessage(id: String) -> GmailMessage {
+        GmailMessage(
+            id: id,
+            threadId: "t-\(id)",
+            labelIds: ["INBOX"],
+            snippet: "Snippet \(id)",
+            historyId: nil,
+            internalDate: "1700000000000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "text/plain",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Alice Smith <alice@example.com>"),
+                    MessageHeader(name: "To", value: Self.myEmail),
+                    MessageHeader(name: "Subject", value: "Subject \(id)"),
+                    MessageHeader(name: "Content-Type", value: "text/plain; charset=UTF-8"),
+                ],
+                body: MessageBody(size: 30_000, data: nil, attachmentId: "att-\(id)"),
+                parts: nil
+            ),
+            sizeEstimate: 30_000
+        )
+    }
+
+    /// A complete history chain whose last page is terminal.
+    private func makeHistoryPages(pageCount: Int) -> [(pageToken: String?, response: HistoryResponse)] {
         (0..<pageCount).map { index in
             let requestPageToken: String? = index == 0 ? nil : "p\(index)"
             let record = HistoryRecord(
@@ -906,11 +1538,38 @@ final class IncrementalSyncCursorTests: XCTestCase {
             )
             let response = HistoryResponse(
                 history: [record],
-                nextPageToken: "p\(index + 1)",
+                nextPageToken: index == pageCount - 1 ? nil : "p\(index + 1)",
                 historyId: "\(4000 + index)"
             )
             return (pageToken: requestPageToken, response: response)
         }
+    }
+
+    private func makeDeletionHistoryResponse(
+        nextPageToken: String?,
+        historyId: String
+    ) -> HistoryResponse {
+        HistoryResponse(
+            history: [
+                HistoryRecord(
+                    id: "5000",
+                    messages: nil,
+                    messagesAdded: nil,
+                    messagesDeleted: [
+                        HistoryMessageDeleted(
+                            message: MessageListItem(
+                                id: "m-unknown",
+                                threadId: "t-unknown"
+                            )
+                        )
+                    ],
+                    labelsAdded: nil,
+                    labelsRemoved: nil
+                )
+            ],
+            nextPageToken: nextPageToken,
+            historyId: historyId
+        )
     }
 
     private func fetchAccountHistoryId() async -> String? {
@@ -920,6 +1579,59 @@ final class IncrementalSyncCursorTests: XCTestCase {
             request.fetchLimit = 1
             request.includesPendingChanges = false
             return (try? context.fetch(request).first)?.historyId
+        }
+    }
+
+    private func fetchHistoryCheckpoint() async throws -> ForegroundHistoryCheckpoint? {
+        try await ForegroundHistoryCheckpointStore().loadCompatible(
+            accountEmail: Self.myEmail,
+            startHistoryId: await fetchAccountHistoryId() ?? Self.startingHistoryId,
+            in: coreDataStack.newBackgroundContext()
+        )
+    }
+
+    private func seedHistoryCheckpoint(pageToken: String) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await ForegroundHistoryCheckpointStore().stageProgress(
+            accountEmail: Self.myEmail,
+            startHistoryId: Self.startingHistoryId,
+            pageToken: pageToken,
+            in: context
+        )
+        try await coreDataStack.saveAsync(context: context)
+    }
+
+    private func seedFailureCounter(_ count: Int) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await SyncFailureCounterCheckpointStore().stage(
+            consecutiveFailureCount: count,
+            accountEmail: Self.myEmail,
+            in: context
+        )
+        try await coreDataStack.saveAsync(context: context)
+    }
+
+    private func fetchFailureCounter() async throws -> Int? {
+        struct Payload: Decodable {
+            let version: Int
+            let consecutiveFailureCount: Int
+        }
+
+        let context = coreDataStack.newBackgroundContext()
+        return try await context.perform {
+            let request = SyncCheckpoint.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "kind == %@",
+                SyncFailureCounterCheckpoint.kind
+            )
+            guard let row = try context.fetch(request).first,
+                  let json = row.pendingMessageIdsJSON,
+                  let data = json.data(using: .utf8) else {
+                return nil
+            }
+            let payload = try JSONDecoder().decode(Payload.self, from: data)
+            guard payload.version == 1 else { return nil }
+            return payload.consecutiveFailureCount
         }
     }
 

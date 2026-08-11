@@ -6,7 +6,8 @@ import Foundation
 private struct BoundedFetchResult {
     let successfulMessages: [GmailMessage]
     let retriableFailedIds: [String]
-    /// Messages that failed with non-retriable errors other than 404 (auth, 4xx, decoding)
+    /// Messages that failed with message-scoped, non-retriable errors other
+    /// than 404 (malformed payloads and other request-specific 4xx responses).
     let permanentlyFailedIds: [String]
     /// Messages the server reported as not found — they no longer exist server-side
     let notFoundIds: [String]
@@ -16,11 +17,11 @@ private struct BoundedFetchResult {
     /// Largest server-provided Retry-After (seconds, capped) among rate-limited
     /// failures in this pass — the outer retry loop honors it over synthetic backoff.
     let maxRetryAfterSeconds: TimeInterval?
-    /// Set when Gmail reported the account's quota exhausted during this pass.
+    /// Set when Gmail reported an account-scoped condition during this pass.
     /// The pass stops issuing requests and the affected IDs appear in no
-    /// failure bucket: quota exhaustion is account-scoped, never a
-    /// per-message verdict.
-    let quotaError: APIError?
+    /// failure bucket: authentication, revoked credentials, and quota
+    /// exhaustion are run-level outcomes, never per-message verdicts.
+    let runAbortError: APIError?
 }
 
 /// Outcome of a batch fetch-and-persist pass: fetch failures that must block
@@ -105,6 +106,16 @@ final class MessageFetcher: @unchecked Sendable {
         return false
     }
 
+    /// Errors whose outcome says nothing about an individual message. Letting
+    /// them enter the permanent-ID bucket would spend the history escape hatch
+    /// and eventually delete abandoned recovery pointers during an account
+    /// outage.
+    private func accountScopedAbortError(_ error: Error) -> APIError? {
+        guard let apiError = error as? APIError,
+              apiError.isAccountScopedSyncAbort else { return nil }
+        return apiError
+    }
+
     /// Fetches messages with bounded concurrency to prevent resource exhaustion.
     /// - Parameters:
     ///   - ids: Array of message IDs to fetch
@@ -113,14 +124,16 @@ final class MessageFetcher: @unchecked Sendable {
     private func fetchWithBoundedConcurrency(
         ids: [String],
         isFinalAttempt: Bool = false
-    ) async -> BoundedFetchResult {
+    ) async throws -> BoundedFetchResult {
+        try Task.checkCancellation()
+
         var successfulMessages: [GmailMessage] = []
         var retriableFailedIds: [String] = []
         var permanentlyFailedIds: [String] = []
         var notFoundIds: [String] = []
         var exhaustedRetryIds: [String] = []
         var maxRetryAfterSeconds: TimeInterval?
-        var quotaError: APIError?
+        var runAbortError: APIError?
 
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             var iterator = ids.makeIterator()
@@ -165,16 +178,16 @@ final class MessageFetcher: @unchecked Sendable {
                 case .success(let message):
                     successfulMessages.append(message)
                 case .failure(let error):
-                    if let apiError = error as? APIError, case .quotaExhausted = apiError {
+                    if let accountError = self.accountScopedAbortError(error) {
                         // Account-scoped: every further request this pass is
                         // doomed, so stop issuing them and give the affected
-                        // IDs no verdict — quota exhaustion must never be
-                        // recorded as a per-message failure.
-                        if quotaError == nil {
-                            quotaError = apiError
+                        // IDs no verdict. An auth or quota outage must never
+                        // be recorded as a per-message failure.
+                        if runAbortError == nil {
+                            runAbortError = accountError
                             group.cancelAll()
                         }
-                    } else if quotaError == nil {
+                    } else if runAbortError == nil {
                         if case APIError.rateLimited(let retryAfter) = error, let retryAfter {
                             maxRetryAfterSeconds = max(maxRetryAfterSeconds ?? 0, retryAfter)
                         }
@@ -190,23 +203,31 @@ final class MessageFetcher: @unchecked Sendable {
                             // The server says the message doesn't exist
                             notFoundIds.append(id)
                         } else {
-                            // Non-retriable error (4xx, auth, decoding) - truly permanent
+                            // Message-scoped non-retriable error (4xx or
+                            // decoding) — safe to classify for this ID.
                             permanentlyFailedIds.append(id)
                         }
                     }
-                    // Failures arriving after the quota signal are the
+                    // Failures arriving after an account-scoped abort are
                     // cancellations of in-flight tasks; those IDs also get
                     // no verdict.
                 }
 
-                // Start next task if there are more IDs (and the pass wasn't
-                // aborted by quota exhaustion)
-                if quotaError == nil, let nextId = iterator.next() {
+                // Start next task if there are more IDs and the pass was not
+                // aborted by an account-scoped condition.
+                if runAbortError == nil, let nextId = iterator.next() {
                     group.addTask { await fetchOnce(nextId) }
                     activeTasks += 1
                 }
             }
         }
+
+        // Child requests deliberately report errors as values so quota and
+        // per-message failures can be classified together. Parent-task
+        // cancellation is different: an incomplete ID partition must never
+        // look like a successful batch and let a history cursor/checkpoint
+        // advance.
+        try Task.checkCancellation()
 
         return BoundedFetchResult(
             successfulMessages: successfulMessages,
@@ -215,7 +236,7 @@ final class MessageFetcher: @unchecked Sendable {
             notFoundIds: notFoundIds,
             exhaustedRetryIds: exhaustedRetryIds,
             maxRetryAfterSeconds: maxRetryAfterSeconds,
-            quotaError: quotaError
+            runAbortError: runAbortError
         )
     }
 
@@ -243,18 +264,29 @@ final class MessageFetcher: @unchecked Sendable {
     /// No in-place retry loop: these IDs have already failed multiple full syncs, so
     /// one attempt per sync is enough.
     ///
-    /// Quota exhaustion mid-pass yields no outcome for the affected IDs — like
-    /// the cancellation path below, recording it would burn the drain's retry
-    /// budget on attempts that prove nothing about the messages.
-    func fetchAbandonedMessages(_ ids: [String]) async -> AbandonedRetryFetchResult {
+    /// An account-scoped abort mid-pass throws and yields no outcome for the
+    /// affected IDs. Recording it would burn the drain's retry budget on
+    /// attempts that prove nothing about the messages.
+    func fetchAbandonedMessages(_ ids: [String]) async throws -> AbandonedRetryFetchResult {
         guard !ids.isEmpty, !Task.isCancelled else { return .empty }
 
-        let result = await fetchWithBoundedConcurrency(ids: ids, isFinalAttempt: true)
+        let result: BoundedFetchResult
+        do {
+            result = try await fetchWithBoundedConcurrency(ids: ids, isFinalAttempt: true)
+        } catch is CancellationError {
+            return .empty
+        } catch {
+            throw error
+        }
 
         // A cancelled pass classifies unreliably (child tasks fail with
         // CancellationError); record nothing rather than burn retry budget
         // on attempts that never ran.
         guard !Task.isCancelled else { return .empty }
+
+        if let runAbortError = result.runAbortError {
+            throw runAbortError
+        }
 
         return AbandonedRetryFetchResult(
             fetched: chronologicallySorted(result.successfulMessages),
@@ -270,20 +302,18 @@ final class MessageFetcher: @unchecked Sendable {
     ///     sorted into chronological order; returns the per-ID persistence report
     /// - Returns: The batch outcome: blocking fetch failures, server-side-gone
     ///   IDs (404 — non-blocking), and the merged persistence report
-    /// - Throws: `APIError.quotaExhausted` when Gmail reports the account's
-    ///   quota exhausted — the sync run must abort: the affected IDs get no
+    /// - Throws: An account-scoped authentication, credential, or quota error
+    ///   when Gmail reports one — the sync run must abort: affected IDs get no
     ///   per-message verdict (in neither the outcome nor the report), so the
     ///   next scheduled sync retries them after the quota window resets
     ///   instead of recording permanent failures. Errors thrown by `persist`
-    ///   also propagate.
+    ///   also propagate. Cancellation always throws so a partial ID partition
+    ///   cannot advance durable sync progress.
     func fetchBatch(
         _ ids: [String],
         persist: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport
     ) async throws -> MessageBatchOutcome {
-        guard !Task.isCancelled else {
-            Log.debug("Batch processing cancelled", category: .sync)
-            return MessageBatchOutcome(fetchFailedIds: ids, goneIds: [], persistence: .empty)
-        }
+        try Task.checkCancellation()
 
         var permanentlyFailed: [String] = []
         var exhaustedRetries: [String] = []
@@ -291,7 +321,7 @@ final class MessageFetcher: @unchecked Sendable {
         var persistenceReport = MessagePersistenceReport()
 
         // First attempt
-        let initialResult = await fetchWithBoundedConcurrency(ids: ids)
+        let initialResult = try await fetchWithBoundedConcurrency(ids: ids)
         permanentlyFailed.append(contentsOf: initialResult.permanentlyFailedIds)
         goneIds.append(contentsOf: initialResult.notFoundIds)
 
@@ -302,11 +332,12 @@ final class MessageFetcher: @unchecked Sendable {
         persistenceReport.merge(
             try await persistInChronologicalOrder(initialResult.successfulMessages, persist: persist)
         )
+        try Task.checkCancellation()
 
         // Abort after persisting what did succeed: classifying the remainder
         // would turn an account-scoped condition into per-message verdicts.
-        if let quotaError = initialResult.quotaError {
-            throw quotaError
+        if let runAbortError = initialResult.runAbortError {
+            throw runAbortError
         }
 
         var currentFailedIds = initialResult.retriableFailedIds
@@ -314,26 +345,22 @@ final class MessageFetcher: @unchecked Sendable {
 
         // Retry loop with exponential backoff and jitter
         for attempt in 1...maxRetryAttempts {
-            guard !Task.isCancelled, !currentFailedIds.isEmpty else {
-                break
-            }
+            guard !currentFailedIds.isEmpty else { break }
+            try Task.checkCancellation()
 
             // Server-provided Retry-After (when the previous pass was rate
             // limited) dominates the synthetic backoff.
             let delay = calculateRetryDelay(attempt: attempt, retryAfter: pendingRetryAfter)
             Log.debug("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...", category: .sync)
 
-            do {
-                try await clock.sleep(nanoseconds: delay)
-            } catch {
-                // Task was cancelled during sleep
-                break
-            }
-
-            guard !Task.isCancelled else { break }
+            try await clock.sleep(nanoseconds: delay)
+            try Task.checkCancellation()
 
             let isFinalAttempt = attempt == maxRetryAttempts
-            let retryResult = await fetchWithBoundedConcurrency(ids: currentFailedIds, isFinalAttempt: isFinalAttempt)
+            let retryResult = try await fetchWithBoundedConcurrency(
+                ids: currentFailedIds,
+                isFinalAttempt: isFinalAttempt
+            )
 
             for message in retryResult.successfulMessages {
                 Log.debug("Successfully fetched message \(Log.hashIdentifier(message.id)) on retry attempt \(attempt)", category: .sync)
@@ -349,9 +376,10 @@ final class MessageFetcher: @unchecked Sendable {
             persistenceReport.merge(
                 try await persistInChronologicalOrder(retryResult.successfulMessages, persist: persist)
             )
+            try Task.checkCancellation()
 
-            if let quotaError = retryResult.quotaError {
-                throw quotaError
+            if let runAbortError = retryResult.runAbortError {
+                throw runAbortError
             }
 
             currentFailedIds = retryResult.retriableFailedIds
@@ -376,6 +404,8 @@ final class MessageFetcher: @unchecked Sendable {
         if !goneIds.isEmpty {
             Log.info("Messages gone server-side (404): \(goneIds.count)", category: .sync)
         }
+
+        try Task.checkCancellation()
 
         return MessageBatchOutcome(
             fetchFailedIds: permanentlyFailed + exhaustedRetries,

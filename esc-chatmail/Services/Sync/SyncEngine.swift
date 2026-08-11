@@ -14,6 +14,20 @@ enum ForegroundSyncRequestResult {
     case skippedNoNetwork
 }
 
+/// Captures the result produced inside the coordinator-owned `Task<Void, Error>`
+/// without weakening cancellation registration on that task.
+private actor IncrementalSyncResultRecorder {
+    private var result: IncrementalSyncResult?
+
+    func record(_ result: IncrementalSyncResult) {
+        self.result = result
+    }
+
+    func recordedResult() -> IncrementalSyncResult? {
+        result
+    }
+}
+
 // MARK: - Sync Engine
 
 /// Orchestrates email synchronization between Gmail API and local Core Data storage
@@ -110,7 +124,10 @@ final class SyncEngine: ObservableObject {
             conversationManager: conversationManager,
             dataCleanupService: dataCleanupService,
             reconciliation: reconciliation,
-            coreDataStack: coreDataStack
+            coreDataStack: coreDataStack,
+            authenticatedAccountEmail: {
+                AuthSession.shared.currentOrPersistedUserEmail()
+            }
         )
     }
 
@@ -146,24 +163,23 @@ final class SyncEngine: ObservableObject {
         await runSyncTask(syncRunTask, syncType: "Initial")
     }
 
-    /// Performs incremental sync using Gmail history API
-    func performIncrementalSync() async throws {
-        switch await prepareIncrementalSync() {
-        case .started(let syncRunTask):
-            await runSyncTask(syncRunTask, syncType: "Incremental")
-        case .alreadyInProgress:
-            log.debug("Sync already in progress, skipping incremental sync")
-        case .skippedNoNetwork:
-            return
-        }
-    }
-
-    func triggerIncrementalSyncIfPossible() async -> ForegroundSyncRequestResult {
-        switch await prepareIncrementalSync() {
+    func triggerIncrementalSyncIfPossible(
+        completion: @escaping @MainActor @Sendable (Bool) -> Void
+    ) async -> ForegroundSyncRequestResult {
+        let resultRecorder = IncrementalSyncResultRecorder()
+        switch await prepareIncrementalSync(resultRecorder: resultRecorder) {
         case .started(let syncRunTask):
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.runSyncTask(syncRunTask, syncType: "Incremental")
+                let success = await self.runSyncTask(
+                    syncRunTask,
+                    syncType: "Incremental"
+                )
+                guard success,
+                      let result = await resultRecorder.recordedResult() else {
+                    return
+                }
+                completion(result.needsFollowUp)
             }
             return .started
         case .alreadyInProgress:
@@ -174,25 +190,55 @@ final class SyncEngine: ObservableObject {
         }
     }
 
+    /// Runs the same model-v3 incremental executor for a system background
+    /// launch, but keeps ownership of the concrete run task so cancelling the
+    /// awaiting `BGTask` wrapper cannot leave mailbox work running past expiry.
+    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult {
+        let resultRecorder = IncrementalSyncResultRecorder()
+        switch await prepareIncrementalSync(resultRecorder: resultRecorder) {
+        case .started(let syncRunTask):
+            let success = await withTaskCancellationHandler {
+                await runSyncTask(syncRunTask, syncType: "Background incremental")
+            } onCancel: {
+                syncRunTask.task.cancel()
+            }
+            guard success,
+                  let result = await resultRecorder.recordedResult() else {
+                return .failed
+            }
+            return result.needsFollowUp ? .needsFollowUp : .completed
+        case .alreadyInProgress:
+            let activeKind = await syncRunCoordinator.activeRunKind()
+            log.debug("Background mailbox sync blocked by \(activeKind?.rawValue ?? "account transition")")
+            return .blocked(by: activeKind)
+        case .skippedNoNetwork:
+            return .failed
+        }
+    }
+
     func waitForCurrentSyncToComplete() async {
         await syncRunCoordinator.waitUntilIdle()
     }
 
     /// Executes a sync task with unified error handling
     /// Note: Task is already set atomically by the shared sync-run coordinator.
-    private func runSyncTask(_ syncRunTask: SyncRunTask, syncType: String) async {
+    @discardableResult
+    private func runSyncTask(_ syncRunTask: SyncRunTask, syncType: String) async -> Bool {
 
         do {
             try await syncRunTask.task.value
             await syncRunCoordinator.endRun(syncRunTask.run)
+            return true
         } catch is CancellationError {
             await syncRunCoordinator.endRun(syncRunTask.run)
             log.info("\(syncType) sync was cancelled")
             uiState.update(isSyncing: false, status: "Sync cancelled")
+            return false
         } catch {
             await syncRunCoordinator.endRun(syncRunTask.run)
             log.error("\(syncType) sync failed", error: error)
             uiState.update(isSyncing: false, status: "Sync failed: \(formatSyncError(error))")
+            return false
         }
     }
 
@@ -276,7 +322,7 @@ final class SyncEngine: ObservableObject {
         log.info("Initial sync completed: \(result.messagesProcessed) messages, \(result.conversationCount) conversations in \(String(format: "%.1f", result.duration))s")
     }
 
-    private func performIncrementalSyncInternal() async throws {
+    private func performIncrementalSyncInternal() async throws -> IncrementalSyncResult {
         uiState.update(isSyncing: true, progress: 0.0, status: "Checking for updates...")
 
         let result = try await incrementalSyncOrchestrator.performSync(
@@ -297,9 +343,8 @@ final class SyncEngine: ObservableObject {
 
         log.info("Incremental sync completed: \(result.newMessagesCount) new messages, \(result.labelChangesProcessed) label changes")
 
-        Task {
-            await attachmentDownloader.enqueueAllPendingAttachments()
-        }
+        attachmentDownloader.schedulePendingAttachmentDownloads()
+        return result
     }
 
     private enum IncrementalSyncPreparationResult {
@@ -308,7 +353,9 @@ final class SyncEngine: ObservableObject {
         case skippedNoNetwork
     }
 
-    private func prepareIncrementalSync() async -> IncrementalSyncPreparationResult {
+    private func prepareIncrementalSync(
+        resultRecorder: IncrementalSyncResultRecorder? = nil
+    ) async -> IncrementalSyncPreparationResult {
         guard await networkMonitor.isNetworkAvailable() else {
             log.info("Network not available, skipping sync")
             uiState.update(isSyncing: false, status: "Network unavailable")
@@ -322,7 +369,10 @@ final class SyncEngine: ObservableObject {
                     Log.warning("SyncEngine deallocated during incremental sync setup - sync will not complete", category: .sync)
                     throw CancellationError()
                 }
-                try await self.performIncrementalSyncInternal()
+                let result = try await self.performIncrementalSyncInternal()
+                if let resultRecorder {
+                    await resultRecorder.record(result)
+                }
             }
         }
 

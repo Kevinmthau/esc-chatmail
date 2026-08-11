@@ -2,10 +2,27 @@ import Foundation
 import CoreData
 
 /// Result of incremental sync operation
-struct IncrementalSyncResult {
+struct IncrementalSyncResult: Sendable {
     let newMessagesCount: Int
     let labelChangesProcessed: Int
     let hadWarnings: Bool
+    /// True only when durable history progress remains intentionally held or
+    /// checkpointed and another sync should be scheduled promptly.
+    let needsFollowUp: Bool
+}
+
+enum IncrementalSyncAccountError: LocalizedError, Equatable {
+    case authenticatedAccountMismatch(authenticated: String?, stored: String)
+    case profileAccountMismatch(profile: String, stored: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .authenticatedAccountMismatch(let authenticated, let stored):
+            return "Authenticated Gmail account \(authenticated ?? "<missing>") does not match the local account \(stored)."
+        case .profileAccountMismatch(let profile, let stored):
+            return "Gmail profile \(profile) does not match the local account \(stored)."
+        }
+    }
 }
 
 /// Orchestrates incremental sync using Gmail History API
@@ -29,8 +46,16 @@ final class IncrementalSyncOrchestrator {
     private let reconciliation: SyncReconciliation
     private let coreDataStack: CoreDataStack
     private let failureTracker: SyncFailureTracker
+    private let historyCheckpointStore: ForegroundHistoryCheckpointStore
+    private let failureCounterStore: SyncFailureCounterCheckpointStore
     private let aliasRefreshPolicy: SendAsAliasRefreshPolicy
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
+    private let historyPageLimit: Int
+    private let historyPageSize: Int
+    /// Production supplies AuthSession's current-or-persisted email. Keeping
+    /// the seam optional lets lower-level orchestrator tests remain focused,
+    /// while the app enforces auth == Account == checkpoint before any request.
+    private let authenticatedAccountEmail: (() -> String?)?
     /// Creates the run's sync context. Injectable so tests can drive a full
     /// orchestrator run through a save-scripted context and pin what a failed
     /// final save must NOT commit (cursor, tracker success state, ledger rows).
@@ -44,7 +69,9 @@ final class IncrementalSyncOrchestrator {
 
     private lazy var historyCollectionPhase = HistoryCollectionPhase(
         messageFetcher: messageFetcher,
-        historyProcessor: historyProcessor
+        historyProcessor: historyProcessor,
+        maxHistoryPages: historyPageLimit,
+        maxResultsPerPage: historyPageSize
     )
 
     private lazy var messageFetchPhase = MessageFetchPhase(
@@ -77,8 +104,13 @@ final class IncrementalSyncOrchestrator {
         reconciliation: SyncReconciliation,
         coreDataStack: CoreDataStack,
         failureTracker: SyncFailureTracker = .shared,
+        historyCheckpointStore: ForegroundHistoryCheckpointStore = ForegroundHistoryCheckpointStore(),
+        failureCounterStore: SyncFailureCounterCheckpointStore = SyncFailureCounterCheckpointStore(),
         aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy(),
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        historyPageLimit: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
+        historyPageSize: Int = SyncConfig.maxHistoryResultsPerRequest,
+        authenticatedAccountEmail: (() -> String?)? = nil,
         makeSyncContext: (() -> NSManagedObjectContext)? = nil
     ) {
         self.messageFetcher = messageFetcher
@@ -89,8 +121,13 @@ final class IncrementalSyncOrchestrator {
         self.reconciliation = reconciliation
         self.coreDataStack = coreDataStack
         self.failureTracker = failureTracker
+        self.historyCheckpointStore = historyCheckpointStore
+        self.failureCounterStore = failureCounterStore
         self.aliasRefreshPolicy = aliasRefreshPolicy
         self.rollupMutationSerializer = rollupMutationSerializer
+        self.historyPageLimit = historyPageLimit
+        self.historyPageSize = historyPageSize
+        self.authenticatedAccountEmail = authenticatedAccountEmail
         self.makeSyncContext = makeSyncContext ?? { coreDataStack.newBackgroundContext() }
     }
 
@@ -116,19 +153,50 @@ final class IncrementalSyncOrchestrator {
         }
         timing.finish(accountTimer, detail: "hasHistory=\(accountData?.historyId != nil)")
 
+        // Validate every surviving Account row before deciding whether its
+        // missing cursor should trigger initial sync. Otherwise a failed store
+        // reset could route a newly authenticated user into initial sync on
+        // top of the previous account's data.
+        if let accountData, let authenticatedAccountEmail {
+            let authenticatedEmail = authenticatedAccountEmail()
+            guard let authenticatedEmail,
+                  authenticatedEmail.caseInsensitiveCompare(accountData.email) == .orderedSame else {
+                throw IncrementalSyncAccountError.authenticatedAccountMismatch(
+                    authenticated: authenticatedEmail,
+                    stored: accountData.email
+                )
+            }
+        }
+
         guard let accountData = accountData, let historyId = accountData.historyId else {
             log.info("No account/historyId found, performing initial sync")
             let fallbackTimer = timing.start("initialSyncFallback")
+            let initialSyncIncomplete: Bool
             do {
                 try await initialSyncFallback()
-                timing.finish(fallbackTimer)
-                timing.finishRun(outcome: "initialFallback")
+                // Initial sync deliberately leaves the durable cursor unset
+                // when message or ledger work is incomplete. Re-read committed
+                // account state so its follow-up intent survives this fallback.
+                let refreshedAccountData = try await messagePersister.fetchAccountData()
+                initialSyncIncomplete = refreshedAccountData?.historyId == nil
+                timing.finish(
+                    fallbackTimer,
+                    detail: "incomplete=\(initialSyncIncomplete)"
+                )
+                timing.finishRun(
+                    outcome: "initialFallback incomplete=\(initialSyncIncomplete)"
+                )
             } catch {
                 timing.finish(fallbackTimer, detail: "failed=true")
                 timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
                 throw error
             }
-            return IncrementalSyncResult(newMessagesCount: 0, labelChangesProcessed: 0, hadWarnings: false)
+            return IncrementalSyncResult(
+                newMessagesCount: 0,
+                labelChangesProcessed: 0,
+                hadWarnings: initialSyncIncomplete,
+                needsFollowUp: initialSyncIncomplete
+            )
         }
 
         log.info("Starting incremental sync with historyId: \(historyId)")
@@ -154,13 +222,58 @@ final class IncrementalSyncOrchestrator {
             sourceHistoryId: historyId
         )
 
+        var activeHistoryCheckpoint: ForegroundHistoryCheckpoint?
+        var activeFailureCount = 0
+
         do {
-            // Phase 1: Collect all history
+            // Phase 1: collect one bounded history slice. A compatible model-v3
+            // checkpoint resumes at its page token while the Account cursor
+            // remains frozen at `historyId`.
             let historyTimer = timing.start("historyCollection")
-            let historyResult = try await historyCollectionPhase.execute(
-                input: historyId,
-                context: historyCollectionContext
+            activeHistoryCheckpoint = try await historyCheckpointStore.loadCompatible(
+                accountEmail: accountData.email,
+                startHistoryId: historyId,
+                in: context
             )
+            if activeHistoryCheckpoint != nil {
+                log.info("Resuming foreground history from a durable checkpoint")
+            }
+            let legacyFailureCount = await failureTracker.consecutiveFailureCount
+            activeFailureCount = try await failureCounterStore.load(
+                accountEmail: accountData.email,
+                legacyConsecutiveFailureCount: legacyFailureCount,
+                in: context
+            ).consecutiveFailureCount
+
+            let historyResult: HistoryCollectionResult
+            do {
+                historyResult = try await historyCollectionPhase.execute(
+                    input: HistoryCollectionRequest(
+                        startHistoryId: historyId,
+                        pageToken: activeHistoryCheckpoint?.pageToken
+                    ),
+                    context: historyCollectionContext
+                )
+            } catch let error as APIError {
+                // Gmail page tokens are opaque and may expire independently of
+                // the still-valid history cursor. A 4xx on a persisted token is
+                // safe to recover by durably discarding it and replaying from
+                // the frozen cursor once. Initial-page invalid-data errors still
+                // propagate because they indicate a different request defect.
+                guard activeHistoryCheckpoint?.pageToken != nil,
+                      case .invalidHistoryPageToken = error else {
+                    throw error
+                }
+
+                log.warning("Stored foreground history page token was rejected; restarting from the frozen cursor")
+                try await historyCheckpointStore.stageClear(in: context)
+                try await coreDataStack.saveAsync(context: context)
+                activeHistoryCheckpoint = nil
+                historyResult = try await historyCollectionPhase.execute(
+                    input: HistoryCollectionRequest(startHistoryId: historyId, pageToken: nil),
+                    context: historyCollectionContext
+                )
+            }
             timing.finish(
                 historyTimer,
                 detail: "records=\(historyResult.records.count) newMessages=\(historyResult.newMessageIds.count) truncated=\(historyResult.wasTruncated)"
@@ -199,7 +312,7 @@ final class IncrementalSyncOrchestrator {
             // fails, the staged changes die with the context and every record stays
             // for the next drain.
             let abandonedRetryTimer = timing.start("abandonedRetry")
-            let abandonedOutcome = await retryAbandonedMessages(phaseContext: phaseContext)
+            let abandonedOutcome = try await retryAbandonedMessages(phaseContext: phaseContext)
             await failureTracker.stageAbandonedRetryOutcome(
                 recoveredIds: abandonedOutcome.recoveredIds,
                 goneIds: abandonedOutcome.goneIds,
@@ -276,26 +389,52 @@ final class IncrementalSyncOrchestrator {
                 detail: "labelOutcome=\(reconciliationResult.labelOutcome) \(reconciliationResult.diagnostics.summary)"
             )
 
-            // Don't advance historyId if history collection was truncated - we need to
-            // retry from the same point to get remaining pages. The plan stages any
-            // ledger transition (deferred-row cleanup or abandonment) into the sync
-            // context; its success-side effects apply only after the final save below.
+            // Resolve this slice's ledger before advancing either continuation
+            // or cursor. Below the failure threshold the current checkpoint is
+            // left untouched so the same slice is retried. Once every outcome
+            // is clean or durably abandoned, a non-terminal slice advances only
+            // its checkpoint; the Account cursor advances only at Gmail's end.
             let historyAdvanceTimer = timing.start("historyAdvanceDecision")
-            let advancePlan: SyncFailureTracker.HistoryAdvancePlan
-            if historyResult.wasTruncated {
-                log.info("History was truncated - will retry from same point on next sync")
-                advancePlan = .held
-            } else {
-                advancePlan = await failureTracker.planHistoryAdvance(
-                    hadFailures: fetchResult.hasFailures,
-                    in: context
-                )
-            }
+            let proposedFailureCount = fetchResult.hasFailures
+                ? Self.incrementedFailureCount(after: activeFailureCount)
+                : 0
+            let advancePlan = await failureTracker.planHistoryAdvance(
+                hadFailures: fetchResult.hasFailures,
+                consecutiveFailureCount: proposedFailureCount,
+                in: context
+            )
             timing.finish(historyAdvanceTimer, detail: "advance=\(advancePlan.shouldAdvance)")
 
-            let historyIdToSave = advancePlan.shouldAdvance ? historyResult.latestHistoryId : nil
-            if let historyIdToSave {
-                await messagePersister.setAccountHistoryId(historyIdToSave, in: context)
+            // Stage the strike only after the optional intermediate flush.
+            // It now commits with the final ledger transition and cursor or
+            // continuation movement, eliminating the old one-high crash gap.
+            let durableFailureCount = advancePlan.shouldAdvance
+                ? 0
+                : (fetchResult.hasFailures ? proposedFailureCount : activeFailureCount)
+            try await failureCounterStore.stage(
+                consecutiveFailureCount: durableFailureCount,
+                accountEmail: accountData.email,
+                in: context
+            )
+
+            if advancePlan.shouldAdvance {
+                if let nextPageToken = historyResult.nextPageToken {
+                    try await historyCheckpointStore.stageProgress(
+                        accountEmail: accountData.email,
+                        startHistoryId: historyId,
+                        pageToken: nextPageToken,
+                        in: context
+                    )
+                    log.info("Staged foreground history continuation for the next sync slice")
+                } else {
+                    try await historyCheckpointStore.stageClear(in: context)
+                    await messagePersister.setAccountHistoryId(historyResult.latestHistoryId, in: context)
+                }
+            } else {
+                // Do not move the progress row: an existing continuation stays
+                // at this slice, while a first-slice failure naturally retries
+                // from the frozen Account cursor with no progress row.
+                log.info("History slice remains at its current durable position for retry")
             }
 
             let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
@@ -347,7 +486,11 @@ final class IncrementalSyncOrchestrator {
                     // state before the post-save cancellation check so a
                     // cancelled run cannot strand newly abandoned rows behind
                     // a stale in-memory cache.
-                    await failureTracker.commit(advancePlan)
+                    await failureTracker.commit(
+                        advancePlan,
+                        recordsSuccessfulSync: !historyResult.wasTruncated
+                    )
+                    await failureTracker.retireLegacyCounterState()
                 },
                 recordReconciliation: {
                     self.recordReconciliationTime()
@@ -370,13 +513,14 @@ final class IncrementalSyncOrchestrator {
             // dataset so observers reconcile against the final sync state.
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
             timing.finishRun(
-                outcome: "success newMessages=\(fetchResult.successfulCount) labelRecords=\(historyResult.records.count) warnings=\(fetchResult.hasFailures)"
+                outcome: "success newMessages=\(fetchResult.successfulCount) labelRecords=\(historyResult.records.count) continuation=\(historyResult.wasTruncated) warnings=\(fetchResult.hasFailures)"
             )
 
             return IncrementalSyncResult(
                 newMessagesCount: fetchResult.successfulCount,
                 labelChangesProcessed: historyResult.records.count,
-                hadWarnings: fetchResult.hasFailures
+                hadWarnings: fetchResult.hasFailures || historyResult.wasTruncated,
+                needsFollowUp: historyResult.wasTruncated || !advancePlan.shouldAdvance
             )
 
         } catch let error as APIError {
@@ -390,8 +534,13 @@ final class IncrementalSyncOrchestrator {
                     throw error
                 }
                 let recoveryTimer = timing.start("historyRecovery")
+                let recoveryNeedsFollowUp: Bool
                 do {
-                    try await performHistoryRecoverySync(progressHandler: progressHandler)
+                    recoveryNeedsFollowUp = try await performHistoryRecoverySync(
+                        accountEmail: accountData.email,
+                        priorFailureCount: activeFailureCount,
+                        progressHandler: progressHandler
+                    )
                     timing.finish(recoveryTimer)
                     timing.finishRun(outcome: "historyRecovery warnings=true")
                 } catch {
@@ -399,7 +548,12 @@ final class IncrementalSyncOrchestrator {
                     timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
                     throw error
                 }
-                return IncrementalSyncResult(newMessagesCount: 0, labelChangesProcessed: 0, hadWarnings: true)
+                return IncrementalSyncResult(
+                    newMessagesCount: 0,
+                    labelChangesProcessed: 0,
+                    hadWarnings: true,
+                    needsFollowUp: recoveryNeedsFollowUp
+                )
             }
             timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
             throw error
@@ -426,12 +580,12 @@ final class IncrementalSyncOrchestrator {
     /// tracker, persisting any that now succeed into the sync context. The returned
     /// outcome is staged into the same context (stageAbandonedRetryOutcome) so
     /// ledger resolution and the recovered messages commit in one save.
-    private func retryAbandonedMessages(phaseContext: SyncPhaseContext) async -> AbandonedRetryOutcome {
+    private func retryAbandonedMessages(phaseContext: SyncPhaseContext) async throws -> AbandonedRetryOutcome {
         let ids = await failureTracker.fetchRetryableAbandonedMessageIds()
         guard !ids.isEmpty else { return .empty }
 
         log.info("Retrying \(ids.count) previously abandoned messages")
-        let result = await messageFetcher.fetchAbandonedMessages(ids)
+        let result = try await messageFetcher.fetchAbandonedMessages(ids)
 
         // A fetched message can still be skipped by the persister (e.g.
         // unprocessable payload), so "recovered" is what the persistence
@@ -451,15 +605,19 @@ final class IncrementalSyncOrchestrator {
                     modificationTransaction: phaseContext.modificationTransaction,
                     in: phaseContext.coreDataContext
                 )
+            } catch let apiError as APIError where apiError.isAccountScopedSyncAbort {
+                // A credential/quota outage says nothing about this message
+                // and affects the whole account. Let the outer transaction
+                // abort so no cursor, counter, message, or drain state moves.
+                throw apiError
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
-                // Run-fatal persistence failure: the persister throws only for
-                // account-scoped infrastructure errors, so the fetched
-                // messages proved nothing about themselves — give them NO
-                // outcome. Recording a failure here would burn the drain's
-                // bounded retry budget and, at the cap, delete the only
-                // durable pointer to messages the cursor already advanced
-                // past. Fetch-level verdicts (404s, per-message fetch
-                // failures) stand: they are independent of local persistence.
+                // A drain-local infrastructure failure proves nothing about
+                // the fetched messages, but need not freeze the current
+                // history window. Give those successful fetches NO outcome so
+                // their durable pointers remain eligible next run. Fetch-level
+                // verdicts (404s and message-scoped failures) remain valid.
                 Log.error("Abandoned-message retry aborted by persistence failure", category: .sync, error: error)
                 return AbandonedRetryOutcome(
                     recoveredIds: [],
@@ -480,8 +638,10 @@ final class IncrementalSyncOrchestrator {
 
     /// Performs recovery sync when history ID has expired
     private func performHistoryRecoverySync(
+        accountEmail: String,
+        priorFailureCount: Int,
         progressHandler: @escaping (Double, String) -> Void
-    ) async throws {
+    ) async throws -> Bool {
         log.info("Starting history recovery sync")
 
         let context = makeSyncContext()
@@ -503,6 +663,12 @@ final class IncrementalSyncOrchestrator {
             // past arrivals the enumeration never saw, skipping them until
             // reconciliation — and never repairing their deletions/labels.
             let profile = try await messageFetcher.getProfile()
+            guard profile.emailAddress.caseInsensitiveCompare(accountEmail) == .orderedSame else {
+                throw IncrementalSyncAccountError.profileAccountMismatch(
+                    profile: profile.emailAddress,
+                    stored: accountEmail
+                )
+            }
 
             let result = try await MessageListPaginator.fetchAndProcess(
                 query: query,
@@ -563,11 +729,28 @@ final class IncrementalSyncOrchestrator {
             // Advance only to the PRE-SCAN watermark and only when failure
             // policy allows it — this prevents data loss when recovery
             // fetched a partial set of messages.
+            let proposedFailureCount = result.hasFailures
+                ? Self.incrementedFailureCount(after: priorFailureCount)
+                : 0
             let advancePlan = await failureTracker.planHistoryAdvance(
                 hadFailures: result.hasFailures,
+                consecutiveFailureCount: proposedFailureCount,
                 in: context
             )
+            try await failureCounterStore.stage(
+                consecutiveFailureCount: advancePlan.shouldAdvance
+                    ? 0
+                    : (result.hasFailures ? proposedFailureCount : priorFailureCount),
+                accountEmail: accountEmail,
+                in: context
+            )
+            // Every token derived from the expired cursor is invalid. Its
+            // deletion commits with the replacement cursor or held recovery
+            // counter so a fresh run cannot resume the obsolete page.
+            try await historyCheckpointStore.stageClear(in: context)
             if advancePlan.shouldAdvance {
+                // The replacement cursor and deletion of every state derived
+                // from the expired cursor commit together.
                 await messagePersister.setAccountHistoryId(profile.historyId, in: context)
             } else {
                 log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
@@ -606,12 +789,14 @@ final class IncrementalSyncOrchestrator {
             // The save above committed the staged ledger rows with the cursor;
             // only now may the tracker's success state change.
             await failureTracker.commit(advancePlan)
+            await failureTracker.retireLegacyCounterState()
 
             if advancePlan.shouldAdvance {
                 log.info("History recovery complete, new historyId: \(profile.historyId)")
             } else {
                 log.info("History recovery complete with warnings; historyId not advanced")
             }
+            return !advancePlan.shouldAdvance
         } catch {
             if !committedModificationTransaction {
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
@@ -626,6 +811,14 @@ final class IncrementalSyncOrchestrator {
             : max(checkpoint.listedCount + SyncConfig.maxMessagesPerRequest, 1)
         let progress = Double(checkpoint.processedCount) / Double(denominator)
         return min(checkpoint.isComplete ? 1.0 : 0.98, progress)
+    }
+
+    /// Counts only as high as the escape threshold. Values above the threshold
+    /// carry no additional policy meaning, and saturation avoids overflow if a
+    /// future/corrupt payload somehow contains an unexpectedly large value.
+    nonisolated private static func incrementedFailureCount(after count: Int) -> Int {
+        let threshold = Swift.max(SyncConfig.maxConsecutiveSyncFailures, 1)
+        return Swift.min(Swift.max(count, 0), threshold - 1) + 1
     }
 
     /// Decides whether to skip label reconciliation for this sync.

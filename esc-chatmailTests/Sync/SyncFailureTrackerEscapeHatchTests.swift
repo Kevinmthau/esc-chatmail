@@ -6,7 +6,8 @@ import CoreData
 /// boundary: at the max consecutive-failure threshold the tracker STAGES the
 /// deferred→abandoned transition into the caller's context, the caller's final
 /// save commits rows and cursor together, and only `commit(_:)` afterwards
-/// resets counters and posts `.syncMessagesAbandoned`. This is the
+/// posts `.syncMessagesAbandoned`. The separate counter row is staged by the
+/// orchestrator. This is the
 /// deadlock-breaker the reliability work must preserve.
 final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
     private var defaults: UserDefaults!
@@ -55,7 +56,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         )
 
         let hatchRun = coreDataStack.newBackgroundContext()
-        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: hatchRun)
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: hatchRun
+        )
         XCTAssertTrue(plan.shouldAdvance, "The escape hatch must advance at the threshold to break the deadlock")
         XCTAssertEqual(plan.outcome, .advancedAbandoning(count: 2))
 
@@ -95,7 +100,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
     func testReAbandonmentPreservesDrainRetryCount() async throws {
         try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures, failedIds: ["stuck-1"])
         let firstHatch = coreDataStack.newBackgroundContext()
-        let firstPlan = await tracker.planHistoryAdvance(hadFailures: true, in: firstHatch)
+        let firstPlan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: firstHatch
+        )
         try await coreDataStack.saveAsync(context: firstHatch)
         await tracker.commit(firstPlan)
 
@@ -105,7 +114,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         // The same message fails again and trips the escape hatch a second time.
         try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures, failedIds: ["stuck-1"])
         let secondHatch = coreDataStack.newBackgroundContext()
-        let secondPlan = await tracker.planHistoryAdvance(hadFailures: true, in: secondHatch)
+        let secondPlan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: secondHatch
+        )
         XCTAssertTrue(secondPlan.shouldAdvance)
         try await coreDataStack.saveAsync(context: secondHatch)
         await tracker.commit(secondPlan)
@@ -123,7 +136,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures, failedIds: ["stuck-1"])
 
         let failedRun = coreDataStack.newBackgroundContext()
-        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: failedRun)
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: failedRun
+        )
         XCTAssertTrue(plan.shouldAdvance)
         // The caller's save fails here; the plan is discarded, never committed.
 
@@ -135,13 +152,17 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         )
         let consecutive = await tracker.consecutiveFailureCount
         XCTAssertEqual(
-            consecutive, SyncConfig.maxConsecutiveSyncFailures,
-            "Failure tracking must survive so the hatch retries next run"
+            consecutive, 0,
+            "The tracker must not mutate the retired UserDefaults counter"
         )
 
         // Next run: the hatch arms again over the same durable rows.
         let retryRun = coreDataStack.newBackgroundContext()
-        let retryPlan = await tracker.planHistoryAdvance(hadFailures: true, in: retryRun)
+        let retryPlan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: retryRun
+        )
         XCTAssertEqual(retryPlan.outcome, .advancedAbandoning(count: 1))
     }
 
@@ -151,7 +172,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         defaults.set(SyncConfig.maxConsecutiveSyncFailures, forKey: SyncConfig.consecutiveFailuresKey)
         let failingContext = try FailingReadStore.makeFailingContext()
 
-        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: failingContext)
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: failingContext
+        )
 
         XCTAssertEqual(plan.outcome, .held, "The cursor must stay frozen when the ledger cannot be read")
         let consecutive = await tracker.consecutiveFailureCount
@@ -167,7 +192,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
     func testFailedLedgerReadBlocksCleanAdvance() async throws {
         let failingContext = try FailingReadStore.makeFailingContext()
 
-        let plan = await tracker.planHistoryAdvance(hadFailures: false, in: failingContext)
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: false,
+            consecutiveFailureCount: 0,
+            in: failingContext
+        )
 
         XCTAssertEqual(plan.outcome, .held, "The cursor must stay frozen when clean-run ledger cleanup cannot be planned")
     }
@@ -188,7 +217,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
 
         try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures, failedIds: ["stuck-1"])
         let hatchRun = coreDataStack.newBackgroundContext()
-        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: hatchRun)
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: hatchRun
+        )
         XCTAssertEqual(plan.outcome, .advancedAbandoning(count: 1))
 
         var didRecordReconciliation = false
@@ -243,20 +276,25 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         // A previous run durably tracked an older failing set.
         try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures - 1, failedIds: ["stale-1"])
 
-        // The threshold-crossing run cannot read the ledger: the strike counts,
-        // the staging is skipped.
+        // The threshold-crossing run cannot read the ledger, so staging is
+        // skipped. The orchestrator's separate counter row still supplies the
+        // threshold decision.
         let failingContext = try FailingReadStore.makeFailingContext()
         await tracker.recordFailure(fetchFailedIds: ["fresh-1"], in: failingContext)
         let consecutive = await tracker.consecutiveFailureCount
         XCTAssertEqual(
-            consecutive, SyncConfig.maxConsecutiveSyncFailures,
-            "The strike must count even when staging is skipped, or a persistently failing store would freeze the cursor with the hatch never arming"
+            consecutive, 0,
+            "Ledger staging must not mutate the retired UserDefaults counter"
         )
 
         // The hatch fetch itself succeeds (working context) — but it must not
         // abandon stale-1 and advance past fresh-1, which has no durable row.
         let hatchRun = coreDataStack.newBackgroundContext()
-        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: hatchRun)
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: hatchRun
+        )
         XCTAssertEqual(plan.outcome, .held, "An unstaged failing set must hold the cursor")
 
         let rows = try await fetchAbandonedRows()
@@ -271,7 +309,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         // hatch fires over the now-durable set.
         let recoveredRun = coreDataStack.newBackgroundContext()
         await tracker.recordFailure(fetchFailedIds: ["stale-1", "fresh-1"], in: recoveredRun)
-        let retryPlan = await tracker.planHistoryAdvance(hadFailures: true, in: recoveredRun)
+        let retryPlan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: recoveredRun
+        )
         XCTAssertEqual(retryPlan.outcome, .advancedAbandoning(count: 2))
     }
 
@@ -281,7 +323,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         defaults.set(SyncConfig.maxConsecutiveSyncFailures, forKey: SyncConfig.consecutiveFailuresKey)
 
         let context = coreDataStack.newBackgroundContext()
-        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: context)
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: context
+        )
 
         XCTAssertEqual(
             plan.outcome, .held,
@@ -293,7 +339,11 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         try await recordFailingRuns(SyncConfig.maxConsecutiveSyncFailures - 1, failedIds: ["stuck-1"])
 
         let context = coreDataStack.newBackgroundContext()
-        let plan = await tracker.planHistoryAdvance(hadFailures: true, in: context)
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures - 1,
+            in: context
+        )
         try await coreDataStack.saveAsync(context: context)
 
         XCTAssertFalse(plan.shouldAdvance)
@@ -304,7 +354,7 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         )
         XCTAssertEqual(rows.count, 1, "Tracking itself is durable even while the cursor holds")
         let consecutive = await tracker.consecutiveFailureCount
-        XCTAssertEqual(consecutive, SyncConfig.maxConsecutiveSyncFailures - 1)
+        XCTAssertEqual(consecutive, 0)
     }
 
     // MARK: - Helpers

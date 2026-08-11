@@ -37,10 +37,25 @@ extension MessagePersister {
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async -> Bool {
-        let remoteCommittedSendMutation = await remoteCommittedSendMutationResolutions(
-            for: [processedMessage.id],
-            in: context
-        )[processedMessage.id]
+        let remoteCommittedSendMutation: RemoteCommittedSendMutationResolution?
+        do {
+            remoteCommittedSendMutation = try await remoteCommittedSendMutationResolutions(
+                for: [processedMessage.id],
+                sentMessageIDsByRemoteID: Self.sentMessageIDsByRemoteID(
+                    in: [processedMessage]
+                ),
+                in: context
+            )[processedMessage.id]
+        } catch {
+            // A failed mutation lookup cannot be treated as "no route": doing
+            // so could persist the echo and strand its optimistic graph forever.
+            Log.error(
+                "Failed to resolve remote committed send mutation",
+                category: .coreData,
+                error: error
+            )
+            return false
+        }
         return await updateExistingMessage(
             processedMessage,
             labelIds: labelIds,
@@ -354,12 +369,22 @@ extension MessagePersister {
             }
 
             for attachmentInfo in processedMessage.attachmentInfo {
+                self.refreshSynthesizedInlineStorageIfNeeded(
+                    attachmentInfo,
+                    on: existingMessage
+                )
+
                 if let optimisticAttachment = self.matchingOptimisticLocalAttachment(
                     for: attachmentInfo,
                     in: existingMessage.attachmentsArray,
                     excluding: consumedOptimisticAttachmentObjectIDs
                 ) {
                     let previousAttachmentID = optimisticAttachment.id
+                    self.migrateOptimisticAttachmentStorage(
+                        optimisticAttachment,
+                        to: attachmentInfo,
+                        remoteMessageID: existingMessage.id
+                    )
                     self.reconcileOptimisticLocalAttachment(optimisticAttachment, with: attachmentInfo)
                     consumedOptimisticAttachmentObjectIDs.insert(optimisticAttachment.objectID)
 
@@ -458,6 +483,12 @@ extension MessagePersister {
             // Keep mutation-route cleanup in the same eventual context save as
             // the message update, relationship move, and source rollup repair.
             if canApplyAnchoredListRoute {
+                self.handoffOptimisticAttachmentStorage(
+                    remoteCommittedSendMutation,
+                    attachmentInfos: processedMessage.attachmentInfo,
+                    to: existingMessage,
+                    in: context
+                )
                 self.consumeRemoteCommittedSendMutation(
                     remoteCommittedSendMutation,
                     in: context
@@ -638,7 +669,9 @@ extension MessagePersister {
         excluding excludedObjectIDs: Set<NSManagedObjectID>
     ) -> Attachment? {
         let localCandidates = attachments.filter {
-            $0.isLocalAttachment && !excludedObjectIDs.contains($0.objectID)
+            $0.isLocalAttachment &&
+                !($0.id?.hasPrefix("local_inline_") ?? false) &&
+                !excludedObjectIDs.contains($0.objectID)
         }
 
         guard !localCandidates.isEmpty else { return nil }
@@ -661,6 +694,218 @@ extension MessagePersister {
         })
     }
 
+    /// Copies a superseded optimistic send's known-good local files into the
+    /// collision-safe storage identity of its exact Gmail echo. The old paths
+    /// are then detached from the object being deleted, so CacheCoordinator
+    /// cannot remove a URL that an already-open QuickLook controller still uses.
+    nonisolated func handoffOptimisticAttachmentStorage(
+        _ resolution: RemoteCommittedSendMutationResolution?,
+        attachmentInfos: [AttachmentInfo],
+        to remoteMessage: Message,
+        in context: NSManagedObjectContext
+    ) {
+        guard let resolution,
+              resolution.shouldConsumeAfterPersistence,
+              !resolution.supersededOptimisticMessages.isEmpty,
+              !attachmentInfos.isEmpty else {
+            return
+        }
+
+        let optimisticAttachments = resolution.supersededOptimisticMessages.keys
+            .compactMap { objectID -> Message? in
+                guard let message = try? context.existingObject(with: objectID) as? Message,
+                      !message.isDeleted else {
+                    return nil
+                }
+                return message
+            }
+            .flatMap(\.attachmentsArray)
+        guard !optimisticAttachments.isEmpty else { return }
+
+        AttachmentPaths.setupDirectories()
+        var consumedOptimisticAttachmentObjectIDs = Set<NSManagedObjectID>()
+
+        for info in attachmentInfos {
+            guard let remoteAttachment = remoteMessage.attachmentsArray.first(where: {
+                $0.id == info.id && !$0.isDeleted
+            }), let optimisticAttachment = matchingOptimisticLocalAttachment(
+                for: info,
+                in: optimisticAttachments,
+                excluding: consumedOptimisticAttachmentObjectIDs
+            ) else {
+                continue
+            }
+
+            consumedOptimisticAttachmentObjectIDs.insert(optimisticAttachment.objectID)
+            handoffOptimisticAttachmentStorage(
+                optimisticAttachment,
+                to: remoteAttachment,
+                info: info,
+                remoteMessageID: remoteMessage.id
+            )
+        }
+    }
+
+    private nonisolated func handoffOptimisticAttachmentStorage(
+        _ optimisticAttachment: Attachment,
+        to remoteAttachment: Attachment,
+        info: AttachmentInfo,
+        remoteMessageID: String
+    ) {
+        guard let remoteAttachmentID = remoteAttachment.id else { return }
+
+        let filenameExtension = (info.filename as NSString).pathExtension.lowercased()
+        let originalExtension = filenameExtension.isEmpty
+            ? AttachmentPaths.fileExtension(for: info.mimeType)
+            : filenameExtension
+        let remoteOriginalPath = AttachmentPaths.originalPath(
+            messageId: remoteMessageID,
+            attachmentId: remoteAttachmentID,
+            ext: originalExtension
+        )
+        let remotePreviewPath = AttachmentPaths.previewPath(
+            messageId: remoteMessageID,
+            attachmentId: remoteAttachmentID
+        )
+
+        let hasRemoteOriginal: Bool
+        if readableFileExists(
+            remoteAttachment.localURL,
+            messageId: remoteMessageID,
+            attachmentId: remoteAttachmentID
+        ) {
+            hasRemoteOriginal = true
+            remoteAttachment.state = .downloaded
+            remoteAttachment.lastDownloadFailedAt = nil
+        } else if copyAttachmentFile(
+            from: optimisticAttachment.localURL,
+            to: remoteOriginalPath
+        ) {
+            hasRemoteOriginal = true
+            remoteAttachment.localURL = remoteOriginalPath
+            remoteAttachment.state = .downloaded
+            remoteAttachment.lastDownloadFailedAt = nil
+        } else {
+            hasRemoteOriginal = false
+        }
+
+        let hasRemotePreview: Bool
+        if readableFileExists(
+            remoteAttachment.previewURL,
+            messageId: remoteMessageID,
+            attachmentId: remoteAttachmentID
+        ) {
+            hasRemotePreview = true
+        } else if copyAttachmentFile(
+            from: optimisticAttachment.previewURL,
+            to: remotePreviewPath
+        ) {
+            hasRemotePreview = true
+            remoteAttachment.previewURL = remotePreviewPath
+        } else {
+            hasRemotePreview = false
+        }
+
+        if remoteAttachment.width == 0 {
+            remoteAttachment.width = optimisticAttachment.width
+        }
+        if remoteAttachment.height == 0 {
+            remoteAttachment.height = optimisticAttachment.height
+        }
+        if remoteAttachment.pageCount == 0 {
+            remoteAttachment.pageCount = optimisticAttachment.pageCount
+        }
+
+        // Keep the old files alive as unreferenced compatibility copies. A
+        // QLPreviewItem snapshots its URL when presented, so deleting that path
+        // during convergence would invalidate the active preview. Periodic
+        // orphan cleanup may reclaim it after this atomic replacement.
+        if hasRemoteOriginal, fileExists(at: optimisticAttachment.localURL) {
+            optimisticAttachment.localURL = nil
+        }
+        if hasRemotePreview, fileExists(at: optimisticAttachment.previewURL) {
+            optimisticAttachment.previewURL = nil
+        }
+    }
+
+    private nonisolated func readableFileExists(
+        _ path: String?,
+        messageId: String,
+        attachmentId: String
+    ) -> Bool {
+        AttachmentPaths.isReadableStoragePath(
+            path,
+            messageId: messageId,
+            attachmentId: attachmentId
+        ) && fileExists(at: path)
+    }
+
+    private nonisolated func copyAttachmentFile(
+        from sourcePath: String?,
+        to destinationPath: String
+    ) -> Bool {
+        guard let sourcePath,
+              let sourceURL = AttachmentPaths.fullURL(for: sourcePath),
+              let destinationURL = AttachmentPaths.fullURL(for: destinationPath) else {
+            return false
+        }
+        if sourcePath == destinationPath {
+            return fileExists(at: sourcePath)
+        }
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: sourceURL.path) else {
+            return false
+        }
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            return true
+        }
+        do {
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            return true
+        } catch {
+            Log.error(
+                "Failed to hand off optimistic attachment storage",
+                category: .attachment,
+                error: error
+            )
+            return false
+        }
+    }
+
+    private nonisolated func fileExists(at path: String?) -> Bool {
+        guard let url = AttachmentPaths.fullURL(for: path) else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    private nonisolated func migrateOptimisticAttachmentStorage(
+        _ attachment: Attachment,
+        to attachmentInfo: AttachmentInfo,
+        remoteMessageID: String
+    ) {
+        AttachmentPaths.setupDirectories()
+
+        let filenameExtension = (attachmentInfo.filename as NSString).pathExtension.lowercased()
+        let originalExtension = filenameExtension.isEmpty
+            ? AttachmentPaths.fileExtension(for: attachmentInfo.mimeType)
+            : filenameExtension
+        let remoteOriginalPath = AttachmentPaths.originalPath(
+            messageId: remoteMessageID,
+            attachmentId: attachmentInfo.id,
+            ext: originalExtension
+        )
+        let remotePreviewPath = AttachmentPaths.previewPath(
+            messageId: remoteMessageID,
+            attachmentId: attachmentInfo.id
+        )
+
+        if copyAttachmentFile(from: attachment.localURL, to: remoteOriginalPath) {
+            attachment.localURL = remoteOriginalPath
+        }
+        if copyAttachmentFile(from: attachment.previewURL, to: remotePreviewPath) {
+            attachment.previewURL = remotePreviewPath
+        }
+    }
+
     nonisolated func reconcileOptimisticLocalAttachment(_ attachment: Attachment, with attachmentInfo: AttachmentInfo) {
         attachment.id = attachmentInfo.id
         attachment.filename = attachmentInfo.filename
@@ -674,6 +919,67 @@ extension MessagePersister {
 
     nonisolated func normalizedAttachmentFilename(_ filename: String) -> String {
         filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    nonisolated func refreshSynthesizedInlineStorageIfNeeded(
+        _ info: AttachmentInfo,
+        on message: Message
+    ) {
+        guard info.id.hasPrefix("local_inline_"),
+              let inlineData = info.inlineData else {
+            return
+        }
+
+        let normalizedIncomingContentID = EmailDocument.normalizedContentID(info.contentId)
+        let incomingFingerprint = inlineAttachmentFingerprint(for: info)
+        guard let existing = message.attachmentsArray.first(where: { attachment in
+            if attachment.id == info.id {
+                return true
+            }
+            if let normalizedIncomingContentID,
+               EmailDocument.normalizedContentID(attachment.contentId) == normalizedIncomingContentID {
+                return true
+            }
+            return incomingFingerprint != nil &&
+                inlineAttachmentFingerprint(attachment) == incomingFingerprint
+        }), synthesizedInlineStorageNeedsRefresh(existing, messageId: message.id) else {
+            return
+        }
+
+        _ = persistInlineAttachmentData(
+            inlineData,
+            info: info,
+            attachment: existing,
+            messageId: message.id
+        )
+    }
+
+    nonisolated func synthesizedInlineStorageNeedsRefresh(
+        _ attachment: Attachment,
+        messageId: String
+    ) -> Bool {
+        guard let attachmentId = attachment.id,
+              AttachmentPaths.isReadableStoragePath(
+                  attachment.localURL,
+                  messageId: messageId,
+                  attachmentId: attachmentId
+              ),
+              let localFileURL = AttachmentPaths.fullURL(for: attachment.localURL),
+              FileManager.default.fileExists(atPath: localFileURL.path) else {
+            return true
+        }
+
+        guard let previewURL = attachment.previewURL else { return false }
+        guard AttachmentPaths.isReadableStoragePath(
+                  previewURL,
+                  messageId: messageId,
+                  attachmentId: attachmentId
+              ),
+              let previewFileURL = AttachmentPaths.fullURL(for: previewURL),
+              FileManager.default.fileExists(atPath: previewFileURL.path) else {
+            return true
+        }
+        return false
     }
 
     // MARK: - Inline attachment deduplication

@@ -72,16 +72,118 @@ final class MessageFetcherTests: XCTestCase {
         XCTAssertTrue(clock.sleeps.isEmpty, "No retry backoff for an aborted run")
     }
 
+    func testFetchBatch_authenticationErrorAbortsInsteadOfRecordingPerMessageFailure() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.getMessageErrors["auth"] = APIError.authenticationError
+
+        let clock = FakeSyncClock()
+        let fetcher = MessageFetcher(apiClient: mockAPI, clock: clock)
+
+        do {
+            _ = try await fetcher.fetchBatch(["auth"]) { _ in
+                XCTFail("An authentication failure cannot produce messages to persist")
+                return .empty
+            }
+            XCTFail("Authentication failure must abort the sync run")
+        } catch let error as APIError {
+            guard case .authenticationError = error else {
+                return XCTFail("Expected authenticationError, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(mockAPI.getMessageCallCount, 1)
+        XCTAssertTrue(clock.sleeps.isEmpty, "Account auth recovery happens outside the per-message retry loop")
+    }
+
+    func testFetchBatch_revokedCredentialsAbortInsteadOfRecordingPerMessageFailure() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.getMessageErrors["revoked"] = APIError.credentialsRevoked
+
+        let clock = FakeSyncClock()
+        let fetcher = MessageFetcher(apiClient: mockAPI, clock: clock)
+
+        do {
+            _ = try await fetcher.fetchBatch(["revoked"]) { _ in
+                XCTFail("Revoked credentials cannot produce messages to persist")
+                return .empty
+            }
+            XCTFail("Revoked credentials must abort the sync run")
+        } catch let error as APIError {
+            guard case .credentialsRevoked = error else {
+                return XCTFail("Expected credentialsRevoked, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(mockAPI.getMessageCallCount, 1)
+        XCTAssertTrue(clock.sleeps.isEmpty)
+    }
+
+    // MARK: - Cancellation completeness
+
+    func testFetchBatch_cancellationDuringMessageFanoutThrows() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.getMessageResponses["slow"] = GmailMessageBuilder().withId("slow").build()
+        mockAPI.artificialDelay = 10
+        let fetcher = MessageFetcher(apiClient: mockAPI, clock: FakeSyncClock())
+
+        let task = Task {
+            try await fetcher.fetchBatch(["slow"]) { _ in .empty }
+        }
+        for _ in 0..<1_000 where mockAPI.getMessageCallCountSnapshot() == 0 {
+            await Task.yield()
+        }
+        XCTAssertEqual(mockAPI.getMessageCallCountSnapshot(), 1)
+
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("An incomplete fan-out must not return a normal batch outcome")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+    }
+
+    func testFetchBatch_cancellationDuringRetryBackoffThrows() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.getMessageErrors["retry"] = APIError.timeout
+        let clock = LongSuspendingSyncClock()
+        let fetcher = MessageFetcher(apiClient: mockAPI, clock: clock)
+
+        let task = Task {
+            try await fetcher.fetchBatch(["retry"]) { _ in .empty }
+        }
+        for _ in 0..<1_000 where !clock.hasStartedSleeping {
+            await Task.yield()
+        }
+        XCTAssertTrue(clock.hasStartedSleeping)
+
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Cancelling retry backoff must abort the batch")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+    }
+
     // MARK: - fetchAbandonedMessages
 
-    func testFetchAbandonedMessages_classifiesOutcomes() async {
+    func testFetchAbandonedMessages_classifiesOutcomes() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.getMessageResponses["ok"] = GmailMessageBuilder().withId("ok").build()
         mockAPI.getMessageErrors["gone"] = APIError.notFound("gone")
         mockAPI.getMessageErrors["transient"] = APIError.timeout
 
         let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
-        let result = await fetcher.fetchAbandonedMessages(["ok", "gone", "transient"])
+        let result = try await fetcher.fetchAbandonedMessages(["ok", "gone", "transient"])
 
         XCTAssertEqual(result.fetched.map(\.id), ["ok"])
         XCTAssertEqual(result.goneIds, ["gone"])
@@ -89,38 +191,71 @@ final class MessageFetcherTests: XCTestCase {
         XCTAssertEqual(mockAPI.getMessageCallCount, 3, "Abandoned retries make a single attempt per ID, no retry loop")
     }
 
-    func testFetchAbandonedMessages_non404PermanentErrorsAreFailedNotGone() async {
+    func testFetchAbandonedMessages_messageScopedPermanentErrorIsFailedNotGone() async throws {
         let mockAPI = MockGmailAPIClient()
-        mockAPI.getMessageErrors["auth"] = APIError.authenticationError
         mockAPI.getMessageErrors["forbidden"] = APIError.invalidData("Gmail API 403: rate limited")
 
         let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
-        let result = await fetcher.fetchAbandonedMessages(["auth", "forbidden"])
+        let result = try await fetcher.fetchAbandonedMessages(["forbidden"])
 
-        XCTAssertTrue(result.goneIds.isEmpty, "Only a 404 proves the message is gone; auth/403 errors must not delete tracking records")
-        XCTAssertEqual(Set(result.failedIds), Set(["auth", "forbidden"]))
+        XCTAssertTrue(result.goneIds.isEmpty, "Only a 404 proves the message is gone")
+        XCTAssertEqual(result.failedIds, ["forbidden"])
     }
 
-    func testFetchAbandonedMessages_quotaExhaustionRecordsNoOutcomes() async {
+    func testFetchAbandonedMessages_authenticationErrorAbortsTheDrain() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.getMessageErrors["auth"] = APIError.authenticationError
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        do {
+            _ = try await fetcher.fetchAbandonedMessages(["auth"])
+            XCTFail("Authentication failure must abort without spending the abandoned retry budget")
+        } catch let error as APIError {
+            guard case .authenticationError = error else {
+                return XCTFail("Expected authenticationError, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testFetchAbandonedMessages_revokedCredentialsAbortTheDrain() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.getMessageErrors["revoked"] = APIError.credentialsRevoked
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        do {
+            _ = try await fetcher.fetchAbandonedMessages(["revoked"])
+            XCTFail("Revoked credentials must abort without aging out the abandoned pointer")
+        } catch let error as APIError {
+            guard case .credentialsRevoked = error else {
+                return XCTFail("Expected credentialsRevoked, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testFetchAbandonedMessages_quotaExhaustionAbortsTheDrain() async {
         let mockAPI = MockGmailAPIClient()
         mockAPI.getMessageErrors["stuck"] = APIError.quotaExhausted("Daily Limit Exceeded")
 
         let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
-        let result = await fetcher.fetchAbandonedMessages(["stuck"])
-
-        XCTAssertTrue(result.fetched.isEmpty)
-        XCTAssertTrue(result.goneIds.isEmpty)
-        XCTAssertTrue(
-            result.failedIds.isEmpty,
-            "Quota exhaustion is not an attempt outcome - recording it would burn the abandoned-drain retry budget"
-        )
+        do {
+            _ = try await fetcher.fetchAbandonedMessages(["stuck"])
+            XCTFail("Quota exhaustion must abort without spending the abandoned retry budget")
+        } catch let APIError.quotaExhausted(message) {
+            XCTAssertTrue(message.contains("Daily Limit Exceeded"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
-    func testFetchAbandonedMessages_emptyInput_returnsEmpty() async {
+    func testFetchAbandonedMessages_emptyInput_returnsEmpty() async throws {
         let mockAPI = MockGmailAPIClient()
 
         let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
-        let result = await fetcher.fetchAbandonedMessages([])
+        let result = try await fetcher.fetchAbandonedMessages([])
 
         XCTAssertTrue(result.fetched.isEmpty)
         XCTAssertTrue(result.goneIds.isEmpty)
@@ -139,5 +274,21 @@ private actor SuccessCollector {
 
     func values() -> [String] {
         ids
+    }
+}
+
+private final class LongSuspendingSyncClock: SyncClock, @unchecked Sendable {
+    private let lock = NSLock()
+    private var startedSleeping = false
+
+    var hasStartedSleeping: Bool {
+        lock.withLock { startedSleeping }
+    }
+
+    func now() -> Date { Date(timeIntervalSince1970: 1_700_000_000) }
+
+    func sleep(nanoseconds: UInt64) async throws {
+        lock.withLock { startedSleeping = true }
+        try await Task.sleep(nanoseconds: 60_000_000_000)
     }
 }

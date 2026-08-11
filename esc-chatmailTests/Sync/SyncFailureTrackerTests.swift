@@ -5,8 +5,9 @@ import CoreData
 /// Unit coverage for SyncFailureTracker's staged ledger model: failed IDs are
 /// staged as durable deferred `AbandonedSyncMessage` rows in the CALLER's
 /// context (never saved by the tracker), advancement decisions stage the
-/// matching transition, and success-side UserDefaults mutations happen only in
-/// `commit(_:)` after the caller's save.
+/// matching transition, and success-side timestamps happen only in `commit(_:)`
+/// after the caller's save. Durable strike-count behavior belongs to
+/// SyncFailureCounterCheckpointStore tests.
 final class SyncFailureTrackerTests: XCTestCase {
 
     private var defaults: UserDefaults!
@@ -136,7 +137,7 @@ final class SyncFailureTrackerTests: XCTestCase {
         await sut.recordFailure(fetchFailedIds: ["id-1"], in: context)
 
         let count = await sut.consecutiveFailureCount
-        XCTAssertEqual(count, 1)
+        XCTAssertEqual(count, 0, "Ledger staging must never mutate the legacy counter")
         let rows = await committedRows()
         XCTAssertTrue(
             rows.isEmpty,
@@ -179,7 +180,7 @@ final class SyncFailureTrackerTests: XCTestCase {
         try await coreDataStack.saveAsync(context: secondRun)
 
         let count = await sut.consecutiveFailureCount
-        XCTAssertEqual(count, 2)
+        XCTAssertEqual(count, 0)
         let rows = await committedRows()
         XCTAssertEqual(
             Set(rows.map { $0.gmailMessageId ?? "" }), ["b", "c"],
@@ -254,7 +255,11 @@ final class SyncFailureTrackerTests: XCTestCase {
         try await coreDataStack.saveAsync(context: failingRun)
 
         let cleanRun = coreDataStack.newBackgroundContext()
-        let plan = await sut.planHistoryAdvance(hadFailures: false, in: cleanRun)
+        let plan = await sut.planHistoryAdvance(
+            hadFailures: false,
+            consecutiveFailureCount: 0,
+            in: cleanRun
+        )
 
         XCTAssertTrue(plan.shouldAdvance)
         XCTAssertEqual(plan.outcome, .advancedClean)
@@ -270,12 +275,16 @@ final class SyncFailureTrackerTests: XCTestCase {
         let context = coreDataStack.newBackgroundContext()
         await sut.recordFailure(fetchFailedIds: ["x"], in: context)
 
-        let plan = await sut.planHistoryAdvance(hadFailures: true, in: context)
+        let plan = await sut.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: 1,
+            in: context
+        )
 
         XCTAssertFalse(plan.shouldAdvance)
         XCTAssertEqual(plan.outcome, .held)
         let count = await sut.consecutiveFailureCount
-        XCTAssertEqual(count, 1)
+        XCTAssertEqual(count, 0)
     }
 
     func testCommit_heldPlan_changesNothing() async {
@@ -285,7 +294,7 @@ final class SyncFailureTrackerTests: XCTestCase {
         await sut.commit(.held)
 
         let count = await sut.consecutiveFailureCount
-        XCTAssertEqual(count, 1, "A held run must not reset the failure counter")
+        XCTAssertEqual(count, 0, "The tracker does not own the durable failure counter")
         let time = await sut.lastSuccessfulSyncTime
         XCTAssertNil(time)
     }
@@ -293,7 +302,12 @@ final class SyncFailureTrackerTests: XCTestCase {
     func testCommit_appliesSuccessStateOnlyWhenCalled() async throws {
         let context = coreDataStack.newBackgroundContext()
         await sut.recordFailure(fetchFailedIds: ["x"], in: context)
-        let plan = await sut.planHistoryAdvance(hadFailures: false, in: context)
+        defaults.set(1, forKey: SyncConfig.consecutiveFailuresKey)
+        let plan = await sut.planHistoryAdvance(
+            hadFailures: false,
+            consecutiveFailureCount: 0,
+            in: context
+        )
         try await coreDataStack.saveAsync(context: context)
 
         // The save alone must not touch the tracker's UserDefaults state —

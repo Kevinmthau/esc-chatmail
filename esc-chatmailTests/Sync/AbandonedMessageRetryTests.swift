@@ -225,7 +225,11 @@ final class AbandonedMessageRetryTests: XCTestCase {
 
         let context = coreDataStack.newBackgroundContext()
         await sut.recordFailure(fetchFailedIds: ["round-trip"], in: context)
-        let plan = await sut.planHistoryAdvance(hadFailures: true, in: context)
+        let plan = await sut.planHistoryAdvance(
+            hadFailures: true,
+            consecutiveFailureCount: SyncConfig.maxConsecutiveSyncFailures,
+            in: context
+        )
         XCTAssertTrue(plan.shouldAdvance, "The seeded counter must arm the escape hatch")
         try await coreDataStack.saveAsync(context: context)
         await sut.commit(plan)

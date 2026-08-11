@@ -92,6 +92,14 @@ struct SyncConfig {
     /// Maximum messages to fetch per API call
     static let maxMessagesPerRequest = 500
 
+    /// Maximum history records requested from Gmail per page.
+    static let maxHistoryResultsPerRequest = 500
+
+    /// Maximum history pages retained in memory for one foreground slice.
+    /// At Gmail's 500-record page limit this preserves the old ~5,000-record
+    /// bound while model-v3 checkpoints carry larger backlogs across runs.
+    static let maxHistoryPagesPerForegroundSlice = 10
+
     /// Maximum concurrent message fetch requests to prevent resource exhaustion
     static let maxConcurrentMessageFetches = 15
 

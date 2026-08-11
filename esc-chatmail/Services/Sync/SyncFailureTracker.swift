@@ -9,9 +9,11 @@ import CoreData
 /// Failed message IDs are tracked as durable `AbandonedSyncMessage` rows staged
 /// into the CALLER's sync context — never saved here — so the tracked set and
 /// every ledger transition commit atomically with the history cursor at the
-/// run's existing final save. UserDefaults holds only the consecutive-failure
-/// counter and the last-success timestamp; success-side mutations are applied
-/// exclusively through `commit(_:)` after the final save has succeeded.
+/// run's existing final save. The consecutive-failure counter lives in its own
+/// model-v3 SyncCheckpoint row and is supplied explicitly to advancement
+/// planning; this actor never increments that counter ahead of a Core Data
+/// save. Success-side mutations are applied exclusively through `commit(_:)`
+/// after the final save has succeeded.
 ///
 /// Row lifecycle (`AbandonedSyncMessage.state`):
 /// - `deferred`: still covered by the frozen cursor; retried by the normal
@@ -42,10 +44,10 @@ actor SyncFailureTracker {
     }
 
     /// Latched when `recordFailure` could not stage the current failing set
-    /// (ledger read failed). While set, the escape hatch must hold: the counter
-    /// kept incrementing, but the ledger does not contain the IDs the cursor
-    /// would advance past — abandoning a stale (or empty) set would lose the
-    /// unstaged IDs with no durable trace. Cleared by the next successful
+    /// (ledger read failed). While set, the escape hatch must hold: the ledger
+    /// does not contain the IDs the cursor would advance past, so abandoning a
+    /// stale (or empty) set would lose the unstaged IDs with no durable trace.
+    /// Cleared by the next successful
     /// staging or by a committed advance (in-memory only; a relaunch clears it,
     /// and the next failing run re-records the same frozen window).
     private var deferredStagingFailed = false
@@ -58,18 +60,14 @@ actor SyncFailureTracker {
     /// this before the run's final save; use `planHistoryAdvance(hadFailures:in:)`
     /// plus `commit(_:)` instead.
     func recordSuccess() {
-        defaults.set(0, forKey: SyncConfig.consecutiveFailuresKey)
-        // Legacy cleanup: tracked IDs lived under this key before they moved
-        // into durable AbandonedSyncMessage rows.
-        defaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)
-        defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-        log.debug("Sync success - reset failure tracking")
+        recordResolvedProgress(recordsSuccessfulSync: true)
     }
 
-    /// Records this run's complete failing set: increments the consecutive
-    /// failure counter and reconciles the durable deferred ledger inside the
-    /// caller's context WITHOUT saving, so the rows commit — or die — with the
-    /// run's final save and can never diverge from the cursor.
+    /// Records this run's complete failing set by reconciling the durable
+    /// deferred ledger inside the caller's context WITHOUT saving, so the rows
+    /// commit — or die — with the run's final save and can never diverge from
+    /// the cursor. The orchestrator stages the separate durable strike count
+    /// only after any intermediate save has finished.
     ///
     /// The staged set REPLACES the previous deferred set. The cursor is frozen
     /// while failures persist, so each failing run re-scans the same window and
@@ -106,14 +104,6 @@ actor SyncFailureTracker {
         let orderedIds = dedupedIds
         let classById = classesById
         let trackedIdSet = seen
-
-        // The counter increments immediately (not post-save) so the escape
-        // hatch can fire in the same run that reaches the threshold. A run
-        // whose final save later fails leaves the counter one high — a
-        // conservative error: the hatch may arm one run early, and the set it
-        // abandons is always the current run's staged rows.
-        let consecutiveFailures = defaults.integer(forKey: SyncConfig.consecutiveFailuresKey) + 1
-        defaults.set(consecutiveFailures, forKey: SyncConfig.consecutiveFailuresKey)
 
         let staged: Bool = await context.perform {
             let trackedAt = Date()
@@ -174,7 +164,7 @@ actor SyncFailureTracker {
         }
         deferredStagingFailed = !staged
 
-        log.warning("Consecutive failures: \(consecutiveFailures)/\(SyncConfig.maxConsecutiveSyncFailures), staged \(staged ? orderedIds.count : 0) deferred IDs")
+        log.warning("Staged \(staged ? orderedIds.count : 0) deferred IDs; the executor owns the durable failure count")
     }
 
     // MARK: - History Advancement
@@ -218,6 +208,7 @@ actor SyncFailureTracker {
     /// discard the plan.
     func planHistoryAdvance(
         hadFailures: Bool,
+        consecutiveFailureCount: Int,
         in context: NSManagedObjectContext
     ) async -> HistoryAdvancePlan {
         if !hadFailures {
@@ -235,10 +226,8 @@ actor SyncFailureTracker {
             return HistoryAdvancePlan(outcome: .advancedClean)
         }
 
-        let consecutiveFailures = defaults.integer(forKey: SyncConfig.consecutiveFailuresKey)
-
-        guard consecutiveFailures >= SyncConfig.maxConsecutiveSyncFailures else {
-            log.info("Not advancing historyId - \(consecutiveFailures) consecutive failures (max: \(SyncConfig.maxConsecutiveSyncFailures))")
+        guard consecutiveFailureCount >= SyncConfig.maxConsecutiveSyncFailures else {
+            log.info("Not advancing historyId - \(consecutiveFailureCount) consecutive failures (max: \(SyncConfig.maxConsecutiveSyncFailures))")
             return .held
         }
 
@@ -251,7 +240,7 @@ actor SyncFailureTracker {
             return .held
         }
 
-        log.warning("Maximum consecutive failures (\(consecutiveFailures)) reached - advancing historyId to prevent deadlock")
+        log.warning("Maximum consecutive failures (\(consecutiveFailureCount)) reached - advancing historyId to prevent deadlock")
 
         let abandonedCount: Int? = await context.perform {
             let abandonedAt = Date()
@@ -296,16 +285,19 @@ actor SyncFailureTracker {
     /// save has durably committed the staged ledger rows (and, when advancing,
     /// the cursor). Never call this when the save failed — discarding the plan
     /// leaves every tracker state intact for the retry.
-    func commit(_ plan: HistoryAdvancePlan) async {
+    func commit(
+        _ plan: HistoryAdvancePlan,
+        recordsSuccessfulSync: Bool = true
+    ) async {
         switch plan.outcome {
         case .held:
             return
         case .advancedClean:
             deferredStagingFailed = false
-            recordSuccess()
+            recordResolvedProgress(recordsSuccessfulSync: recordsSuccessfulSync)
         case .advancedAbandoning(let count):
             deferredStagingFailed = false
-            recordSuccess()
+            recordResolvedProgress(recordsSuccessfulSync: recordsSuccessfulSync)
             // Newly abandoned rows carry their original drain budget, so the
             // drain has work again.
             mayHaveRetryableAbandonedMessages = true
@@ -316,6 +308,20 @@ actor SyncFailureTracker {
                     userInfo: ["count": count]
                 )
             }
+        }
+    }
+
+    /// A clean bounded history slice resolves the same failure state as a
+    /// terminal sync, but it must not update the user-facing last-success time
+    /// until Gmail's terminal page and Account cursor commit.
+    private func recordResolvedProgress(recordsSuccessfulSync: Bool) {
+        defaults.set(0, forKey: SyncConfig.consecutiveFailuresKey)
+        defaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)
+        if recordsSuccessfulSync {
+            defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            log.debug("Sync success - reset failure tracking")
+        } else {
+            log.debug("History slice committed - reset failure tracking without recording terminal success")
         }
     }
 
@@ -353,6 +359,14 @@ actor SyncFailureTracker {
     /// Returns the number of consecutive sync failures
     var consecutiveFailureCount: Int {
         defaults.integer(forKey: SyncConfig.consecutiveFailuresKey)
+    }
+
+    /// Retires pre-v3 account-scoped state after a transaction containing the
+    /// durable counter row has saved. A crash before this cleanup is safe: the
+    /// row (including a zero tombstone) wins over UserDefaults on the next run.
+    func retireLegacyCounterState() {
+        defaults.removeObject(forKey: SyncConfig.consecutiveFailuresKey)
+        defaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)
     }
 
     /// Clears all failure tracking state

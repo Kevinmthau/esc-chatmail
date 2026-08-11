@@ -31,13 +31,18 @@ final class HistoryCollectionPhaseIntegrationTests: XCTestCase {
 
         let context = makePhaseContext()
         let startingHistoryId = "1000"
-        let result = try await phase.execute(input: startingHistoryId, context: context)
+        let result = try await phase.execute(
+            input: HistoryCollectionRequest(startHistoryId: startingHistoryId, pageToken: nil),
+            context: context
+        )
 
         XCTAssertTrue(result.wasTruncated)
-        XCTAssertEqual(result.latestHistoryId, startingHistoryId)
-        XCTAssertEqual(result.records.count, 50)
-        XCTAssertEqual(result.newMessageIds.count, 50)
-        XCTAssertEqual(mockAPI.listHistoryCallCount, 50)
+        XCTAssertEqual(result.latestHistoryId, "4009")
+        XCTAssertEqual(result.nextPageToken, "p10")
+        XCTAssertEqual(result.records.count, SyncConfig.maxHistoryPagesPerForegroundSlice)
+        XCTAssertEqual(result.newMessageIds.count, SyncConfig.maxHistoryPagesPerForegroundSlice)
+        XCTAssertEqual(mockAPI.listHistoryCallCount, SyncConfig.maxHistoryPagesPerForegroundSlice)
+        XCTAssertEqual(mockAPI.listHistoryLastMaxResults, SyncConfig.maxHistoryResultsPerRequest)
     }
 
     func testExecute_propagatesHistoryIdExpiredForRecoveryHandling() async {
@@ -52,7 +57,10 @@ final class HistoryCollectionPhaseIntegrationTests: XCTestCase {
         )
 
         do {
-            _ = try await phase.execute(input: "start", context: makePhaseContext())
+            _ = try await phase.execute(
+                input: HistoryCollectionRequest(startHistoryId: "start", pageToken: nil),
+                context: makePhaseContext()
+            )
             XCTFail("Expected historyIdExpired error")
         } catch let error as APIError {
             if case .historyIdExpired = error {
@@ -91,11 +99,187 @@ final class HistoryCollectionPhaseIntegrationTests: XCTestCase {
             historyProcessor: HistoryProcessor()
         )
 
-        let result = try await phase.execute(input: "1000", context: makePhaseContext())
+        let result = try await phase.execute(
+            input: HistoryCollectionRequest(startHistoryId: "1000", pageToken: nil),
+            context: makePhaseContext()
+        )
 
         XCTAssertEqual(result.records.map(\.id), ["history-delete"])
         XCTAssertTrue(result.newMessageIds.isEmpty)
         XCTAssertEqual(result.latestHistoryId, "1001")
+        XCTAssertFalse(result.wasTruncated)
+        XCTAssertNil(result.nextPageToken)
+    }
+
+    func testExecute_fetchesOnlyMatchingExcludedRemoteSendEcho() async throws {
+        let matchingRemoteID = "remote-trashed-send"
+        let unrelatedTrashID = "unrelated-trash"
+        let matchingMessage = GmailMessage(
+            id: matchingRemoteID,
+            threadId: "remote-thread",
+            labelIds: ["SENT", "TRASH"],
+            snippet: nil,
+            historyId: nil,
+            internalDate: nil,
+            payload: nil,
+            sizeEstimate: nil
+        )
+        let unrelatedMessage = GmailMessage(
+            id: unrelatedTrashID,
+            threadId: "unrelated-thread",
+            labelIds: ["TRASH"],
+            snippet: nil,
+            historyId: nil,
+            internalDate: nil,
+            payload: nil,
+            sizeEstimate: nil
+        )
+        let historyRecord = HistoryRecord(
+            id: "history-excluded-send-echo",
+            messages: nil,
+            messagesAdded: [
+                HistoryMessageAdded(message: matchingMessage),
+                HistoryMessageAdded(message: unrelatedMessage)
+            ],
+            messagesDeleted: nil,
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [historyRecord],
+                    nextPageToken: nil,
+                    historyId: "1001"
+                )
+            )
+        ])
+        let phaseContext = makePhaseContext()
+        try await phaseContext.coreDataContext.perform {
+            let record = phaseContext.coreDataContext.insertTestObject(
+                OutboundSendMutationRecord.self
+            )
+            record.id = "optimistic-send"
+            record.createdAt = Date()
+            record.hidden = false
+            record.newlyInsertedConversation = true
+            record.remoteCommittedMessageId = matchingRemoteID
+            record.remoteCommittedThreadId = "remote-thread"
+
+            let definitelyUnsentRecord = phaseContext.coreDataContext.insertTestObject(
+                OutboundSendMutationRecord.self
+            )
+            definitelyUnsentRecord.id = "definitely-unsent-optimistic-message"
+            definitelyUnsentRecord.createdAt = Date()
+            definitelyUnsentRecord.hidden = false
+            definitelyUnsentRecord.newlyInsertedConversation = true
+            definitelyUnsentRecord.remoteCommittedMessageId =
+                OutboundSendRemoteState.notSentMessageID
+            try phaseContext.coreDataContext.save()
+        }
+        let phase = HistoryCollectionPhase(
+            messageFetcher: MessageFetcher(apiClient: mockAPI),
+            historyProcessor: HistoryProcessor()
+        )
+
+        let result = try await phase.execute(
+            input: HistoryCollectionRequest(startHistoryId: "1000", pageToken: nil),
+            context: phaseContext
+        )
+
+        XCTAssertEqual(result.newMessageIds, [matchingRemoteID])
+        XCTAssertFalse(result.newMessageIds.contains(unrelatedTrashID))
+    }
+
+    func testExecute_fetchesExcludedCandidatesWhileLocalMarkerNeedsIdentityInspection() async throws {
+        let candidateID = "possibly-ambiguous-send-echo"
+        let historyRecord = HistoryRecord(
+            id: "history-ambiguous-excluded-send-echo",
+            messages: nil,
+            messagesAdded: [
+                HistoryMessageAdded(
+                    message: GmailMessage(
+                        id: candidateID,
+                        threadId: "candidate-thread",
+                        labelIds: ["SPAM"],
+                        snippet: nil,
+                        historyId: nil,
+                        internalDate: nil,
+                        payload: nil,
+                        sizeEstimate: nil
+                    )
+                )
+            ],
+            messagesDeleted: nil,
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [historyRecord],
+                    nextPageToken: nil,
+                    historyId: "1001"
+                )
+            )
+        ])
+        let phaseContext = makePhaseContext()
+        try await phaseContext.coreDataContext.perform {
+            let record = phaseContext.coreDataContext.insertTestObject(
+                OutboundSendMutationRecord.self
+            )
+            record.id = "ambiguous-optimistic-send"
+            record.createdAt = Date()
+            record.hidden = false
+            record.newlyInsertedConversation = true
+            record.remoteCommittedMessageId = OutboundSendRemoteState.ambiguousMessageID
+            try phaseContext.coreDataContext.save()
+        }
+        let phase = HistoryCollectionPhase(
+            messageFetcher: MessageFetcher(apiClient: mockAPI),
+            historyProcessor: HistoryProcessor()
+        )
+
+        let result = try await phase.execute(
+            input: HistoryCollectionRequest(startHistoryId: "1000", pageToken: nil),
+            context: phaseContext
+        )
+
+        XCTAssertEqual(result.newMessageIds, [candidateID])
+    }
+
+    func testExecute_resumesFromProvidedPageToken() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setHistoryResponsesByPageToken([
+            (
+                pageToken: "resume-token",
+                response: HistoryResponse(
+                    history: [],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        let phase = HistoryCollectionPhase(
+            messageFetcher: MessageFetcher(apiClient: mockAPI),
+            historyProcessor: HistoryProcessor()
+        )
+
+        let result = try await phase.execute(
+            input: HistoryCollectionRequest(
+                startHistoryId: "1000",
+                pageToken: "resume-token"
+            ),
+            context: makePhaseContext()
+        )
+
+        XCTAssertEqual(mockAPI.listHistoryLastStartId, "1000")
+        XCTAssertEqual(mockAPI.listHistoryLastPageToken, "resume-token")
+        XCTAssertEqual(result.latestHistoryId, "2000")
         XCTAssertFalse(result.wasTruncated)
     }
 

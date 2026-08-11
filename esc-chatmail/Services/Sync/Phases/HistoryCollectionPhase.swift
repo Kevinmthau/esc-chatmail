@@ -2,7 +2,7 @@ import Foundation
 
 /// Phase 1: Collect all history changes since last sync
 struct HistoryCollectionPhase: SyncPhase {
-    typealias Input = String // startHistoryId
+    typealias Input = HistoryCollectionRequest
     typealias Output = HistoryCollectionResult
 
     let name = "History Collection"
@@ -12,23 +12,31 @@ struct HistoryCollectionPhase: SyncPhase {
     private let historyProcessor: HistoryProcessor
     private let log = LogCategory.sync.logger
 
-    /// Maximum number of history pages to fetch to prevent unbounded memory growth
-    /// If exceeded, sync will continue with partial data (next sync will catch remaining)
-    private let maxHistoryPages = 50
+    /// Bounded page budget keeps one slice's history records and derived IDs
+    /// predictable in memory. The next page token is persisted in Core Data.
+    private let maxHistoryPages: Int
+    private let maxResultsPerPage: Int
 
-    init(messageFetcher: MessageFetcher, historyProcessor: HistoryProcessor) {
+    init(
+        messageFetcher: MessageFetcher,
+        historyProcessor: HistoryProcessor,
+        maxHistoryPages: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
+        maxResultsPerPage: Int = SyncConfig.maxHistoryResultsPerRequest
+    ) {
         self.messageFetcher = messageFetcher
         self.historyProcessor = historyProcessor
+        self.maxHistoryPages = max(1, maxHistoryPages)
+        self.maxResultsPerPage = max(1, min(maxResultsPerPage, 500))
     }
 
     func execute(
-        input startHistoryId: String,
+        input request: HistoryCollectionRequest,
         context: SyncPhaseContext
     ) async throws -> HistoryCollectionResult {
         context.reportProgress(0, status: "Fetching history...", phase: self)
 
-        var pageToken: String? = nil
-        var latestHistoryId = startHistoryId
+        var pageToken = request.pageToken
+        var latestHistoryId = request.startHistoryId
         var allNewMessageIds: Set<String> = []
         var allHistoryRecords: [HistoryRecord] = []
         var pageCount = 0
@@ -37,13 +45,22 @@ struct HistoryCollectionPhase: SyncPhase {
             try Task.checkCancellation()
 
             let (history, newHistoryId, nextPageToken) = try await messageFetcher.listHistory(
-                startHistoryId: startHistoryId,
-                pageToken: pageToken
+                startHistoryId: request.startHistoryId,
+                pageToken: pageToken,
+                maxResults: maxResultsPerPage
             )
 
             if let history = history, !history.isEmpty {
                 log.debug("Received \(history.count) history records")
-                let newIds = historyProcessor.extractNewMessageIds(from: history)
+                let excludedSendEchoIDs = try await HistoryProcessor
+                    .excludedRemoteSendEchoMessageIDs(
+                        from: history,
+                        in: context.coreDataContext
+                    )
+                let newIds = historyProcessor.extractNewMessageIds(
+                    from: history,
+                    includingExcludedMessageIDs: excludedSendEchoIDs
+                )
                 allNewMessageIds.formUnion(newIds)
                 // Preserve the original history records for downstream lightweight processing.
                 // Deletions and any future lightweight operations rely on the full record payload.
@@ -57,16 +74,16 @@ struct HistoryCollectionPhase: SyncPhase {
             pageToken = nextPageToken
             pageCount += 1
 
-            // Prevent unbounded memory growth by limiting pages
+            // Return the next token instead of discarding it. The orchestrator
+            // stages it with this slice's effects in the final Core Data save.
             if pageCount >= maxHistoryPages && pageToken != nil {
-                log.warning("History collection reached page limit (\(maxHistoryPages)). Returning starting historyId to retry from same point on next sync.")
-                // Return starting historyId so next sync retries from same point,
-                // preventing permanent loss of changes on pages 51+
+                log.warning("History collection reached page limit (\(maxHistoryPages)); returning a resumable continuation")
+                context.reportProgress(1.0, status: "History slice collected", phase: self)
                 return HistoryCollectionResult(
                     newMessageIds: Array(allNewMessageIds),
                     records: allHistoryRecords,
-                    latestHistoryId: startHistoryId,
-                    wasTruncated: true
+                    latestHistoryId: latestHistoryId,
+                    nextPageToken: pageToken
                 )
             }
         } while pageToken != nil
@@ -79,7 +96,7 @@ struct HistoryCollectionPhase: SyncPhase {
             newMessageIds: Array(allNewMessageIds),
             records: allHistoryRecords,
             latestHistoryId: latestHistoryId,
-            wasTruncated: false
+            nextPageToken: nil
         )
     }
 }

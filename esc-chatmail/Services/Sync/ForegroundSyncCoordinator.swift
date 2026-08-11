@@ -2,7 +2,9 @@ import Foundation
 
 @MainActor
 protocol ForegroundSyncPerforming: AnyObject {
-    func triggerIncrementalSyncIfPossible() async -> ForegroundSyncRequestResult
+    func triggerIncrementalSyncIfPossible(
+        completion: @escaping @MainActor @Sendable (Bool) -> Void
+    ) async -> ForegroundSyncRequestResult
     func waitForCurrentSyncToComplete() async
 }
 
@@ -24,6 +26,7 @@ final class ForegroundSyncCoordinator {
     private let authSession: any ForegroundSyncAuthenticationProviding
     private let periodicInterval: TimeInterval
     private let minimumSyncGap: TimeInterval
+    private let maxImmediateFollowUpRuns: Int
     private let log = LogCategory.sync.logger
 
     private var periodicTask: Task<Void, Never>?
@@ -35,12 +38,14 @@ final class ForegroundSyncCoordinator {
         syncEngine: (any ForegroundSyncPerforming)? = nil,
         authSession: (any ForegroundSyncAuthenticationProviding)? = nil,
         periodicInterval: TimeInterval = 60,
-        minimumSyncGap: TimeInterval = 30
+        minimumSyncGap: TimeInterval = 30,
+        maxImmediateFollowUpRuns: Int = 3
     ) {
         self.syncEngine = syncEngine ?? SyncEngine.shared
         self.authSession = authSession ?? AuthSession.shared
         self.periodicInterval = periodicInterval
         self.minimumSyncGap = minimumSyncGap
+        self.maxImmediateFollowUpRuns = max(0, maxImmediateFollowUpRuns)
     }
 
     @discardableResult
@@ -73,13 +78,69 @@ final class ForegroundSyncCoordinator {
     }
 
     func triggerSync(reason: String, force: Bool = false) {
+        triggerSync(
+            reason: reason,
+            force: force,
+            remainingImmediateFollowUps: maxImmediateFollowUpRuns
+        )
+    }
+
+    /// Routes post-send reconciliation through the app-scoped foreground
+    /// scheduler so bounded history slices retain their continuation policy.
+    func performIncrementalSync() async throws {
+        let outcome = await requestSyncIfNeeded(
+            reason: "postSend",
+            force: true,
+            remainingImmediateFollowUps: maxImmediateFollowUpRuns
+        )
+        if outcome == .alreadyInProgress {
+            triggerSyncAfterCurrent(
+                reason: "postSendAfterCurrent",
+                force: true,
+                remainingImmediateFollowUps: maxImmediateFollowUpRuns
+            )
+        }
+    }
+
+    private func triggerSync(
+        reason: String,
+        force: Bool,
+        remainingImmediateFollowUps: Int
+    ) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            _ = await self.requestSyncIfNeeded(reason: reason, force: force)
+            let outcome = await self.requestSyncIfNeeded(
+                reason: reason,
+                force: force,
+                remainingImmediateFollowUps: remainingImmediateFollowUps
+            )
+            if outcome == .alreadyInProgress {
+                // Account transitions deliberately hold the shared boundary
+                // until store validation/repair finishes. Preserve the
+                // immediate auth/scene trigger across that short boundary (or
+                // any real active run) instead of waiting for the next timer.
+                self.triggerSyncAfterCurrent(
+                    reason: "\(reason)AfterCurrent",
+                    force: force,
+                    remainingImmediateFollowUps: remainingImmediateFollowUps
+                )
+            }
         }
     }
 
     func triggerSyncAfterCurrent(reason: String, force: Bool = false) {
+        triggerSyncAfterCurrent(
+            reason: reason,
+            force: force,
+            remainingImmediateFollowUps: maxImmediateFollowUpRuns
+        )
+    }
+
+    private func triggerSyncAfterCurrent(
+        reason: String,
+        force: Bool,
+        remainingImmediateFollowUps: Int
+    ) {
         deferredSyncTask?.cancel()
         let taskID = UUID()
         deferredSyncTaskID = taskID
@@ -99,7 +160,11 @@ final class ForegroundSyncCoordinator {
                     return
                 }
 
-                let outcome = await self.requestSyncIfNeeded(reason: reason, force: force)
+                let outcome = await self.requestSyncIfNeeded(
+                    reason: reason,
+                    force: force,
+                    remainingImmediateFollowUps: remainingImmediateFollowUps
+                )
                 if outcome != .alreadyInProgress {
                     return
                 }
@@ -108,7 +173,11 @@ final class ForegroundSyncCoordinator {
     }
 
     func performUserInitiatedSync(reason: String) async {
-        let outcome = await requestSyncIfNeeded(reason: reason, force: true)
+        let outcome = await requestSyncIfNeeded(
+            reason: reason,
+            force: true,
+            remainingImmediateFollowUps: maxImmediateFollowUpRuns
+        )
         if outcome == .started {
             log.debug("User-initiated sync waiting for started run (\(reason))")
             await syncEngine.waitForCurrentSyncToComplete()
@@ -121,7 +190,11 @@ final class ForegroundSyncCoordinator {
         await syncEngine.waitForCurrentSyncToComplete()
         guard !Task.isCancelled else { return }
 
-        let retryOutcome = await requestSyncIfNeeded(reason: "\(reason)AfterCurrent", force: true)
+        let retryOutcome = await requestSyncIfNeeded(
+            reason: "\(reason)AfterCurrent",
+            force: true,
+            remainingImmediateFollowUps: maxImmediateFollowUpRuns
+        )
         if retryOutcome == .started {
             log.debug("User-initiated sync waiting for started run (\(reason))")
             await syncEngine.waitForCurrentSyncToComplete()
@@ -156,7 +229,11 @@ final class ForegroundSyncCoordinator {
         case skipped
     }
 
-    private func requestSyncIfNeeded(reason: String, force: Bool) async -> SyncTriggerOutcome {
+    private func requestSyncIfNeeded(
+        reason: String,
+        force: Bool,
+        remainingImmediateFollowUps: Int
+    ) async -> SyncTriggerOutcome {
         guard authSession.isAuthenticated else {
             log.debug("Skipping foreground sync (\(reason)): user not authenticated")
             return .skipped
@@ -169,7 +246,15 @@ final class ForegroundSyncCoordinator {
             return .skipped
         }
 
-        switch await syncEngine.triggerIncrementalSyncIfPossible() {
+        switch await syncEngine.triggerIncrementalSyncIfPossible(
+            completion: { [weak self] needsFollowUp in
+                guard needsFollowUp else { return }
+                self?.scheduleImmediateFollowUp(
+                    after: reason,
+                    remainingImmediateFollowUps: remainingImmediateFollowUps
+                )
+            }
+        ) {
         case .started:
             lastSyncTriggerAt = Date()
             return .started
@@ -180,5 +265,25 @@ final class ForegroundSyncCoordinator {
             log.debug("Skipping foreground sync (\(reason)): network unavailable")
             return .skipped
         }
+    }
+
+    private func scheduleImmediateFollowUp(
+        after reason: String,
+        remainingImmediateFollowUps: Int
+    ) {
+        guard authSession.isAuthenticated, periodicTask != nil else {
+            log.debug("Not scheduling foreground sync continuation outside an active session")
+            return
+        }
+        guard remainingImmediateFollowUps > 0 else {
+            log.warning("Foreground sync reached its immediate continuation limit; leaving durable progress for the periodic loop")
+            return
+        }
+
+        triggerSync(
+            reason: "\(reason)Continuation",
+            force: true,
+            remainingImmediateFollowUps: remainingImmediateFollowUps - 1
+        )
     }
 }

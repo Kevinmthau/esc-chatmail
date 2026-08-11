@@ -152,6 +152,42 @@ final class MessagePersisterDispositionTests: XCTestCase {
     }
 
     @MainActor
+    func testAuthenticationFailuresDuringLargeBodyFetchAbortWithNoVerdict() async throws {
+        for id in ["m-auth", "m-revoked"] {
+            let persister = makePersister(
+                messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
+                    if id == "m-auth" {
+                        throw APIError.authenticationError
+                    }
+                    throw APIError.credentialsRevoked
+                })
+            )
+            let context = coreDataStack.newBackgroundContext()
+
+            do {
+                _ = try await persister.saveMessages(
+                    [makeFullMessage(id: "m-inline"), makeLargeBodyMessage(id: id)],
+                    myAliases: [Self.myEmail],
+                    in: context
+                )
+                XCTFail("Account authentication failures must abort the whole batch")
+            } catch let error as APIError {
+                XCTAssertTrue(error.isAccountScopedSyncAbort)
+            }
+
+            let rowCount: Int = await context.perform {
+                let request = Message.fetchRequest()
+                return (try? context.count(for: request)) ?? -1
+            }
+            XCTAssertEqual(
+                rowCount,
+                0,
+                "An account outage must not create rows or per-message failure verdicts"
+            )
+        }
+    }
+
+    @MainActor
     func testCancelledBodyFetchThrowsWithoutVerdict() async throws {
         let persister = makePersister(
             messageProcessor: MessageProcessor(fetchAttachmentData: { _, _ in
@@ -259,6 +295,90 @@ final class MessagePersisterDispositionTests: XCTestCase {
     }
 
     @MainActor
+    func testSaveMessage_excludedCommittedSendConsumesOptimisticGraphAtomically() async throws {
+        let persister = makePersister()
+        let context = coreDataStack.newBackgroundContext()
+        let optimisticID = "optimistic-exact-excluded"
+        let remoteID = "remote-exact-excluded"
+        try await seedOptimisticSend(
+            optimisticID: optimisticID,
+            remoteMessageID: remoteID,
+            in: context
+        )
+
+        let disposition = try await persister.saveMessage(
+            makeFullMessage(id: remoteID, labels: ["SENT", "TRASH"]),
+            myAliases: [Self.myEmail],
+            in: context
+        )
+
+        XCTAssertEqual(disposition, .excluded)
+        let stateBeforeSave = try await durableOptimisticState(
+            optimisticID: optimisticID
+        )
+        XCTAssertEqual(
+            stateBeforeSave,
+            OptimisticState(messages: 1, mutationRecords: 1, conversations: 1),
+            "The replacement must remain entirely pending until the caller commits its cursor save"
+        )
+
+        try await coreDataStack.saveAsync(context: context)
+
+        let stateAfterSave = try await durableOptimisticState(
+            optimisticID: optimisticID
+        )
+        XCTAssertEqual(
+            stateAfterSave,
+            OptimisticState(messages: 0, mutationRecords: 0, conversations: 0)
+        )
+    }
+
+    @MainActor
+    func testSaveMessages_excludedDeterministicEchoConsumesOnlyMatchingLocalMarker() async throws {
+        let persister = makePersister()
+        let context = coreDataStack.newBackgroundContext()
+        let optimisticID = "optimistic-marker-excluded"
+        let matchingRemoteID = "remote-marker-excluded"
+        let unrelatedRemoteID = "unrelated-excluded"
+        try await seedOptimisticSend(
+            optimisticID: optimisticID,
+            remoteMessageID: OutboundSendRemoteState.ambiguousMessageID,
+            in: context
+        )
+        let matchingEcho = GmailMessageBuilder()
+            .withId(matchingRemoteID)
+            .withThreadId("remote-marker-thread")
+            .withLabels(["SENT", "SPAM"])
+            .withMessageId(
+                MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+            )
+            .build()
+        let unrelatedExcludedMessage = GmailMessageBuilder()
+            .withId(unrelatedRemoteID)
+            .withThreadId("unrelated-thread")
+            .withLabels(["SPAM"])
+            .withMessageId("<unrelated@example.com>")
+            .build()
+
+        let report = try await persister.saveMessages(
+            [unrelatedExcludedMessage, matchingEcho],
+            myAliases: [Self.myEmail],
+            in: context
+        )
+        try await coreDataStack.saveAsync(context: context)
+
+        XCTAssertEqual(Set(report.excludedIds), [matchingRemoteID, unrelatedRemoteID])
+        XCTAssertTrue(report.failedIds.isEmpty)
+        let finalState = try await durableOptimisticState(
+            optimisticID: optimisticID
+        )
+        XCTAssertEqual(
+            finalState,
+            OptimisticState(messages: 0, mutationRecords: 0, conversations: 0)
+        )
+    }
+
+    @MainActor
     func testUnprocessablePayloadReportsUnprocessable() async throws {
         let persister = makePersister()
         let context = coreDataStack.newBackgroundContext()
@@ -341,5 +461,74 @@ final class MessagePersisterDispositionTests: XCTestCase {
 
         XCTAssertEqual(report.failedIds, ["m-unreadable"])
         XCTAssertTrue(report.persistedIds.isEmpty)
+    }
+
+    private struct OptimisticState: Equatable {
+        let messages: Int
+        let mutationRecords: Int
+        let conversations: Int
+    }
+
+    private func seedOptimisticSend(
+        optimisticID: String,
+        remoteMessageID: String,
+        in context: NSManagedObjectContext
+    ) async throws {
+        try await context.perform {
+            let conversation = ConversationBuilder()
+                .withDisplayName("Optimistic send")
+                .withSnippet("Authored body")
+                .withLastMessageDate(Date())
+                .visible()
+                .build(in: context)
+            let message = MessageBuilder()
+                .withId(optimisticID)
+                .withThreadId("optimistic-thread")
+                .withSnippet("Authored body")
+                .fromMe()
+                .inConversation(conversation)
+                .build(in: context)
+            message.messageId = MimeBuilder.messageId(
+                forOptimisticMessageID: optimisticID
+            )
+            try context.obtainPermanentIDs(for: [conversation, message])
+
+            let record = context.insertTestObject(OutboundSendMutationRecord.self)
+            record.id = optimisticID
+            record.createdAt = Date()
+            record.hidden = false
+            record.newlyInsertedConversation = true
+            record.conversationId = conversation.id
+            record.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+            record.remoteCommittedMessageId = remoteMessageID
+            record.remoteCommittedThreadId = OutboundSendRemoteState.isLocalMarker(remoteMessageID)
+                ? nil
+                : "remote-thread"
+            try context.save()
+        }
+    }
+
+    private func durableOptimisticState(
+        optimisticID: String
+    ) async throws -> OptimisticState {
+        let context = coreDataStack.newBackgroundContext()
+        return try await context.perform {
+            let messageRequest = Message.fetchRequest()
+            messageRequest.predicate = MessagePredicates.id(optimisticID)
+            messageRequest.includesPendingChanges = false
+
+            let mutationRequest = OutboundSendMutationRecord.fetchRequest()
+            mutationRequest.predicate = NSPredicate(format: "id == %@", optimisticID)
+            mutationRequest.includesPendingChanges = false
+
+            let conversationRequest = Conversation.fetchRequest()
+            conversationRequest.includesPendingChanges = false
+
+            return OptimisticState(
+                messages: try context.count(for: messageRequest),
+                mutationRecords: try context.count(for: mutationRequest),
+                conversations: try context.count(for: conversationRequest)
+            )
+        }
     }
 }

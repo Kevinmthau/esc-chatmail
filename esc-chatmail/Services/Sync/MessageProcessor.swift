@@ -29,12 +29,13 @@ class MessageProcessor: @unchecked Sendable {
     ///   >~25KB by attachmentId). A thrown error means the message's content
     ///   could not be fully materialized and it must NOT be persisted as-is —
     ///   callers map it to a blocking per-message failure (or a run abort for
-    ///   `APIError.quotaExhausted`) so the cursor cannot advance past a
+    ///   account-scoped API failures) so the cursor cannot advance past a
     ///   silently body-less message. Deterministic per-part failures (404,
     ///   undecodable response) do not throw: retrying cannot materialize the
     ///   part, so the message persists without it. Failures of the
     ///   best-effort embedded-HTML salvage probe never throw either (except
-    ///   quota/cancellation) — by then the body verdict is already decided.
+    ///   account-scoped failures/cancellation) — by then the body verdict is
+    ///   already decided.
     func processGmailMessage(
         _ gmailMessage: GmailMessage,
         myAliases: Set<String>,
@@ -570,8 +571,8 @@ class MessageProcessor: @unchecked Sendable {
     /// message's body verdict was already decided by the main extraction by
     /// the time this runs, so a failed probe fetch must NOT fail the message —
     /// non-account-scoped errors are swallowed and the probe simply yields
-    /// nothing. Only `APIError.quotaExhausted` (run abort) and task
-    /// cancellation propagate.
+    /// nothing. Only account-scoped API failures and task cancellation
+    /// propagate.
     private func extractEmbeddedHTMLFromTextualBodies(
         from part: MessagePart,
         messageId: String,
@@ -581,7 +582,7 @@ class MessageProcessor: @unchecked Sendable {
         do {
             decodedText = try await decodedTextualBody(from: part, messageId: messageId, fetchMemo: fetchMemo)
         } catch {
-            if let apiError = error as? APIError, case .quotaExhausted = apiError {
+            if let apiError = error as? APIError, apiError.isAccountScopedSyncAbort {
                 throw apiError
             }
             if error is CancellationError {

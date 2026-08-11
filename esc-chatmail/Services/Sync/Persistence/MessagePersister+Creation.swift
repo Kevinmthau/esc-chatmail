@@ -18,8 +18,11 @@ extension MessagePersister {
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async throws {
-        let remoteCommittedSendMutation = await remoteCommittedSendMutationResolutions(
+        let remoteCommittedSendMutation = try await remoteCommittedSendMutationResolutions(
             for: [processedMessage.id],
+            sentMessageIDsByRemoteID: Self.sentMessageIDsByRemoteID(
+                in: [processedMessage]
+            ),
             in: context
         )[processedMessage.id]
         try await createNewMessage(
@@ -149,6 +152,13 @@ extension MessagePersister {
             for attachmentInfo in processedMessage.attachmentInfo {
                 self.createAttachment(attachmentInfo, for: message, in: context)
             }
+
+            self.handoffOptimisticAttachmentStorage(
+                remoteCommittedSendMutation,
+                attachmentInfos: processedMessage.attachmentInfo,
+                to: message,
+                in: context
+            )
 
             self.applyFastConversationListUpdateForNewMessage(
                 message,
