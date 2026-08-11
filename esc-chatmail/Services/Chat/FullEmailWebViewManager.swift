@@ -625,6 +625,8 @@ protocol FullEmailWebViewAdopting: AnyObject {
 final class FullEmailReaderAccountBoundaryRegistry {
     static let shared = FullEmailReaderAccountBoundaryRegistry()
 
+    typealias BlankDocumentAwaiter = @MainActor ([LayoutAwareWKWebView]) async -> Void
+
     private final class Record {
         weak var webView: LayoutAwareWKWebView?
         weak var coordinator: FullEmailReaderWebView.Coordinator?
@@ -635,12 +637,35 @@ final class FullEmailReaderAccountBoundaryRegistry {
         }
     }
 
+    private let blankDocumentAwaiter: BlankDocumentAwaiter
     private var records: [ObjectIdentifier: Record] = [:]
+    /// Admission flag only — deliberately short of the full account-generation
+    /// participant contract: register() is synchronous MainActor work with no
+    /// suspension between the admission check and the write, so there is no
+    /// window a generation token would close. A reader scrubbed at
+    /// registration is permanently dead, not blank-until-reopen: its
+    /// Coordinator latches isInvalidated and SwiftUI reuses it after reopen.
+    /// Not reachable through today's UI — a closed pool invalidates every
+    /// FullEmailOpenSession at init, so no FullEmailReaderWebView is
+    /// constructed while the registry is closed; the guard is defense in
+    /// depth for a future consumer of FullEmailReaderWebView that is not
+    /// gated by an open session.
+    private var acceptsAccountWork = true
+
+    init(blankDocumentAwaiter: BlankDocumentAwaiter? = nil) {
+        self.blankDocumentAwaiter = blankDocumentAwaiter ?? { webViews in
+            await FullEmailReaderAccountBoundaryRegistry.awaitBlankDocuments(in: webViews)
+        }
+    }
 
     func register(
         webView: LayoutAwareWKWebView,
         coordinator: FullEmailReaderWebView.Coordinator
     ) {
+        guard acceptsAccountWork else {
+            coordinator.scrubForAccountBoundary(webView)
+            return
+        }
         purgeReleasedRecords()
         records[ObjectIdentifier(webView)] = Record(webView: webView, coordinator: coordinator)
     }
@@ -652,6 +677,7 @@ final class FullEmailReaderAccountBoundaryRegistry {
     func clearForAccountTransition(
         additionallyAwaiting additionalWebViews: [LayoutAwareWKWebView] = []
     ) async {
+        acceptsAccountWork = false
         let liveRecords = Array(records.values)
         records.removeAll(keepingCapacity: false)
 
@@ -668,7 +694,11 @@ final class FullEmailReaderAccountBoundaryRegistry {
             }
         }
 
-        await Self.awaitBlankDocuments(in: Array(webViewsByID.values))
+        await blankDocumentAwaiter(Array(webViewsByID.values))
+    }
+
+    func reopenAccountWork() {
+        acceptsAccountWork = true
     }
 
     private func purgeReleasedRecords() {
@@ -1513,7 +1543,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         let entryWebViews = entries.values.map(\.webView)
 
         for entry in entries.values {
-            teardown(entry)
+            scrubForAccountTransition(entry)
         }
         entries.removeAll()
         preparedPayloads.removeAll()
@@ -1542,6 +1572,16 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     }
 
     func reopenAccountWork() {
+        // Reopen the process-wide reader registry before the pool's own guard.
+        // If a leaked warm operation keeps the pool closed, registerOpenSession
+        // already invalidates every newly created FullEmailOpenSession, so full
+        // email stays unusable either way until relaunch — but the registry
+        // must not stay latched with it: a closed registry would silently
+        // scrub any future reader not gated by an open session, and this
+        // manager is the registry's sole close/reopen owner (AuthSession
+        // reaches the registry only through here), so nothing else could ever
+        // reopen it.
+        FullEmailReaderAccountBoundaryRegistry.shared.reopenAccountWork()
         guard activeWarmOperations.isEmpty else { return }
         accountGeneration &+= 1
         acceptsAccountWork = true
@@ -1740,16 +1780,37 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         return entry
     }
 
+    /// Ordinary teardown deliberately skips the blank-document navigation: it
+    /// only ever releases pool-owned, non-checked-out entries, where the pool
+    /// holds the last strong reference and the WebView deallocates with its
+    /// content. Account transitions route through scrubForAccountTransition,
+    /// which alone pays the blank-load.
     private func teardown(_ entry: Entry) {
+        // Fail closed if a future caller breaks the non-checked-out contract:
+        // a checked-out entry may be externally retained, so releasing it
+        // without the blank-load would leave its DOM resident.
+        guard !entry.isCheckedOut else {
+            scrubForAccountTransition(entry)
+            return
+        }
+        prepareForTeardown(entry)
+        host.remove(entry.webView)
+    }
+
+    /// A checked-out reader may still retain this WKWebView after the pool
+    /// drops its entry. Replace the old account's live DOM immediately so a
+    /// later SwiftUI dismantle/checkin cannot leave that content resident.
+    private func scrubForAccountTransition(_ entry: Entry) {
+        prepareForTeardown(entry)
+        entry.webView.loadHTMLString("", baseURL: URL(string: "about:blank"))
+        host.remove(entry.webView)
+    }
+
+    private func prepareForTeardown(_ entry: Entry) {
         entry.webView.stopLoading()
         entry.webView.navigationDelegate = nil
         entry.webView.onLayoutChange = nil
         entry.cidHandler.message = nil
-        // A checked-out reader may still retain this WKWebView after the pool
-        // drops its entry. Replace the old account's live DOM immediately so a
-        // later SwiftUI dismantle/checkin cannot leave that content resident.
-        entry.webView.loadHTMLString("", baseURL: URL(string: "about:blank"))
-        host.remove(entry.webView)
     }
 
     private func rememberRemoteImageFallbackWarmContext(
@@ -1832,6 +1893,20 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     func markInitialLoadFinishedForTesting(messageId: String) {
         entries[messageId]?.didFinishInitialLoad = true
+    }
+
+    var acceptsAccountWorkForTesting: Bool {
+        acceptsAccountWork
+    }
+
+    func beginWarmOperationForTesting() -> UUID {
+        let id = UUID()
+        activeWarmOperations.insert(id)
+        return id
+    }
+
+    func finishWarmOperationForTesting(_ id: UUID) {
+        finishWarmOperation(id)
     }
 }
 

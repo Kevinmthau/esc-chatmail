@@ -451,6 +451,91 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertFalse(coordinator.hasAdoptedPrerenderedWebViewForTesting)
     }
 
+    // Revert-check: fails if `FullEmailReaderAccountBoundaryRegistry.register()`
+    // loses its `acceptsAccountWork` admission guard — a reader whose makeUIView
+    // runs during or after `clearForAccountTransition()` would keep old-account
+    // DOM alive un-scrubbed.
+    func testRegistryScrubsReadersRegisteredWhileAccountWorkIsClosingAndClosed() async {
+        let blankDocumentAwaiter = DeferredFullEmailBlankDocumentAwaiter()
+        let registry = FullEmailReaderAccountBoundaryRegistry { _ in
+            await blankDocumentAwaiter.wait()
+        }
+        let clearTask = Task {
+            await registry.clearForAccountTransition()
+        }
+        defer { blankDocumentAwaiter.resume() }
+
+        await blankDocumentAwaiter.waitUntilStarted()
+        XCTAssertTrue(blankDocumentAwaiter.isWaiting)
+
+        let duringClear = makeAccountBoundaryRegistration(id: "registered-during-clear")
+        registry.register(webView: duringClear.webView, coordinator: duringClear.coordinator)
+
+        XCTAssertTrue(duringClear.coordinator.isInvalidatedForAccountTransitionForTesting)
+        XCTAssertEqual(duringClear.coordinator.parent.htmlContent, "")
+        XCTAssertNil(duringClear.coordinator.parent.message)
+        XCTAssertNil(duringClear.coordinator.cidHandler)
+        XCTAssertNil(duringClear.cidHandler.message)
+        XCTAssertNil(duringClear.webView.navigationDelegate)
+        XCTAssertNil(duringClear.webView.onLayoutChange)
+
+        blankDocumentAwaiter.resume()
+        await clearTask.value
+
+        let whileClosed = makeAccountBoundaryRegistration(id: "registered-while-closed")
+        registry.register(webView: whileClosed.webView, coordinator: whileClosed.coordinator)
+        XCTAssertTrue(whileClosed.coordinator.isInvalidatedForAccountTransitionForTesting)
+
+        registry.reopenAccountWork()
+        let afterReopen = makeAccountBoundaryRegistration(id: "registered-after-reopen")
+        registry.register(webView: afterReopen.webView, coordinator: afterReopen.coordinator)
+
+        XCTAssertFalse(afterReopen.coordinator.isInvalidatedForAccountTransitionForTesting)
+        XCTAssertTrue(afterReopen.webView.navigationDelegate === afterReopen.coordinator)
+        XCTAssertNotNil(afterReopen.webView.onLayoutChange)
+
+        registry.unregister(webView: afterReopen.webView)
+        afterReopen.coordinator.scrubForAccountBoundary(afterReopen.webView)
+    }
+
+    // Revert-check: fails if `FullEmailWebViewManager.reopenAccountWork()` moves
+    // the registry reopen back below its `activeWarmOperations` guard — a leaked
+    // warm operation would then keep the process-wide registry closed, scrubbing
+    // every future reader blank instead of merely leaving the prerender pool cold.
+    // HONEST SCOPE: activeWarmOperations cannot be non-empty at reopen through
+    // the public API today (warm() defers finishWarmOperation and close drains
+    // the set before returning), so beginWarmOperationForTesting manufactures
+    // the state; this pins defense-in-depth ordering against a future leak,
+    // not a reachable production regression.
+    func testManagerReopenReopensReaderRegistryEvenWhileWarmOperationsKeepPoolClosed() async {
+        let manager = FullEmailWebViewManager()
+        addTeardownBlock { @MainActor in
+            FullEmailReaderAccountBoundaryRegistry.shared.reopenAccountWork()
+        }
+        await manager.clearForAccountTransition()
+
+        let warmOperationID = manager.beginWarmOperationForTesting()
+        manager.reopenAccountWork()
+        XCTAssertFalse(
+            manager.acceptsAccountWorkForTesting,
+            "The pool must refuse to reopen while a warm operation is outstanding"
+        )
+
+        let reader = makeAccountBoundaryRegistration(id: "registered-after-refused-pool-reopen")
+        FullEmailReaderAccountBoundaryRegistry.shared.register(
+            webView: reader.webView,
+            coordinator: reader.coordinator
+        )
+        XCTAssertFalse(reader.coordinator.isInvalidatedForAccountTransitionForTesting)
+        XCTAssertTrue(reader.webView.navigationDelegate === reader.coordinator)
+        FullEmailReaderAccountBoundaryRegistry.shared.unregister(webView: reader.webView)
+        reader.coordinator.scrubForAccountBoundary(reader.webView)
+
+        manager.finishWarmOperationForTesting(warmOperationID)
+        manager.reopenAccountWork()
+        XCTAssertTrue(manager.acceptsAccountWorkForTesting)
+    }
+
     func testAccountTransitionScrubsFreshReaderAndRejectsStalePaintCallback() async throws {
         let oldAccountMarker = "PRIVATE_FRESH_READER_\(UUID().uuidString)"
         let message = makeMessage(id: "fresh-reader")
@@ -485,6 +570,11 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 1)
 
         let manager = FullEmailWebViewManager()
+        // The shared registry is process-global: reopen it even if an assertion
+        // failure or thrown error aborts this test between close and reopen.
+        addTeardownBlock { @MainActor in
+            FullEmailReaderAccountBoundaryRegistry.shared.reopenAccountWork()
+        }
         await manager.clearForAccountTransition()
         manager.reopenAccountWork()
         coordinator.updateParent(reader)
@@ -501,6 +591,15 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertNil(webView.onLayoutChange)
         XCTAssertFalse(bodyText?.contains(oldAccountMarker) == true)
         XCTAssertEqual(loadFinishedCount, 0)
+
+        let afterReopen = makeAccountBoundaryRegistration(id: "shared-registry-after-reopen")
+        FullEmailReaderAccountBoundaryRegistry.shared.register(
+            webView: afterReopen.webView,
+            coordinator: afterReopen.coordinator
+        )
+        XCTAssertFalse(afterReopen.coordinator.isInvalidatedForAccountTransitionForTesting)
+        FullEmailReaderAccountBoundaryRegistry.shared.unregister(webView: afterReopen.webView)
+        afterReopen.coordinator.scrubForAccountBoundary(afterReopen.webView)
     }
 
     func testNormalDismantleScrubsFreshReader() {
@@ -541,6 +640,26 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         )
     }
 
+    private func makeAccountBoundaryRegistration(
+        id: String
+    ) -> (
+        coordinator: FullEmailReaderWebView.Coordinator,
+        cidHandler: CIDSchemeHandler,
+        webView: LayoutAwareWKWebView
+    ) {
+        let message = makeMessage(id: id)
+        let coordinator = FullEmailReaderWebView.Coordinator(makeReader(message: message))
+        let cidHandler = CIDSchemeHandler(message: message)
+        coordinator.cidHandler = cidHandler
+        let webView = LayoutAwareWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 390, height: 600),
+            configuration: FullInteractiveEmailWebView.makeConfiguration(cidHandler: cidHandler)
+        )
+        webView.navigationDelegate = coordinator
+        webView.onLayoutChange = { _ in }
+        return (coordinator, cidHandler, webView)
+    }
+
     private func waitForBody(
         in webView: WKWebView,
         satisfying predicate: (String) -> Bool
@@ -564,6 +683,34 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         MessageBuilder()
             .withId(id)
             .build(in: coreDataStack.viewContext)
+    }
+}
+
+@MainActor
+private final class DeferredFullEmailBlankDocumentAwaiter {
+    private(set) var isWaiting = false
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        isWaiting = true
+        startContinuation?.resume()
+        startContinuation = nil
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !isWaiting else { return }
+        await withCheckedContinuation { continuation in
+            startContinuation = continuation
+        }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

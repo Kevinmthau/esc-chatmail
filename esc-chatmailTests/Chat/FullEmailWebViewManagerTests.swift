@@ -535,6 +535,64 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         manager.clear()
     }
 
+    // Revert-check: fails if `teardown(_:)` regains the blank-document
+    // `loadHTMLString` — the `prepareForTeardown`/`scrubForAccountTransition`
+    // split is what keeps ordinary capacity eviction from navigating a
+    // released WebView.
+    func testOrdinaryEvictionReleasesWebViewWithoutBlankDocumentNavigation() async throws {
+        let testStack = TestCoreDataStack()
+        let firstMessageId = "webview-eviction-first-\(UUID().uuidString)"
+        let secondMessageId = "webview-eviction-second-\(UUID().uuidString)"
+        let firstMarker = "RETAINED_EVICTED_DOM_\(UUID().uuidString)"
+        let firstMessage = MessageBuilder()
+            .withId(firstMessageId)
+            .withSubject("First")
+            .withSender(email: "first@example.com", name: "First")
+            .withBody("First body")
+            .build(in: testStack.viewContext)
+        let secondMessage = MessageBuilder()
+            .withId(secondMessageId)
+            .withSubject("Second")
+            .withSender(email: "second@example.com", name: "Second")
+            .withBody("Second body")
+            .build(in: testStack.viewContext)
+        let firstHTML = simpleHTML(title: firstMarker)
+        let manager = FullEmailWebViewManager(capacity: 1)
+        defer { manager.clear() }
+
+        manager.prepaintAfterExplicitOpen(
+            request: makeRequest(messageId: firstMessageId),
+            message: firstMessage,
+            artifact: makeArtifact(message: firstMessage, html: firstHTML),
+            width: 390
+        )
+        let retainedWebView = try XCTUnwrap(manager.webViewForTesting(messageId: firstMessageId))
+        try await waitForBody(in: retainedWebView) { $0.contains(firstMarker) }
+
+        manager.prepaintAfterExplicitOpen(
+            request: makeRequest(messageId: secondMessageId),
+            message: secondMessage,
+            artifact: makeArtifact(message: secondMessage, html: simpleHTML(title: "Second")),
+            width: 390
+        )
+
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: firstMessageId))
+        XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: secondMessageId))
+
+        for _ in 0..<100 {
+            if let value = try? await retainedWebView.evaluateJavaScript("document.body.innerText"),
+               let bodyText = value as? String,
+               !bodyText.contains(firstMarker) {
+                XCTFail("Ordinary eviction must not navigate the released WebView to a blank document")
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let retainedBody = try await retainedWebView.evaluateJavaScript("document.body.innerText") as? String
+        XCTAssertTrue(retainedBody?.contains(firstMarker) == true)
+    }
+
     func testAccountTransitionClearsPayloadsAndBlocksNewWarmStateUntilReopen() async throws {
         let messagesDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "FullEmailWebViewManagerAccountTransition-\(UUID().uuidString)"
@@ -552,6 +610,11 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         await manager.warm(request: request, message: nil, width: nil)
         XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
 
+        // The shared registry is process-global: reopen it even if an assertion
+        // failure or thrown error aborts this test between close and reopen.
+        addTeardownBlock { @MainActor in
+            FullEmailReaderAccountBoundaryRegistry.shared.reopenAccountWork()
+        }
         await manager.clearForAccountTransition()
         XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
 
@@ -625,6 +688,11 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         XCTAssertEqual(session.initialArtifact, artifact)
         XCTAssertEqual(session.immediatePlaceholder.subject, oldAccountMarker)
 
+        // The shared registry is process-global: reopen it even if an assertion
+        // failure or thrown error aborts this test between close and reopen.
+        addTeardownBlock { @MainActor in
+            FullEmailReaderAccountBoundaryRegistry.shared.reopenAccountWork()
+        }
         await manager.clearForAccountTransition()
 
         XCTAssertTrue(session.isInvalidatedForAccountTransition)
@@ -710,6 +778,11 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             coordinator: coordinator
         )
 
+        // The shared registry is process-global: reopen it even if an assertion
+        // failure or thrown error aborts this test between close and reopen.
+        addTeardownBlock { @MainActor in
+            FullEmailReaderAccountBoundaryRegistry.shared.reopenAccountWork()
+        }
         await manager.clearForAccountTransition()
 
         XCTAssertNil(checkout.cidHandler.message)
@@ -789,6 +862,21 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             hasHTMLSource: true,
             producedAt: Date(timeIntervalSince1970: 0)
         )
+    }
+
+    private func waitForBody(
+        in webView: WKWebView,
+        satisfying predicate: (String) -> Bool
+    ) async throws {
+        for _ in 0..<100 {
+            if let value = try? await webView.evaluateJavaScript("document.body.innerText"),
+               let bodyText = value as? String,
+               predicate(bodyText) {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for the expected pre-rendered full-email DOM")
     }
 }
 
