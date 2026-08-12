@@ -122,9 +122,17 @@ struct esc_chatmailApp: App {
         CacheCoordinator.shared.start()
         logStartupTiming("CacheCoordinator started")
 
+        // Maintenance scheduling is fire-and-forget: the pending-request fetch
+        // is an unbounded, uncancellable XPC round-trip (getPendingTaskRequests
+        // has no timeout) and nothing downstream consumes its result, so it
+        // must not gate auth restore or the first frame — a wedged scheduler
+        // daemon would otherwise pin the app on AppLoadingView forever.
+        // Launch-handler registration already happened in App.init().
         if !isRunningUITests {
-            DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
-            logStartupTiming("Database maintenance scheduled")
+            Task { @MainActor in
+                await DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
+                logStartupTiming("Database maintenance scheduled")
+            }
         }
 
         // 3. Restore auth session (after cleanup complete). A cold background
@@ -179,6 +187,13 @@ struct esc_chatmailApp: App {
     
     private func configureBackgroundTasks() {
         BackgroundSyncManager.shared.registerBackgroundTasks()
+        // Constructing the singleton registers the three maintenance launch
+        // handlers. BGTaskScheduler only delivers a task whose handler was
+        // registered before the end of app launch, and a cold BGTask launch is
+        // the normal delivery path for an eligible maintenance request — so
+        // registration must not wait for initializeApp() to touch the service
+        // lazily after the first frame.
+        _ = DatabaseMaintenanceService.shared
     }
     
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
