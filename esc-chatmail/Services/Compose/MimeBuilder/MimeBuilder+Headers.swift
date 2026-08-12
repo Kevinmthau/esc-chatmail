@@ -92,8 +92,12 @@ extension MimeBuilder {
         // Format as "Name <email@example.com>"
         // If name contains special characters, quote it. Quote-escaping alone cannot
         // neutralize CRLF, so the quoted-name path must sanitize before escaping.
+        // Backslashes are escaped first (a trailing bare backslash would turn the
+        // closing quote into an RFC 5322 quoted-pair and swallow the address).
         if name.contains(where: { $0 == "\"" || $0 == "<" || $0 == ">" || $0 == "," || $0 == "@" }) {
-            let quotedName = sanitizeHeaderValue(name).replacingOccurrences(of: "\"", with: "\\\"")
+            let quotedName = sanitizeHeaderValue(name)
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
             return "\"\(quotedName)\" <\(sanitizedEmail)>"
         } else {
             return "\(encodedName) <\(sanitizedEmail)>"

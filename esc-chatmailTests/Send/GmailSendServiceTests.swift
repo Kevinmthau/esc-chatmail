@@ -420,6 +420,25 @@ final class GmailSendServiceTests: XCTestCase {
         )
     }
 
+    func testFormatFromHeader_quotedNameWithBackslash_escapesQuotedPair() {
+        // Revert-check: the backslash escape on the quoted-name path in
+        // MimeBuilder.formatFromHeader. Without it a display name ending in a bare
+        // backslash turns the closing quote into an RFC 5322 quoted-pair, leaving the
+        // quoted-string unterminated so the address is swallowed and the From: header
+        // is unparseable (Gmail rejects the send with a 400).
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: "Thau, Kevin\\"),
+            "\"Thau, Kevin\\\\\" <sender@example.com>"
+        )
+
+        // Backslash-before-quote must escape the backslash first, then the quote, so
+        // both survive as separate quoted-pairs.
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: "A\\\"B"),
+            "\"A\\\\\\\"B\" <sender@example.com>"
+        )
+    }
+
     func testFormatFromHeader_cleanIdentity_isPreservedByteIdentically() {
         // HONEST SCOPE: this test PASSES with the sanitizeHeaderValue calls deleted — it
         // pins the no-op direction only, failing if the sanitizer is ever STRENGTHENED to
