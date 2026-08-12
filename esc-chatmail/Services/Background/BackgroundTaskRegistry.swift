@@ -11,8 +11,9 @@ final class BackgroundTaskRegistry {
     private var taskConfigurations: [String: BackgroundTaskConfiguration] = [:]
 
     /// `BGTaskScheduler` seams. Injectable because the real scheduler cannot
-    /// back hosted unit tests: launch handlers may only be registered during
-    /// app launch, and the simulator rejects submits outright.
+    /// back hosted unit tests: the app already registered every identifier at
+    /// launch, re-registering one is a process-aborting assertion, and the
+    /// simulator rejects submits outright.
     private let registerLaunchHandler: @Sendable (String, @escaping (BGTask) -> Void) -> Void
     private let submitTaskRequest: @Sendable (BGTaskRequest) throws -> Void
     private let pendingTaskIdentifiers: @Sendable () async -> Set<String>

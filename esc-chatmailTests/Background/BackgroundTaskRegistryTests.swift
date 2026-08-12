@@ -4,8 +4,9 @@ import BackgroundTasks
 
 /// Drives `BackgroundTaskRegistry` through its injected `BGTaskScheduler`
 /// seams (`BackgroundTaskRegistrySchedulerSpy`): the real scheduler cannot
-/// back hosted unit tests because launch handlers may only be registered
-/// during app launch and the simulator rejects submits outright.
+/// back hosted unit tests because the host app already registered every
+/// identifier at launch — re-registering one aborts the process — and the
+/// simulator rejects submits outright.
 final class BackgroundTaskRegistryTests: XCTestCase {
 
     // Revert-check: fails if `BackgroundTaskRegistry.scheduleIfNotPending(_:)`
