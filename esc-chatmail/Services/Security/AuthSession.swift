@@ -201,6 +201,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private let reopenDownloads: @MainActor @Sendable () async -> Void
     private let resetPendingActionRetryState: @MainActor @Sendable () async -> Void
     private let pendingActionAuthenticationDidRecover: @MainActor @Sendable () async -> Void
+    private let cancelBackgroundTaskRequests: @MainActor @Sendable () -> Void
     private let resetCoreDataStore: @Sendable () async throws -> Void
     private let inspectLocalMailboxStore: @Sendable () async throws -> LocalMailboxStoreInspection
     private let deleteAttachmentFiles: @Sendable () async throws -> Void
@@ -271,6 +272,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         },
         pendingActionAuthenticationDidRecover: @escaping @MainActor @Sendable () async -> Void = {
             PendingActionsManager.shared.authenticationDidRecover()
+        },
+        cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {
+            // A pending BGTask request re-arms itself at handler entry before
+            // the unauthenticated guard runs, so any request that survives a
+            // signed-out conclusion wakes the device on the sync cadence
+            // forever. Sign-in needs no counterpart: the scene handler re-arms
+            // on the next authenticated backgrounding.
+            BackgroundTaskScheduler.shared.cancelPendingTaskRequests()
         },
         resetCoreDataStore: @escaping @Sendable () async throws -> Void = {
             try await CoreDataStack.shared.resetStore()
@@ -343,6 +352,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         self.reopenDownloads = reopenDownloads
         self.resetPendingActionRetryState = resetPendingActionRetryState
         self.pendingActionAuthenticationDidRecover = pendingActionAuthenticationDidRecover
+        self.cancelBackgroundTaskRequests = cancelBackgroundTaskRequests
         self.resetCoreDataStore = resetCoreDataStore
         self.inspectLocalMailboxStore = inspectLocalMailboxStore
         self.deleteAttachmentFiles = deleteAttachmentFiles
@@ -648,6 +658,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // Clear the sign-in flag
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
         BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        // Disarm pending background sync wakes. This runs after
+        // isAuthenticated is false and inside quiescence, so neither the
+        // scene handler nor an in-flight background run can re-arm a request
+        // behind this sweep.
+        cancelBackgroundTaskRequests()
 
         // Clear conversation cache to prevent leaking previous user's data
         clearConversationCaches()
@@ -784,6 +799,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // Clear the sign-in flag
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
         BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        cancelBackgroundTaskRequests()
 
         // Clear conversation cache to prevent leaking previous user's data
         clearConversationCaches()
@@ -976,6 +992,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         clearAuthState()
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
         clearAccountScopedSyncDefaults()
+        // Every caller concludes signed out with credentials cleared, so any
+        // pending BGTask request is the same perpetual no-op wake sign-out
+        // disarms. All call sites hold quiescence, and clearAuthState() above
+        // dropped the flag the scene handler re-arms on.
+        cancelBackgroundTaskRequests()
 
         // Persist before the first delete so a crash or partial Keychain
         // failure always has a launch-time retry path. UserDefaults is a
@@ -1180,6 +1201,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
         BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        cancelBackgroundTaskRequests()
         clearConversationCaches()
         await AliasManager.shared.invalidate()
         await SendAsAliasManager.shared.invalidate()
@@ -1215,6 +1237,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         clearAccountScopedSyncDefaults()
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
         BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        cancelBackgroundTaskRequests()
         clearConversationCaches()
         await AliasManager.shared.invalidate()
         await SendAsAliasManager.shared.invalidate()
