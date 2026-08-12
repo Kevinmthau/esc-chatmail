@@ -140,11 +140,18 @@ final class TokenManagerCacheTests: XCTestCase {
         XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
     }
 
+    // Revert-check: the CancellationError expectation fails if performTokenRefresh
+    // stops throwing when `saveTokens(_:refresh:expirationDate:ifCacheEpochMatches:)`
+    // reports `saved == false` — the pre-branch code logged and handed the
+    // triggering request its token once. A retired generation must yield no
+    // usable token at all; this is TokenManager's half of the same
+    // retired-generation rejection TokenRefreshCoordinator applies to callers
+    // that joined the refresh.
     func testRefreshCompletingAfterSignOut_doesNotResurrectAccount() async throws {
         // getCurrentToken must refresh (seeded token is inside the 5-min
         // window), and sign-out lands mid-refresh — after performTokenRefresh
-        // snapshots the epoch, before it saves. The triggering request may
-        // still receive the token once, but nothing is written back.
+        // snapshots the epoch, before it saves. The retired request must be
+        // canceled so it cannot execute account work with any returned token.
         try manager.saveTokens(access: "old", refresh: "old-r", expirationDate: Date().addingTimeInterval(60))
         refresher.accessToken = "refreshed"
         refresher.refreshToken = "refreshed-r"
@@ -153,14 +160,56 @@ final class TokenManagerCacheTests: XCTestCase {
             try? manager?.clearTokens()
         }
 
-        let returned = try await manager.getCurrentToken()
-        XCTAssertEqual(returned, "refreshed", "the request that triggered the refresh still gets its token once")
+        do {
+            _ = try await manager.getCurrentToken()
+            XCTFail("Expected the retired refresh to be cancelled")
+        } catch is CancellationError {
+            // Expected.
+        }
 
         // The refresh's saveTokens saw the bumped epoch and dropped: keychain
         // empty, not authenticated, so no BGTask relaunch resurrects the account.
         XCTAssertFalse(manager.isAuthenticated())
         XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleAccessToken.rawValue))
         XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
+    }
+
+    // Revert-check: fails if saveTokens drops the `if epoch == nil { _cacheEpoch &+= 1 }`
+    // bump on ungated (interactive/restore) saves. Without it the in-flight
+    // refresh's gated save still matches its snapshotted epoch, so the retired
+    // account's "stale-refresh" tokens overwrite the replacement sign-in's in
+    // the keychain and the next getCurrentToken serves the wrong account's token.
+    func testRefreshCompletingAfterReplacementSignInDoesNotOverwriteNewTokens() async throws {
+        try manager.saveTokens(
+            access: "old",
+            refresh: "old-r",
+            expirationDate: Date().addingTimeInterval(60)
+        )
+        refresher.accessToken = "stale-refresh"
+        refresher.refreshToken = "stale-refresh-r"
+        refresher.expirationDate = Date().addingTimeInterval(3_600)
+        refresher.onRefresh = { [weak manager] in
+            try? manager?.saveTokens(
+                access: "replacement",
+                refresh: "replacement-r",
+                expirationDate: Date().addingTimeInterval(3_600)
+            )
+        }
+
+        do {
+            _ = try await manager.getCurrentToken()
+            XCTFail("Expected the retired refresh to be cancelled")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let stored = try keychain.loadCodable(
+            TokenInfo.self,
+            for: KeychainService.Key.googleAccessToken.rawValue
+        )
+        XCTAssertEqual(stored.accessToken, "replacement")
+        let currentToken = try await manager.getCurrentToken()
+        XCTAssertEqual(currentToken, "replacement")
     }
 
     func testExpiringSoonCachedToken_triggersRefreshInsteadOfServingStale() async throws {

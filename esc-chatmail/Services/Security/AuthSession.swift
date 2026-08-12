@@ -174,6 +174,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     @Published var userEmail: String?
     @Published var userName: String?
     @Published var accessToken: String?
+    @Published private(set) var requiresReauthentication = false
+
+    var canAccessMailbox: Bool {
+        isAuthenticated && !requiresReauthentication
+    }
 
     private let tokenManagerProvider: @MainActor @Sendable () -> TokenManagerProtocol
     private lazy var tokenManager: TokenManagerProtocol = tokenManagerProvider()
@@ -194,6 +199,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private let reopenParticipantCaches: @Sendable () async -> Void
     private let cleanupDownloads: @MainActor @Sendable () async -> Void
     private let reopenDownloads: @MainActor @Sendable () async -> Void
+    private let resetPendingActionRetryState: @MainActor @Sendable () async -> Void
+    private let pendingActionAuthenticationDidRecover: @MainActor @Sendable () async -> Void
     private let cancelBackgroundTaskRequests: @MainActor @Sendable () -> Void
     private let resetCoreDataStore: @Sendable () async throws -> Void
     private let inspectLocalMailboxStore: @Sendable () async throws -> LocalMailboxStoreInspection
@@ -248,7 +255,6 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             await ProductionParticipantCacheAccountTransition.reopenAccountWork()
         },
         cleanupDownloads: @escaping @MainActor @Sendable () async -> Void = {
-            PendingActionsManager.shared.resetQuotaRetryStateForAccountTransition()
             await AttachmentAccountWorkRegistry.shared.cancelAndAwaitAll()
             await AttachmentDownloader.shared.cancelAndAwaitAllDownloads()
             await ProductionAttachmentCacheAccountTransition.closeAdmission()
@@ -260,6 +266,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             AttachmentAccountWorkRegistry.shared.reopenAdmission()
             AttachmentDownloader.shared.reopenAdmission()
             await ProductionAttachmentCacheAccountTransition.reopenAdmission()
+        },
+        resetPendingActionRetryState: @escaping @MainActor @Sendable () async -> Void = {
+            PendingActionsManager.shared.resetRetryStateForAccountTransition()
+        },
+        pendingActionAuthenticationDidRecover: @escaping @MainActor @Sendable () async -> Void = {
+            PendingActionsManager.shared.authenticationDidRecover()
         },
         cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {
             // A pending BGTask request re-arms itself at handler entry before
@@ -338,6 +350,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         self.reopenParticipantCaches = reopenParticipantCaches
         self.cleanupDownloads = cleanupDownloads
         self.reopenDownloads = reopenDownloads
+        self.resetPendingActionRetryState = resetPendingActionRetryState
+        self.pendingActionAuthenticationDidRecover = pendingActionAuthenticationDidRecover
         self.cancelBackgroundTaskRequests = cancelBackgroundTaskRequests
         self.resetCoreDataStore = resetCoreDataStore
         self.inspectLocalMailboxStore = inspectLocalMailboxStore
@@ -457,6 +471,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         let didReopenAccountWork: Bool
         if restoredUser.user != nil {
+            await resetPendingActionRetryState()
             didReopenAccountWork = await reopenAccountWork(after: outboundTransition)
         } else {
             didReopenAccountWork = false
@@ -467,6 +482,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             return restoredUser.restoreOutcome
         }
         publishAuthenticatedSession(user, recordsCompletedSignIn: false)
+        await pendingActionAuthenticationDidRecover()
         return .authenticated
     }
     
@@ -486,6 +502,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await clearParticipantCaches()
         await cleanupDownloads()
         var releasedQuiescence = false
+        var didResetPendingActionRetryState = false
         let signedInUser = AuthenticatedGoogleUserBox()
         do {
             try await performSignIn(
@@ -496,16 +513,22 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             guard let user = signedInUser.user else {
                 throw CancellationError()
             }
+            await resetPendingActionRetryState()
+            didResetPendingActionRetryState = true
             guard await reopenAccountWork(after: outboundTransition) else {
                 throw CancellationError()
             }
             await syncRunCoordinator.endQuiescence()
             releasedQuiescence = true
             publishAuthenticatedSession(user, recordsCompletedSignIn: true)
+            await pendingActionAuthenticationDidRecover()
         } catch {
             if !releasedQuiescence {
                 if signedInUser.didReplaceGoogleSession {
                     clearFailedGoogleSession()
+                    if !didResetPendingActionRetryState {
+                        await resetPendingActionRetryState()
+                    }
                 } else if wasAuthenticated {
                     await reopenPreSignInAccountWork(after: outboundTransition)
                 }
@@ -621,12 +644,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // drain-before-destruction path.
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
+        await resetPendingActionRetryState()
         await clearParticipantCaches()
         signOutGoogleSession()
         currentUser = nil
         userEmail = nil
         userName = nil
         isAuthenticated = false
+        requiresReauthentication = false
         accessToken = nil
         clearAccountScopedSyncDefaults()
 
@@ -749,6 +774,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // every live outbound owner has reconciled and released its reservation.
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
+        await resetPendingActionRetryState()
         await clearParticipantCaches()
 
         // Capture the old credential before local SDK sign-out clears it. Use
@@ -763,6 +789,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         userEmail = nil
         userName = nil
         isAuthenticated = false
+        requiresReauthentication = false
         accessToken = nil
         // Clear account-scoped sync state before the remote disconnect:
         // revocation can fail, but a later sign-in must never inherit this
@@ -941,13 +968,20 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         if recordsCompletedSignIn {
             userDefaults.set(true, forKey: "hasCompletedSignIn")
         }
+        requiresReauthentication = false
         isAuthenticated = true
+    }
+
+    func requireReauthentication() {
+        guard isAuthenticated else { return }
+        requiresReauthentication = true
     }
 
     private func clearAuthState() {
         currentUser = nil
         userEmail = nil
         userName = nil
+        requiresReauthentication = false
         isAuthenticated = false
         accessToken = nil
     }
@@ -1153,6 +1187,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         outboundTaskRegistry.closeAdmission()
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
+        await resetPendingActionRetryState()
         await clearParticipantCaches()
 
         GIDSignIn.sharedInstance.signOut()
@@ -1160,6 +1195,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         userEmail = nil
         userName = nil
         isAuthenticated = false
+        requiresReauthentication = false
         accessToken = nil
         clearAccountScopedSyncDefaults()
 
@@ -1193,6 +1229,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         outboundTaskRegistry.closeAdmission()
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
+        await resetPendingActionRetryState()
         await clearParticipantCaches()
 
         GIDSignIn.sharedInstance.signOut()

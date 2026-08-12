@@ -686,24 +686,66 @@ final class PendingActionsManagerTests: XCTestCase {
 
     // MARK: - Account-scoped API failures
 
-    func testScheduledProcessing_authenticationErrorStopsRunWithoutVerdicts() async throws {
-        try await assertAccountScopedFailureStopsRunWithoutVerdicts(
-            APIError.authenticationError
+    // Revert-check: fails if clearPendingTask(after:)'s `.authenticationError`
+    // arm stops calling scheduleAuthenticationRetry(). The pre-branch code just
+    // dropped the request, so nothing ever schedules a delay:
+    // sleeper.waitUntilScheduled() never returns and a transient auth failure
+    // strands the queue until an unrelated wake-up. `[30]` also pins the first
+    // attempt at authenticationRetryBaseDelay rather than an escalated value.
+    func testScheduledProcessing_authenticationErrorRetriesAfterBackoff() async throws {
+        let sleeper = ControlledRetrySleeper()
+        let executor = AccountScopedFailureOnceActionExecutor(error: .authenticationError)
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            authenticationRetryBaseDelay: 30,
+            authenticationRetryMaximumDelay: 120,
+            authenticationRetrySleeper: { delay in
+                await sleeper.sleep(for: delay)
+            }
         )
+
+        await manager.queueAction(type: .markRead, messageId: "authentication-retry")
+        await manager.waitUntilScheduledProcessingIsIdle()
+        await sleeper.waitUntilScheduled()
+
+        XCTAssertEqual(executor.executedMessageIds, ["authentication-retry"])
+        let retryDelays = await sleeper.scheduledDelays
+        XCTAssertEqual(retryDelays, [30])
+        context.refreshAllObjects()
+        let pendingAction = try XCTUnwrap(context.fetch(PendingAction.fetchRequest()).first)
+        XCTAssertEqual(pendingAction.status, "pending")
+        XCTAssertEqual(pendingAction.retryCount, 0)
+
+        await sleeper.resume()
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, executor.executedMessageIds.count < 2 {
+            await Task.yield()
+        }
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertEqual(
+            executor.executedMessageIds,
+            ["authentication-retry", "authentication-retry"]
+        )
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
     }
 
-    func testScheduledProcessing_credentialsRevokedStopsRunWithoutVerdicts() async throws {
-        try await assertAccountScopedFailureStopsRunWithoutVerdicts(
-            APIError.credentialsRevoked
-        )
-    }
-
-    private func assertAccountScopedFailureStopsRunWithoutVerdicts(
-        _ error: APIError,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
-        let executor = AccountScopedFailureOnceActionExecutor(error: error)
+    // Revert-check: fails if the `isWaitingForCredentialRecovery` latch loses
+    // either end — the assignment in clearPendingTask's `.credentialsRevoked`
+    // arm or the `guard !isWaitingForCredentialRecovery` at the top of
+    // scheduleProcessing(): the enqueue made during revocation immediately
+    // rescans, so "queued-during-reauth" executes before recovery. It equally
+    // fails if authenticationDidRecover() stops clearing the latch and
+    // rescanning, since the queue then never drains.
+    func testScheduledProcessing_credentialsRevokedWaitsForSuccessfulAuthentication() async throws {
+        let executor = AccountScopedFailureOnceActionExecutor(error: .credentialsRevoked)
         let manager = PendingActionsManager(
             coreDataStack: CoreDataStack(
                 persistentContainerForTesting: testStack.persistentContainer
@@ -713,44 +755,528 @@ final class PendingActionsManagerTests: XCTestCase {
             syncRunCoordinator: SyncRunCoordinator()
         )
 
-        _ = PendingActionBuilder()
-            .markAsRead()
-            .forMessage("existing-action")
-            .pending()
-            .withRetryCount(4)
-            .createdMinutesAgo(1)
-            .build(in: context)
-        try testStack.saveViewContext()
-
-        await manager.queueAction(type: .archive, messageId: "remaining-action")
+        await manager.queueAction(type: .archive, messageId: "revoked-action")
+        await manager.waitUntilScheduledProcessingIsIdle()
+        await manager.queueAction(type: .markRead, messageId: "queued-during-reauth")
+        // Barrier: under a revert of the latch, the enqueue above schedules a
+        // rescan task that would not have run yet by the time the assertion
+        // executes — waiting for idle lets the illegal rescan actually land so
+        // the assertion catches it (with the latch intact, no task exists and
+        // this returns immediately).
         await manager.waitUntilScheduledProcessingIsIdle()
 
         XCTAssertEqual(
             executor.executedMessageIds,
-            ["existing-action"],
-            "An account-scoped failure must stop before processing the remaining queue",
-            file: file,
-            line: line
+            ["revoked-action"],
+            "Enqueues must stay parked while credentials are revoked"
         )
 
         context.refreshAllObjects()
         let request = PendingAction.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
         let actions = try context.fetch(request)
+        XCTAssertEqual(actions.map(\.status), ["pending", "pending"])
+        XCTAssertEqual(actions.map(\.retryCount), [0, 0])
+
+        await manager.authenticationDidRecover()
+        await manager.waitUntilScheduledProcessingIsIdle()
+
         XCTAssertEqual(
-            actions.map(\.status),
-            ["pending", "pending"],
-            "Authentication state is not a verdict on either user action",
-            file: file,
-            line: line
+            executor.executedMessageIds,
+            ["revoked-action", "revoked-action", "queued-during-reauth"]
         )
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
+    // Revert-check: fails if clearPendingTask's `.authenticationError` arm stops
+    // scheduling the retry (waitUntilScheduled never returns), and equally if it
+    // stops returning early — draining processingWasRequested there, the way
+    // `.skipped`/`.completed` do via scheduleRequestedFollowUpIfNeeded(), lets
+    // the enqueue that landed while the failed run was releasing bypass the 45s
+    // gate with an immediate rescan (concurrent-auth-action runs before resume).
+    func testScheduledProcessing_authenticationErrorDefersConcurrentEnqueueUntilBackoff() async throws {
+        let coordinator = SyncRunCoordinator()
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        let sleeper = ControlledRetrySleeper()
+        let executor = AccountScopedFailureOnceActionExecutor(error: .authenticationError)
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator,
+            lifecycleHooks: PendingActionLifecycleHooks(
+                scheduledProcessingDidReleaseRun: {
+                    await lifecycleProbe.pauseAfterFirstScheduledProcessingRun()
+                }
+            ),
+            authenticationRetryBaseDelay: 45,
+            authenticationRetryMaximumDelay: 180,
+            authenticationRetrySleeper: { delay in
+                await sleeper.sleep(for: delay)
+            }
+        )
+
+        await manager.queueAction(type: .markRead, messageId: "first-auth-action")
+        await lifecycleProbe.waitUntilFirstScheduledProcessingRunPauses()
+        await manager.queueAction(type: .archive, messageId: "concurrent-auth-action")
+        await lifecycleProbe.resumeFirstScheduledProcessingRun()
+        await manager.waitUntilScheduledProcessingIsIdle()
+        await sleeper.waitUntilScheduled()
+
+        XCTAssertEqual(executor.executedMessageIds, ["first-auth-action"])
+        let retryDelays = await sleeper.scheduledDelays
+        XCTAssertEqual(retryDelays, [45])
+
+        await sleeper.resume()
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, executor.executedMessageIds.count < 3 {
+            await Task.yield()
+        }
+        await manager.waitUntilScheduledProcessingIsIdle()
+
         XCTAssertEqual(
-            actions.map(\.retryCount),
-            [4, 0],
-            "Authentication failures must not consume retry budget",
-            file: file,
-            line: line
+            executor.executedMessageIds,
+            ["first-auth-action", "first-auth-action", "concurrent-auth-action"]
         )
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
+    // Revert-check: fails if currentOutcome(for:) drops its generation
+    // comparison, or if authenticationDidRecover() stops bumping
+    // retryStateGeneration. The run's now-stale `.credentialsRevoked` result
+    // would re-latch isWaitingForCredentialRecovery after recovery already
+    // released it, so the queue parks forever and the second execution the
+    // deadline loop waits for never happens.
+    func testCredentialRecoveryAfterRunReleaseCannotBeOverwrittenByStaleOutcome() async throws {
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        let executor = AccountScopedFailureOnceActionExecutor(error: .credentialsRevoked)
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            lifecycleHooks: PendingActionLifecycleHooks(
+                scheduledProcessingDidReleaseRun: {
+                    await lifecycleProbe.pauseAfterFirstScheduledProcessingRun()
+                }
+            )
+        )
+
+        await manager.queueAction(type: .markRead, messageId: "recovered-after-release")
+        await lifecycleProbe.waitUntilFirstScheduledProcessingRunPauses()
+
+        // Reauthentication can finish after the inner coordinator run ends
+        // but before its wrapper applies the revoked-credential outcome.
+        await manager.authenticationDidRecover()
+        await lifecycleProbe.resumeFirstScheduledProcessingRun()
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, executor.executedMessageIds.count < 2 {
+            await Task.yield()
+        }
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertEqual(
+            executor.executedMessageIds,
+            ["recovered-after-release", "recovered-after-release"]
+        )
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
+    // Revert-check: fails if resetRetryStateForAccountTransition() stops bumping
+    // retryStateGeneration, or if currentOutcome(for:) stops mapping a stale
+    // `.quotaExhausted` to `.skipped`. The torn-down account's quota verdict
+    // would then schedule a retry (scheduledDelays is no longer empty) that the
+    // replacement account inherits as an unrelated hour-long backoff.
+    func testAccountTransitionResetIgnoresStaleQuotaOutcomeAfterRunRelease() async throws {
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        let retryRecorder = QuotaRetryScheduleRecorder()
+        let executor = QuotaExhaustedActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            lifecycleHooks: PendingActionLifecycleHooks(
+                scheduledProcessingDidReleaseRun: {
+                    await lifecycleProbe.pauseAfterFirstScheduledProcessingRun()
+                }
+            ),
+            quotaRetrySleeper: { delay in
+                await retryRecorder.recordAndCancel(delay: delay)
+            }
+        )
+
+        await manager.queueAction(type: .markRead, messageId: "retired-quota-outcome")
+        await lifecycleProbe.waitUntilFirstScheduledProcessingRunPauses()
+
+        await manager.resetRetryStateForAccountTransition()
+        await lifecycleProbe.resumeFirstScheduledProcessingRun()
+        await manager.waitUntilScheduledProcessingIsIdle()
+        await Task.yield()
+
+        XCTAssertEqual(executor.executeCallCount, 1)
+        let scheduledDelays = await retryRecorder.scheduledDelays
+        XCTAssertTrue(scheduledDelays.isEmpty)
+    }
+
+    // Revert-check: fails if processAllPendingActionsWithOutcome() binds its
+    // result to `generationBeforeRunAcquisition` instead of the
+    // `generationForRun` captured after acquirePendingActionRunTask() returns.
+    // The replacement account's own revoked verdict would be discarded as
+    // stale, and the `.skipped` arm's scheduleRequestedFollowUpIfNeeded()
+    // rescans and drains the queue instead of parking it for reauthentication.
+    func testRunWaitingAcrossAccountTransitionBindsFailureToReplacementGeneration() async throws {
+        let coordinator = SyncRunCoordinator()
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        let executor = AccountScopedFailureOnceActionExecutor(error: .credentialsRevoked)
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator,
+            lifecycleHooks: PendingActionLifecycleHooks(
+                scheduledProcessingDidWaitForRun: {
+                    await lifecycleProbe.recordScheduledProcessingWait()
+                }
+            )
+        )
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("replacement-generation-action")
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await coordinator.beginQuiescence()
+        let processingTask = Task {
+            await manager.processAllPendingActions()
+        }
+        await lifecycleProbe.waitUntilScheduledProcessingWaits()
+
+        await manager.resetRetryStateForAccountTransition()
+        await manager.authenticationDidRecover()
+        await coordinator.endQuiescence()
+        await processingTask.value
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertEqual(
+            executor.executedMessageIds,
+            ["replacement-generation-action"],
+            "The replacement account's revoked verdict must gate the first run instead of being discarded as stale"
+        )
+        context.refreshAllObjects()
+        let actions = try context.fetch(PendingAction.fetchRequest())
+        XCTAssertEqual(actions.count, 1)
+        XCTAssertEqual(actions.first?.status, "pending")
+    }
+
+    // Revert-check: fails if authenticationDidRecover() drops the
+    // `hasUnconsumedTransitionReset` branch and always bumps
+    // retryStateGeneration. AuthSession publishes after quiescence ends, so the
+    // bump lands on a run the replacement account already admitted; its revoked
+    // verdict is then discarded as stale and the `.skipped` follow-up rescans,
+    // executing the action a second time and emptying the queue.
+    func testAuthenticationPublicationDoesNotInvalidateReplacementRunAfterReset() async throws {
+        let coordinator = SyncRunCoordinator()
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        let executor = SuspendedAccountScopedFailureOnceActionExecutor(
+            error: .credentialsRevoked
+        )
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator,
+            lifecycleHooks: PendingActionLifecycleHooks(
+                scheduledProcessingDidWaitForRun: {
+                    await lifecycleProbe.recordScheduledProcessingWait()
+                }
+            )
+        )
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("replacement-run-during-publication")
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await coordinator.beginQuiescence()
+        let processingTask = Task {
+            await manager.processAllPendingActions()
+        }
+        await lifecycleProbe.waitUntilScheduledProcessingWaits()
+
+        await manager.resetRetryStateForAccountTransition()
+        await coordinator.endQuiescence()
+        await executor.waitUntilFirstExecutionStarts()
+
+        // AuthSession publishes after releasing quiescence. This recovery must
+        // consume the transition reset without making the already-admitted
+        // replacement run's verdict look stale.
+        await manager.authenticationDidRecover()
+        await executor.resumeFirstExecution()
+        await processingTask.value
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        let executedMessageIDs = await executor.executedMessageIDs
+        XCTAssertEqual(executedMessageIDs, ["replacement-run-during-publication"])
+        context.refreshAllObjects()
+        let actions = try context.fetch(PendingAction.fetchRequest())
+        XCTAssertEqual(actions.count, 1)
+        XCTAssertEqual(actions.first?.status, "pending")
+    }
+
+    // Revert-check: fails if clearLocalModifications stops subtracting the live
+    // queue (its `status IN {pending, processing, failed}` fetch and the
+    // executedTargetMessageIDs intersection) from the completed action's
+    // targets. The succeeding markUnread would clear localModifiedAt for a
+    // message whose newer markRead is still queued, so the next sync overwrites
+    // an optimistic state the server has not been told about yet.
+    func testSuccessfulOlderActionKeepsMarkerForNewerPendingAction() async throws {
+        let markerDate = Date().addingTimeInterval(-180)
+        let message = MessageBuilder()
+            .withId("overlapping-message")
+            .build(in: context)
+        message.localModifiedAt = markerDate
+
+        _ = PendingActionBuilder()
+            .markAsUnread()
+            .forMessage("overlapping-message")
+            .pending()
+            .createdAt(markerDate.addingTimeInterval(60))
+            .build(in: context)
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("overlapping-message")
+            .pending()
+            .createdAt(markerDate.addingTimeInterval(120))
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let executor = SuccessThenAuthenticationFailureActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            authenticationRetrySleeper: { _ in false }
+        )
+
+        await manager.processAllPendingActions()
+
+        context.refreshAllObjects()
+        XCTAssertEqual(message.localModifiedAt, markerDate)
+        let remainingActions = try context.fetch(PendingAction.fetchRequest())
+        XCTAssertEqual(remainingActions.count, 1)
+        XCTAssertEqual(remainingActions.first?.actionType, "markRead")
+        XCTAssertEqual(remainingActions.first?.status, "pending")
+        XCTAssertEqual(remainingActions.first?.retryCount, 0)
+    }
+
+    // Revert-check: fails if clearLocalModifications drops either half of its
+    // guard — the live-action intersection restricted to
+    // `status IN {pending, processing, failed}` (completed/abandoned rows must
+    // NOT protect, pinned by the `completedDoesNotProtect` and
+    // `abandonedDoesNotProtect` assertions), or the
+    // `localModifiedAt != nil AND localModifiedAt <= completedActionCreatedAt`
+    // predicate that leaves a newer optimistic mutation's marker alone.
+    func testClearLocalModificationsProtectsLiveOverlapsAndNewerMutation() async throws {
+        let completedActionDate = Date().addingTimeInterval(-60)
+        let olderMarkerDate = completedActionDate.addingTimeInterval(-60)
+        let newerMarkerDate = completedActionDate.addingTimeInterval(30)
+
+        let directlyProtected = MessageBuilder()
+            .withId("directly-protected")
+            .build(in: context)
+        directlyProtected.localModifiedAt = olderMarkerDate
+        let payloadProtected = MessageBuilder()
+            .withId("payload-protected")
+            .build(in: context)
+        payloadProtected.localModifiedAt = olderMarkerDate
+        let clearable = MessageBuilder()
+            .withId("clearable")
+            .build(in: context)
+        clearable.localModifiedAt = olderMarkerDate
+        let newerMutation = MessageBuilder()
+            .withId("newer-mutation")
+            .build(in: context)
+        newerMutation.localModifiedAt = newerMarkerDate
+        let processingProtected = MessageBuilder()
+            .withId("processing-protected")
+            .build(in: context)
+        processingProtected.localModifiedAt = olderMarkerDate
+        let completedDoesNotProtect = MessageBuilder()
+            .withId("completed-does-not-protect")
+            .build(in: context)
+        completedDoesNotProtect.localModifiedAt = olderMarkerDate
+        let abandonedDoesNotProtect = MessageBuilder()
+            .withId("abandoned-does-not-protect")
+            .build(in: context)
+        abandonedDoesNotProtect.localModifiedAt = olderMarkerDate
+
+        _ = PendingActionBuilder()
+            .archive()
+            .forMessage("directly-protected")
+            .failed()
+            .build(in: context)
+        _ = PendingActionBuilder()
+            .withActionType("archiveConversation")
+            .forConversation(UUID())
+            .withPayload(["messageIds": ["payload-protected"]])
+            .pending()
+            .build(in: context)
+        _ = PendingActionBuilder()
+            .archive()
+            .forMessage("processing-protected")
+            .withStatus("processing")
+            .build(in: context)
+        _ = PendingActionBuilder()
+            .archive()
+            .forMessage("completed-does-not-protect")
+            .completed()
+            .build(in: context)
+        _ = PendingActionBuilder()
+            .archive()
+            .forMessage("abandoned-does-not-protect")
+            .withStatus("abandoned")
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: RecordingActionExecutor(),
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+        await manager.clearLocalModifications(
+            actionType: .archiveConversation,
+            messageId: "directly-protected",
+            payload: [
+                "messageIds": [
+                    "directly-protected",
+                    "payload-protected",
+                    "processing-protected",
+                    "completed-does-not-protect",
+                    "abandoned-does-not-protect",
+                    "clearable",
+                    "newer-mutation"
+                ]
+            ],
+            completedActionCreatedAt: completedActionDate
+        )
+
+        context.refreshAllObjects()
+        XCTAssertEqual(directlyProtected.localModifiedAt, olderMarkerDate)
+        XCTAssertEqual(payloadProtected.localModifiedAt, olderMarkerDate)
+        XCTAssertEqual(processingProtected.localModifiedAt, olderMarkerDate)
+        XCTAssertNil(completedDoesNotProtect.localModifiedAt)
+        XCTAssertNil(abandonedDoesNotProtect.localModifiedAt)
+        XCTAssertNil(clearable.localModifiedAt)
+        XCTAssertEqual(newerMutation.localModifiedAt, newerMarkerDate)
+    }
+
+    // Revert-check: fails if executedTargetMessageIDs' `.markRead` case stops
+    // preferring payload messageIds over the row's messageId (e.g. returns
+    // their union). ActionExecutor batch-modifies the payload ids and returns
+    // without ever touching messageId, so clearing the direct target's marker
+    // would retire a local modification that was never actually synced.
+    func testClearLocalModificationsMirrorsExecutorPayloadPrecedence() async throws {
+        let markerDate = Date().addingTimeInterval(-120)
+        let completedActionDate = markerDate.addingTimeInterval(60)
+        let directMessage = MessageBuilder().withId("unused-direct-target").build(in: context)
+        directMessage.localModifiedAt = markerDate
+        let payloadMessage = MessageBuilder().withId("executed-payload-target").build(in: context)
+        payloadMessage.localModifiedAt = markerDate
+        try testStack.saveViewContext()
+
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: RecordingActionExecutor(),
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+
+        await manager.clearLocalModifications(
+            actionType: .markRead,
+            messageId: "unused-direct-target",
+            payload: ["messageIds": ["executed-payload-target"]],
+            completedActionCreatedAt: completedActionDate
+        )
+
+        context.refreshAllObjects()
+        XCTAssertEqual(directMessage.localModifiedAt, markerDate)
+        XCTAssertNil(payloadMessage.localModifiedAt)
+    }
+
+    // Revert-check: fails if clearLocalModifications stops setting
+    // `markerContext.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy` —
+    // CoreDataStack's default is object-trump, so the nil staged before the
+    // interleaved write would clobber a newer optimistic marker committed
+    // between the staging fetch and this save.
+    // HONEST SCOPE: reproducing the interleaving needs the
+    // localModificationClearDidStageChanges hook, whose removal is a compile
+    // failure rather than a test failure.
+    func testClearLocalModificationsDoesNotOverwriteConcurrentNewerMarker() async throws {
+        let lifecycleProbe = PendingActionLifecycleProbe()
+        let markerDate = Date().addingTimeInterval(-120)
+        let completedActionDate = markerDate.addingTimeInterval(60)
+        let newerMarkerDate = completedActionDate.addingTimeInterval(30)
+        let message = MessageBuilder().withId("concurrent-newer-marker").build(in: context)
+        message.localModifiedAt = markerDate
+        try testStack.saveViewContext()
+
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            actionExecutor: RecordingActionExecutor(),
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            lifecycleHooks: PendingActionLifecycleHooks(
+                localModificationClearDidStageChanges: {
+                    await lifecycleProbe.pauseAfterLocalModificationClearStagesChanges()
+                }
+            )
+        )
+
+        let clearTask = Task {
+            await manager.clearLocalModifications(
+                actionType: .archive,
+                messageId: "concurrent-newer-marker",
+                payload: nil,
+                completedActionCreatedAt: completedActionDate
+            )
+        }
+        await lifecycleProbe.waitUntilLocalModificationClearStagesChanges()
+
+        message.localModifiedAt = newerMarkerDate
+        try testStack.saveViewContext()
+        await lifecycleProbe.resumeLocalModificationClear()
+        await clearTask.value
+
+        context.refreshAllObjects()
+        XCTAssertEqual(message.localModifiedAt, newerMarkerDate)
     }
 
     /// Quota exhaustion is account-scoped: it must stop the processing run
@@ -815,7 +1341,7 @@ final class PendingActionsManagerTests: XCTestCase {
     }
 
     func testScheduledProcessing_quotaExhaustionRetriesAfterBackoff() async throws {
-        let sleeper = ControlledQuotaRetrySleeper()
+        let sleeper = ControlledRetrySleeper()
         let executor = QuotaOnceThenSuccessActionExecutor()
         let manager = PendingActionsManager(
             coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
@@ -884,6 +1410,39 @@ final class PendingActionsManagerTests: XCTestCase {
         )
     }
 
+    // Revert-check: fails if the shared retryDelay(forAttempt:baseDelay:maximumDelay:)
+    // stops doubling per attempt or loses its `min(..., maximumDelay)` clamp —
+    // attempt 8 would be 7680s instead of 120s, so a transient auth failure
+    // could park interactive actions for hours.
+    // HONEST SCOPE: authenticationRetryDelay itself cannot be deleted without a
+    // compile failure; this pins the schedule's shape, not its existence.
+    func testAuthenticationRetryDelay_usesExponentialBackoffWithCap() {
+        XCTAssertEqual(
+            PendingActionsManager.authenticationRetryDelay(
+                forAttempt: 0,
+                baseDelay: 30,
+                maximumDelay: 120
+            ),
+            30
+        )
+        XCTAssertEqual(
+            PendingActionsManager.authenticationRetryDelay(
+                forAttempt: 1,
+                baseDelay: 30,
+                maximumDelay: 120
+            ),
+            60
+        )
+        XCTAssertEqual(
+            PendingActionsManager.authenticationRetryDelay(
+                forAttempt: 8,
+                baseDelay: 30,
+                maximumDelay: 120
+            ),
+            120
+        )
+    }
+
     func testAccountTransitionResetsQuotaRetryBackoff() async throws {
         let executor = QuotaExhaustedActionExecutor()
         let retryRecorder = QuotaRetryScheduleRecorder()
@@ -910,7 +1469,7 @@ final class PendingActionsManagerTests: XCTestCase {
 
         await manager.processAllPendingActions()
         await retryRecorder.waitUntilScheduled(count: 1)
-        await manager.resetQuotaRetryStateForAccountTransition()
+        await manager.resetRetryStateForAccountTransition()
         await manager.processAllPendingActions()
         await retryRecorder.waitUntilScheduled(count: 2)
 
@@ -925,7 +1484,7 @@ final class PendingActionsManagerTests: XCTestCase {
     func testScheduledProcessing_quotaExhaustionDefersConcurrentEnqueueUntilBackoff() async throws {
         let coordinator = SyncRunCoordinator()
         let lifecycleProbe = PendingActionLifecycleProbe()
-        let sleeper = ControlledQuotaRetrySleeper()
+        let sleeper = ControlledRetrySleeper()
         let executor = QuotaOnceThenSuccessActionExecutor()
         let manager = PendingActionsManager(
             coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
@@ -997,7 +1556,7 @@ final class PendingActionsManagerTests: XCTestCase {
 
     func testScheduledProcessing_quotaExhaustionOfflineReconnectStillWaitsForBackoff() async throws {
         let networkMonitor = ControllableNetworkMonitor(isConnected: true)
-        let sleeper = ControlledQuotaRetrySleeper()
+        let sleeper = ControlledRetrySleeper()
         let executor = QuotaOnceThenSuccessActionExecutor()
         let manager = PendingActionsManager(
             coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
@@ -1179,6 +1738,71 @@ private final class AccountScopedFailureOnceActionExecutor: ActionExecutorProtoc
     }
 }
 
+private actor SuspendedAccountScopedFailureOnceActionExecutor: ActionExecutorProtocol {
+    private let error: APIError
+    private var didStart = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstExecutionContinuation: CheckedContinuation<Void, Never>?
+    private(set) var executedMessageIDs: [String] = []
+
+    init(error: APIError) {
+        self.error = error
+    }
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        if let messageId {
+            executedMessageIDs.append(messageId)
+        }
+        guard executedMessageIDs.count == 1 else { return }
+
+        didStart = true
+        let waiters = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            firstExecutionContinuation = continuation
+        }
+        throw error
+    }
+
+    func waitUntilFirstExecutionStarts() async {
+        guard !didStart else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func resumeFirstExecution() {
+        firstExecutionContinuation?.resume()
+        firstExecutionContinuation = nil
+    }
+}
+
+private final class SuccessThenAuthenticationFailureActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var executeCallCount = 0
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        let shouldFail = lock.withLock {
+            executeCallCount += 1
+            return executeCallCount == 2
+        }
+        if shouldFail {
+            throw APIError.authenticationError
+        }
+    }
+}
+
 private final class QuotaExhaustedActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
     private let lock = NSLock()
     private var _executeCallCount = 0
@@ -1216,7 +1840,7 @@ private actor QuotaOnceThenSuccessActionExecutor: ActionExecutorProtocol {
     }
 }
 
-private actor ControlledQuotaRetrySleeper {
+private actor ControlledRetrySleeper {
     private(set) var scheduledDelays: [TimeInterval] = []
     private var didSchedule = false
     private var scheduleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1331,6 +1955,9 @@ private actor PendingActionLifecycleProbe {
     private var didPauseAfterFirstScheduledProcessingRun = false
     private var firstScheduledProcessingRunPauseWaiters: [CheckedContinuation<Void, Never>] = []
     private var firstScheduledProcessingRunResumeContinuation: CheckedContinuation<Void, Never>?
+    private var didPauseAfterLocalModificationClearStagedChanges = false
+    private var localModificationClearStageWaiters: [CheckedContinuation<Void, Never>] = []
+    private var localModificationClearResumeContinuation: CheckedContinuation<Void, Never>?
     private(set) var contextCreationGenerations: [StoreGeneration] = []
     private(set) var retryMutationRun: SyncRun?
 
@@ -1383,6 +2010,31 @@ private actor PendingActionLifecycleProbe {
     func resumeFirstScheduledProcessingRun() {
         firstScheduledProcessingRunResumeContinuation?.resume()
         firstScheduledProcessingRunResumeContinuation = nil
+    }
+
+    func pauseAfterLocalModificationClearStagesChanges() async {
+        guard !didPauseAfterLocalModificationClearStagedChanges else { return }
+        didPauseAfterLocalModificationClearStagedChanges = true
+
+        let waiters = localModificationClearStageWaiters
+        localModificationClearStageWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        await withCheckedContinuation { continuation in
+            localModificationClearResumeContinuation = continuation
+        }
+    }
+
+    func waitUntilLocalModificationClearStagesChanges() async {
+        guard !didPauseAfterLocalModificationClearStagedChanges else { return }
+        await withCheckedContinuation { continuation in
+            localModificationClearStageWaiters.append(continuation)
+        }
+    }
+
+    func resumeLocalModificationClear() {
+        localModificationClearResumeContinuation?.resume()
+        localModificationClearResumeContinuation = nil
     }
 }
 

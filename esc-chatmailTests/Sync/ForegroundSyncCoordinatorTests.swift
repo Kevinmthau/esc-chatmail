@@ -3,6 +3,67 @@ import XCTest
 
 @MainActor
 final class ForegroundSyncCoordinatorTests: XCTestCase {
+    // Revert-check: fails if either `guard authSession.canAccessMailbox` reverts
+    // to `isAuthenticated` — the one in start(reason:triggerImmediateSync:)
+    // (start would return true) or the one in
+    // requestSyncIfNeeded(reason:force:remainingImmediateFollowUps:), which the
+    // three trigger calls below all funnel through. A session holding a revoked
+    // token would keep issuing sync requests that can only fail.
+    func testReauthenticationRequirementBlocksEveryForegroundSyncEntryPoint() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        authSession.requiresReauthentication = true
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 0
+        )
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        XCTAssertFalse(
+            coordinator.start(reason: "reauthenticationRequired", triggerImmediateSync: true)
+        )
+        coordinator.triggerSync(reason: "racingImmediateRequest", force: true)
+        await coordinator.performUserInitiatedSync(reason: "pullToRefresh")
+        try? await coordinator.performIncrementalSync()
+        await Task.yield()
+
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 0)
+    }
+
+    // Revert-check (combined): fails only when BOTH canAccessMailbox guards —
+    // scheduleImmediateFollowUp's (reached FIRST on the completion path) and
+    // requestSyncIfNeeded's — revert to `isAuthenticated`; each alone is
+    // masked by the other, because whichever survives still kills the
+    // needsFollowUp continuation before dead credentials re-trigger a sync.
+    // HONEST SCOPE: no single-hunk revert fails this test; it pins the pair.
+    func testReauthenticationRequirementSuppressesActiveSessionContinuation() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 0
+        )
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let initialSyncStarted = expectation(description: "initial sync")
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            initialSyncStarted.fulfill()
+            return .started
+        }
+        XCTAssertTrue(coordinator.start(reason: "active", triggerImmediateSync: true))
+        await fulfillment(of: [initialSyncStarted], timeout: 1.0)
+
+        authSession.requiresReauthentication = true
+        syncEngine.completeRequest(at: 0, needsFollowUp: true)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
+    }
+
     func testStart_triggerImmediateSync_runsOnFreshStart() async {
         let syncEngine = MockForegroundSyncEngine()
         let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
@@ -433,6 +494,11 @@ private final class MockForegroundSyncEngine: ForegroundSyncPerforming {
 @MainActor
 private final class MockForegroundSyncAuthSession: ForegroundSyncAuthenticationProviding {
     var isAuthenticated: Bool
+    var requiresReauthentication = false
+
+    var canAccessMailbox: Bool {
+        isAuthenticated && !requiresReauthentication
+    }
 
     init(isAuthenticated: Bool) {
         self.isAuthenticated = isAuthenticated

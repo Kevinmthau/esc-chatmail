@@ -19,7 +19,11 @@ struct SignInView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
                 
-                Text("A chat-style Gmail client")
+                Text(
+                    authSession.requiresReauthentication
+                        ? "Reconnect your Google account to continue"
+                        : "A chat-style Gmail client"
+                )
                     .font(.headline)
                     .foregroundColor(.secondary)
             }
@@ -68,6 +72,12 @@ struct SignInView: View {
             .padding(.horizontal, 40)
         }
         .padding()
+        .onAppear {
+            if authSession.requiresReauthentication,
+               loginHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                loginHint = authSession.userEmail ?? ""
+            }
+        }
     }
     
     private func signIn() {

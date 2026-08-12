@@ -81,6 +81,9 @@ struct esc_chatmailApp: App {
                     .onChange(of: dependencies.authSession.isAuthenticated) { _, isAuthenticated in
                         handleAuthStateChange(isAuthenticated)
                     }
+                    .onChange(of: dependencies.authSession.requiresReauthentication) { _, isRequired in
+                        handleReauthenticationRequirementChange(isRequired)
+                    }
             } else {
                 AppLoadingView()
                     .task {
@@ -140,7 +143,7 @@ struct esc_chatmailApp: App {
 
         // Start app-scoped foreground sync as soon as auth is available.
         // Scene callbacks may not fire during cold-start when already active.
-        if dependencies.authSession.isAuthenticated && !isRunningUITests {
+        if dependencies.authSession.canAccessMailbox && !isRunningUITests {
             startForegroundSyncSession(
                 reason: "appInitialized",
                 triggerImmediateSync: true,
@@ -184,14 +187,14 @@ struct esc_chatmailApp: App {
         switch newPhase {
         case .background:
             dependencies.foregroundSyncCoordinator.stop(reason: "sceneBackground")
-            if dependencies.authSession.isAuthenticated {
+            if dependencies.authSession.canAccessMailbox {
                 dependencies.backgroundSyncManager.scheduleAppRefresh()
                 dependencies.backgroundSyncManager.scheduleProcessingTask()
             }
         case .active:
             // Foreground sync is now app-scoped (independent of the conversation list lifecycle).
             // Also process pending actions and duplicate cleanup.
-            if dependencies.authSession.isAuthenticated {
+            if dependencies.authSession.canAccessMailbox {
                 startForegroundSyncSession(
                     reason: "sceneActive",
                     triggerImmediateSync: true,
@@ -208,7 +211,9 @@ struct esc_chatmailApp: App {
     private func handleAuthStateChange(_ isAuthenticated: Bool) {
         if isRunningUITests { return }
 
-        if isAuthenticated && scenePhase == .active {
+        if isAuthenticated,
+           dependencies.authSession.canAccessMailbox,
+           scenePhase == .active {
             reconcileAbandonedOptimisticSendsIfAuthenticated()
             startForegroundSyncSession(
                 reason: "authBecameAuthenticated",
@@ -220,9 +225,24 @@ struct esc_chatmailApp: App {
         }
     }
 
+    private func handleReauthenticationRequirementChange(_ isRequired: Bool) {
+        if isRunningUITests { return }
+
+        if isRequired {
+            dependencies.foregroundSyncCoordinator.stop(reason: "reauthenticationRequired")
+        } else if dependencies.authSession.canAccessMailbox && scenePhase == .active {
+            reconcileAbandonedOptimisticSendsIfAuthenticated()
+            startForegroundSyncSession(
+                reason: "reauthenticationCompleted",
+                triggerImmediateSync: true,
+                processPendingActionsIfStarted: true
+            )
+        }
+    }
+
     @discardableResult
     private func reconcileAbandonedOptimisticSendsIfAuthenticated() -> Bool {
-        guard dependencies.authSession.isAuthenticated else { return false }
+        guard dependencies.authSession.canAccessMailbox else { return false }
         return dependencies.makeSendService().reconcileAbandonedOptimisticSendMutations()
     }
 

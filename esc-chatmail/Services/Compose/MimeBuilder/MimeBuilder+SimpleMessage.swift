@@ -27,7 +27,7 @@ extension MimeBuilder {
         }
 
         mime += "Date: \(formatDate(Date()))\r\n"
-        mime += "Message-ID: \(messageId ?? generateMessageId())\r\n"
+        mime += "Message-ID: \(sanitizeHeaderValue(messageId ?? generateMessageId()))\r\n"
 
         if let inReplyTo = inReplyTo, !inReplyTo.isEmpty {
             mime += "In-Reply-To: \(sanitizeHeaderValue(inReplyTo))\r\n"

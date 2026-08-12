@@ -12,11 +12,17 @@ private enum PendingActionProcessingOutcome: Equatable {
     case skipped
 }
 
+private struct PendingActionProcessingResult {
+    let outcome: PendingActionProcessingOutcome
+    let retryStateGeneration: UInt64
+}
+
 struct PendingActionLifecycleHooks: Sendable {
     var scheduledProcessingDidWaitForRun: (@Sendable () async -> Void)? = nil
     var scheduledProcessingWillCreateInitialContext: (@Sendable () async -> Void)? = nil
     var scheduledProcessingDidReleaseRun: (@Sendable () async -> Void)? = nil
     var retryMutationDidResetAction: (@Sendable (SyncRun) async -> Void)? = nil
+    var localModificationClearDidStageChanges: (@Sendable () async -> Void)? = nil
 }
 
 /// Manages a persistent queue of pending actions that need to be synced to Gmail.
@@ -41,6 +47,9 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     let networkMonitor: NetworkMonitorProtocol
     let syncRunCoordinator: SyncRunCoordinator
     let lifecycleHooks: PendingActionLifecycleHooks
+    private let authenticationRetryBaseDelay: TimeInterval
+    private let authenticationRetryMaximumDelay: TimeInterval
+    private let authenticationRetrySleeper: @Sendable (TimeInterval) async -> Bool
     private let quotaRetryBaseDelay: TimeInterval
     private let quotaRetryMaximumDelay: TimeInterval
     private let quotaRetrySleeper: @Sendable (TimeInterval) async -> Bool
@@ -56,11 +65,23 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     private var isProcessing = false
     private var isInitialized = false
     private var pendingProcessTask: Task<Void, Never>?
+    private var authenticationRetryTask: Task<Void, Never>?
+    private var authenticationRetryTaskID: UUID?
+    private var authenticationRetryAttempt = 0
     private var quotaRetryTask: Task<Void, Never>?
     private var quotaRetryTaskID: UUID?
     private var quotaRetryAttempt = 0
     private var activeProcessingOutcome: PendingActionProcessingOutcome = .completed
     private var processingWasRequested = false
+    /// Parked-queue latch for revoked credentials. Released ONLY by
+    /// authenticationDidRecover() — deliberately not by
+    /// resetRetryStateForAccountTransition(), because a transition reset runs
+    /// before the replacement session proves its credentials work. Any new
+    /// AuthSession path that publishes an authenticated session must call the
+    /// recovery hook, or the queue stays parked until process restart.
+    private var isWaitingForCredentialRecovery = false
+    private var retryStateGeneration: UInt64 = 0
+    private var hasUnconsumedTransitionReset = false
 
     // MARK: - Initialization
 
@@ -71,6 +92,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         self.networkMonitor = AppNetworkMonitor.shared
         self.syncRunCoordinator = .shared
         self.lifecycleHooks = PendingActionLifecycleHooks()
+        self.authenticationRetryBaseDelay = 30
+        self.authenticationRetryMaximumDelay = 5 * 60
+        self.authenticationRetrySleeper = { delay in
+            await Task.sleepUnlessCancelled(
+                nanoseconds: UInt64(delay * 1_000_000_000)
+            )
+        }
         self.quotaRetryBaseDelay = 15 * 60
         self.quotaRetryMaximumDelay = 60 * 60
         self.quotaRetrySleeper = { delay in
@@ -87,6 +115,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         networkMonitor: NetworkMonitorProtocol = AppNetworkMonitor.shared,
         syncRunCoordinator: SyncRunCoordinator = .shared,
         lifecycleHooks: PendingActionLifecycleHooks = PendingActionLifecycleHooks(),
+        authenticationRetryBaseDelay: TimeInterval = 30,
+        authenticationRetryMaximumDelay: TimeInterval = 5 * 60,
+        authenticationRetrySleeper: @escaping @Sendable (TimeInterval) async -> Bool = { delay in
+            await Task.sleepUnlessCancelled(
+                nanoseconds: UInt64(delay * 1_000_000_000)
+            )
+        },
         quotaRetryBaseDelay: TimeInterval = 15 * 60,
         quotaRetryMaximumDelay: TimeInterval = 60 * 60,
         quotaRetrySleeper: @escaping @Sendable (TimeInterval) async -> Bool = { delay in
@@ -100,6 +135,9 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         self.networkMonitor = networkMonitor
         self.syncRunCoordinator = syncRunCoordinator
         self.lifecycleHooks = lifecycleHooks
+        self.authenticationRetryBaseDelay = authenticationRetryBaseDelay
+        self.authenticationRetryMaximumDelay = authenticationRetryMaximumDelay
+        self.authenticationRetrySleeper = authenticationRetrySleeper
         self.quotaRetryBaseDelay = quotaRetryBaseDelay
         self.quotaRetryMaximumDelay = quotaRetryMaximumDelay
         self.quotaRetrySleeper = quotaRetrySleeper
@@ -126,6 +164,20 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     /// Schedules processing with deduplication to prevent multiple concurrent processing tasks
     /// during network flaps (rapid connect/disconnect cycles)
     private func scheduleProcessing() {
+        // Revoked credentials need an interactive sign-in, so autonomous
+        // scans stay parked while new enqueues remain durable.
+        guard !isWaitingForCredentialRecovery else {
+            processingWasRequested = true
+            return
+        }
+
+        // A transient authentication failure has its own bounded wake-up.
+        // Do not let an enqueue turn that delay into a hot loop.
+        guard authenticationRetryTask == nil else {
+            processingWasRequested = true
+            return
+        }
+
         // Quota exhaustion gates every automatic request until the existing
         // bounded retry expires. Enqueues are already durable; remember their
         // signal without cancelling the timer or starting an immediate scan.
@@ -145,28 +197,35 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         processingWasRequested = false
         pendingProcessTask = Task { [weak self] in
             guard let self = self else { return }
-            let outcome = await self.processAllPendingActionsWithOutcome()
-            await self.clearPendingTask(after: outcome)
+            let result = await self.processAllPendingActionsWithOutcome()
+            await self.clearPendingTask(after: result)
         }
     }
 
-    private func clearPendingTask(after outcome: PendingActionProcessingOutcome) async {
-        // Account-wide failures leave the row pending intentionally. Auth
-        // failures wait for authentication recovery instead of immediately
-        // re-scanning a queue that cannot succeed. Quota exhaustion retains
-        // concurrent enqueue signals behind one bounded exponential-backoff
-        // wake-up. A run cancelled by account teardown is
+    private func clearPendingTask(after result: PendingActionProcessingResult) async {
+        let outcome = currentOutcome(for: result)
+        // Account-wide failures leave the row pending intentionally. Transient
+        // authentication and quota failures retain concurrent enqueue signals
+        // behind bounded wake-ups. Revoked credentials wait for successful
+        // interactive authentication. A run cancelled by account teardown is
         // different: autonomous processing carries no old-account identifiers,
         // so it may wait through teardown and scan the current store under a
         // fresh run afterward.
         switch outcome {
-        case .authenticationError, .credentialsRevoked:
+        case .authenticationError:
             pendingProcessTask = nil
-            processingWasRequested = false
+            resetQuotaRetryBackoff()
+            scheduleAuthenticationRetry()
+            return
+        case .credentialsRevoked:
+            pendingProcessTask = nil
+            isWaitingForCredentialRecovery = true
+            resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
             return
         case .quotaExhausted:
             pendingProcessTask = nil
+            resetAuthenticationRetryBackoff()
             scheduleQuotaRetry()
             return
         case .skipped:
@@ -174,6 +233,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             _ = scheduleRequestedFollowUpIfNeeded()
             return
         case .completed:
+            resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
         case .cancelled:
             break
@@ -205,6 +265,49 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         guard networkMonitor.isConnected else { return false }
         scheduleProcessing()
         return true
+    }
+
+    private func scheduleAuthenticationRetry() {
+        // Start the delay even if connectivity dropped while the failed run
+        // was finishing. Reconnects before expiry remain behind this gate.
+        guard authenticationRetryTask == nil else { return }
+        guard !isWaitingForCredentialRecovery else { return }
+
+        let delay = Self.authenticationRetryDelay(
+            forAttempt: authenticationRetryAttempt,
+            baseDelay: authenticationRetryBaseDelay,
+            maximumDelay: authenticationRetryMaximumDelay
+        )
+        authenticationRetryAttempt = min(authenticationRetryAttempt + 1, 63)
+
+        let taskID = UUID()
+        let sleeper = authenticationRetrySleeper
+        authenticationRetryTaskID = taskID
+        authenticationRetryTask = Task { [weak self] in
+            guard await sleeper(delay) else { return }
+            await self?.authenticationRetryDelayElapsed(taskID: taskID)
+        }
+
+        Log.info("Scheduled pending-action authentication retry in \(delay) seconds", category: .sync)
+    }
+
+    private func authenticationRetryDelayElapsed(taskID: UUID) {
+        guard authenticationRetryTaskID == taskID else { return }
+        authenticationRetryTask = nil
+        authenticationRetryTaskID = nil
+        guard networkMonitor.isConnected else { return }
+        scheduleProcessing()
+    }
+
+    private func cancelAuthenticationRetryTask() {
+        authenticationRetryTask?.cancel()
+        authenticationRetryTask = nil
+        authenticationRetryTaskID = nil
+    }
+
+    private func resetAuthenticationRetryBackoff() {
+        cancelAuthenticationRetryTask()
+        authenticationRetryAttempt = 0
     }
 
     private func scheduleQuotaRetry() {
@@ -251,15 +354,97 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         quotaRetryAttempt = 0
     }
 
-    /// Retires quota scheduling owned by the account being torn down. The
-    /// manager is process-wide, so carrying this attempt counter into the next
-    /// authenticated account could make that account's first retry inherit an
-    /// unrelated hour-long backoff.
-    func resetQuotaRetryStateForAccountTransition() {
+    /// Retires delayed retries owned by the account being torn down. The
+    /// manager is process-wide, so carrying attempt counters into the next
+    /// authenticated account could delay unrelated work.
+    func resetRetryStateForAccountTransition() {
+        retryStateGeneration &+= 1
+        hasUnconsumedTransitionReset = true
+        resetAuthenticationRetryBackoff()
         resetQuotaRetryBackoff()
     }
 
+    /// Releases a revoked-credential gate only after authentication has
+    /// actually succeeded. A canceled sign-in must leave the queue parked.
+    func authenticationDidRecover() {
+        // Rescan only when the queue was parked, backing off, or mid-run.
+        // This hook fires on EVERY successful restore (both
+        // publishAuthenticatedSession sites), so an unconditional rescan
+        // would race a cold BGTask launch: the rescan wins the pendingActions
+        // run, the background mailbox sync returns .blocked, and the BGTask
+        // slot burns on setTaskCompleted(success: false). The
+        // pendingProcessTask disjunct is load-bearing for the inverse race —
+        // a recovery landing after a run released its lease but before its
+        // (about-to-be-neutralized) revoked verdict is applied has no parked
+        // state to observe yet, and the neutralized .skipped arm only
+        // reschedules if something requested processing meanwhile.
+        let hadParkedWork = isWaitingForCredentialRecovery
+            || authenticationRetryTask != nil
+            || authenticationRetryAttempt > 0
+            || pendingProcessTask != nil
+        if hasUnconsumedTransitionReset {
+            // The transition reset already invalidated every old-account
+            // outcome. Do not invalidate a replacement-account run that was
+            // admitted after quiescence ended but before publication finished.
+            hasUnconsumedTransitionReset = false
+        } else {
+            // Keep the standalone API safe for a recovery that races a run's
+            // post-release outcome bookkeeping.
+            retryStateGeneration &+= 1
+        }
+        isWaitingForCredentialRecovery = false
+        resetAuthenticationRetryBackoff()
+        guard hadParkedWork, networkMonitor.isConnected else { return }
+        scheduleProcessing()
+    }
+
+    private func currentOutcome(
+        for result: PendingActionProcessingResult
+    ) -> PendingActionProcessingOutcome {
+        guard result.retryStateGeneration != retryStateGeneration else {
+            return result.outcome
+        }
+
+        // A successful authentication or account transition can interleave
+        // after a run releases its coordinator lease but before the scheduled
+        // task applies that run's result. Never let an old account-wide
+        // failure recreate a gate that the newer session already retired —
+        // and never let a stale .completed reset the CURRENT account's
+        // bounded retry timers (its arm resets both backoffs and returns
+        // without rescheduling).
+        switch result.outcome {
+        case .authenticationError, .credentialsRevoked, .quotaExhausted, .completed:
+            return .skipped
+        case .cancelled, .skipped:
+            return result.outcome
+        }
+    }
+
+    nonisolated static func authenticationRetryDelay(
+        forAttempt attempt: Int,
+        baseDelay: TimeInterval,
+        maximumDelay: TimeInterval
+    ) -> TimeInterval {
+        retryDelay(
+            forAttempt: attempt,
+            baseDelay: baseDelay,
+            maximumDelay: maximumDelay
+        )
+    }
+
     nonisolated static func quotaRetryDelay(
+        forAttempt attempt: Int,
+        baseDelay: TimeInterval,
+        maximumDelay: TimeInterval
+    ) -> TimeInterval {
+        retryDelay(
+            forAttempt: attempt,
+            baseDelay: baseDelay,
+            maximumDelay: maximumDelay
+        )
+    }
+
+    private nonisolated static func retryDelay(
         forAttempt attempt: Int,
         baseDelay: TimeInterval,
         maximumDelay: TimeInterval
@@ -314,6 +499,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     public func stopMonitoring() {
         networkMonitor.stop()
+        cancelAuthenticationRetryTask()
         cancelQuotaRetryTask()
         isInitialized = false
     }
@@ -562,6 +748,18 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     // MARK: - Process Actions
 
     public func processAllPendingActions() async {
+        guard !isWaitingForCredentialRecovery else {
+            processingWasRequested = true
+            return
+        }
+
+        // A direct request observes the same authentication gate as an
+        // enqueue, so callers cannot bypass bounded recovery backoff.
+        guard authenticationRetryTask == nil else {
+            processingWasRequested = true
+            return
+        }
+
         // A direct request that races a quota-failed scheduled run observes the
         // same gate as an enqueue. Keep its signal for the already scheduled
         // retry instead of bypassing backoff with an immediate rescan.
@@ -574,14 +772,21 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             processingWasRequested = true
             return
         }
-        let outcome = await processAllPendingActionsWithOutcome()
+        let result = await processAllPendingActionsWithOutcome()
+        let outcome = currentOutcome(for: result)
         switch outcome {
-        case .authenticationError, .credentialsRevoked:
-            processingWasRequested = false
+        case .authenticationError:
+            resetQuotaRetryBackoff()
+            scheduleAuthenticationRetry()
+        case .credentialsRevoked:
+            isWaitingForCredentialRecovery = true
+            resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
         case .quotaExhausted:
+            resetAuthenticationRetryBackoff()
             scheduleQuotaRetry()
         case .completed:
+            resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
             _ = scheduleRequestedFollowUpIfNeeded()
         case .cancelled, .skipped:
@@ -589,19 +794,37 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         }
     }
 
-    private func processAllPendingActionsWithOutcome() async -> PendingActionProcessingOutcome {
+    private func processAllPendingActionsWithOutcome() async -> PendingActionProcessingResult {
+        let generationBeforeRunAcquisition = retryStateGeneration
         ensureInitialized()
 
-        guard !isProcessing else { return .skipped }
-        guard networkMonitor.isConnected else { return .completed }
+        guard !isProcessing else {
+            return PendingActionProcessingResult(
+                outcome: .skipped,
+                retryStateGeneration: generationBeforeRunAcquisition
+            )
+        }
+        guard networkMonitor.isConnected else {
+            return PendingActionProcessingResult(
+                outcome: .completed,
+                retryStateGeneration: generationBeforeRunAcquisition
+            )
+        }
 
         isProcessing = true
         defer { isProcessing = false }
         activeProcessingOutcome = .completed
 
         guard let syncRunTask = await acquirePendingActionRunTask() else {
-            return .cancelled
+            return PendingActionProcessingResult(
+                outcome: .cancelled,
+                retryStateGeneration: generationBeforeRunAcquisition
+            )
         }
+        // A scanner may wait here across account quiescence. Bind its verdict
+        // to the generation whose run it actually acquired, not the account
+        // that originally requested the scan.
+        let generationForRun = retryStateGeneration
 
         do {
             try await syncRunTask.task.value
@@ -614,7 +837,10 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         await syncRunCoordinator.endRun(syncRunTask.run)
         await lifecycleHooks.scheduledProcessingDidReleaseRun?()
-        return activeProcessingOutcome
+        return PendingActionProcessingResult(
+            outcome: activeProcessingOutcome,
+            retryStateGeneration: generationForRun
+        )
     }
 
     private func performPendingActionRun(within syncRun: SyncRun) async {

@@ -4,6 +4,69 @@ import XCTest
 
 @MainActor
 final class AuthSessionTests: XCTestCase {
+    // Revert-check: fails if AuthSession.requireReauthentication() stops setting
+    // `requiresReauthentication` (or reverts to tearing the session down), or if
+    // `canAccessMailbox` stops subtracting that flag from `isAuthenticated`. A
+    // revoked refresh token must park the mailbox, not sign the account out and
+    // take its isolated local store and durable pending actions with it.
+    func testRequireReauthenticationPreservesAuthenticatedMailboxState() {
+        let session = makeAuthSession()
+        session.isAuthenticated = true
+        session.userEmail = "person@example.com"
+        session.accessToken = "expired-access-token"
+
+        session.requireReauthentication()
+
+        XCTAssertTrue(session.isAuthenticated)
+        XCTAssertTrue(session.requiresReauthentication)
+        XCTAssertFalse(session.canAccessMailbox)
+        XCTAssertEqual(session.userEmail, "person@example.com")
+        XCTAssertEqual(session.accessToken, "expired-access-token")
+    }
+
+    // Revert-check: the `requiresReauthentication` assertion fails if
+    // requireReauthentication()'s `guard isAuthenticated else { return }` is
+    // removed. A refresh failure that lands before any session is published
+    // would otherwise latch a reauthentication demand onto a signed-out app,
+    // where no sign-in flow can clear it except publishAuthenticatedSession.
+    func testRequireReauthenticationDoesNothingWithoutAuthenticatedSession() {
+        let session = makeAuthSession()
+
+        session.requireReauthentication()
+
+        XCTAssertFalse(session.requiresReauthentication)
+        XCTAssertFalse(session.canAccessMailbox)
+    }
+
+    // Revert-check: fails if `await resetPendingActionRetryState()` is removed
+    // from AuthSession.signOut() (firstIndex(of:) goes nil) or moved after
+    // completeDurableLocalCleanupForAccountRemoval(). PendingActionsManager is
+    // process-wide, so the old account's retry timers and credential-recovery
+    // latch must be retired before the store reset, not inherited by the next.
+    func testSignOutResetsPendingActionRetryStateBeforeStoreCleanup() async {
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            resetPendingActionRetryState: {
+                cleanup.record("pending-retries-reset")
+            },
+            resetCoreDataStore: {
+                cleanup.record("store-reset")
+            }
+        )
+        session.isAuthenticated = true
+
+        let didSignOut = await session.signOut()
+
+        XCTAssertTrue(didSignOut)
+        let retryResetIndex = cleanup.events.firstIndex(of: "pending-retries-reset")
+        let storeResetIndex = cleanup.events.firstIndex(of: "store-reset")
+        XCTAssertNotNil(retryResetIndex)
+        XCTAssertNotNil(storeResetIndex)
+        if let retryResetIndex, let storeResetIndex {
+            XCTAssertLessThan(retryResetIndex, storeResetIndex)
+        }
+    }
+
     func testWithFreshToken_reusesSingleInjectedTokenManagerInstance() async throws {
         let factory = AuthSessionTokenManagerFactory()
         let session = makeAuthSession(tokenManagerProvider: { factory.makeDistinctTokenManager() })
@@ -2105,6 +2168,8 @@ final class AuthSessionTests: XCTestCase {
         reopenParticipantCaches: @escaping @Sendable () async -> Void = {},
         cleanupDownloads: @escaping @MainActor @Sendable () async -> Void = {},
         reopenDownloads: @escaping @MainActor @Sendable () async -> Void = {},
+        resetPendingActionRetryState: @escaping @MainActor @Sendable () async -> Void = {},
+        pendingActionAuthenticationDidRecover: @escaping @MainActor @Sendable () async -> Void = {},
         cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {},
         resetCoreDataStore: @escaping @Sendable () async throws -> Void = {},
         fetchStoredAccountEmails: @escaping @Sendable () async throws -> [String] = { [] },
@@ -2130,6 +2195,8 @@ final class AuthSessionTests: XCTestCase {
             reopenParticipantCaches: reopenParticipantCaches,
             cleanupDownloads: cleanupDownloads,
             reopenDownloads: reopenDownloads,
+            resetPendingActionRetryState: resetPendingActionRetryState,
+            pendingActionAuthenticationDidRecover: pendingActionAuthenticationDidRecover,
             cancelBackgroundTaskRequests: cancelBackgroundTaskRequests,
             resetCoreDataStore: resetCoreDataStore,
             inspectLocalMailboxStore: {
