@@ -213,6 +213,7 @@ final class TokenManagerTests: XCTestCase {
     // MARK: - refreshToken error classification
 
     func testRefreshToken_invalidCredentialsError_doesNotRetry() async {
+        authSession.isAuthenticated = true
         mockRefresher.errorToThrow = TokenManagerError.invalidCredentials
 
         do {
@@ -223,12 +224,206 @@ final class TokenManagerTests: XCTestCase {
                 return XCTFail("Expected .invalidCredentials, got \(error)")
             }
             XCTAssertEqual(mockRefresher.callCount, 1, "Non-retryable errors should not retry")
+            XCTAssertTrue(authSession.requiresReauthentication)
+            XCTAssertFalse(authSession.canAccessMailbox)
         } catch {
             XCTFail("Unexpected error type: \(error)")
         }
     }
 
+    // Revert-check: fails if performTokenRefresh's non-retryable branch stops
+    // unwrapping `TokenManagerError.refreshFailed(underlying)` before asking
+    // isInvalidGrantError, or stops calling publishCredentialRevocation. The
+    // old code classified the wrapper itself, which carries neither code 400
+    // nor the userInfo, so a revoked grant surfaced as a generic .refreshFailed
+    // and the mailbox kept retrying instead of asking for reauthentication.
+    func testRefreshToken_invalidGrantRequiresReauthenticationWithoutRetry() async {
+        authSession.isAuthenticated = true
+        let underlying = NSError(
+            domain: "GTMSessionFetcher",
+            code: 400,
+            userInfo: ["error": "invalid_grant"]
+        )
+        mockRefresher.errorToThrow = TokenManagerError.refreshFailed(underlying)
+
+        do {
+            _ = try await sut.refreshToken()
+            XCTFail("Expected throw")
+        } catch let error as TokenManagerError {
+            guard case .invalidCredentials = error else {
+                return XCTFail("Expected .invalidCredentials, got \(error)")
+            }
+            XCTAssertEqual(mockRefresher.callCount, 1)
+            XCTAssertTrue(authSession.requiresReauthentication)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    // Revert-check: fails if TokenManager.isInvalidGrantError loses its AppAuth
+    // handling — the `org.openid.appauth.oauth_token` / code -10 pair and the
+    // nested OIDOAuthErrorResponseErrorKey lookup. The legacy `code == 400`
+    // check matches neither shape, so an AppAuth-reported revocation would
+    // never park the mailbox.
+    // HONEST SCOPE: the fixture carries both shapes, so removing either branch
+    // alone still passes; this pins that detection exists, not which branch does it.
+    func testRefreshToken_appAuthInvalidGrantRequiresReauthenticationWithoutRetry() async {
+        authSession.isAuthenticated = true
+        let underlying = NSError(
+            domain: "org.openid.appauth.oauth_token",
+            code: -10,
+            userInfo: [
+                "OIDOAuthErrorResponseErrorKey": ["error": "invalid_grant"]
+            ]
+        )
+        mockRefresher.errorToThrow = TokenManagerError.refreshFailed(underlying)
+
+        do {
+            _ = try await sut.refreshToken()
+            XCTFail("Expected throw")
+        } catch let error as TokenManagerError {
+            guard case .invalidCredentials = error else {
+                return XCTFail("Expected .invalidCredentials, got \(error)")
+            }
+            XCTAssertEqual(mockRefresher.callCount, 1)
+            XCTAssertTrue(authSession.requiresReauthentication)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    // Revert-check: fails if saveTokens drops the ungated-save epoch bump
+    // (`if epoch == nil { _cacheEpoch &+= 1 }`) that retires refreshes begun
+    // under the previous credentials — the retired refresh's invalid_grant
+    // verdict is then published into the replacement session, parking a
+    // mailbox whose credentials are fine. Also fails (on the CancellationError
+    // expectation, not the requiresReauthentication assert — the publish
+    // helper's own epoch re-check still no-ops) if performTokenRefresh drops
+    // the `guard cacheEpochMatches(epochAtStart)` at the head of its catch.
+    func testRetiredRefreshCannotRequireReauthenticationForReplacementSession() async throws {
+        let staleRefresher = ControlledFailingTokenRefresher(
+            error: TokenManagerError.invalidCredentials
+        )
+        let manager = TokenManager(
+            keychainService: mockKeychain,
+            authSession: authSession,
+            tokenRefresher: staleRefresher
+        )
+        authSession.isAuthenticated = true
+
+        let staleRefresh = Task {
+            try await manager.refreshToken()
+        }
+        await staleRefresher.waitUntilStarted()
+
+        // A direct save establishes the replacement sign-in generation.
+        try manager.saveTokens(
+            access: "replacement-access",
+            refresh: "replacement-refresh",
+            expirationDate: Date().addingTimeInterval(3_600)
+        )
+        await staleRefresher.resumeWithFailure()
+
+        do {
+            _ = try await staleRefresh.value
+            XCTFail("Expected the retired refresh to be cancelled")
+        } catch is CancellationError {
+            // Expected: a retired generation cannot return a usable token or
+            // publish an authentication verdict into the replacement session.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+
+        XCTAssertFalse(authSession.requiresReauthentication)
+        XCTAssertTrue(authSession.canAccessMailbox)
+        let currentToken = try await manager.getCurrentToken()
+        XCTAssertEqual(currentToken, "replacement-access")
+    }
+
+    // Revert-check: fails if TokenRefreshCoordinator.getOrCreateTask stops
+    // keying single-flight on `forGeneration:` (i.e. reverts to TaskCoordinator's
+    // unconditional reuse of the live task). The replacement caller would join
+    // the retired account's suspended refresh instead of issuing its own, so
+    // waitUntilCallCount(2) times out at its 5s deadline and the assertions
+    // below fail — the replacement inherits the retired task's
+    // CancellationError rather than a usable token.
+    func testReplacementGenerationDoesNotJoinRetiredRefreshTask() async throws {
+        let refresher = ControlledFailingTokenRefresher(
+            error: TokenManagerError.invalidCredentials,
+            succeedingAccessToken: "replacement-refreshed-access"
+        )
+        let manager = TokenManager(
+            keychainService: mockKeychain,
+            authSession: authSession,
+            tokenRefresher: refresher
+        )
+        authSession.isAuthenticated = true
+
+        let staleRefresh = Task {
+            try await manager.refreshToken()
+        }
+        await refresher.waitUntilStarted()
+        try manager.saveTokens(
+            access: "replacement-access",
+            refresh: "replacement-refresh",
+            expirationDate: Date().addingTimeInterval(3_600)
+        )
+
+        let replacementRefresh = Task {
+            try await manager.refreshToken()
+        }
+        await refresher.waitUntilCallCount(2)
+        let replacementToken = try await replacementRefresh.value
+        XCTAssertEqual(replacementToken, "replacement-refreshed-access")
+
+        await refresher.resumeWithFailure()
+        do {
+            _ = try await staleRefresh.value
+            XCTFail("Expected the retired refresh to be cancelled")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+
+        XCTAssertFalse(authSession.requiresReauthentication)
+        XCTAssertTrue(authSession.canAccessMailbox)
+        let currentToken = try await manager.getCurrentToken()
+        XCTAssertEqual(currentToken, "replacement-refreshed-access")
+    }
+
+    // Revert-check: fails if getOrCreateTask's `generation < latestGeneration`
+    // early return (the throwaway cancelled handle) is removed. A caller that
+    // snapshotted an old epoch and reached the actor late would then overwrite
+    // currentEntry/latestGeneration, so the still-live newer generation loses
+    // its single-flight entry — the reuse call gets a fresh id and runs the
+    // "duplicate" factory instead of returning "replacement".
+    func testRefreshCoordinatorRejectsDelayedRetiredGenerationWithoutEvictingNewTask() async throws {
+        let coordinator = TokenRefreshCoordinator()
+        let replacementHandle = await coordinator.getOrCreateTask(forGeneration: 2) {
+            Task<String, Error> { "replacement" }
+        }
+        let retiredHandle = await coordinator.getOrCreateTask(forGeneration: 1) {
+            Task<String, Error> { "retired" }
+        }
+
+        do {
+            _ = try await retiredHandle.task.value
+            XCTFail("Expected the delayed retired registration to be cancelled")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let reusedReplacementHandle = await coordinator.getOrCreateTask(forGeneration: 2) {
+            Task<String, Error> { "duplicate" }
+        }
+        XCTAssertEqual(reusedReplacementHandle.id, replacementHandle.id)
+        let replacementToken = try await reusedReplacementHandle.task.value
+        XCTAssertEqual(replacementToken, "replacement")
+    }
+
     func testRefreshToken_noValidTokenError_doesNotRetry() async {
+        authSession.isAuthenticated = true
         mockRefresher.errorToThrow = TokenManagerError.noValidToken
 
         do {
@@ -239,6 +434,7 @@ final class TokenManagerTests: XCTestCase {
                 return XCTFail("Expected .noValidToken, got \(error)")
             }
             XCTAssertEqual(mockRefresher.callCount, 1, "Non-retryable errors should not retry")
+            XCTAssertFalse(authSession.requiresReauthentication)
         } catch {
             XCTFail("Unexpected error type: \(error)")
         }
@@ -323,5 +519,62 @@ final class TokenManagerTests: XCTestCase {
     func testIsAuthError_urlErrorUserAuthRequired_returnsTrue() {
         let error = URLError(.userAuthenticationRequired)
         XCTAssertTrue(sut.isAuthError(error))
+    }
+}
+
+private actor ControlledFailingTokenRefresher: TokenRefresherProtocol {
+    private let error: Error
+    private let succeedingAccessToken: String?
+    private var callCount = 0
+    private var didStart = false
+    private var failureContinuation: CheckedContinuation<Void, Never>?
+
+    init(error: Error, succeedingAccessToken: String? = nil) {
+        self.error = error
+        self.succeedingAccessToken = succeedingAccessToken
+    }
+
+    func refreshTokens() async throws -> (
+        accessToken: String,
+        refreshToken: String?,
+        expirationDate: Date
+    ) {
+        callCount += 1
+        let currentCall = callCount
+        didStart = true
+
+        if currentCall > 1, let succeedingAccessToken {
+            return (
+                accessToken: succeedingAccessToken,
+                refreshToken: "replacement-refreshed-refresh",
+                expirationDate: Date().addingTimeInterval(3_600)
+            )
+        }
+
+        await withCheckedContinuation { continuation in
+            failureContinuation = continuation
+        }
+        throw error
+    }
+
+    /// Deadline-bounded (house rule) so a regression fails the calling
+    /// test's next assertion instead of hanging the whole suite.
+    func waitUntilStarted() async {
+        let deadline = Date().addingTimeInterval(5)
+        while !didStart, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func waitUntilCallCount(_ expectedCount: Int) async {
+        let deadline = Date().addingTimeInterval(5)
+        while callCount < expectedCount, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func resumeWithFailure() {
+        failureContinuation?.resume()
+        failureContinuation = nil
     }
 }

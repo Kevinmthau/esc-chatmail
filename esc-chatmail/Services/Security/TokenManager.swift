@@ -2,6 +2,56 @@ import Foundation
 import GoogleSignIn
 import Combine
 
+struct TokenRefreshTaskHandle: Sendable {
+    let id: UUID
+    let task: Task<String, Error>
+}
+
+actor TokenRefreshCoordinator {
+    private struct Entry {
+        let generation: UInt64
+        let handle: TokenRefreshTaskHandle
+    }
+
+    private var currentEntry: Entry?
+    private var latestGeneration: UInt64?
+
+    func getOrCreateTask(
+        forGeneration generation: UInt64,
+        factory: () -> Task<String, Error>
+    ) -> TokenRefreshTaskHandle {
+        if let latestGeneration {
+            if generation < latestGeneration {
+                // A caller can snapshot an old generation, suspend before
+                // reaching this actor, then arrive after a replacement
+                // account has installed its task. Never let that stale caller
+                // evict the newer single-flight entry.
+                return TokenRefreshTaskHandle(
+                    id: UUID(),
+                    task: Task { throw CancellationError() }
+                )
+            }
+
+            if generation == latestGeneration,
+               let currentEntry {
+                return currentEntry.handle
+            }
+        }
+
+        let handle = TokenRefreshTaskHandle(id: UUID(), task: factory())
+        latestGeneration = generation
+        currentEntry = Entry(generation: generation, handle: handle)
+        return handle
+    }
+
+    /// Returns true only when this handle still owns the active generation.
+    func clearTask(id: UUID) -> Bool {
+        guard currentEntry?.handle.id == id else { return false }
+        currentEntry = nil
+        return true
+    }
+}
+
 // MARK: - Token Manager Error
 
 enum TokenManagerError: LocalizedError {
@@ -75,7 +125,7 @@ protocol TokenManagerProtocol: Sendable {
 
 /// TokenManager uses @unchecked Sendable because:
 /// - All @Published properties are explicitly @MainActor isolated
-/// - Internal coordination uses dedicated actors (TaskCoordinator, ExponentialBackoffActor)
+/// - Internal coordination uses a dedicated actor (TokenRefreshCoordinator)
 /// - Nonisolated methods are carefully designed to not access mutable state directly
 /// - ObservableObject pattern requires class semantics with Sendable conformance
 final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sendable {
@@ -86,8 +136,7 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
 
     let keychainService: KeychainServiceProtocol
     private let authSession: AuthSession
-    private let refreshCoordinator = TaskCoordinator<String>()
-    let refreshBackoff = ExponentialBackoffActor()
+    private let refreshCoordinator = TokenRefreshCoordinator()
     let tokenRefresher: TokenRefresherProtocol
 
     // Token refresh configuration
@@ -114,12 +163,16 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     /// - The lock guards the cached pair, a sign-out epoch, AND the keychain
     ///   writes/deletes of the two writers (saveTokens, clearTokens), so a
     ///   save and a clear can never interleave their keychain operations.
-    /// - clearTokens bumps the epoch under the lock. Cache populates are
+    /// - BOTH writers bump the epoch under the lock: clearTokens always, and
+    ///   ungated saveTokens (sign-in/restore via
+    ///   persistSessionForBackgroundAccess) so in-flight refreshes for the
+    ///   prior credentials cancel instead of publishing. Cache populates are
     ///   epoch-gated: getCurrentToken snapshots the epoch before its
-    ///   (unserialized) keychain read, and performTokenRefresh snapshots it
-    ///   before its network call, so a token obtained under a sign-in
-    ///   generation that a sign-out has since retired is dropped instead of
-    ///   cached — with the reader's populate serialized against the whole
+    ///   (unserialized) keychain read, and refreshToken() snapshots it before
+    ///   entering the coordinator and passes it into performTokenRefresh's
+    ///   network call, so a token obtained under a generation that a
+    ///   sign-out or replacement sign-in has since retired is dropped instead
+    ///   of cached — with the reader's populate serialized against the whole
     ///   clear section, no interleaving can resurrect a cleared token.
     private let cacheLock = NSLock()
     private var _cachedToken: CachedToken?
@@ -133,6 +186,10 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     /// snapshot the sign-out generation before its network call.
     func cacheEpoch() -> UInt64 {
         cacheLock.withLock { _cacheEpoch }
+    }
+
+    func cacheEpochMatches(_ epoch: UInt64) -> Bool {
+        cacheLock.withLock { _cacheEpoch == epoch }
     }
 
     /// Populates the cache only if no clear happened since `epoch` was
@@ -188,7 +245,8 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
                         // Re-check under the MainActor hop: a clear that landed
                         // after the populate must not have its nil-publish
                         // overwritten with the retired token.
-                        if cachedToken() != nil {
+                        if cacheEpochMatches(epoch),
+                           cachedToken()?.accessToken == tokenInfo.accessToken {
                             authSession.accessToken = tokenInfo.accessToken
                         }
                     }
@@ -213,8 +271,12 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     }
 
     nonisolated func refreshToken() async throws -> String {
-        // Use actor-based coordinator to atomically check-and-set refresh task
-        let task = await refreshCoordinator.getOrCreateTask { [weak self] in
+        // Refreshes are single-flight only within one credential generation.
+        // A replacement sign-in must never join the retired account's task.
+        let generation = cacheEpoch()
+        let handle = await refreshCoordinator.getOrCreateTask(
+            forGeneration: generation
+        ) { [weak self] in
             Task<String, Error> {
                 guard let self = self else {
                     throw TokenManagerError.noValidToken
@@ -225,22 +287,24 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
                     self.lastRefreshError = nil
                 }
 
-                do {
-                    let token = try await self.performTokenRefresh()
-                    // Clear state BEFORE returning to prevent race where second caller
-                    // gets the completed task before coordinator is cleared
-                    await MainActor.run { self.isRefreshing = false }
-                    await self.refreshCoordinator.clearTask()
-                    return token
-                } catch {
-                    await MainActor.run { self.isRefreshing = false }
-                    await self.refreshCoordinator.clearTask()
-                    throw error
-                }
+                return try await self.performTokenRefresh(
+                    ifCacheEpochMatches: generation
+                )
             }
         }
 
-        return try await task.value
+        do {
+            let token = try await handle.task.value
+            if await refreshCoordinator.clearTask(id: handle.id) {
+                await MainActor.run { self.isRefreshing = false }
+            }
+            return token
+        } catch {
+            if await refreshCoordinator.clearTask(id: handle.id) {
+                await MainActor.run { self.isRefreshing = false }
+            }
+            throw error
+        }
     }
 
     nonisolated func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {
@@ -271,9 +335,16 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             scope: GoogleConfig.scopes.joined(separator: " ")
         )
 
-        let applied: Bool = try cacheLock.withLock {
+        let appliedGeneration: UInt64? = try cacheLock.withLock {
             if let epoch, _cacheEpoch != epoch {
-                return false
+                return nil
+            }
+
+            // An ungated save establishes a new interactive/restore session.
+            // Retire every refresh that began under the previous credentials
+            // before writing the replacement token set.
+            if epoch == nil {
+                _cacheEpoch &+= 1
             }
 
             // Save to keychain with afterFirstUnlock to allow background sync
@@ -287,10 +358,10 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             // Validate the cache synchronously — this is what getCurrentToken's
             // fast path reads.
             _cachedToken = CachedToken(accessToken: access, expirationDate: expirationDate)
-            return true
+            return _cacheEpoch
         }
 
-        guard applied else { return false }
+        guard let appliedGeneration else { return false }
 
         // The AuthSession publish stays fire-and-forget by design: it only
         // feeds UI observers, and making it synchronous would require
@@ -298,16 +369,12 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         // background contexts. It re-reads the cache so a clear that lands
         // before the hop is not overwritten with the stale token.
         Task { @MainActor in
-            if self.cachedToken() != nil {
+            if self.cacheEpochMatches(appliedGeneration),
+               self.cachedToken()?.accessToken == access {
                 self.authSession.accessToken = access
             }
         }
 
-        // Reset backoff on successful save
-        // Fire-and-forget is acceptable here as backoff state only affects retry timing
-        Task {
-            await refreshBackoff.reset()
-        }
         return true
     }
 
@@ -348,6 +415,16 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         } catch {
             Log.warning("Unexpected error checking authentication status", category: .auth)
             return false
+        }
+    }
+
+    /// Publishes a terminal refresh-token verdict without signing out or
+    /// deleting the isolated local mailbox. Interactive authentication can
+    /// then repair the session while preserving durable pending actions.
+    func publishCredentialRevocation(ifCacheEpochMatches epoch: UInt64) async {
+        await MainActor.run {
+            guard self.cacheEpochMatches(epoch) else { return }
+            authSession.requireReauthentication()
         }
     }
 

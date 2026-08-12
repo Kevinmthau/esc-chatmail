@@ -202,6 +202,11 @@ struct FreshInstallHandler {
 
     private func clearAuthSession() async {
         Log.debug("Clearing AuthSession", category: .auth)
+        // Open-codes a subset of AuthSession.clearAuthState() and CANNOT reset
+        // requiresReauthentication (private(set)). Unreachable with the flag
+        // set today — fresh-install cleanup runs at first launch, before any
+        // session could have required reauthentication — but if this ever
+        // gains a mid-life caller, route through AuthSession instead.
         await MainActor.run {
             AuthSession.shared.currentUser = nil
             AuthSession.shared.isAuthenticated = false

@@ -10,7 +10,7 @@ protocol ForegroundSyncPerforming: AnyObject {
 
 @MainActor
 protocol ForegroundSyncAuthenticationProviding: AnyObject {
-    var isAuthenticated: Bool { get }
+    var canAccessMailbox: Bool { get }
 }
 
 extension SyncEngine: ForegroundSyncPerforming {}
@@ -50,9 +50,9 @@ final class ForegroundSyncCoordinator {
 
     @discardableResult
     func start(reason: String, triggerImmediateSync: Bool) -> Bool {
-        guard authSession.isAuthenticated else {
-            log.debug("Foreground sync not started (\(reason)): user not authenticated")
-            stop(reason: "notAuthenticated")
+        guard authSession.canAccessMailbox else {
+            log.debug("Foreground sync not started (\(reason)): mailbox unavailable")
+            stop(reason: "mailboxUnavailable")
             return false
         }
 
@@ -234,8 +234,8 @@ final class ForegroundSyncCoordinator {
         force: Bool,
         remainingImmediateFollowUps: Int
     ) async -> SyncTriggerOutcome {
-        guard authSession.isAuthenticated else {
-            log.debug("Skipping foreground sync (\(reason)): user not authenticated")
+        guard authSession.canAccessMailbox else {
+            log.debug("Skipping foreground sync (\(reason)): mailbox unavailable")
             return .skipped
         }
 
@@ -271,7 +271,7 @@ final class ForegroundSyncCoordinator {
         after reason: String,
         remainingImmediateFollowUps: Int
     ) {
-        guard authSession.isAuthenticated, periodicTask != nil else {
+        guard authSession.canAccessMailbox, periodicTask != nil else {
             log.debug("Not scheduling foreground sync continuation outside an active session")
             return
         }
