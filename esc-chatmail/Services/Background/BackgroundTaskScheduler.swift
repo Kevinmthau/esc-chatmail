@@ -70,6 +70,19 @@ final class BackgroundTaskScheduler {
         }
     }
 
+    /// Cancels the pending refresh and processing requests. Sign-out relies on
+    /// this to disarm background wakes: both task handlers re-arm at entry
+    /// before `performAuthoritativeSync`'s unauthenticated guard runs, so a
+    /// request that survives sign-out wakes the signed-out device on the sync
+    /// cadence indefinitely. The database-maintenance identifiers are
+    /// deliberately not cancelled — they are store-scoped, not account-scoped,
+    /// and `initializeApp` re-arms them unconditionally at every launch.
+    func cancelPendingTaskRequests() {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: refreshTaskIdentifier)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: processingTaskIdentifier)
+        Log.debug("Cancelled pending background sync task requests", category: .background)
+    }
+
     /// Schedules a retry after the specified backoff interval
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval) {
         let request = BGAppRefreshTaskRequest(identifier: refreshTaskIdentifier)

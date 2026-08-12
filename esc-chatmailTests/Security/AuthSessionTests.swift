@@ -737,6 +737,141 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    // Revert-check: fails if `signOut()` drops its `cancelBackgroundTaskRequests()`
+    // step. Without it the pending com.esc.inboxchat.refresh/.processing requests
+    // survive sign-out, and each fire re-arms itself at handler entry before the
+    // unauthenticated guard runs, so a signed-out device takes discretionary
+    // background wakes indefinitely.
+    func testSignOutCancelsPendingBackgroundTaskRequestsEvenWhenStoreResetFails() async {
+        struct StoreResetFailure: Error {}
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            cancelBackgroundTaskRequests: { cleanup.record("bg-task-requests-cancelled") },
+            resetCoreDataStore: { throw StoreResetFailure() }
+        )
+
+        await session.signOut()
+
+        XCTAssertEqual(
+            cleanup.events,
+            ["bg-task-requests-cancelled"],
+            "Sign-out must disarm pending background sync task requests even when durable cleanup will retry"
+        )
+    }
+
+    // Revert-check: fails if `signOutAndDisconnect()` drops its
+    // `cancelBackgroundTaskRequests()` step.
+    func testSignOutAndDisconnectCancelsPendingBackgroundTaskRequestsEvenWhenRevocationFails() async {
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            cancelBackgroundTaskRequests: { cleanup.record("bg-task-requests-cancelled") }
+        )
+
+        // With no authenticated user there is no revocation token, so the
+        // disconnect throws after its local cleanup; the disarm must already
+        // have happened by then.
+        do {
+            try await session.signOutAndDisconnect()
+            XCTFail("Disconnect without a revocation token should rethrow the revocation failure")
+        } catch {}
+
+        XCTAssertEqual(
+            cleanup.events,
+            ["bg-task-requests-cancelled"],
+            "Disconnect must disarm pending background sync task requests even when remote revocation fails"
+        )
+    }
+
+    // Revert-check: fails if `resumeInterruptedAccountRemovalIfNeeded()` drops its
+    // `cancelBackgroundTaskRequests()` step — a sign-out interrupted by a crash
+    // must still disarm the sync task requests when its durable marker is resumed
+    // at the next launch.
+    func testRestoreResumedAccountRemovalCancelsPendingBackgroundTaskRequests() async throws {
+        let keychain = MockKeychainService()
+        try keychain.save(
+            Data([1]),
+            for: KeychainService.Key.localStoreResetRequired.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            keychainService: keychain,
+            cancelBackgroundTaskRequests: { cleanup.record("bg-task-requests-cancelled") }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(cleanup.events, ["bg-task-requests-cancelled"])
+    }
+
+    // Revert-check: fails if `resumeInterruptedCredentialCleanupIfNeeded()` drops
+    // its `cancelBackgroundTaskRequests()` step — a launch that concludes signed
+    // out by finishing an interrupted credential transaction must not leave the
+    // sync task requests armed.
+    func testRestoreResumedCredentialCleanupCancelsPendingBackgroundTaskRequests() async throws {
+        let keychain = MockKeychainService()
+        try keychain.save(
+            Data([1]),
+            for: KeychainService.Key.credentialCleanupRequired.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            keychainService: keychain,
+            cancelBackgroundTaskRequests: { cleanup.record("bg-task-requests-cancelled") }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(cleanup.events, ["bg-task-requests-cancelled"])
+    }
+
+    // Revert-check: fails if `clearFailedGoogleSession()` drops its
+    // `cancelBackgroundTaskRequests()` step. A restore rejected with an
+    // invalidated credential concludes signed out with tokens cleared, so every
+    // surviving BGTask fire would be the same perpetual no-op wake sign-out
+    // disarms.
+    func testRestoreTerminalGoogleErrorCancelsPendingBackgroundTaskRequests() async {
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            hasPreviousGoogleSignIn: { true },
+            restorePreviousGoogleSignIn: { completion in
+                completion(
+                    nil,
+                    NSError(domain: kGIDSignInErrorDomain, code: -4)
+                )
+            },
+            cancelBackgroundTaskRequests: { cleanup.record("bg-task-requests-cancelled") }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(cleanup.events, ["bg-task-requests-cancelled"])
+    }
+
+    // HONEST SCOPE: this pins the deliberate seam — BGTask disarming belongs to
+    // the transitions that conclude signed out, not to the store-repair cleanup
+    // sign-in and restore run while concluding authenticated (where the scene
+    // handler owns re-arming). It cannot detect removal of the sign-out
+    // cancellation itself; the positive tests above own that.
+    func testAccountPreparationStoreResetDoesNotCancelPendingBackgroundTaskRequests() async throws {
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            cancelBackgroundTaskRequests: { cleanup.record("bg-task-requests-cancelled") },
+            fetchStoredAccountEmails: { ["old@example.com"] }
+        )
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("new@example.com")
+
+        XCTAssertTrue(
+            cleanup.events.isEmpty,
+            "Repairing a stale store on the way into an authenticated session must not disarm background sync"
+        )
+    }
+
     func testCleanupPrerequisiteSurvivesFreshSessionWhenDefaultsStateIsLost() async throws {
         let keychain = MockKeychainService()
         let resetScript = AuthSessionStoreResetScript(failuresBeforeSuccess: 1)
@@ -1970,6 +2105,7 @@ final class AuthSessionTests: XCTestCase {
         reopenParticipantCaches: @escaping @Sendable () async -> Void = {},
         cleanupDownloads: @escaping @MainActor @Sendable () async -> Void = {},
         reopenDownloads: @escaping @MainActor @Sendable () async -> Void = {},
+        cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {},
         resetCoreDataStore: @escaping @Sendable () async throws -> Void = {},
         fetchStoredAccountEmails: @escaping @Sendable () async throws -> [String] = { [] },
         hasStoredAccountScopedMailboxData: @escaping @Sendable () async throws -> Bool = { false },
@@ -1994,6 +2130,7 @@ final class AuthSessionTests: XCTestCase {
             reopenParticipantCaches: reopenParticipantCaches,
             cleanupDownloads: cleanupDownloads,
             reopenDownloads: reopenDownloads,
+            cancelBackgroundTaskRequests: cancelBackgroundTaskRequests,
             resetCoreDataStore: resetCoreDataStore,
             inspectLocalMailboxStore: {
                 LocalMailboxStoreInspection(
