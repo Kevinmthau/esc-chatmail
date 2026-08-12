@@ -50,7 +50,7 @@ final class AttachmentAccountWorkRegistryTests: XCTestCase {
         )
         XCTAssertTrue(teardownFinished.isSet)
 
-        registry.reopenAdmission()
+        XCTAssertTrue(registry.reopenAdmission())
         let newWrite = AttachmentAccountWorkFlag()
         let newTask = try XCTUnwrap(registry.startOperation { generation in
             guard generation.isActive else { return }
@@ -88,6 +88,40 @@ final class AttachmentAccountWorkRegistryTests: XCTestCase {
 
         XCTAssertTrue(cleanupFinished.isSet)
         XCTAssertTrue(teardownFinished.isSet)
+    }
+
+    // Revert-check: fails if `reopenAdmission()`'s
+    // `guard operations.isEmpty else { return false }` is removed or downgraded
+    // to an unconditional reopen. Admission would then reopen on top of a still
+    // live old-account writer, whose late file or Core Data write would land in
+    // the next account's store.
+    //
+    // HONEST SCOPE: the outstanding operation is manufactured by holding the
+    // writer gate. AuthSession always drains through `cancelAndAwaitAll()`
+    // before reopening, so this state is unreachable through the account
+    // transition paths today; the assertion pins the guard and its Bool result
+    // against a future leak, not a live regression.
+    func testReopenAdmissionRefusesWhileClosedAccountWriterIsOutstanding() async throws {
+        let registry = AttachmentAccountWorkRegistry(admissionOpen: true)
+        let writerGate = AttachmentAccountWorkGate()
+
+        let writerTask = try XCTUnwrap(registry.startOperation { _ in
+            await writerGate.waitUntilReleased()
+        })
+        await writerGate.waitUntilStarted()
+
+        XCTAssertFalse(
+            registry.reopenAdmission(),
+            "Admission must stay closed while an old-account writer is still live"
+        )
+
+        await writerGate.release()
+        await writerTask.value
+
+        XCTAssertTrue(
+            registry.reopenAdmission(),
+            "Admission must reopen once every old-account writer has unwound"
+        )
     }
 
     func testStaleAdmissionTokenCannotRegisterAfterCloseAndReopen() async throws {

@@ -1582,7 +1582,13 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         // reaches the registry only through here), so nothing else could ever
         // reopen it.
         FullEmailReaderAccountBoundaryRegistry.shared.reopenAccountWork()
-        guard activeWarmOperations.isEmpty else { return }
+        guard activeWarmOperations.isEmpty else {
+            Log.error(
+                "Refusing to reopen the full-email pool while closed-account warm operations remain",
+                category: .ui
+            )
+            return
+        }
         accountGeneration &+= 1
         acceptsAccountWork = true
     }

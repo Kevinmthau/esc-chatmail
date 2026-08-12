@@ -467,12 +467,25 @@ final class AttachmentDownloader: ObservableObject {
 
     /// Reopens attachment work only after AuthSession has isolated the new
     /// account's store and is ready to publish authenticated UI.
-    func reopenAdmission() {
-        guard activeDownloadOperations.isEmpty else { return }
+    ///
+    /// Returns false when a leaked download operation from the closed account
+    /// is still outstanding. This transition's reopen has failed — the caller
+    /// must fail the whole account reopen rather than publish a session whose
+    /// attachment work cannot start. A later transition can still reopen once
+    /// the outstanding operation unwinds.
+    func reopenAdmission() -> Bool {
+        guard activeDownloadOperations.isEmpty else {
+            Log.error(
+                "Refusing to reopen attachment downloads while operations from the closed account remain",
+                category: .attachment
+            )
+            return false
+        }
         // Sign-out removes the account-scoped directories. Recreate them
         // before same-process sign-in exposes any attachment work.
         prepareDownloadDirectories()
         acceptsNewDownloads = true
+        return true
     }
 
     /// Invalidates every common download operation, cancels tasks owned by the

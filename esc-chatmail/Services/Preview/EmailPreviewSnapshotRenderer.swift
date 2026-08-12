@@ -327,7 +327,16 @@ final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderSched
     }
 
     func reopenAccountWork() {
-        guard allWorkByID.isEmpty, runningCount == 0 else { return }
+        // A leaked render keeps snapshot rendering closed until relaunch. That
+        // degrades previews rather than crossing the account boundary, so the
+        // refusal stays non-fatal — but it must not be invisible.
+        guard allWorkByID.isEmpty, runningCount == 0 else {
+            Log.error(
+                "Refusing to reopen preview snapshot rendering while closed-account renders remain",
+                category: .ui
+            )
+            return
+        }
         accountGeneration &+= 1
         acceptsAccountWork = true
     }
