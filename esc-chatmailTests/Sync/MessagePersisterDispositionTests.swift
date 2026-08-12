@@ -379,6 +379,165 @@ final class MessagePersisterDispositionTests: XCTestCase {
     }
 
     @MainActor
+    // Revert-check: fails if the create-new path stops calling
+    // `preserveSupersededOptimisticContentIfNeeded` before consumption — the
+    // snippet-truncated echo row would keep Gmail's preview text instead of
+    // the authored bodyText/cleanedSnippet/chatPreviewText for both the
+    // in-flight and ambiguous marker states this test drives end-to-end.
+    func testSaveMessage_deterministicLocalMarkerEchoPreservesOptimisticAuthoredContent() async throws {
+        let persister = makePersister()
+        let context = coreDataStack.newBackgroundContext()
+        let authoredBody = """
+        Can we please see alts for:
+
+        Primary bedroom drapery
+        Kitchen backsplash
+
+        Thank you!
+        """
+        let authoredCleanedSnippet =
+            "Can we please see alts for: Primary bedroom drapery Kitchen backsplash Thank you!"
+        let snippetOnlyBody = "Can we please see alts for:"
+        let markerCases = [
+            ("in-flight", OutboundSendRemoteState.inFlightMessageID),
+            ("ambiguous", OutboundSendRemoteState.ambiguousMessageID)
+        ]
+
+        for (suffix, remoteState) in markerCases {
+            let optimisticID = "optimistic-body-\(suffix)"
+            let remoteID = "remote-body-\(suffix)"
+            try await seedOptimisticSend(
+                optimisticID: optimisticID,
+                remoteMessageID: remoteState,
+                authoredBody: authoredBody,
+                cleanedSnippet: authoredCleanedSnippet,
+                chatPreviewText: authoredBody,
+                in: context
+            )
+
+            let echo = GmailMessageBuilder()
+                .withId(remoteID)
+                .withThreadId("remote-body-thread-\(suffix)")
+                .sent()
+                .withFrom(Self.myEmail, name: "Me")
+                .withTo(["friend@example.com"])
+                .withMessageId(
+                    MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+                )
+                .withSnippet(snippetOnlyBody)
+                .withBodyText(snippetOnlyBody)
+                .build()
+
+            let disposition = try await persister.saveMessage(
+                echo,
+                myAliases: [Self.myEmail],
+                in: context
+            )
+            XCTAssertEqual(disposition, .persisted, suffix)
+            try await coreDataStack.saveAsync(context: context)
+
+            let state = try await context.perform {
+                let remoteRequest = Message.fetchRequest()
+                remoteRequest.predicate = MessagePredicates.id(remoteID)
+                remoteRequest.fetchLimit = 1
+                let remoteMessage = try XCTUnwrap(context.fetch(remoteRequest).first)
+
+                let optimisticRequest = Message.fetchRequest()
+                optimisticRequest.predicate = MessagePredicates.id(optimisticID)
+
+                let mutationRequest = OutboundSendMutationRecord.fetchRequest()
+                mutationRequest.predicate = NSPredicate(
+                    format: "id == %@",
+                    optimisticID
+                )
+
+                return (
+                    bodyText: remoteMessage.bodyText,
+                    cleanedSnippet: remoteMessage.cleanedSnippet,
+                    chatPreviewText: remoteMessage.chatPreviewText,
+                    optimisticCount: try context.count(for: optimisticRequest),
+                    mutationCount: try context.count(for: mutationRequest)
+                )
+            }
+
+            XCTAssertEqual(state.bodyText, authoredBody, suffix)
+            XCTAssertEqual(state.cleanedSnippet, authoredCleanedSnippet, suffix)
+            XCTAssertEqual(state.chatPreviewText, authoredBody, suffix)
+            XCTAssertEqual(state.optimisticCount, 0, suffix)
+            XCTAssertEqual(state.mutationCount, 0, suffix)
+        }
+    }
+
+    // Revert-check: fails if the update path's preview overwrite stops routing
+    // through `richerSupersededPreview` when `shouldPreserveOutgoingLocalBodyText`
+    // holds — re-syncing the same snippet-truncated echo would revert
+    // cleanedSnippet/chatPreviewText to Gmail's truncated preview while
+    // bodyText keeps the authored text, resurrecting the truncated bubble the
+    // create path's preservation just fixed.
+    @MainActor
+    func testSaveMessage_truncatedEchoRefetchKeepsPreservedPreviews() async throws {
+        let persister = makePersister()
+        let context = coreDataStack.newBackgroundContext()
+        let authoredBody = "Line one\n\nLine two\n\nThank you!"
+        let authoredCleanedSnippet = "Line one Line two Thank you!"
+        let snippetOnlyBody = "Line one"
+        let optimisticID = "optimistic-refetch"
+        let remoteID = "remote-refetch"
+        try await seedOptimisticSend(
+            optimisticID: optimisticID,
+            remoteMessageID: OutboundSendRemoteState.inFlightMessageID,
+            authoredBody: authoredBody,
+            cleanedSnippet: authoredCleanedSnippet,
+            chatPreviewText: authoredBody,
+            in: context
+        )
+
+        let echo = GmailMessageBuilder()
+            .withId(remoteID)
+            .withThreadId("remote-refetch-thread")
+            .sent()
+            .withFrom(Self.myEmail, name: "Me")
+            .withTo(["friend@example.com"])
+            .withMessageId(
+                MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+            )
+            .withSnippet(snippetOnlyBody)
+            .withBodyText(snippetOnlyBody)
+            .build()
+
+        // First arrival: the create path preserves the authored content and
+        // consumes the optimistic row.
+        _ = try await persister.saveMessage(echo, myAliases: [Self.myEmail], in: context)
+        try await coreDataStack.saveAsync(context: context)
+
+        // Refetch of the SAME truncated echo takes the update path, which
+        // must not undo the preservation.
+        let disposition = try await persister.saveMessage(
+            echo,
+            myAliases: [Self.myEmail],
+            in: context
+        )
+        XCTAssertEqual(disposition, .persisted)
+        try await coreDataStack.saveAsync(context: context)
+
+        let state = try await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id(remoteID)
+            request.fetchLimit = 1
+            let remoteMessage = try XCTUnwrap(context.fetch(request).first)
+            return (
+                bodyText: remoteMessage.bodyText,
+                cleanedSnippet: remoteMessage.cleanedSnippet,
+                chatPreviewText: remoteMessage.chatPreviewText
+            )
+        }
+
+        XCTAssertEqual(state.bodyText, authoredBody)
+        XCTAssertEqual(state.cleanedSnippet, authoredCleanedSnippet)
+        XCTAssertEqual(state.chatPreviewText, authoredBody)
+    }
+
+    @MainActor
     func testUnprocessablePayloadReportsUnprocessable() async throws {
         let persister = makePersister()
         let context = coreDataStack.newBackgroundContext()
@@ -472,6 +631,9 @@ final class MessagePersisterDispositionTests: XCTestCase {
     private func seedOptimisticSend(
         optimisticID: String,
         remoteMessageID: String,
+        authoredBody: String = "This is the full body text of the test message.",
+        cleanedSnippet: String? = nil,
+        chatPreviewText: String? = nil,
         in context: NSManagedObjectContext
     ) async throws {
         try await context.perform {
@@ -485,9 +647,12 @@ final class MessagePersisterDispositionTests: XCTestCase {
                 .withId(optimisticID)
                 .withThreadId("optimistic-thread")
                 .withSnippet("Authored body")
+                .withBody(authoredBody)
                 .fromMe()
                 .inConversation(conversation)
                 .build(in: context)
+            message.cleanedSnippet = cleanedSnippet
+            message.chatPreviewText = chatPreviewText
             message.messageId = MimeBuilder.messageId(
                 forOptimisticMessageID: optimisticID
             )

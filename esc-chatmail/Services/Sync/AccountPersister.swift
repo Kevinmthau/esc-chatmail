@@ -82,21 +82,20 @@ extension MessagePersister {
         }
     }
 
-    /// Fetches account data
-    func fetchAccountData() async throws -> AccountData? {
+    /// Fetches every account row so callers can enforce the single-account
+    /// store invariant without selecting an arbitrary cursor first.
+    func fetchAllAccountData() async throws -> [AccountData] {
         return try await coreDataStack.performBackgroundTask { context in
             let request = Account.fetchRequest()
-            request.fetchLimit = 1
             let accounts = try context.fetch(request)
-            guard let account = accounts.first else {
-                return nil
+            return accounts.map { account in
+                AccountData(
+                    historyId: account.historyId,
+                    email: account.email,
+                    aliases: account.aliasesArray,
+                    sendAsAliases: account.sendAsAliasesArray
+                )
             }
-            return AccountData(
-                historyId: account.historyId,
-                email: account.email,
-                aliases: account.aliasesArray,
-                sendAsAliases: account.sendAsAliasesArray
-            )
         }
     }
 

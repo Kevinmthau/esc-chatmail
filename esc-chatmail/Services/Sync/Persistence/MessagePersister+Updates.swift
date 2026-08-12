@@ -238,6 +238,25 @@ extension MessagePersister {
                 existingMessage.listId = listId
             }
             existingMessage.hasAttachments = processedMessage.hasAttachments
+            // Decide body preservation before the preview overwrite: a refetch
+            // of the same snippet-truncated echo must not undo the preview
+            // preservation the create path (or a previous pass here) applied —
+            // bodyText below keeps the authored text, so the previews must
+            // keep pace or the bubble reverts to Gmail's truncated preview
+            // while the full body silently survives underneath.
+            let shouldPreserveOutgoingLocalBody: Bool
+            if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
+                shouldPreserveOutgoingLocalBody = Self.shouldPreserveOutgoingLocalBodyText(
+                    previousBodyText: previousBodyText,
+                    incomingBodyText: plainText,
+                    incomingSnippet: processedMessage.snippet,
+                    incomingCleanedSnippet: processedMessage.cleanedSnippet,
+                    wasFromMe: previousIsFromMe,
+                    isFromMe: processedMessage.headers.isFromMe
+                )
+            } else {
+                shouldPreserveOutgoingLocalBody = false
+            }
             if MessagePreviewText.firstNonEmpty(
                 processedMessage.chatPreviewText,
                 processedMessage.cleanedSnippet,
@@ -246,6 +265,20 @@ extension MessagePersister {
                 existingMessage.snippet = MessagePreviewText.nonEmpty(existingMessage.snippet)
                 existingMessage.cleanedSnippet = MessagePreviewText.nonEmpty(existingMessage.cleanedSnippet)
                 existingMessage.chatPreviewText = MessagePreviewText.nonEmpty(existingMessage.chatPreviewText)
+            } else if shouldPreserveOutgoingLocalBody {
+                // Same longer+prefix rule as the create path: keep the richer
+                // preserved preview, fall back to the incoming one otherwise.
+                // `snippet` deliberately follows the server value (both preview
+                // consumers prefer cleanedSnippet/chatPreviewText).
+                existingMessage.snippet = MessagePreviewText.nonEmpty(processedMessage.snippet)
+                existingMessage.cleanedSnippet = Self.richerSupersededPreview(
+                    existingMessage.cleanedSnippet,
+                    replacing: MessagePreviewText.nonEmpty(processedMessage.cleanedSnippet)
+                )
+                existingMessage.chatPreviewText = Self.richerSupersededPreview(
+                    existingMessage.chatPreviewText,
+                    replacing: MessagePreviewText.nonEmpty(processedMessage.chatPreviewText)
+                )
             } else {
                 existingMessage.snippet = MessagePreviewText.nonEmpty(processedMessage.snippet)
                 existingMessage.cleanedSnippet = MessagePreviewText.nonEmpty(processedMessage.cleanedSnippet)
@@ -286,14 +319,6 @@ extension MessagePersister {
             }
 
             if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
-                let shouldPreserveOutgoingLocalBody = Self.shouldPreserveOutgoingLocalBodyText(
-                    previousBodyText: previousBodyText,
-                    incomingBodyText: plainText,
-                    incomingSnippet: processedMessage.snippet,
-                    incomingCleanedSnippet: processedMessage.cleanedSnippet,
-                    wasFromMe: previousIsFromMe,
-                    isFromMe: processedMessage.headers.isFromMe
-                )
                 if shouldPreserveOutgoingLocalBody {
                     Log.debug(
                         "Preserving local outgoing body text for message \(processedMessage.id) over snippet-only sync body",
@@ -650,7 +675,7 @@ extension MessagePersister {
         return snippetCandidates.contains(incoming)
     }
 
-    private nonisolated static func normalizedBodyComparisonText(_ text: String?) -> String? {
+    nonisolated static func normalizedBodyComparisonText(_ text: String?) -> String? {
         guard let text else { return nil }
 
         let normalized = HTMLEntityDecoder.decode(
@@ -668,30 +693,44 @@ extension MessagePersister {
         in attachments: [Attachment],
         excluding excludedObjectIDs: Set<NSManagedObjectID>
     ) -> Attachment? {
+        optimisticLocalAttachmentCandidates(
+            for: attachmentInfo,
+            in: attachments,
+            excluding: excludedObjectIDs
+        ).first
+    }
+
+    private nonisolated func optimisticLocalAttachmentCandidates(
+        for attachmentInfo: AttachmentInfo,
+        in attachments: [Attachment],
+        excluding excludedObjectIDs: Set<NSManagedObjectID>
+    ) -> [Attachment] {
         let localCandidates = attachments.filter {
             $0.isLocalAttachment &&
                 !($0.id?.hasPrefix("local_inline_") ?? false) &&
                 !excludedObjectIDs.contains($0.objectID)
         }
 
-        guard !localCandidates.isEmpty else { return nil }
+        guard !localCandidates.isEmpty else { return [] }
 
-        if let normalizedIncomingCID = EmailDocument.normalizedContentID(attachmentInfo.contentId),
-           let cidMatch = localCandidates.first(where: {
-               EmailDocument.normalizedContentID($0.contentId) == normalizedIncomingCID
-           }) {
-            return cidMatch
+        if let normalizedIncomingCID = EmailDocument.normalizedContentID(attachmentInfo.contentId) {
+            let cidMatches = localCandidates.filter {
+                EmailDocument.normalizedContentID($0.contentId) == normalizedIncomingCID
+            }
+            if !cidMatches.isEmpty {
+                return cidMatches
+            }
         }
 
         let normalizedIncomingFilename = normalizedAttachmentFilename(attachmentInfo.filename)
         let incomingSize = Int64(attachmentInfo.size)
 
-        return localCandidates.first(where: {
+        return localCandidates.filter {
             EmailDocument.normalizedContentID($0.contentId) == nil &&
             normalizedAttachmentFilename($0.filename) == normalizedIncomingFilename &&
             $0.mimeType == attachmentInfo.mimeType &&
             $0.byteSize == incomingSize
-        })
+        }
     }
 
     /// Copies a superseded optimistic send's known-good local files into the
@@ -723,24 +762,46 @@ extension MessagePersister {
         guard !optimisticAttachments.isEmpty else { return }
 
         AttachmentPaths.setupDirectories()
-        var consumedOptimisticAttachmentObjectIDs = Set<NSManagedObjectID>()
-
-        for info in attachmentInfos {
-            guard let remoteAttachment = remoteMessage.attachmentsArray.first(where: {
+        let handoffMatches = attachmentInfos.map { info -> (
+            info: AttachmentInfo,
+            remoteAttachment: Attachment?,
+            optimisticCandidates: [Attachment]
+        ) in
+            let remoteAttachment = remoteMessage.attachmentsArray.first(where: {
                 $0.id == info.id && !$0.isDeleted
-            }), let optimisticAttachment = matchingOptimisticLocalAttachment(
-                for: info,
-                in: optimisticAttachments,
-                excluding: consumedOptimisticAttachmentObjectIDs
-            ) else {
+            })
+            let optimisticCandidates = remoteAttachment.map { _ in
+                optimisticLocalAttachmentCandidates(
+                    for: info,
+                    in: optimisticAttachments,
+                    excluding: []
+                )
+            } ?? []
+            return (info, remoteAttachment, optimisticCandidates)
+        }
+
+        // A metadata fingerprint is only safe across different message graphs
+        // when it identifies one attachment on both sides. Leave every
+        // ambiguous remote attachment queued for its normal Gmail download.
+        var remoteMatchCountsByOptimisticObjectID: [NSManagedObjectID: Int] = [:]
+        for match in handoffMatches {
+            for candidate in match.optimisticCandidates {
+                remoteMatchCountsByOptimisticObjectID[candidate.objectID, default: 0] += 1
+            }
+        }
+
+        for match in handoffMatches {
+            guard let remoteAttachment = match.remoteAttachment,
+                  match.optimisticCandidates.count == 1,
+                  let optimisticAttachment = match.optimisticCandidates.first,
+                  remoteMatchCountsByOptimisticObjectID[optimisticAttachment.objectID] == 1 else {
                 continue
             }
 
-            consumedOptimisticAttachmentObjectIDs.insert(optimisticAttachment.objectID)
             handoffOptimisticAttachmentStorage(
                 optimisticAttachment,
                 to: remoteAttachment,
-                info: info,
+                info: match.info,
                 remoteMessageID: remoteMessage.id
             )
         }

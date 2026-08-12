@@ -178,6 +178,107 @@ extension MessagePersister {
         }
     }
 
+    /// Carries forward the exact authored content from a deterministic local
+    /// send when Gmail's echo contains only its preview snippet. This is used by
+    /// the create-new path, where the remote row and optimistic row have
+    /// different IDs; the existing-message update path performs the equivalent
+    /// preservation directly on one row.
+    ///
+    /// Deliberately NOT gated on `resolution.shouldConsumeAfterPersistence`
+    /// (unlike `handoffOptimisticAttachmentStorage`): preservation only runs
+    /// at echo-row creation, so skipping it under an unresolved list anchor
+    /// would leave the echo permanently snippet-truncated once a later sync
+    /// consumes the optimistic row. The cost is an unconsumed optimistic row
+    /// rendering alongside the full-content echo until a later sync refetches
+    /// this echo with a resolvable anchor and consumes it — potentially
+    /// several sync intervals, but both bubbles read identically and the
+    /// alternative (permanent truncation) is worse.
+    nonisolated func preserveSupersededOptimisticContentIfNeeded(
+        _ resolution: RemoteCommittedSendMutationResolution?,
+        for processedMessage: ProcessedMessage,
+        on remoteMessage: Message,
+        in context: NSManagedObjectContext
+    ) {
+        guard let resolution,
+              processedMessage.headers.isFromMe else {
+            return
+        }
+
+        let optimisticCandidates = resolution.supersededOptimisticMessages.compactMap {
+            objectID, candidate -> (message: Message, normalizedBody: String)? in
+            guard let optimisticMessage = try? context.existingObject(
+                with: objectID
+            ) as? Message,
+            !optimisticMessage.isDeleted,
+            optimisticMessage.id == candidate.optimisticMessageID,
+            optimisticMessage.isFromMe,
+            let optimisticBody = Self.normalizedBodyComparisonText(
+                optimisticMessage.bodyText
+            ) else {
+                return nil
+            }
+            return (optimisticMessage, optimisticBody)
+        }
+        guard optimisticCandidates.count == 1,
+              let optimisticCandidate = optimisticCandidates.first else {
+            return
+        }
+
+        // When the echo carries no usable plain-text body there is nothing to
+        // compare against, so the copy below runs unconditionally. The update
+        // path's shouldPreserveOutgoingLocalBodyText refuses in that case
+        // because refusing there KEEPS the existing row's content; on this
+        // create path the freshly inserted row has no content to keep, so
+        // copying is the preserving choice.
+        if let incomingBody = Self.normalizedBodyComparisonText(
+            processedMessage.plainTextBody
+        ) {
+            let incomingSnippetCandidates = [
+                processedMessage.snippet,
+                processedMessage.cleanedSnippet
+            ].compactMap(Self.normalizedBodyComparisonText)
+            guard optimisticCandidate.normalizedBody.count > incomingBody.count,
+                  optimisticCandidate.normalizedBody.hasPrefix(incomingBody),
+                  incomingSnippetCandidates.contains(incomingBody) else {
+                return
+            }
+        }
+
+        // `snippet` deliberately keeps Gmail's value: both preview consumers
+        // (MessageBubbleLoader, Message+Extensions) prefer cleanedSnippet /
+        // chatPreviewText, and the server snippet stays a faithful record of
+        // what Gmail actually returned.
+        let optimisticMessage = optimisticCandidate.message
+        remoteMessage.bodyText = optimisticMessage.bodyText
+        remoteMessage.cleanedSnippet = Self.richerSupersededPreview(
+            optimisticMessage.cleanedSnippet,
+            replacing: remoteMessage.cleanedSnippet
+        )
+        remoteMessage.chatPreviewText = Self.richerSupersededPreview(
+            optimisticMessage.chatPreviewText,
+            replacing: remoteMessage.chatPreviewText
+        )
+    }
+
+    nonisolated static func richerSupersededPreview(
+        _ optimisticText: String?,
+        replacing remoteText: String?
+    ) -> String? {
+        guard let normalizedOptimistic = normalizedBodyComparisonText(
+            optimisticText
+        ) else {
+            return remoteText
+        }
+        guard let normalizedRemote = normalizedBodyComparisonText(remoteText) else {
+            return optimisticText
+        }
+        guard normalizedOptimistic.count > normalizedRemote.count,
+              normalizedOptimistic.hasPrefix(normalizedRemote) else {
+            return remoteText
+        }
+        return optimisticText
+    }
+
     @discardableResult
     nonisolated func consumeRemoteCommittedSendMutation(
         _ resolution: RemoteCommittedSendMutationResolution?,
