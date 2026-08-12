@@ -7,8 +7,12 @@ struct DocumentAttachmentCard: View {
     let onTap: () -> Void
 
     @State private var thumbnailImage: UIImage?
-    @State private var isLoadingThumbnail = false
     @State private var thumbnailRequest: QLThumbnailGenerator.Request?
+
+    /// Derived, not stored: a stored loading flag must stay in lockstep with
+    /// the request token, and that two-variable invariant is exactly what a
+    /// future edit breaks.
+    private var isLoadingThumbnail: Bool { thumbnailRequest != nil }
 
     private var isLocalAttachment: Bool {
         (attachment.id)?.starts(with: "local_") == true
@@ -129,13 +133,12 @@ struct DocumentAttachmentCard: View {
     }
 
     private func loadThumbnail() {
+        guard thumbnailImage == nil, !isLoadingThumbnail else { return }
         guard let localPath = attachment.readableLocalURLValue,
               let fileURL = AttachmentPaths.fullURL(for: localPath),
               FileManager.default.fileExists(atPath: fileURL.path) else {
             return
         }
-
-        isLoadingThumbnail = true
 
         let request = QLThumbnailGenerator.Request(
             fileAt: fileURL,
@@ -145,11 +148,15 @@ struct DocumentAttachmentCard: View {
         )
         thumbnailRequest = request
 
+        // Keyed on request identity, which assumes single-shot delivery: valid
+        // only while representationTypes stays `.icon` (exactly one callback).
+        // Requesting multiple types would silently drop every callback after
+        // the first, because the first one nils thumbnailRequest.
         QLThumbnailGenerator.shared.generateRepresentations(for: request) { thumbnail, _, _ in
             DispatchQueue.main.async {
-                guard attachment.readableLocalURLValue == localPath else { return }
+                guard thumbnailRequest === request else { return }
                 thumbnailRequest = nil
-                isLoadingThumbnail = false
+                guard attachment.readableLocalURLValue == localPath else { return }
                 if let thumbnail = thumbnail {
                     thumbnailImage = thumbnail.uiImage
                 }
@@ -167,7 +174,6 @@ struct DocumentAttachmentCard: View {
             QLThumbnailGenerator.shared.cancel(thumbnailRequest)
         }
         thumbnailRequest = nil
-        isLoadingThumbnail = false
     }
 
     private func triggerDownloadIfNeeded() {
