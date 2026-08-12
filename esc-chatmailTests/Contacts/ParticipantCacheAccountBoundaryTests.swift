@@ -166,6 +166,112 @@ final class ParticipantCacheAccountBoundaryTests: XCTestCase {
         )
     }
 
+    // Revert-check: fails if `ProfilePhotoResolver.savePhotoURLToCache` loses its
+    // `replacingURL:` parameter and the `|| person.avatarURL == expectedURL` clause,
+    // or if `fetchPhoto`'s legacy-data-URL branch stops passing `replacingURL:
+    // cachedURL`. The nil/empty-only write condition never overwrites the legacy
+    // base64 URL, so the migrated file URL is never persisted and every later
+    // resolution re-runs `migrateAvatar` (callCount 2, persisted URL still legacy).
+    func testProfilePhotoResolverLegacyDataURLMigrationReplacesPersistedURLOnlyOnce() async throws {
+        let email = "legacy-avatar@example.com"
+        let imageData = Data([0x31, 0x32, 0x33])
+        let legacyURL = "data:image/png;base64,\(imageData.base64EncodedString())"
+        let migratedURL = "file:///test-avatar/migrated"
+        let migrations = AvatarMigrationRecorder(fileURL: migratedURL)
+        let (testStack, coreDataStack) = try makePersonStore(
+            email: email,
+            avatarURL: legacyURL
+        )
+        _ = testStack
+        let resolver = ProfilePhotoResolver(
+            contactsResolver: NoPhotoContactsResolver(),
+            coreDataStack: coreDataStack,
+            saveAvatar: { _, _ in nil },
+            loadAvatar: { url in url == migratedURL ? imageData : nil },
+            migrateAvatar: { email, dataURL in
+                await migrations.migrate(email: email, dataURL: dataURL)
+            }
+        )
+
+        let migratedPhoto = await resolver.resolvePhoto(for: email)
+        let persistedMigratedURL = try await persistedAvatarURL(
+            in: coreDataStack,
+            email: email
+        )
+
+        XCTAssertEqual(migratedPhoto?.imageData, imageData)
+        XCTAssertEqual(persistedMigratedURL, migratedURL)
+
+        // Force the second resolution through Core Data instead of the memory
+        // cache. It should load the persisted file URL without migrating again.
+        await resolver.clearCache()
+        let reloadedPhoto = await resolver.resolvePhoto(for: email)
+        let migrationCallCount = await migrations.callCount
+
+        XCTAssertEqual(reloadedPhoto?.imageData, imageData)
+        XCTAssertEqual(migrationCallCount, 1)
+    }
+
+    // Revert-check: the `XCTAssertNil(stalePhoto)` half fails if `resolvePhoto`'s
+    // trailing `guard isCurrentAccountGeneration(generation)` (or `fetchPhoto`'s
+    // post-`migrateAvatar` re-check) is removed — the parked migration would publish
+    // the closed account's base64 avatar into the reopened generation.
+    // HONEST SCOPE: the `persistedURL == currentURL` half cannot fail under a revert
+    // of the new `replacingURL:` narrowing; reverting makes the write condition
+    // stricter, so it only pins that widening the condition stays fenced by the
+    // generation guard rather than clobbering the new account's avatar.
+    func testProfilePhotoResolverStaleLegacyMigrationCannotOverwriteReopenedGeneration() async throws {
+        let email = "stale-legacy-avatar@example.com"
+        let legacyData = Data([0x41])
+        let currentData = Data([0x42])
+        let legacyURL = "data:image/png;base64,\(legacyData.base64EncodedString())"
+        let staleMigratedURL = "file:///test-avatar/stale"
+        let currentURL = "file:///test-avatar/current"
+        let migrations = GatedAvatarMigration(fileURL: staleMigratedURL)
+        let (testStack, coreDataStack) = try makePersonStore(
+            email: email,
+            avatarURL: legacyURL
+        )
+        _ = testStack
+        let resolver = ProfilePhotoResolver(
+            contactsResolver: NoPhotoContactsResolver(),
+            coreDataStack: coreDataStack,
+            saveAvatar: { _, _ in nil },
+            loadAvatar: { url in url == currentURL ? currentData : nil },
+            migrateAvatar: { email, dataURL in
+                await migrations.migrate(email: email, dataURL: dataURL)
+            }
+        )
+
+        let oldRequest = Task {
+            await resolver.resolvePhoto(for: email)
+        }
+        await migrations.waitUntilStarted()
+
+        let closeTask = Task {
+            await resolver.closeAccountWorkAndClear()
+        }
+        let didClose = await waitUntilClosed(resolver)
+        XCTAssertTrue(didClose)
+
+        await resolver.reopenAccountWork()
+        try await setPersistedAvatarURL(
+            currentURL,
+            in: coreDataStack,
+            email: email
+        )
+        let currentPhoto = await resolver.resolvePhoto(for: email)
+        XCTAssertEqual(currentPhoto?.imageData, currentData)
+
+        await migrations.release()
+        await closeTask.value
+        let stalePhoto = await oldRequest.value
+        let persistedURL = try await persistedAvatarURL(in: coreDataStack, email: email)
+
+        XCTAssertNil(stalePhoto)
+        XCTAssertEqual(persistedURL, currentURL)
+    }
+
     func testProfilePhotoResolverStaleBatchPrefetchCannotPersistOrReplaceNewMemory() async throws {
         let email = "prefetch@example.com"
         let oldData = Data([0x0A])
@@ -249,9 +355,13 @@ final class ParticipantCacheAccountBoundaryTests: XCTestCase {
         return false
     }
 
-    private func makePersonStore(email: String) throws -> (TestCoreDataStack, CoreDataStack) {
+    private func makePersonStore(
+        email: String,
+        avatarURL: String? = nil
+    ) throws -> (TestCoreDataStack, CoreDataStack) {
         let testStack = TestCoreDataStack()
-        _ = PersonBuilder.emailOnly(email, in: testStack.viewContext)
+        let person = PersonBuilder.emailOnly(email, in: testStack.viewContext)
+        person.avatarURL = avatarURL
         try testStack.saveViewContext()
         return (
             testStack,
@@ -272,6 +382,22 @@ final class ParticipantCacheAccountBoundaryTests: XCTestCase {
         }
     }
 
+    private func setPersistedAvatarURL(
+        _ avatarURL: String,
+        in coreDataStack: CoreDataStack,
+        email: String
+    ) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await context.perform {
+            let request = Person.fetchRequest()
+            request.predicate = NSPredicate(format: "email == %@", email)
+            request.fetchLimit = 1
+            let person = try XCTUnwrap(context.fetch(request).first)
+            person.avatarURL = avatarURL
+            try context.save()
+        }
+    }
+
     private func persistedPerson(
         in coreDataStack: CoreDataStack,
         email: String
@@ -284,6 +410,65 @@ final class ParticipantCacheAccountBoundaryTests: XCTestCase {
             let person = try context.fetch(request).first
             return (person?.displayName, person?.avatarURL)
         }
+    }
+}
+
+private struct NoPhotoContactsResolver: ContactsResolving {
+    func ensureAuthorization() async throws {}
+    func lookup(email: String) async -> ContactMatch? { nil }
+    func prewarm(emails: [String]) async {}
+}
+
+private actor AvatarMigrationRecorder {
+    private let fileURL: String
+    private(set) var callCount = 0
+
+    init(fileURL: String) {
+        self.fileURL = fileURL
+    }
+
+    func migrate(email: String, dataURL: String) -> String {
+        callCount += 1
+        return fileURL
+    }
+}
+
+private actor GatedAvatarMigration {
+    private let fileURL: String
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(fileURL: String) {
+        self.fileURL = fileURL
+    }
+
+    func migrate(email: String, dataURL: String) async -> String {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if !released {
+            await withCheckedContinuation { continuation in
+                releaseWaiters.append(continuation)
+            }
+        }
+        return fileURL
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 }
 

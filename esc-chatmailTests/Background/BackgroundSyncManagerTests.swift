@@ -137,6 +137,31 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(callCount, 1)
     }
 
+    // Revert-check: fails if `performAuthoritativeSync(budget:)` stops forwarding its
+    // budget into `performIncrementalSyncForBackground(budget:)` (the recorded pair
+    // collapses to one value), or if `BackgroundMailboxSyncBudget.appRefresh` stops
+    // mapping to the short-slice constants and returns the processing/foreground
+    // 10/500/allowsExpensiveRecovery values instead.
+    func testModelV3Executor_passesDistinctAppRefreshAndProcessingBudgets() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        _ = await manager.performAuthoritativeSync(budget: .appRefresh)
+        _ = await manager.performAuthoritativeSync(budget: .processing)
+
+        let budgets = await MainActor.run { executor.budgets }
+        XCTAssertEqual(budgets, [.appRefresh, .processing])
+        XCTAssertEqual(budgets.map(\.historyPageLimit), [3, 10])
+        XCTAssertEqual(budgets.map(\.historyPageSize), [100, 500])
+        XCTAssertFalse(BackgroundMailboxSyncBudget.appRefresh.allowsExpensiveRecovery)
+        XCTAssertTrue(BackgroundMailboxSyncBudget.processing.allowsExpensiveRecovery)
+    }
+
     func testModelV3Executor_incompleteHistorySchedulesCatchUpAndFailsTask() async {
         let executor = await MainActor.run {
             BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
@@ -149,6 +174,53 @@ final class BackgroundSyncManagerTests: XCTestCase {
         let success = await manager.performAuthoritativeSync()
 
         XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
+    }
+
+    // Revert-check: fails if the `budget == .appRefresh` branch that calls
+    // `taskScheduler.scheduleProcessingTask()` is dropped from the `.needsFollowUp`
+    // case of `performAuthoritativeSync()`. A deferred short slice would then only
+    // re-arm the catch-up retry and never hand the backlog to a processing task,
+    // so an app-refresh-only device could never drain a deferred initial sync.
+    func testModelV3Executor_appRefreshFollowUpEscalatesToProcessingTask() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync(budget: .appRefresh)
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
+        XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
+    }
+
+    // Revert-check: fails if the escalation branch stops consulting
+    // `taskScheduler.isProcessingTaskPending()` before re-submitting. A BGTask
+    // re-submit with the same identifier REPLACES the pending request and
+    // pushes its earliestBeginDate another hour out, so app-refresh slices
+    // arriving more often than hourly would starve the processing task forever.
+    func testModelV3Executor_appRefreshFollowUpDoesNotReplacePendingProcessingTask() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+        taskScheduler.processingTaskPending = true
+
+        let success = await manager.performAuthoritativeSync(budget: .appRefresh)
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(
+            taskScheduler.processingScheduleCount,
+            0,
+            "A pending processing request must not be replaced (and thereby postponed)"
+        )
         XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
     }
 
@@ -1157,13 +1229,17 @@ final class BackgroundSyncManagerTests: XCTestCase {
 private final class BackgroundMailboxSyncExecutorSpy: BackgroundMailboxSyncExecuting {
     private let result: BackgroundMailboxSyncExecutionResult
     private(set) var callCount = 0
+    private(set) var budgets: [BackgroundMailboxSyncBudget] = []
 
     init(result: BackgroundMailboxSyncExecutionResult) {
         self.result = result
     }
 
-    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult {
+    func performIncrementalSyncForBackground(
+        budget: BackgroundMailboxSyncBudget
+    ) async -> BackgroundMailboxSyncExecutionResult {
         callCount += 1
+        budgets.append(budget)
         return result
     }
 }
@@ -1178,7 +1254,9 @@ private final class SequencedBackgroundMailboxSyncExecutorSpy: BackgroundMailbox
         self.results = results
     }
 
-    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult {
+    func performIncrementalSyncForBackground(
+        budget: BackgroundMailboxSyncBudget
+    ) async -> BackgroundMailboxSyncExecutionResult {
         defer { callCount += 1 }
         guard callCount < results.count else {
             // Name an over-run rather than silently substituting an outcome the
@@ -1203,7 +1281,9 @@ private final class CancellableBackgroundMailboxSyncExecutorSpy: BackgroundMailb
         }
     }
 
-    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult {
+    func performIncrementalSyncForBackground(
+        budget: BackgroundMailboxSyncBudget
+    ) async -> BackgroundMailboxSyncExecutionResult {
         didStart = true
         let waiters = startWaiters
         startWaiters.removeAll(keepingCapacity: false)
@@ -1318,10 +1398,12 @@ private final class BackgroundTaskSchedulerSpy: BackgroundTaskScheduling {
     private(set) var registrationCount = 0
     private(set) var appRefreshScheduleCount = 0
     private(set) var processingScheduleCount = 0
+    var processingTaskPending = false
 
     func registerBackgroundTasks() { registrationCount += 1 }
     func scheduleAppRefresh() { appRefreshScheduleCount += 1 }
     func scheduleProcessingTask() { processingScheduleCount += 1 }
+    func isProcessingTaskPending() async -> Bool { processingTaskPending }
 
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval) {
         retryBackoffs.append(backoff)

@@ -11,8 +11,14 @@ struct AttachmentPaths {
         let size: Int
     }
 
-    private static let attachmentsFolder = "Attachments"
-    private static let previewsFolder = "Previews"
+    /// CANONICAL directory names — account-boundary inspection and cleanup
+    /// (AccountScopedMailboxFileInspector, FreshInstallHandler) reference
+    /// these; never duplicate the literals.
+    static let attachmentsFolder = "Attachments"
+    static let previewsFolder = "Previews"
+    /// Legacy caches-directory folder: nothing creates it anymore, it is only
+    /// inspected and removed during account cleanup.
+    static let legacyAttachmentCacheFolder = "AttachmentCache"
     
     static func setupDirectories() {
         let fileManager = FileManager.default

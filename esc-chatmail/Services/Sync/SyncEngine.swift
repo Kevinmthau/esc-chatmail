@@ -193,9 +193,16 @@ final class SyncEngine: ObservableObject {
     /// Runs the same model-v3 incremental executor for a system background
     /// launch, but keeps ownership of the concrete run task so cancelling the
     /// awaiting `BGTask` wrapper cannot leave mailbox work running past expiry.
-    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult {
+    func performIncrementalSyncForBackground(
+        budget: BackgroundMailboxSyncBudget
+    ) async -> BackgroundMailboxSyncExecutionResult {
         let resultRecorder = IncrementalSyncResultRecorder()
-        switch await prepareIncrementalSync(resultRecorder: resultRecorder) {
+        switch await prepareIncrementalSync(
+            resultRecorder: resultRecorder,
+            historyPageLimit: budget.historyPageLimit,
+            historyPageSize: budget.historyPageSize,
+            allowsExpensiveRecovery: budget.allowsExpensiveRecovery
+        ) {
         case .started(let syncRunTask):
             let success = await withTaskCancellationHandler {
                 await runSyncTask(syncRunTask, syncType: "Background incremental")
@@ -322,10 +329,17 @@ final class SyncEngine: ObservableObject {
         log.info("Initial sync completed: \(result.messagesProcessed) messages, \(result.conversationCount) conversations in \(String(format: "%.1f", result.duration))s")
     }
 
-    private func performIncrementalSyncInternal() async throws -> IncrementalSyncResult {
+    private func performIncrementalSyncInternal(
+        historyPageLimit: Int? = nil,
+        historyPageSize: Int? = nil,
+        allowsExpensiveRecovery: Bool = true
+    ) async throws -> IncrementalSyncResult {
         uiState.update(isSyncing: true, progress: 0.0, status: "Checking for updates...")
 
         let result = try await incrementalSyncOrchestrator.performSync(
+            historyPageLimit: historyPageLimit,
+            historyPageSize: historyPageSize,
+            allowsExpensiveRecovery: allowsExpensiveRecovery,
             progressHandler: { [weak self] progress, status in
                 self?.uiState.update(progress: progress, status: status)
             },
@@ -354,7 +368,10 @@ final class SyncEngine: ObservableObject {
     }
 
     private func prepareIncrementalSync(
-        resultRecorder: IncrementalSyncResultRecorder? = nil
+        resultRecorder: IncrementalSyncResultRecorder? = nil,
+        historyPageLimit: Int? = nil,
+        historyPageSize: Int? = nil,
+        allowsExpensiveRecovery: Bool = true
     ) async -> IncrementalSyncPreparationResult {
         guard await networkMonitor.isNetworkAvailable() else {
             log.info("Network not available, skipping sync")
@@ -369,7 +386,11 @@ final class SyncEngine: ObservableObject {
                     Log.warning("SyncEngine deallocated during incremental sync setup - sync will not complete", category: .sync)
                     throw CancellationError()
                 }
-                let result = try await self.performIncrementalSyncInternal()
+                let result = try await self.performIncrementalSyncInternal(
+                    historyPageLimit: historyPageLimit,
+                    historyPageSize: historyPageSize,
+                    allowsExpensiveRecovery: allowsExpensiveRecovery
+                )
                 if let resultRecorder {
                     await resultRecorder.record(result)
                 }

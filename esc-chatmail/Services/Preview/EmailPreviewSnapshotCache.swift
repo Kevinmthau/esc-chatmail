@@ -48,6 +48,11 @@ enum EmailPreviewSnapshotCacheKey {
 actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
     static let shared = EmailPreviewSnapshotCache(startsPeriodicCleanup: true)
 
+    /// CANONICAL caches-subdirectory name — account-boundary inspection
+    /// (AccountScopedMailboxFileInspector) references this; never duplicate
+    /// the literal.
+    static let directoryName = "EmailPreviewSnapshots"
+
     private struct Metadata: Codable {
         let displayHeight: Double
         let pixelScale: Double
@@ -82,7 +87,7 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
         } else {
             let cachesRoot = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
                 ?? fileManager.temporaryDirectory
-            self.cacheDirectory = cachesRoot.appendingPathComponent("EmailPreviewSnapshots", isDirectory: true)
+            self.cacheDirectory = cachesRoot.appendingPathComponent(Self.directoryName, isDirectory: true)
         }
 
         Self.createDirectoryIfNeeded(at: self.cacheDirectory, fileManager: fileManager)

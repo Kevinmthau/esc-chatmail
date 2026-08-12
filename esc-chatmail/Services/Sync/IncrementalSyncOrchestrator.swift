@@ -67,13 +67,6 @@ final class IncrementalSyncOrchestrator {
 
     // MARK: - Phases (lazily initialized)
 
-    private lazy var historyCollectionPhase = HistoryCollectionPhase(
-        messageFetcher: messageFetcher,
-        historyProcessor: historyProcessor,
-        maxHistoryPages: historyPageLimit,
-        maxResultsPerPage: historyPageSize
-    )
-
     private lazy var messageFetchPhase = MessageFetchPhase(
         messageFetcher: messageFetcher,
         messagePersister: messagePersister
@@ -135,11 +128,20 @@ final class IncrementalSyncOrchestrator {
 
     /// Performs incremental sync using composable phases
     func performSync(
+        historyPageLimit: Int? = nil,
+        historyPageSize: Int? = nil,
+        allowsExpensiveRecovery: Bool = true,
         progressHandler: @escaping (Double, String) -> Void,
         initialSyncFallback: @escaping () async throws -> Void
     ) async throws -> IncrementalSyncResult {
         let syncStartTime = Date()
         var timing = SyncTimingRecorder(syncType: "incremental")
+        let historyCollectionPhase = HistoryCollectionPhase(
+            messageFetcher: messageFetcher,
+            historyProcessor: historyProcessor,
+            maxHistoryPages: historyPageLimit ?? self.historyPageLimit,
+            maxResultsPerPage: historyPageSize ?? self.historyPageSize
+        )
 
         // Fetch account data
         let accountTimer = timing.start("accountData")
@@ -169,6 +171,20 @@ final class IncrementalSyncOrchestrator {
         }
 
         guard let accountData = accountData, let historyId = accountData.historyId else {
+            guard allowsExpensiveRecovery else {
+                // BGAppRefreshTask has a short execution window and cannot
+                // safely absorb the unbounded initial-sync fallback. Preserve
+                // follow-up intent so BackgroundSyncManager can hand the work
+                // to a processing task instead.
+                log.info("No account/historyId found; deferring initial sync to a processing task")
+                timing.finishRun(outcome: "initialFallback deferred=true")
+                return IncrementalSyncResult(
+                    newMessagesCount: 0,
+                    labelChangesProcessed: 0,
+                    hadWarnings: true,
+                    needsFollowUp: true
+                )
+            }
             log.info("No account/historyId found, performing initial sync")
             let fallbackTimer = timing.start("initialSyncFallback")
             let initialSyncIncomplete: Bool
@@ -528,10 +544,20 @@ final class IncrementalSyncOrchestrator {
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
             }
             if case .historyIdExpired = error {
-                log.warning("History ID expired, performing recovery sync")
+                log.warning("History ID expired, preparing recovery sync")
                 guard await StaticRemoteConfigProvider.shared.isEnabled(.syncRecoveryEnabled) else {
                     log.warning("History recovery skipped because sync recovery is disabled by remote config")
                     throw error
+                }
+                guard allowsExpensiveRecovery else {
+                    log.info("History ID expired; deferring mailbox recovery to a processing task")
+                    timing.finishRun(outcome: "historyRecovery deferred=true")
+                    return IncrementalSyncResult(
+                        newMessagesCount: 0,
+                        labelChangesProcessed: 0,
+                        hadWarnings: true,
+                        needsFollowUp: true
+                    )
                 }
                 let recoveryTimer = timing.start("historyRecovery")
                 let recoveryNeedsFollowUp: Bool

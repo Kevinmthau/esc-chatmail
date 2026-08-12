@@ -3,103 +3,153 @@ import Foundation
 
 /// In-memory mock implementation of KeychainServiceProtocol for testing.
 /// All data is stored in memory and lost when the mock is deallocated.
-final class MockKeychainService: KeychainServiceProtocol {
+///
+/// All state is guarded by `lock`: tests poll this mock from the test
+/// executor (`waitUntil` closures) while `AuthSession` mutates it from
+/// MainActor tasks, so unsynchronized dictionaries would be a data race.
+/// The `onLoad`/`onDelete` hooks deliberately fire OUTSIDE the lock so a
+/// hook that re-enters the mock cannot deadlock.
+final class MockKeychainService: KeychainServiceProtocol, @unchecked Sendable {
+
+    private let lock = NSLock()
 
     /// In-memory storage for keychain items
     private var storage: [String: Data] = [:]
     private var accessLevels: [String: KeychainService.AccessLevel] = [:]
 
+    private var _saveCallCount = 0
+    private var _loadCallCount = 0
+    private var _deleteCallCount = 0
+
     /// Tracks method calls for verification in tests
-    private(set) var saveCallCount = 0
-    private(set) var loadCallCount = 0
-    private(set) var deleteCallCount = 0
+    var saveCallCount: Int { lock.withLock { _saveCallCount } }
+    var loadCallCount: Int { lock.withLock { _loadCallCount } }
+    var deleteCallCount: Int { lock.withLock { _deleteCallCount } }
+
+    private var _errorToThrow: Error?
+    private var saveErrorsByKey: [String: Error] = [:]
+    private var deleteErrorsByKey: [String: Error] = [:]
 
     /// Optional error to throw on next operation (resets after throwing)
-    var errorToThrow: Error?
-    private var saveErrorsByKey: [String: Error] = [:]
+    var errorToThrow: Error? {
+        get { lock.withLock { _errorToThrow } }
+        set { lock.withLock { _errorToThrow = newValue } }
+    }
+
+    private var _onLoad: (() -> Void)?
+    private var _onDelete: ((String) -> Void)?
 
     /// Interleave hook: runs after `load(for:)` has read the stored value but
     /// before it returns, letting tests deterministically emulate mutations
     /// (e.g. clearTokens) that land while a keychain read is in flight.
-    var onLoad: (() -> Void)?
+    var onLoad: (() -> Void)? {
+        get { lock.withLock { _onLoad } }
+        set { lock.withLock { _onLoad = newValue } }
+    }
+    var onDelete: ((String) -> Void)? {
+        get { lock.withLock { _onDelete } }
+        set { lock.withLock { _onDelete = newValue } }
+    }
 
     /// Clears all stored data and resets call counts
     func reset() {
-        storage.removeAll()
-        accessLevels.removeAll()
-        saveCallCount = 0
-        loadCallCount = 0
-        deleteCallCount = 0
-        errorToThrow = nil
-        saveErrorsByKey.removeAll()
-        onLoad = nil
+        lock.withLock {
+            storage.removeAll()
+            accessLevels.removeAll()
+            _saveCallCount = 0
+            _loadCallCount = 0
+            _deleteCallCount = 0
+            _errorToThrow = nil
+            saveErrorsByKey.removeAll()
+            deleteErrorsByKey.removeAll()
+            _onLoad = nil
+            _onDelete = nil
+        }
     }
 
     // MARK: - KeychainServiceProtocol
 
     func save(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel) throws {
-        saveCallCount += 1
-        if let error = saveErrorsByKey.removeValue(forKey: key) {
-            throw error
-        }
-        if let error = errorToThrow {
-            errorToThrow = nil
-            throw error
-        }
-        storage[key] = data
-        accessLevels[key] = access
-    }
-
-    func load(for key: String) throws -> Data {
-        loadCallCount += 1
-        if let error = errorToThrow {
-            errorToThrow = nil
-            throw error
-        }
-        guard let data = storage[key] else {
-            throw KeychainError.itemNotFound
-        }
-        // Fires after the value was read so the caller receives a snapshot
-        // that any mutation made by the hook did not see (TOCTOU window).
-        onLoad?()
-        return data
-    }
-
-    func delete(for key: String) throws {
-        deleteCallCount += 1
-        if let error = errorToThrow {
-            errorToThrow = nil
-            throw error
-        }
-        storage.removeValue(forKey: key)
-        accessLevels.removeValue(forKey: key)
-    }
-
-    func exists(for key: String) -> Bool {
-        storage[key] != nil
-    }
-
-    func update(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel?) throws {
-        if let error = errorToThrow {
-            errorToThrow = nil
-            throw error
-        }
-        guard storage[key] != nil else {
-            throw KeychainError.itemNotFound
-        }
-        storage[key] = data
-        if let access {
+        try lock.withLock {
+            _saveCallCount += 1
+            if let error = saveErrorsByKey.removeValue(forKey: key) {
+                throw error
+            }
+            if let error = _errorToThrow {
+                _errorToThrow = nil
+                throw error
+            }
+            storage[key] = data
             accessLevels[key] = access
         }
     }
 
-    func clearAll() throws {
-        if let error = errorToThrow {
-            errorToThrow = nil
-            throw error
+    func load(for key: String) throws -> Data {
+        let (data, hook): (Data, (() -> Void)?) = try lock.withLock {
+            _loadCallCount += 1
+            if let error = _errorToThrow {
+                _errorToThrow = nil
+                throw error
+            }
+            guard let data = storage[key] else {
+                throw KeychainError.itemNotFound
+            }
+            return (data, _onLoad)
         }
-        storage.removeAll()
-        accessLevels.removeAll()
+        // Fires after the value was read so the caller receives a snapshot
+        // that any mutation made by the hook did not see (TOCTOU window).
+        hook?()
+        return data
+    }
+
+    func delete(for key: String) throws {
+        let hook: ((String) -> Void)? = lock.withLock {
+            _deleteCallCount += 1
+            return _onDelete
+        }
+        hook?(key)
+        try lock.withLock {
+            if let error = deleteErrorsByKey.removeValue(forKey: key) {
+                throw error
+            }
+            if let error = _errorToThrow {
+                _errorToThrow = nil
+                throw error
+            }
+            storage.removeValue(forKey: key)
+            accessLevels.removeValue(forKey: key)
+        }
+    }
+
+    func exists(for key: String) -> Bool {
+        lock.withLock { storage[key] != nil }
+    }
+
+    func update(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel?) throws {
+        try lock.withLock {
+            if let error = _errorToThrow {
+                _errorToThrow = nil
+                throw error
+            }
+            guard storage[key] != nil else {
+                throw KeychainError.itemNotFound
+            }
+            storage[key] = data
+            if let access {
+                accessLevels[key] = access
+            }
+        }
+    }
+
+    func clearAll() throws {
+        try lock.withLock {
+            if let error = _errorToThrow {
+                _errorToThrow = nil
+                throw error
+            }
+            storage.removeAll()
+            accessLevels.removeAll()
+        }
     }
 
     func saveString(_ string: String, for key: String, withAccess access: KeychainService.AccessLevel) throws {
@@ -132,36 +182,44 @@ final class MockKeychainService: KeychainServiceProtocol {
 
 extension MockKeychainService {
     func failNextSave(for key: String, with error: Error) {
-        saveErrorsByKey[key] = error
+        lock.withLock { saveErrorsByKey[key] = error }
+    }
+
+    func failNextDelete(for key: String, with error: Error) {
+        lock.withLock { deleteErrorsByKey[key] = error }
     }
 
     /// Pre-populates storage with test data
     func preload(_ data: [String: Data]) {
-        for (key, value) in data {
-            storage[key] = value
+        lock.withLock {
+            for (key, value) in data {
+                storage[key] = value
+            }
         }
     }
 
     /// Pre-populates storage with string values
     func preloadStrings(_ data: [String: String]) {
-        for (key, value) in data {
-            if let data = value.data(using: .utf8) {
-                storage[key] = data
+        lock.withLock {
+            for (key, value) in data {
+                if let data = value.data(using: .utf8) {
+                    storage[key] = data
+                }
             }
         }
     }
 
     /// Returns all stored keys for inspection
     var storedKeys: [String] {
-        Array(storage.keys)
+        lock.withLock { Array(storage.keys) }
     }
 
     /// Returns raw storage for inspection
     var allStoredData: [String: Data] {
-        storage
+        lock.withLock { storage }
     }
 
     func accessLevel(for key: String) -> KeychainService.AccessLevel? {
-        accessLevels[key]
+        lock.withLock { accessLevels[key] }
     }
 }

@@ -82,11 +82,20 @@ final class AuthSessionTests: XCTestCase {
     }
 
     func testPersistSessionForBackgroundAccess_migratesLegacyTokensToBackgroundReadableAccess() throws {
+        let defaults = makeDefaults()
         let keychain = MockKeychainService()
+        var defaultsMarkerWasClearedBeforeKeychainDelete = false
+        keychain.onDelete = { key in
+            guard key == KeychainService.Key.credentialCleanupRequired.rawValue else { return }
+            defaultsMarkerWasClearedBeforeKeychainDelete = !defaults.bool(
+                forKey: AuthSession.credentialCleanupRequiredKey
+            )
+        }
         let tokenManagerProvider = TokenManagerProvider()
         let session = makeAuthSession(
             tokenManagerProvider: { tokenManagerProvider.tokenManager },
-            keychainService: keychain
+            keychainService: keychain,
+            userDefaults: defaults
         )
         tokenManagerProvider.tokenManager = TokenManager(
             keychainService: keychain,
@@ -150,6 +159,8 @@ final class AuthSessionTests: XCTestCase {
             keychain.accessLevel(for: KeychainService.Key.googleUserEmail.rawValue),
             .afterFirstUnlockThisDeviceOnly
         )
+        XCTAssertTrue(defaultsMarkerWasClearedBeforeKeychainDelete)
+        XCTAssertFalse(defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
     }
 
     func testCredentialPersistenceFailureLeavesMarkerAndLaunchCleanupDeletesPartialTokens() async throws {
@@ -404,6 +415,83 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertNotNil(
             outboundTaskRegistry.reserve(),
             "Interactive sign-in's outbound admission must remain open"
+        )
+    }
+
+    // Revert-check: fails if `restorePreviousSignIn()` or `signIn(presenting:)` drops
+    // its `await beginAuthenticationTransition()` / `defer { endAuthenticationTransition() }`
+    // pair. Without the gate the background restore closes participants/downloads
+    // concurrently with the cancelled sign-in's rollback, so the recorded order is no
+    // longer reopen-then-close and the two transitions interleave their generations.
+    func testBootstrapRestoreRetryDoesNotSupersedeInteractiveSignInTransition() async {
+        let cleanup = AuthSessionCleanupRecorder()
+        let interactiveSignIn = AuthSessionInteractiveSignInGate()
+        let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
+        let transientRestoreError = URLError(.notConnectedToInternet)
+        let session = makeAuthSession(
+            hasPreviousGoogleSignIn: { true },
+            restorePreviousGoogleSignIn: { completion in
+                cleanup.record("google-restore")
+                completion(nil, transientRestoreError)
+            },
+            interactiveGoogleSignIn: { _, _, completion in
+                interactiveSignIn.begin(completion: completion)
+            },
+            clearParticipantCaches: { cleanup.record("participants-closed") },
+            reopenParticipantCaches: { cleanup.record("participants-reopened") },
+            cleanupDownloads: { cleanup.record("downloads-closed") },
+            reopenDownloads: { cleanup.record("downloads-reopened") },
+            outboundTaskRegistry: outboundTaskRegistry
+        )
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: { true },
+            restoreAuthenticationOperation: {
+                await session.restorePreviousSignIn()
+            }
+        )
+
+        let initialRestoreResult = await bootstrap.restoreAuthenticationIfNeeded()
+        XCTAssertTrue(initialRestoreResult)
+
+        // Start a replacement transition and hold its Google callback open.
+        // Toggling the published state lets the cancellation rollback expose
+        // whether a concurrent restore advanced the outbound generation while
+        // the interactive transition owned it.
+        session.isAuthenticated = true
+        let signInTask = Task { @MainActor in
+            try await session.signIn(presenting: UIViewController())
+        }
+        await interactiveSignIn.waitUntilStarted()
+        session.isAuthenticated = false
+        let eventStart = cleanup.events.count
+
+        let backgroundRestoreTask = Task {
+            await bootstrap.prepareForBackgroundSync()
+        }
+        // Deterministic: the restore has genuinely parked on the auth-transition
+        // gate (owned by the interactive sign-in) before the rollback begins.
+        await session.waitUntilAuthenticationTransitionWaiterCountForTesting(1)
+        interactiveSignIn.cancel()
+
+        do {
+            try await signInTask.value
+            XCTFail("Expected the injected interactive sign-in cancellation")
+        } catch {
+            // Expected.
+        }
+        let backgroundRestoreResult = await backgroundRestoreTask.value
+        XCTAssertTrue(backgroundRestoreResult)
+
+        XCTAssertEqual(
+            Array(cleanup.events.dropFirst(eventStart)),
+            [
+                "participants-reopened",
+                "downloads-reopened",
+                "participants-closed",
+                "downloads-closed",
+                "google-restore"
+            ],
+            "The restore retry must wait until interactive rollback has reopened its own generation"
         )
     }
 
@@ -752,6 +840,37 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    // Revert-check: fails if `hasPersistedCleanupRequirement(key:defaultsKey:)` goes
+    // back to the non-throwing `keychainService.exists(...)` property that
+    // `resumeInterruptedAccountRemovalIfNeeded` consumed. `exists` swallows the
+    // OSStatus into `false`, so restore would decide no cleanup is pending and reach
+    // `hasPreviousGoogleSignIn` — the recorded events are then non-empty.
+    func testRestoreDefersWhenCleanupMarkerReadIsIndeterminate() async {
+        struct MarkerReadFailure: Error {}
+        let keychain = MockKeychainService()
+        keychain.errorToThrow = MarkerReadFailure()
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            keychainService: keychain,
+            hasPreviousGoogleSignIn: {
+                cleanup.record("google-session-checked")
+                return true
+            },
+            restorePreviousGoogleSignIn: { _ in
+                cleanup.record("google-restore")
+            },
+            resetCoreDataStore: {
+                cleanup.markStoreReset()
+            }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        XCTAssertTrue(cleanup.events.isEmpty)
+        XCTAssertFalse(cleanup.storeReset)
+    }
+
     func testCredentialCleanupFailureRetainsMarkerUntilFreshRetrySucceeds() async throws {
         struct CredentialCleanupFailure: Error {}
         let defaults = makeDefaults()
@@ -807,6 +926,37 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertFalse(defaults.bool(forKey: AuthSession.localStoreResetRequiredKey))
     }
 
+    // Revert-check: fails if `prepareLocalStoreForAuthenticatedAccount(_:)` stops
+    // wrapping `try hasPersistedLocalCleanupRequirement()` in the do/catch that maps
+    // a read failure to `AuthError.localAccountIsolationFailed`. With the old
+    // `exists()`-backed property the failure reads as "no marker", the empty account
+    // list inspects clean, and preparation returns without throwing — publishing an
+    // account over a store whose pending reset could not be proven absent.
+    func testAccountPreparationFailsClosedWhenCleanupMarkerReadIsIndeterminate() async {
+        struct MarkerReadFailure: Error {}
+        let keychain = MockKeychainService()
+        keychain.errorToThrow = MarkerReadFailure()
+        let resetScript = AuthSessionStoreResetScript()
+        let session = makeAuthSession(
+            keychainService: keychain,
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { [] }
+        )
+
+        do {
+            try await session.prepareLocalStoreForAuthenticatedAccount("new@example.com")
+            XCTFail("An indeterminate marker read must block account publication")
+        } catch let error as AuthError {
+            guard case .localAccountIsolationFailed = error else {
+                return XCTFail("Unexpected auth error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(resetScript.attemptCount, 0)
+    }
+
     func testAccountPreparationClearsParticipantCachesBeforeReopeningMismatchedStore() async throws {
         let resetScript = AuthSessionStoreResetScript()
         let cleanup = AuthSessionCleanupRecorder()
@@ -850,6 +1000,90 @@ final class AuthSessionTests: XCTestCase {
         try await session.prepareLocalStoreForAuthenticatedAccount("first@example.com")
 
         XCTAssertEqual(resetScript.attemptCount, 0)
+    }
+
+    // Revert-check: fails if any entry is dropped from
+    // `AccountScopedMailboxFileInspector.hasStoredFiles(appSupportDirectory:cachesDirectory:)`'s
+    // `directories` list — Attachments, Previews, AttachmentCache,
+    // EmailPreviewSnapshots. The literals here deliberately duplicate
+    // `AttachmentPaths`/`EmailPreviewSnapshotCache.directoryName` so renaming a
+    // constant without updating the cleanup path is caught too.
+    func testAccountScopedMailboxFileInspectorDetectsEveryCleanupDirectory() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("AuthSessionFileInspection-\(UUID().uuidString)", isDirectory: true)
+        let appSupportDirectory = root.appendingPathComponent("ApplicationSupport", isDirectory: true)
+        let cachesDirectory = root.appendingPathComponent("Caches", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try fileManager.createDirectory(
+            at: appSupportDirectory,
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: cachesDirectory,
+            withIntermediateDirectories: true
+        )
+
+        XCTAssertFalse(
+            AccountScopedMailboxFileInspector.hasStoredFiles(
+                appSupportDirectory: appSupportDirectory,
+                cachesDirectory: cachesDirectory,
+                fileManager: fileManager
+            )
+        )
+
+        let directories = [
+            appSupportDirectory.appendingPathComponent("Attachments", isDirectory: true),
+            appSupportDirectory.appendingPathComponent("Previews", isDirectory: true),
+            cachesDirectory.appendingPathComponent("AttachmentCache", isDirectory: true),
+            cachesDirectory.appendingPathComponent("EmailPreviewSnapshots", isDirectory: true)
+        ]
+        for directory in directories {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data([1]).write(to: directory.appendingPathComponent("orphan"))
+            XCTAssertTrue(
+                AccountScopedMailboxFileInspector.hasStoredFiles(
+                    appSupportDirectory: appSupportDirectory,
+                    cachesDirectory: cachesDirectory,
+                    fileManager: fileManager
+                ),
+                "\(directory.lastPathComponent) must make an accountless store require cleanup"
+            )
+            try fileManager.removeItem(at: directory)
+        }
+    }
+
+    // Revert-check: fails if `AccountScopedMailboxFileInspector.hasStoredFiles`'s
+    // trailing `catch { return true }` becomes a `continue`/`return false`, or if the
+    // narrow `.fileReadNoSuchFile`/`.fileNoSuchFile` catch is widened to swallow every
+    // error. An unreadable directory would then read as empty and let
+    // `prepareLocalStoreForAuthenticatedAccount` skip cleanup of another account's files.
+    func testAccountScopedMailboxFileInspectorFailsClosedOnEnumerationError() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("AuthSessionFileInspection-\(UUID().uuidString)", isDirectory: true)
+        let appSupportDirectory = root.appendingPathComponent("ApplicationSupport", isDirectory: true)
+        let cachesDirectory = root.appendingPathComponent("Caches", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try fileManager.createDirectory(
+            at: appSupportDirectory,
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: cachesDirectory,
+            withIntermediateDirectories: true
+        )
+        // A regular file where a directory is expected forces enumeration to
+        // fail. The inspector must not collapse that error into "empty."
+        try Data([1]).write(to: appSupportDirectory.appendingPathComponent("Attachments"))
+
+        XCTAssertTrue(
+            AccountScopedMailboxFileInspector.hasStoredFiles(
+                appSupportDirectory: appSupportDirectory,
+                cachesDirectory: cachesDirectory,
+                fileManager: fileManager
+            )
+        )
     }
 
     func testAccountPreparationReplacesAccountlessStoreWithOrphanedMailboxData() async throws {
@@ -968,6 +1202,68 @@ final class AuthSessionTests: XCTestCase {
 
         XCTAssertFalse(session.isAuthenticated)
         XCTAssertEqual(resetScript.attemptCount, 1)
+        XCTAssertTrue(defaults.bool(forKey: AuthSession.localStoreResetRequiredKey))
+    }
+
+    // Revert-check: two independent orderings. The timestamp/continuation assertions
+    // fail if `clearAccountScopedSyncDefaults()` + `BackgroundSyncStateManager
+    // .clearContinuationState(in:)` move back to the tail of
+    // `prepareLocalStoreForAuthenticatedAccount(_:)`, where a throwing marker delete
+    // skips them. `defaultsMarkerWasClearedBeforeKeychainDelete` and the surviving
+    // Keychain marker fail if `clearPersistedCleanupRequirement(key:defaultsKey:)`
+    // reverts to delete-then-removeObject or stops restoring the defaults mirror when
+    // the authoritative delete throws.
+    func testAccountPreparationClearsSyncStateBeforeDeletingDurableResetMarker() async throws {
+        struct MarkerDeletionFailure: Error {}
+        let defaults = makeDefaults()
+        defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastReconciliationTimeKey)
+        let backgroundState = BackgroundSyncStateManager(defaults: defaults)
+        try backgroundState.storeContinuationState(
+            .history(
+                startHistoryId: "old-history",
+                pageToken: "old-page",
+                accountEmail: "old@example.com"
+            )
+        )
+        let keychain = MockKeychainService()
+        var defaultsMarkerWasClearedBeforeKeychainDelete = false
+        keychain.onDelete = { key in
+            guard key == KeychainService.Key.localStoreResetRequired.rawValue else { return }
+            defaultsMarkerWasClearedBeforeKeychainDelete = !defaults.bool(
+                forKey: AuthSession.localStoreResetRequiredKey
+            )
+        }
+        keychain.failNextDelete(
+            for: KeychainService.Key.localStoreResetRequired.rawValue,
+            with: MarkerDeletionFailure()
+        )
+        let session = makeAuthSession(
+            keychainService: keychain,
+            userDefaults: defaults,
+            fetchStoredAccountEmails: { ["old@example.com"] }
+        )
+
+        do {
+            try await session.prepareLocalStoreForAuthenticatedAccount("new@example.com")
+            XCTFail("Expected reset-marker deletion to fail account isolation")
+        } catch let error as AuthError {
+            guard case .localAccountIsolationFailed = error else {
+                return XCTFail("Unexpected auth error: \(error)")
+            }
+        }
+
+        XCTAssertNil(defaults.object(forKey: SyncConfig.lastSuccessfulSyncTimeKey))
+        XCTAssertNil(defaults.object(forKey: SyncConfig.lastReconciliationTimeKey))
+        XCTAssertNil(backgroundState.getContinuationState())
+        XCTAssertTrue(
+            defaultsMarkerWasClearedBeforeKeychainDelete,
+            "The defaults mirror must be flushed away while Keychain still protects crash recovery"
+        )
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
+            "The marker must survive until every account-scoped default is durably cleared"
+        )
         XCTAssertTrue(defaults.bool(forKey: AuthSession.localStoreResetRequiredKey))
     }
 
@@ -1224,11 +1520,13 @@ final class AuthSessionTests: XCTestCase {
     func testSignOutWaitsForActiveAccountWorkBeforeResettingStore() async {
         let coordinator = SyncRunCoordinator()
         let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
+        let keychain = MockKeychainService()
         guard let activeRun = await coordinator.beginRun(kind: .pendingActions) else {
             return XCTFail("Expected an active account-scoped run")
         }
         let cleanup = AuthSessionCleanupRecorder()
         let session = makeAuthSession(
+            keychainService: keychain,
             resetCoreDataStore: { cleanup.markStoreReset() },
             syncRunCoordinator: coordinator,
             outboundTaskRegistry: outboundTaskRegistry
@@ -1238,8 +1536,11 @@ final class AuthSessionTests: XCTestCase {
         let signOutTask = Task { @MainActor in
             await session.signOut()
         }
-        for _ in 0..<20 {
-            await Task.yield()
+        // Wait for the durable marker so the assertions below are non-vacuous:
+        // the sign-out has provably progressed past intent persistence and
+        // admission close while the active run still blocks quiescence.
+        await waitUntil {
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue)
         }
         XCTAssertFalse(
             cleanup.storeReset,
@@ -1253,6 +1554,10 @@ final class AuthSessionTests: XCTestCase {
             outboundTaskRegistry.reserve(),
             "Outbound admission must close before sign-out suspends on the active sync"
         )
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
+            "Logout intent must be durable while quiescence is still draining account work"
+        )
 
         await coordinator.endRun(activeRun)
         _ = await signOutTask.value
@@ -1264,6 +1569,224 @@ final class AuthSessionTests: XCTestCase {
         if let nextRun {
             await coordinator.endRun(nextRun)
         }
+    }
+
+    // Revert-check: the `waitUntil` on the durable marker fails (times out) if
+    // `signOut()` moves `persistLocalCleanupRequirement()` back below
+    // `beginAuthenticationTransition()` — the sign-out would park on the gate held by
+    // the interactive sign-in without ever recording logout intent. The
+    // `XCTAssertFalse(cleanup.storeReset)` assertion fails if `signOut()` drops
+    // `beginAuthenticationTransition()` entirely and runs its destructive cleanup
+    // while the earlier Google transition is still live.
+    func testSignOutPersistsIntentWhileWaitingForInteractiveSignInTransition() async {
+        let interactiveSignIn = AuthSessionInteractiveSignInGate()
+        let keychain = MockKeychainService()
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            keychainService: keychain,
+            interactiveGoogleSignIn: { _, _, completion in
+                interactiveSignIn.begin(completion: completion)
+            },
+            resetCoreDataStore: { cleanup.markStoreReset() },
+            outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
+        )
+        let signInTask = Task { @MainActor in
+            try await session.signIn(presenting: UIViewController())
+        }
+        await interactiveSignIn.waitUntilStarted()
+
+        let signOutTask = Task { @MainActor in
+            await session.signOut()
+        }
+        await waitUntil {
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue)
+        }
+
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
+            "Logout intent must be durable even while an earlier Google transition owns the auth gate"
+        )
+        XCTAssertFalse(
+            cleanup.storeReset,
+            "The intent marker must not consume live account state before the earlier transition unwinds"
+        )
+
+        interactiveSignIn.cancel()
+        do {
+            try await signInTask.value
+            XCTFail("Expected the injected interactive sign-in cancellation")
+        } catch {
+            // Expected.
+        }
+        let signOutResult = await signOutTask.value
+        XCTAssertTrue(signOutResult)
+        XCTAssertTrue(cleanup.storeReset)
+    }
+
+    // Revert-check: fails if `performDurableLocalCleanup(removalRequest:)` drops the
+    // no-request branch's `guard pendingAccountRemovalRequests.isEmpty else { throw
+    // CancellationError() }`, or if `signOut()` stops calling
+    // `registerAccountRemovalRequest()` before `beginAuthenticationTransition()`.
+    // The suspended account preparation would then resume, see no pending removal,
+    // and delete the marker the queued sign-out just wrote — its own cleanup would
+    // be skippable after a crash, and the preparation would wrongly succeed.
+    func testQueuedSignOutMarkerSurvivesEarlierSuspendedAccountPreparationCleanup() async {
+        let interactiveSignIn = AuthSessionInteractiveSignInGate()
+        let resetGate = AuthSessionStoreResetGate()
+        let keychain = MockKeychainService()
+        let defaults = makeDefaults()
+        let session = makeAuthSession(
+            keychainService: keychain,
+            interactiveGoogleSignIn: { _, _, completion in
+                interactiveSignIn.begin(completion: completion)
+            },
+            userDefaults: defaults,
+            resetCoreDataStore: {
+                await resetGate.reset()
+            },
+            fetchStoredAccountEmails: { ["old@example.com"] },
+            outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
+        )
+
+        // Hold the auth-transition lease in Google UI while an already-started
+        // account preparation suspends inside its destructive cleanup.
+        let signInTask = Task { @MainActor in
+            try await session.signIn(presenting: UIViewController())
+        }
+        await interactiveSignIn.waitUntilStarted()
+        let preparationTask = Task { @MainActor in
+            try await session.prepareLocalStoreForAuthenticatedAccount("new@example.com")
+        }
+        await resetGate.waitUntilFirstResetStarted()
+
+        let saveCountBeforeSignOut = keychain.saveCallCount
+        let signOutTask = Task { @MainActor in
+            await session.signOut()
+        }
+        await waitUntil {
+            keychain.saveCallCount > saveCountBeforeSignOut
+        }
+        XCTAssertGreaterThan(
+            keychain.saveCallCount,
+            saveCountBeforeSignOut,
+            "Sign-out must refresh the durable marker before waiting for the auth-transition lease"
+        )
+
+        await resetGate.releaseFirstReset()
+        do {
+            try await preparationTask.value
+            XCTFail("The superseded account preparation should retain the newer sign-out marker")
+        } catch let error as AuthError {
+            guard case .localAccountIsolationFailed = error else {
+                return XCTFail("Unexpected auth error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected preparation error: \(error)")
+        }
+
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
+            "Earlier cleanup must not delete the queued sign-out's durable marker"
+        )
+        XCTAssertTrue(defaults.bool(forKey: AuthSession.localStoreResetRequiredKey))
+
+        interactiveSignIn.cancel()
+        do {
+            try await signInTask.value
+            XCTFail("Expected the injected interactive sign-in cancellation")
+        } catch {
+            // Expected.
+        }
+        let signOutResult = await signOutTask.value
+        let resetAttemptCount = await resetGate.attemptCount
+
+        XCTAssertTrue(signOutResult)
+        XCTAssertEqual(resetAttemptCount, 2)
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue))
+    }
+
+    // Revert-check: three guards. The marker assertion after the first removal fails
+    // if `performDurableLocalCleanup(removalRequest:)` drops its `pendingAccountRemoval
+    // Requests.count == 1 && contains(removalRequest)` gate — the first removal would
+    // consume the marker the still-queued final removal depends on. The
+    // `invocationCount`/`saveTokensCallCount` assertions fail if `signIn(presenting:)`
+    // loses its leading `guard !isAccountRemovalRequested else { throw CancellationError() }`,
+    // letting the intervening sign-in reach Google UI and persist a session between two
+    // removals. Both depend on `endAuthenticationTransition()` resuming waiters FIFO
+    // (`removeFirst()`); LIFO reorders which removal reaches the blocked reset.
+    func testMultipleQueuedRemovalsBlockInterveningSignInUntilFinalMarkerConsumption() async {
+        let interactiveSignIn = AuthSessionSequencedInteractiveSignInGate()
+        let resetGate = AuthSessionNthStoreResetGate(blockedAttempt: 2)
+        let keychain = MockKeychainService()
+        let tokenManager = MockTokenManager()
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: keychain,
+            interactiveGoogleSignIn: { _, _, completion in
+                interactiveSignIn.begin(completion: completion)
+            },
+            resetCoreDataStore: {
+                await resetGate.reset()
+            },
+            outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
+        )
+
+        let activeSignInTask = Task { @MainActor in
+            try await session.signIn(presenting: UIViewController())
+        }
+        await interactiveSignIn.waitUntilFirstStarted()
+
+        let firstRemovalTask = Task { @MainActor in
+            await session.signOut()
+        }
+        await session.waitUntilAuthenticationTransitionWaiterCountForTesting(1)
+
+        let interveningSignInTask = Task { @MainActor in
+            try await session.signIn(presenting: UIViewController())
+        }
+        await session.waitUntilAuthenticationTransitionWaiterCountForTesting(2)
+
+        let finalRemovalTask = Task { @MainActor in
+            await session.signOut()
+        }
+        await session.waitUntilAuthenticationTransitionWaiterCountForTesting(3)
+
+        interactiveSignIn.cancelFirst()
+        do {
+            try await activeSignInTask.value
+            XCTFail("Expected the active interactive sign-in cancellation")
+        } catch {
+            // Expected.
+        }
+
+        // The second reset is the final removal. Reaching this suspension means
+        // FIFO transferred through the first removal and intervening sign-in.
+        await resetGate.waitUntilBlockedResetStarted()
+        let firstRemovalResult = await firstRemovalTask.value
+        do {
+            try await interveningSignInTask.value
+            XCTFail("A queued removal must supersede the intervening sign-in")
+        } catch is CancellationError {
+            // Expected before Google UI or credential persistence starts.
+        } catch {
+            XCTFail("Unexpected intervening sign-in error: \(error)")
+        }
+
+        XCTAssertTrue(firstRemovalResult)
+        XCTAssertEqual(interactiveSignIn.invocationCount, 1)
+        XCTAssertEqual(tokenManager.saveTokensCallCount, 0)
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
+            "The first removal must retain the marker while the final removal is pending"
+        )
+
+        await resetGate.releaseBlockedReset()
+        let finalRemovalResult = await finalRemovalTask.value
+        let resetAttemptCount = await resetGate.attemptCount
+
+        XCTAssertTrue(finalRemovalResult)
+        XCTAssertEqual(resetAttemptCount, 2)
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue))
     }
 
     func testSignOutAwaitsDownloadDrainBeforeResettingStore() async {
@@ -1324,6 +1847,7 @@ final class AuthSessionTests: XCTestCase {
         let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
         let outboundDrain = AuthSessionDownloadDrainGate()
         let cleanup = AuthSessionCleanupRecorder()
+        let keychain = MockKeychainService()
         let reservation = try! XCTUnwrap(outboundTaskRegistry.reserve())
         let backgroundTask = Task {
             await outboundDrain.waitUntilReleased()
@@ -1332,6 +1856,7 @@ final class AuthSessionTests: XCTestCase {
         await outboundDrain.waitUntilStarted()
 
         let session = makeAuthSession(
+            keychainService: keychain,
             resetCoreDataStore: { cleanup.markStoreReset() },
             outboundTaskRegistry: outboundTaskRegistry
         )
@@ -1340,18 +1865,90 @@ final class AuthSessionTests: XCTestCase {
         let signOutTask = Task { @MainActor in
             await session.signOut()
         }
-        for _ in 0..<20 {
-            await Task.yield()
+        // Wait for the durable marker so the assertions below are non-vacuous:
+        // the sign-out has provably progressed past intent persistence while
+        // the admitted send still blocks the outbound drain.
+        await waitUntil {
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue)
         }
         XCTAssertFalse(
             cleanup.storeReset,
             "Core Data reset must stay behind the outbound writer drain"
+        )
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
+            "Logout intent must survive termination without deleting an admitted send's recovery row before its drain"
         )
 
         await outboundDrain.release()
         _ = await signOutTask.value
 
         XCTAssertTrue(cleanup.storeReset)
+    }
+
+    // Revert-check: fails (the `waitUntil` times out) if `signOutAndDisconnect()`
+    // moves `persistLocalCleanupRequirement()` back behind `closeAdmission()` /
+    // `beginQuiescence()` / `cancelAndAwaitAll()`. The held outbound reservation
+    // blocks that drain, so a crash during an admitted send's reconciliation would
+    // leave no durable disconnect intent and the next launch would publish the old
+    // account's store instead of resuming cleanup.
+    func testDisconnectPersistsIntentBeforeOutboundSendDrain() async throws {
+        let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
+        let outboundDrain = AuthSessionDownloadDrainGate()
+        let cleanup = AuthSessionCleanupRecorder()
+        let keychain = MockKeychainService()
+        let reservation = try XCTUnwrap(outboundTaskRegistry.reserve())
+        let backgroundTask = Task {
+            await outboundDrain.waitUntilReleased()
+        }
+        XCTAssertTrue(outboundTaskRegistry.handOff(reservation, to: backgroundTask))
+        await outboundDrain.waitUntilStarted()
+
+        let session = makeAuthSession(
+            keychainService: keychain,
+            resetCoreDataStore: { cleanup.markStoreReset() },
+            outboundTaskRegistry: outboundTaskRegistry
+        )
+        session.accessToken = "old-access-token"
+        let disconnectTask = Task { @MainActor in
+            try await session.signOutAndDisconnect()
+        }
+        // The held outbound reservation already guarantees storeReset stays
+        // false; what this wait pins is the persist-before-drain ordering —
+        // it times out if persistLocalCleanupRequirement() moves back behind
+        // cancelAndAwaitAll(), because the blocked drain would then keep the
+        // marker from ever appearing.
+        await waitUntil {
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue)
+        }
+
+        XCTAssertFalse(cleanup.storeReset)
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
+            "Disconnect intent must be durable while an admitted send finishes reconciliation"
+        )
+
+        await outboundDrain.release()
+        try await disconnectTask.value
+
+        XCTAssertTrue(cleanup.storeReset)
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
     private func makeAuthSession(
@@ -1584,6 +2181,155 @@ private actor AuthSessionDownloadDrainGate {
         let waiters = releaseWaiters
         releaseWaiters.removeAll()
         waiters.forEach { $0.resume() }
+    }
+}
+
+private actor AuthSessionStoreResetGate {
+    private var attempts = 0
+    private var firstResetStarted = false
+    private var firstResetReleased = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    var attemptCount: Int { attempts }
+
+    func reset() async {
+        attempts += 1
+        guard attempts == 1 else { return }
+
+        firstResetStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        guard !firstResetReleased else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilFirstResetStarted() async {
+        guard !firstResetStarted else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirstReset() {
+        firstResetReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private actor AuthSessionNthStoreResetGate {
+    private let blockedAttempt: Int
+    private var attempts = 0
+    private var blockedResetStarted = false
+    private var blockedResetReleased = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(blockedAttempt: Int) {
+        self.blockedAttempt = blockedAttempt
+    }
+
+    var attemptCount: Int { attempts }
+
+    func reset() async {
+        attempts += 1
+        guard attempts == blockedAttempt else { return }
+
+        blockedResetStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+
+        guard !blockedResetReleased else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilBlockedResetStarted() async {
+        guard !blockedResetStarted else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseBlockedReset() {
+        blockedResetReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+    }
+}
+
+@MainActor
+private final class AuthSessionInteractiveSignInGate {
+    private var completion: (@Sendable (GIDSignInResult?, Error?) -> Void)?
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func begin(
+        completion: @escaping @Sendable (GIDSignInResult?, Error?) -> Void
+    ) {
+        self.completion = completion
+        let waiters = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+    }
+
+    func waitUntilStarted() async {
+        guard completion == nil else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func cancel() {
+        let completion = completion
+        self.completion = nil
+        completion?(
+            nil,
+            NSError(domain: kGIDSignInErrorDomain, code: -5)
+        )
+    }
+}
+
+@MainActor
+private final class AuthSessionSequencedInteractiveSignInGate {
+    private var firstCompletion: (@Sendable (GIDSignInResult?, Error?) -> Void)?
+    private var firstStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var invocationCount = 0
+
+    func begin(
+        completion: @escaping @Sendable (GIDSignInResult?, Error?) -> Void
+    ) {
+        invocationCount += 1
+        guard invocationCount == 1 else {
+            completion(nil, NSError(domain: kGIDSignInErrorDomain, code: -5))
+            return
+        }
+
+        firstCompletion = completion
+        let waiters = firstStartWaiters
+        firstStartWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+    }
+
+    func waitUntilFirstStarted() async {
+        guard firstCompletion == nil else { return }
+        await withCheckedContinuation { continuation in
+            firstStartWaiters.append(continuation)
+        }
+    }
+
+    func cancelFirst() {
+        let completion = firstCompletion
+        firstCompletion = nil
+        completion?(nil, NSError(domain: kGIDSignInErrorDomain, code: -5))
     }
 }
 
