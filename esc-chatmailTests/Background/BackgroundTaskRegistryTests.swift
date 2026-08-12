@@ -3,28 +3,10 @@ import BackgroundTasks
 @testable import esc_chatmail
 
 /// Drives `BackgroundTaskRegistry` through its injected `BGTaskScheduler`
-/// seams: the real scheduler cannot back hosted unit tests because launch
-/// handlers may only be registered during app launch and the simulator
-/// rejects submits outright.
+/// seams (`BackgroundTaskRegistrySchedulerSpy`): the real scheduler cannot
+/// back hosted unit tests because launch handlers may only be registered
+/// during app launch and the simulator rejects submits outright.
 final class BackgroundTaskRegistryTests: XCTestCase {
-
-    /// Records what the registry hands to the `BGTaskScheduler` seams.
-    private final class SchedulerSpy {
-        var submittedRequests: [BGTaskRequest] = []
-        var pendingIdentifiers: Set<String> = []
-        var pendingFetchCount = 0
-    }
-
-    private func makeRegistry(spy: SchedulerSpy) -> BackgroundTaskRegistry {
-        BackgroundTaskRegistry(
-            registerLaunchHandler: { _, _ in },
-            submitTaskRequest: { spy.submittedRequests.append($0) },
-            pendingTaskIdentifiers: {
-                spy.pendingFetchCount += 1
-                return spy.pendingIdentifiers
-            }
-        )
-    }
 
     // Revert-check: fails if `BackgroundTaskRegistry.scheduleIfNotPending(_:)`
     // stops consulting `pendingTaskIdentifiers` before submitting (i.e.
@@ -34,8 +16,8 @@ final class BackgroundTaskRegistryTests: XCTestCase {
     // an unconditional launch-path re-submit postpones the task forever for a
     // user who cold-launches more often than that interval.
     func testScheduleIfNotPending_pendingIdentifier_isNotResubmitted() async {
-        let spy = SchedulerSpy()
-        let registry = makeRegistry(spy: spy)
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
         registry.register(config: .dailyProcessing(identifier: "task.pending"), handler: { true })
         spy.pendingIdentifiers = ["task.pending"]
 
@@ -48,8 +30,8 @@ final class BackgroundTaskRegistryTests: XCTestCase {
     }
 
     func testScheduleIfNotPending_identifierWithoutPendingRequest_submitsConfiguredRequest() async {
-        let spy = SchedulerSpy()
-        let registry = makeRegistry(spy: spy)
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
         registry.register(
             config: .weeklyProcessing(
                 identifier: "task.vacuumlike",
@@ -74,8 +56,8 @@ final class BackgroundTaskRegistryTests: XCTestCase {
     // set per identifier instead of once per batch, or if it stops filtering
     // the batch through that set.
     func testScheduleIfNotPending_mixedBatch_submitsOnlyAbsentIdentifiersWithOneFetch() async {
-        let spy = SchedulerSpy()
-        let registry = makeRegistry(spy: spy)
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
         for identifier in ["task.a", "task.b", "task.c"] {
             registry.register(config: .dailyProcessing(identifier: identifier), handler: { true })
         }
@@ -95,8 +77,8 @@ final class BackgroundTaskRegistryTests: XCTestCase {
     // fetch, because the fired request was just consumed and skipping the
     // re-submit would retire a recurring task after its first run.
     func testSchedule_identifierStillListedAsPending_submitsUnconditionally() async {
-        let spy = SchedulerSpy()
-        let registry = makeRegistry(spy: spy)
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
         registry.register(config: .dailyProcessing(identifier: "task.rearm"), handler: { true })
         spy.pendingIdentifiers = ["task.rearm"]
 
@@ -111,8 +93,8 @@ final class BackgroundTaskRegistryTests: XCTestCase {
     }
 
     func testScheduleIfNotPending_unregisteredIdentifier_submitsNothing() async {
-        let spy = SchedulerSpy()
-        let registry = makeRegistry(spy: spy)
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
 
         await registry.scheduleIfNotPending(["task.unknown"])
 

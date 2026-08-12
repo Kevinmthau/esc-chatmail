@@ -13,22 +13,32 @@ final class BackgroundTaskRegistry {
     /// `BGTaskScheduler` seams. Injectable because the real scheduler cannot
     /// back hosted unit tests: launch handlers may only be registered during
     /// app launch, and the simulator rejects submits outright.
-    private let registerLaunchHandler: (String, @escaping (BGTask) -> Void) -> Void
-    private let submitTaskRequest: (BGTaskRequest) throws -> Void
-    private let pendingTaskIdentifiers: () async -> Set<String>
+    private let registerLaunchHandler: @Sendable (String, @escaping (BGTask) -> Void) -> Void
+    private let submitTaskRequest: @Sendable (BGTaskRequest) throws -> Void
+    private let pendingTaskIdentifiers: @Sendable () async -> Set<String>
 
+    /// Internal (not private) only so tests can construct an instance with
+    /// spy seams. Never build a second instance around the default real
+    /// `BGTaskScheduler` closures: re-registering an identifier it already
+    /// holds is an Apple assertion failure that aborts the process.
+    ///
+    /// The handler/configuration dictionaries are deliberately unsynchronized:
+    /// every `register` call happens on the main thread during app launch,
+    /// before any scheduling read or `BGTaskScheduler`-queue launch-handler
+    /// callback can race them. A registrant added from another executor after
+    /// launch would be a Dictionary data race — don't add one.
     init(
-        registerLaunchHandler: @escaping (String, @escaping (BGTask) -> Void) -> Void = { identifier, launchHandler in
+        registerLaunchHandler: @escaping @Sendable (String, @escaping (BGTask) -> Void) -> Void = { identifier, launchHandler in
             _ = BGTaskScheduler.shared.register(
                 forTaskWithIdentifier: identifier,
                 using: nil,
                 launchHandler: launchHandler
             )
         },
-        submitTaskRequest: @escaping (BGTaskRequest) throws -> Void = { request in
+        submitTaskRequest: @escaping @Sendable (BGTaskRequest) throws -> Void = { request in
             try BGTaskScheduler.shared.submit(request)
         },
-        pendingTaskIdentifiers: @escaping () async -> Set<String> = {
+        pendingTaskIdentifiers: @escaping @Sendable () async -> Set<String> = {
             await withCheckedContinuation { continuation in
                 BGTaskScheduler.shared.getPendingTaskRequests { requests in
                     continuation.resume(returning: Set(requests.map(\.identifier)))
@@ -124,7 +134,14 @@ final class BackgroundTaskRegistry {
     /// than the interval. The post-fire re-arm in `handleTask` deliberately
     /// stays a plain `schedule(_:)`: the fired request was just consumed, so
     /// nothing is pending and the guard would only add a needless fetch.
+    ///
+    /// Trade-off accepted (same as the #166 processing-task guard): a skipped
+    /// identifier keeps the configuration it was submitted with, so a changed
+    /// interval or power/network flag reaches the system only after the
+    /// pending request fires or is cancelled — up to one full interval late.
     func scheduleIfNotPending(_ identifiers: [String]) async {
+        guard !identifiers.isEmpty else { return }
+
         let pending = await pendingTaskIdentifiers()
 
         for identifier in identifiers {

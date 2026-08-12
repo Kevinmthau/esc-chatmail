@@ -21,6 +21,12 @@ final class DatabaseMaintenanceService: ObservableObject {
     let coreDataStack = CoreDataStack.shared
     let taskRegistry: BackgroundTaskRegistry
 
+    /// Internal (not private) only so tests can inject a seamed registry.
+    /// Never construct a second instance against the default `.shared`
+    /// registry: `registerBackgroundTasks()` runs in here, and a repeat
+    /// registration of the same identifier with the real `BGTaskScheduler`
+    /// is an Apple assertion failure that aborts the process, not a
+    /// recoverable error.
     init(taskRegistry: BackgroundTaskRegistry = .shared) {
         self.taskRegistry = taskRegistry
         registerBackgroundTasks()

@@ -11,35 +11,18 @@ import BackgroundTasks
 @MainActor
 final class DatabaseMaintenanceSchedulingTests: XCTestCase {
 
-    private final class SchedulerSpy {
-        var registeredIdentifiers: [String] = []
-        var submittedRequests: [BGTaskRequest] = []
-        var pendingIdentifiers: Set<String> = []
-        var pendingFetchCount = 0
-    }
-
     private static let allMaintenanceIdentifiers = [
         DatabaseMaintenanceService.vacuumTaskIdentifier,
         DatabaseMaintenanceService.analyzeTaskIdentifier,
         DatabaseMaintenanceService.cleanupTaskIdentifier
     ]
 
-    private func makeService(spy: SchedulerSpy) -> DatabaseMaintenanceService {
-        let registry = BackgroundTaskRegistry(
-            registerLaunchHandler: { identifier, _ in
-                spy.registeredIdentifiers.append(identifier)
-            },
-            submitTaskRequest: { spy.submittedRequests.append($0) },
-            pendingTaskIdentifiers: {
-                spy.pendingFetchCount += 1
-                return spy.pendingIdentifiers
-            }
-        )
-        return DatabaseMaintenanceService(taskRegistry: registry)
+    private func makeService(spy: BackgroundTaskRegistrySchedulerSpy) -> DatabaseMaintenanceService {
+        DatabaseMaintenanceService(taskRegistry: spy.makeRegistry())
     }
 
     func testInit_registersAllThreeMaintenanceTasks() {
-        let spy = SchedulerSpy()
+        let spy = BackgroundTaskRegistrySchedulerSpy()
         _ = makeService(spy: spy)
 
         XCTAssertEqual(
@@ -56,7 +39,7 @@ final class DatabaseMaintenanceSchedulingTests: XCTestCase {
     // reset the 24h/7d `earliestBeginDate` clocks and no maintenance task ever
     // became eligible to fire.
     func testScheduleMaintenanceTasks_allRequestsStillPending_replacesNothing() async {
-        let spy = SchedulerSpy()
+        let spy = BackgroundTaskRegistrySchedulerSpy()
         let service = makeService(spy: spy)
         spy.pendingIdentifiers = Set(Self.allMaintenanceIdentifiers)
 
@@ -70,7 +53,7 @@ final class DatabaseMaintenanceSchedulingTests: XCTestCase {
     }
 
     func testScheduleMaintenanceTasks_noRequestsPending_submitsAllThree() async {
-        let spy = SchedulerSpy()
+        let spy = BackgroundTaskRegistrySchedulerSpy()
         let service = makeService(spy: spy)
 
         await service.scheduleMaintenanceTasks()
@@ -82,7 +65,7 @@ final class DatabaseMaintenanceSchedulingTests: XCTestCase {
     }
 
     func testScheduleMaintenanceTasks_partiallyPending_submitsOnlyAbsentRequests() async {
-        let spy = SchedulerSpy()
+        let spy = BackgroundTaskRegistrySchedulerSpy()
         let service = makeService(spy: spy)
         spy.pendingIdentifiers = [DatabaseMaintenanceService.analyzeTaskIdentifier]
 
