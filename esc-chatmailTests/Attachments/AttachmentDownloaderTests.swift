@@ -1079,12 +1079,78 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(directoryPreparation.count, 1)
 
         await downloader.cancelAndAwaitAllDownloads()
-        downloader.reopenAdmission()
+        XCTAssertTrue(downloader.reopenAdmission())
 
         XCTAssertEqual(
             directoryPreparation.count,
             2,
             "Same-process sign-in must recreate directories removed by account cleanup"
+        )
+    }
+
+    // Revert-check: fails if `AttachmentDownloader.reopenAdmission()` stops
+    // returning false from its `activeDownloadOperations.isEmpty` guard (for
+    // example by reverting to the Void signature that swallowed the refusal).
+    // AuthSession maps that false onto an all-or-none reopen failure, so
+    // swallowing it publishes a session whose downloads can never be admitted.
+    //
+    // HONEST SCOPE: the outstanding operation is manufactured by holding the
+    // attachment request gate. AuthSession always drains through
+    // `cancelAndAwaitAllDownloads()` before reopening, so this state is
+    // unreachable through the account transition paths today; the assertion
+    // pins the guard's refusal, not a live regression.
+    @MainActor
+    func testReopenAdmissionRefusesWhileClosedAccountDownloadIsOutstanding() async throws {
+        let attachmentID = "reopen-refusal-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId("message-reopen-refusal")
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("outstanding.dat")
+            .withMimeType("application/octet-stream")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let requestGate = MessageScopedAttachmentRequestGate(
+            outcomes: [message.id: .failure]
+        )
+        let apiClient = MockGmailAPIClient()
+        apiClient.getAttachmentOperation = { messageId, _ in
+            try await requestGate.perform(messageId: messageId)
+        }
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            ),
+            maxRetryAttempts: 1,
+            baseRetryDelay: 0
+        )
+
+        let downloadTask = Task { @MainActor in
+            await downloader.downloadAttachment(
+                attachmentObjectID: attachment.objectID,
+                messageId: message.id,
+                in: testStack.newBackgroundContext()
+            )
+        }
+        await requestGate.waitUntilStarted(count: 1)
+
+        XCTAssertFalse(
+            downloader.reopenAdmission(),
+            "Download admission must stay closed while an old-account download is still live"
+        )
+
+        await requestGate.release(messageId: message.id)
+        await downloadTask.value
+
+        XCTAssertTrue(
+            downloader.reopenAdmission(),
+            "Download admission must reopen once every old-account download has unwound"
         )
     }
 

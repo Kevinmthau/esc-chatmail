@@ -20,6 +20,29 @@ enum AuthRestoreOutcome: Equatable, Sendable {
     }
 }
 
+/// Why `AuthSession.reopenAccountWork(after:)` ended.
+///
+/// The three refusal causes are **not** interchangeable: they differ in whether
+/// retrying can ever succeed and in who else is already handling the failure, so
+/// callers must branch on the cause rather than on a bare Boolean.
+enum AccountWorkReopenOutcome: Hashable, CaseIterable, Sendable {
+    /// Every account-scoped subsystem admits work again.
+    case reopened
+    /// A reopen step threw — in practice a directory recreation or other file
+    /// I/O failure. Nothing is latched, so the identical transition can succeed
+    /// on a later attempt.
+    case transientFailure
+    /// A subsystem refused because work from the closed account is still
+    /// outstanding — a drain that already awaited every task it owned did not
+    /// clear it. That admission stays closed until the leaked work unwinds, so
+    /// repeating this transition is not expected to help.
+    case latchedRefusal
+    /// A newer account transition (a queued sign-out) superseded this one. That
+    /// transition owns the teardown, including credential cleanup, so this one
+    /// must unwind without duplicating its work.
+    case supersededByAccountRemoval
+}
+
 struct LocalMailboxStoreInspection: Equatable, Sendable {
     let accountEmails: [String]
     let hasAccountScopedMailboxData: Bool
@@ -198,7 +221,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private let clearParticipantCaches: @Sendable () async -> Void
     private let reopenParticipantCaches: @Sendable () async -> Void
     private let cleanupDownloads: @MainActor @Sendable () async -> Void
-    private let reopenDownloads: @MainActor @Sendable () async -> Void
+    private let reopenDownloads: @MainActor @Sendable () async -> Bool
     private let resetPendingActionRetryState: @MainActor @Sendable () async -> Void
     private let pendingActionAuthenticationDidRecover: @MainActor @Sendable () async -> Void
     private let cancelBackgroundTaskRequests: @MainActor @Sendable () -> Void
@@ -259,13 +282,13 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             await AttachmentDownloader.shared.cancelAndAwaitAllDownloads()
             await ProductionAttachmentCacheAccountTransition.closeAdmission()
         },
-        reopenDownloads: @escaping @MainActor @Sendable () async -> Void = {
+        reopenDownloads: @escaping @MainActor @Sendable () async -> Bool = {
             // Full cleanup removes these directories. Recreate them before
             // admitting any same-process imports or downloads for a new login.
             AttachmentPaths.setupDirectories()
-            AttachmentAccountWorkRegistry.shared.reopenAdmission()
-            AttachmentDownloader.shared.reopenAdmission()
+            let didReopenAttachmentAdmission = await AuthSession.reopenAttachmentAdmission()
             await ProductionAttachmentCacheAccountTransition.reopenAdmission()
+            return didReopenAttachmentAdmission
         },
         resetPendingActionRetryState: @escaping @MainActor @Sendable () async -> Void = {
             PendingActionsManager.shared.resetRetryStateForAccountTransition()
@@ -469,12 +492,24 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             }
         }
 
-        let didReopenAccountWork: Bool
+        var didReopenAccountWork = false
         if restoredUser.user != nil {
             await resetPendingActionRetryState()
-            didReopenAccountWork = await reopenAccountWork(after: outboundTransition)
-        } else {
-            didReopenAccountWork = false
+            let reopenOutcome = await reopenAccountWork(after: outboundTransition)
+            // The restore callback already persisted background-readable
+            // credentials and cleared the cleanup marker, so every refusal
+            // leaves them live. Only a latched refusal makes this restore their
+            // sole owner; the policy explains the other two.
+            switch AuthRestoreReopenPolicy.restoreDispositionAfterReopen(reopenOutcome) {
+            case .publishSession:
+                didReopenAccountWork = true
+            case .retryKeepingCredentials:
+                restoredUser.restoreOutcome = .retryableFailure
+            case .discardCredentials:
+                // Runs before endQuiescence(), matching signIn's catch order:
+                // the clear mutates account-scoped defaults and published state.
+                restoredUser.restoreOutcome = discardRestoredSessionAfterFailedReopen()
+            }
         }
         await syncRunCoordinator.endQuiescence()
 
@@ -515,7 +550,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             }
             await resetPendingActionRetryState()
             didResetPendingActionRetryState = true
-            guard await reopenAccountWork(after: outboundTransition) else {
+            // Interactive sign-in stays all-or-none for every refusal cause: its
+            // catch clears the session it just replaced, so no per-cause
+            // disposition is needed here.
+            guard await reopenAccountWork(after: outboundTransition) == .reopened else {
                 throw CancellationError()
             }
             await syncRunCoordinator.endQuiescence()
@@ -679,6 +717,26 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await syncRunCoordinator.endQuiescence()
         Log.info("Sign-out cleanup completed", category: .auth)
         return true
+    }
+
+    /// Reopens both attachment admission owners and reports whether *both*
+    /// accepted.
+    ///
+    /// Each closure is evaluated exactly once, deliberately without `&&`:
+    /// short-circuiting on the first refusal would leave the second owner
+    /// latched closed with no matching rollback, and a later transition could
+    /// then never tell which half is holding attachments shut.
+    static func reopenAttachmentAdmission(
+        reopenRegistry: @MainActor @Sendable () async -> Bool = {
+            AttachmentAccountWorkRegistry.shared.reopenAdmission()
+        },
+        reopenDownloader: @MainActor @Sendable () async -> Bool = {
+            AttachmentDownloader.shared.reopenAdmission()
+        }
+    ) async -> Bool {
+        let registryDidReopen = await reopenRegistry()
+        let downloaderDidReopen = await reopenDownloader()
+        return registryDidReopen && downloaderDidReopen
     }
 
     private nonisolated static func deleteAttachmentFilesFromDisk() throws {
@@ -986,6 +1044,24 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         accessToken = nil
     }
 
+    /// Discards a restored session whose account-scoped reopen latched closed.
+    ///
+    /// A restore stages live credentials before the reopen sequence runs, so a
+    /// refused reopen leaves background-readable tokens for an account that was
+    /// never published. Call this **only** for the disposition
+    /// `AuthRestoreReopenPolicy` maps to `.discardCredentials`: the other
+    /// refusal causes are either retryable with exactly these credentials or
+    /// already owned by a superseding sign-out. The caller runs this while
+    /// quiescence is still held and never publishes a session afterwards, so
+    /// pending-action recovery must not be signalled.
+    func discardRestoredSessionAfterFailedReopen() -> AuthRestoreOutcome {
+        Log.error(
+            "Failed to reopen account work for a restored session; discarding staged credentials",
+            category: .auth
+        )
+        return clearFailedGoogleSession() ? .terminalNoSession : .retryableFailure
+    }
+
     @discardableResult
     private func clearFailedGoogleSession() -> Bool {
         signOutGoogleSession()
@@ -1041,8 +1117,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             || (error.domain == "org.openid.appauth.oauth_token" && error.code == -10)
     }
 
-    @discardableResult
-    func reopenAccountWork(after transition: OutboundAccountTransition) async -> Bool {
+    /// Reopens every account-scoped subsystem, all-or-none.
+    ///
+    /// Anything but `.reopened` means no authenticated session may be
+    /// published. The distinct refusal cases exist because callers must treat
+    /// them differently — see `AuthRestoreReopenPolicy`.
+    func reopenAccountWork(after transition: OutboundAccountTransition) async -> AccountWorkReopenOutcome {
         do {
             try await reopenHTMLContent()
         } catch {
@@ -1055,10 +1135,24 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             } catch {
                 Log.error("Failed to roll back partial HTML reopen", category: .auth, error: error)
             }
-            return false
+            return .transientFailure
         }
         await reopenParticipantCaches()
-        await reopenDownloads()
+        guard await reopenDownloads() else {
+            // A leaked download or file operation kept attachment admission
+            // closed. Reopening is all-or-none, so roll back in the same order
+            // a superseded transition does rather than publishing a session
+            // whose attachment work can never start.
+            Log.error("Failed to reopen account download admission", category: .auth)
+            await cleanupDownloads()
+            await clearParticipantCaches()
+            do {
+                try await cleanupHTMLContent()
+            } catch {
+                Log.error("Failed to roll back account work after refused download reopen", category: .auth, error: error)
+            }
+            return .latchedRefusal
+        }
         guard outboundTaskRegistry.reopenAdmission(after: transition) else {
             // A newer account transition superseded this one while the async
             // reopen sequence was yielding. Return every component to the
@@ -1071,14 +1165,22 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             } catch {
                 Log.error("Failed to roll back account work after stale reopen", category: .auth, error: error)
             }
-            return false
+            return .supersededByAccountRemoval
         }
-        return true
+        return .reopened
     }
 
     private func reopenPreSignInAccountWork(after transition: OutboundAccountTransition) async {
         await reopenParticipantCaches()
-        await reopenDownloads()
+        if await reopenDownloads() == false {
+            // Deliberately NOT all-or-none, unlike reopenAccountWork(after:).
+            // This path restores the account that is still published — a failed
+            // sign-in never replaced it — and the caller has no way to unpublish
+            // it. Refusing outbound admission here would leave a live session
+            // permanently unable to send; a latched attachment registry only
+            // costs downloads and imports until relaunch. Degrade, don't widen.
+            Log.error("Failed to reopen download admission for the pre-sign-in account", category: .auth)
+        }
         guard outboundTaskRegistry.reopenAdmission(after: transition) else {
             // A newer transition superseded this failed sign-in while its
             // Google UI was active. Roll back every stale account-work reopen.

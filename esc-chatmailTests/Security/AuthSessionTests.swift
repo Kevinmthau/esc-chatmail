@@ -362,7 +362,10 @@ final class AuthSessionTests: XCTestCase {
             },
             signOutGoogleSession: { cleanup.record("google-sign-out") },
             cleanupDownloads: { cleanup.record("downloads-closed") },
-            reopenDownloads: { cleanup.record("downloads-reopened") },
+            reopenDownloads: {
+                cleanup.record("downloads-reopened")
+                return true
+            },
             outboundTaskRegistry: outboundTaskRegistry
         )
 
@@ -397,7 +400,10 @@ final class AuthSessionTests: XCTestCase {
             clearParticipantCaches: { cleanup.record("participants-closed") },
             reopenParticipantCaches: { cleanup.record("participants-reopened") },
             cleanupDownloads: { cleanup.record("downloads-closed") },
-            reopenDownloads: { cleanup.record("downloads-reopened") },
+            reopenDownloads: {
+                cleanup.record("downloads-reopened")
+                return true
+            },
             outboundTaskRegistry: outboundTaskRegistry
         )
         session.isAuthenticated = true
@@ -423,6 +429,61 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertNotNil(
             reservation,
             "Canceling account replacement must restore the authenticated account's admission"
+        )
+        if let reservation {
+            outboundTaskRegistry.finish(reservation)
+        }
+    }
+
+    // Revert-check: fails if reopenPreSignInAccountWork(after:)'s refused-downloads
+    // leg returns early (the all-or-none shape reopenAccountWork(after:) uses)
+    // instead of logging and continuing. That caller cannot unpublish the
+    // session it is restoring, so bailing before
+    // outboundTaskRegistry.reopenAdmission(after:) would leave a live,
+    // authenticated account permanently unable to send — a strictly wider blast
+    // radius than the attachment latch it is reacting to.
+    func testRefusedDownloadReopenStillRestoresOutboundAdmissionForPublishedSession() async {
+        let cleanup = AuthSessionCleanupRecorder()
+        let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
+        let cancellation = NSError(domain: kGIDSignInErrorDomain, code: -5)
+        let session = makeAuthSession(
+            interactiveGoogleSignIn: { _, _, completion in
+                completion(nil, cancellation)
+            },
+            clearParticipantCaches: { cleanup.record("participants-closed") },
+            reopenParticipantCaches: { cleanup.record("participants-reopened") },
+            cleanupDownloads: { cleanup.record("downloads-closed") },
+            reopenDownloads: {
+                cleanup.record("downloads-reopen-refused")
+                return false
+            },
+            outboundTaskRegistry: outboundTaskRegistry
+        )
+        session.isAuthenticated = true
+
+        do {
+            try await session.signIn(presenting: UIViewController())
+            XCTFail("Expected interactive sign-in cancellation")
+        } catch let error as NSError {
+            XCTAssertEqual(error.domain, kGIDSignInErrorDomain)
+            XCTAssertEqual(error.code, -5)
+        }
+
+        XCTAssertEqual(
+            cleanup.events,
+            [
+                "participants-closed",
+                "downloads-closed",
+                "participants-reopened",
+                "downloads-reopen-refused"
+            ],
+            "A degraded attachment reopen must not trigger the all-or-none rollback"
+        )
+        XCTAssertTrue(session.isAuthenticated)
+        let reservation = outboundTaskRegistry.reserve()
+        XCTAssertNotNil(
+            reservation,
+            "A still-published session must keep sending even when attachment admission stays latched"
         )
         if let reservation {
             outboundTaskRegistry.finish(reservation)
@@ -503,7 +564,10 @@ final class AuthSessionTests: XCTestCase {
             clearParticipantCaches: { cleanup.record("participants-closed") },
             reopenParticipantCaches: { cleanup.record("participants-reopened") },
             cleanupDownloads: { cleanup.record("downloads-closed") },
-            reopenDownloads: { cleanup.record("downloads-reopened") },
+            reopenDownloads: {
+                cleanup.record("downloads-reopened")
+                return true
+            },
             outboundTaskRegistry: outboundTaskRegistry
         )
         let bootstrap = AppStartupBootstrap(
@@ -652,6 +716,7 @@ final class AuthSessionTests: XCTestCase {
             userDefaults: defaults,
             reopenDownloads: {
                 cleanup.markDownloadsReopened()
+                return true
             },
             resetCoreDataStore: { cleanup.markStoreReset() },
             deleteAttachmentFiles: { cleanup.markAttachmentFilesCleared() },
@@ -700,6 +765,7 @@ final class AuthSessionTests: XCTestCase {
             userDefaults: defaults,
             reopenDownloads: {
                 cleanup.markDownloadsReopened()
+                return true
             },
             resetCoreDataStore: { cleanup.markStoreReset() },
             deleteAttachmentFiles: { cleanup.markAttachmentFilesCleared() },
@@ -1165,7 +1231,10 @@ final class AuthSessionTests: XCTestCase {
                 cleanup.markParticipantCachesCleared()
                 cleanup.record("participant-caches-cleared")
             },
-            reopenDownloads: { cleanup.record("downloads-reopened") },
+            reopenDownloads: {
+                cleanup.record("downloads-reopened")
+                return true
+            },
             resetCoreDataStore: { try resetScript.reset() },
             fetchStoredAccountEmails: { ["first@example.com"] },
             reopenHTMLContent: { cleanup.record("html-reopened") },
@@ -1173,10 +1242,10 @@ final class AuthSessionTests: XCTestCase {
         )
 
         try await session.prepareLocalStoreForAuthenticatedAccount("SECOND@example.com")
-        let didReopen = await session.reopenAccountWork(after: transition)
+        let reopenOutcome = await session.reopenAccountWork(after: transition)
 
         XCTAssertEqual(resetScript.attemptCount, 1)
-        XCTAssertTrue(didReopen)
+        XCTAssertEqual(reopenOutcome, .reopened)
         XCTAssertTrue(
             cleanup.participantCachesCleared,
             "Direct account replacement must evict the previous store's cached participant identity before account work reopens"
@@ -1635,15 +1704,18 @@ final class AuthSessionTests: XCTestCase {
         let transition = registry.closeAdmission()
         let cleanup = AuthSessionCleanupRecorder()
         let session = makeAuthSession(
-            reopenDownloads: { cleanup.markDownloadsReopened() },
+            reopenDownloads: {
+                cleanup.markDownloadsReopened()
+                return true
+            },
             fetchStoredAccountEmails: { [] },
             outboundTaskRegistry: registry
         )
 
         try await session.prepareLocalStoreForAuthenticatedAccount("new@example.com")
 
-        let didReopen = await session.reopenAccountWork(after: transition)
-        XCTAssertTrue(didReopen)
+        let reopenOutcome = await session.reopenAccountWork(after: transition)
+        XCTAssertEqual(reopenOutcome, .reopened)
         XCTAssertTrue(cleanup.downloadsReopened)
         let reservation = registry.reserve()
         XCTAssertNotNil(reservation)
@@ -1667,9 +1739,13 @@ final class AuthSessionTests: XCTestCase {
             outboundTaskRegistry: registry
         )
 
-        let didReopen = await session.reopenAccountWork(after: transition)
+        let reopenOutcome = await session.reopenAccountWork(after: transition)
 
-        XCTAssertFalse(didReopen)
+        XCTAssertEqual(
+            reopenOutcome,
+            .transientFailure,
+            "A thrown reopen step is retryable; classifying it as latched would discard reusable credentials"
+        )
         XCTAssertEqual(
             cleanup.events,
             ["html-partially-reopened", "html-rollback"]
@@ -1678,6 +1754,195 @@ final class AuthSessionTests: XCTestCase {
             registry.reserve(),
             "Outbound work must remain closed when HTML admission cannot be reopened atomically"
         )
+    }
+
+    // Revert-check: fails if AuthSession.discardRestoredSessionAfterFailedReopen()
+    // stops routing through clearFailedGoogleSession() — the Google sign-out,
+    // the token clear, and the persisted-email delete all go unrecorded, and the
+    // outcome stops being .terminalNoSession. A restore persists live
+    // background-readable credentials before the reopen sequence runs, so a
+    // refused reopen that returns without clearing them strands an account
+    // nothing ever cleans up.
+    //
+    // HONEST SCOPE: this drives the decision method directly instead of through
+    // restorePreviousSignIn(). Reaching the reopen-disposition switch requires a
+    // restored GIDGoogleUser, which cannot be constructed in tests. The trigger
+    // block itself is therefore UNPINNED: deleting the whole `switch
+    // AuthRestoreReopenPolicy.restoreDispositionAfterReopen(...)` from
+    // restorePreviousSignIn keeps this suite green. What is pinned is the
+    // decision (AuthRestoreReopenPolicyTests) and the clearing behavior (here).
+    func testDiscardingRestoredSessionAfterFailedReopenClearsStagedCredentials() {
+        let defaults = makeDefaults()
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([
+            KeychainService.Key.googleUserEmail.rawValue: "restored@example.com"
+        ])
+        let tokenManager = MockTokenManager()
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: keychain,
+            signOutGoogleSession: { cleanup.record("google-sign-out") },
+            userDefaults: defaults
+        )
+        session.isAuthenticated = true
+        session.userEmail = "restored@example.com"
+        session.accessToken = "restored-access-token"
+
+        let outcome = session.discardRestoredSessionAfterFailedReopen()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(cleanup.events, ["google-sign-out"])
+        XCTAssertEqual(tokenManager.clearTokensCallCount, 1)
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleUserEmail.rawValue))
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
+        XCTAssertFalse(defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
+        XCTAssertFalse(session.isAuthenticated)
+        XCTAssertNil(session.userEmail)
+        XCTAssertNil(session.accessToken)
+    }
+
+    // Revert-check: fails if discardRestoredSessionAfterFailedReopen() stops
+    // mapping a failed credential delete to .retryableFailure (for example by
+    // hard-coding .terminalNoSession), or if clearFailedGoogleSession() stops
+    // persisting the durable marker before its first delete. Without both, a
+    // Keychain failure during this discard leaves the restored account's
+    // credentials behind with no launch-time retry.
+    //
+    // HONEST SCOPE: same as above — the restorePreviousSignIn() call site cannot
+    // be exercised because GIDGoogleUser is not constructible in tests, so the
+    // trigger block that invokes this method is unpinned.
+    func testDiscardingRestoredSessionRetainsCleanupMarkerWhenCredentialDeleteFails() {
+        struct EmailDeleteFailure: Error {}
+        let defaults = makeDefaults()
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([
+            KeychainService.Key.googleUserEmail.rawValue: "restored@example.com"
+        ])
+        let tokenManager = MockTokenManager()
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: keychain,
+            userDefaults: defaults
+        )
+        keychain.failNextDelete(
+            for: KeychainService.Key.googleUserEmail.rawValue,
+            with: EmailDeleteFailure()
+        )
+
+        let outcome = session.discardRestoredSessionAfterFailedReopen()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        XCTAssertTrue(keychain.exists(for: KeychainService.Key.googleUserEmail.rawValue))
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue),
+            "A failed discard must retain the marker so launch recovery retries the deletes"
+        )
+        XCTAssertTrue(defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
+    }
+
+    // Revert-check: fails if AuthSession.reopenAccountWork(after:) stops
+    // consuming the Bool returned by reopenDownloads, or stops reporting that
+    // refusal as .latchedRefusal. A refused attachment reopen would otherwise
+    // publish a session whose downloads and file imports can never be admitted
+    // again, with outbound admission wide open.
+    //
+    // HONEST SCOPE: the refusal is injected. Neither
+    // AttachmentAccountWorkRegistry nor AttachmentDownloader can be left with
+    // outstanding operations through AuthSession's own transition paths today,
+    // because cleanupDownloads() drains both before this runs; this pins the
+    // all-or-none contract against a future leak, not a reachable regression.
+    func testRefusedDownloadReopenRollsBackEveryReopenedSubsystem() async {
+        let registry = OutboundTaskRegistry(admissionOpen: true)
+        let transition = registry.closeAdmission()
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            clearParticipantCaches: { cleanup.record("participants-rollback") },
+            reopenParticipantCaches: { cleanup.record("participants-reopened") },
+            cleanupDownloads: { cleanup.record("downloads-rollback") },
+            reopenDownloads: {
+                cleanup.record("downloads-reopen-refused")
+                return false
+            },
+            cleanupHTMLContent: { cleanup.record("html-rollback") },
+            reopenHTMLContent: { cleanup.record("html-reopened") },
+            outboundTaskRegistry: registry
+        )
+
+        let reopenOutcome = await session.reopenAccountWork(after: transition)
+
+        XCTAssertEqual(
+            reopenOutcome,
+            .latchedRefusal,
+            "A refused download reopen is latched, not retryable"
+        )
+        XCTAssertEqual(
+            cleanup.events,
+            [
+                "html-reopened",
+                "participants-reopened",
+                "downloads-reopen-refused",
+                "downloads-rollback",
+                "participants-rollback",
+                "html-rollback"
+            ]
+        )
+        XCTAssertNil(
+            registry.reserve(),
+            "A refused download reopen must leave every account-scoped admission closed"
+        )
+    }
+
+    // Revert-check: fails if AuthSession.reopenAttachmentAdmission(...) collapses
+    // to a short-circuiting `await reopenRegistry() && reopenDownloader()` — the
+    // second owner would never be asked to reopen, staying latched closed with
+    // no matching rollback and no log naming it.
+    //
+    // HONEST SCOPE: this pins the helper, not the production `reopenDownloads`
+    // default closure that calls it. That closure reaches
+    // AttachmentAccountWorkRegistry.shared and AttachmentDownloader.shared, so
+    // its wiring (and its AttachmentPaths.setupDirectories() /
+    // cache-actor-reopen neighbours) remains uncovered here.
+    func testReopenAttachmentAdmissionEvaluatesBothOwnersWhenEitherRefuses() async {
+        let refusedRegistry = AuthSessionCleanupRecorder()
+        let registryRefusedResult = await AuthSession.reopenAttachmentAdmission(
+            reopenRegistry: {
+                refusedRegistry.record("registry")
+                return false
+            },
+            reopenDownloader: {
+                refusedRegistry.record("downloader")
+                return true
+            }
+        )
+
+        XCTAssertFalse(registryRefusedResult)
+        XCTAssertEqual(
+            refusedRegistry.events,
+            ["registry", "downloader"],
+            "A refusing registry must not skip the downloader's reopen"
+        )
+
+        let refusedDownloader = AuthSessionCleanupRecorder()
+        let downloaderRefusedResult = await AuthSession.reopenAttachmentAdmission(
+            reopenRegistry: {
+                refusedDownloader.record("registry")
+                return true
+            },
+            reopenDownloader: {
+                refusedDownloader.record("downloader")
+                return false
+            }
+        )
+
+        XCTAssertFalse(downloaderRefusedResult)
+        XCTAssertEqual(refusedDownloader.events, ["registry", "downloader"])
+
+        let bothReopened = await AuthSession.reopenAttachmentAdmission(
+            reopenRegistry: { true },
+            reopenDownloader: { true }
+        )
+        XCTAssertTrue(bothReopened)
     }
 
     func testSupersededTransitionRollsBackEveryReopenedSubsystem() async {
@@ -1689,15 +1954,22 @@ final class AuthSessionTests: XCTestCase {
             clearParticipantCaches: { cleanup.record("participants-rollback") },
             reopenParticipantCaches: { cleanup.record("participants-reopened") },
             cleanupDownloads: { cleanup.record("downloads-rollback") },
-            reopenDownloads: { cleanup.record("downloads-reopened") },
+            reopenDownloads: {
+                cleanup.record("downloads-reopened")
+                return true
+            },
             cleanupHTMLContent: { cleanup.record("html-rollback") },
             reopenHTMLContent: { cleanup.record("html-reopened") },
             outboundTaskRegistry: registry
         )
 
-        let didReopen = await session.reopenAccountWork(after: staleTransition)
+        let reopenOutcome = await session.reopenAccountWork(after: staleTransition)
 
-        XCTAssertFalse(didReopen)
+        XCTAssertEqual(
+            reopenOutcome,
+            .supersededByAccountRemoval,
+            "The superseding sign-out owns credential cleanup; this transition must not claim it"
+        )
         XCTAssertEqual(
             cleanup.events,
             [
@@ -2167,7 +2439,7 @@ final class AuthSessionTests: XCTestCase {
         clearParticipantCaches: @escaping @Sendable () async -> Void = {},
         reopenParticipantCaches: @escaping @Sendable () async -> Void = {},
         cleanupDownloads: @escaping @MainActor @Sendable () async -> Void = {},
-        reopenDownloads: @escaping @MainActor @Sendable () async -> Void = {},
+        reopenDownloads: @escaping @MainActor @Sendable () async -> Bool = { true },
         resetPendingActionRetryState: @escaping @MainActor @Sendable () async -> Void = {},
         pendingActionAuthenticationDidRecover: @escaping @MainActor @Sendable () async -> Void = {},
         cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {},

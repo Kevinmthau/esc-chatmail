@@ -149,13 +149,24 @@ final class AttachmentAccountWorkRegistry: @unchecked Sendable {
         }
     }
 
-    @discardableResult
+    /// Returns false when a leaked operation from the closed account is still
+    /// outstanding. This transition's reopen has failed, so the caller must fail
+    /// the account reopen instead of discarding this; a later transition can
+    /// still reopen once the outstanding operation unwinds.
     func reopenAdmission() -> Bool {
-        lock.withLock {
+        let didReopen = lock.withLock {
             guard operations.isEmpty else { return false }
             admissionGeneration &+= 1
             acceptsNewWork = true
             return true
         }
+        if !didReopen {
+            // Logged outside the lock so a future logging hook cannot re-enter.
+            Log.error(
+                "Refusing to reopen attachment account work while operations from the closed account remain",
+                category: .attachment
+            )
+        }
+        return didReopen
     }
 }
