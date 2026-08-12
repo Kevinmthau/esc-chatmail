@@ -1,6 +1,7 @@
 import XCTest
 import BackgroundTasks
 import CoreData
+import Security
 @testable import esc_chatmail
 
 final class BackgroundSyncManagerTests: XCTestCase {
@@ -262,6 +263,24 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
     }
 
+    // The pending lookup suspends, so sign-out can cancel requests while this
+    // helper is waiting. Its post-await auth re-check must share one MainActor
+    // slice with the submit or it can re-arm behind that cancellation sweep.
+    func testScheduleProcessingTaskIfNotPending_signOutDuringPendingCheck_submitsNothing() async {
+        let authenticated = AuthGateBox(value: true)
+        taskScheduler.onPendingCheck = {
+            await MainActor.run { authenticated.value = false }
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncIsAuthenticated: { authenticated.value }
+        )
+
+        await manager.scheduleProcessingTaskIfNotPending()
+
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 0)
+    }
+
     // Revert-check: fails if `armBackgroundTasksForSceneBackground()` stops
     // consulting `taskScheduler.isAppRefreshTaskPending()` before re-arming the
     // refresh identifier. An unconditional re-submit REPLACES the pending
@@ -396,6 +415,54 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
     }
 
+    // UIKit can expire the short scene-background assertion while the system's
+    // pending-request callback is withheld. Expiration must cancel the arm and
+    // end its assertion without waiting for that callback; a late callback is
+    // ignored by the scheduler's one-shot bridge.
+    func testArmBackgroundTasksForSceneBackground_expirationUnblocksHungPendingQuery() async {
+        let callbackProbe = BackgroundPendingRequestsCallbackProbe()
+        let scheduler = BackgroundTaskScheduler(
+            pendingTaskRequestsProvider: { callbackProbe.install($0) }
+        )
+        let manager = makeManager(
+            taskSchedulerOverride: scheduler,
+            legacyDeltaSyncEnabled: false
+        )
+
+        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
+        await waitUntil { callbackProbe.hasCallback }
+
+        await MainActor.run { self.sceneAssertions.expire() }
+        await waitUntil { self.sceneAssertions.endInvocationCount == 2 }
+
+        XCTAssertEqual(sceneAssertions.beginCount, 1)
+        XCTAssertEqual(sceneAssertions.endCount, 1)
+        XCTAssertEqual(sceneAssertions.endInvocationCount, 2)
+        callbackProbe.fire(requests: [])
+        await Task.yield()
+        XCTAssertEqual(sceneAssertions.endCount, 1)
+        XCTAssertEqual(sceneAssertions.endInvocationCount, 2)
+    }
+
+    // UIKit may decline the short assertion by returning `.invalid`; in that
+    // case it never delivers an expiration callback. The failed grant is
+    // treated as immediate expiration so no pending lookup starts unprotected.
+    func testArmBackgroundTasksForSceneBackground_deniedAssertionStartsNoPendingQuery() async {
+        let pendingChecks = BackgroundPendingCheckCounter()
+        sceneAssertions.shouldGrant = false
+        taskScheduler.onPendingCheck = { pendingChecks.increment() }
+        let manager = makeManager(legacyDeltaSyncEnabled: false)
+
+        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
+        await waitUntil { self.sceneAssertions.endInvocationCount == 1 }
+
+        XCTAssertEqual(sceneAssertions.beginCount, 1)
+        XCTAssertEqual(sceneAssertions.endCount, 0)
+        XCTAssertEqual(pendingChecks.value, 0)
+        XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 0)
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 0)
+    }
+
     // Revert-check: fails if `BackgroundSyncManager.scheduleFailureBackoffRetry()`
     // is removed from the `.failed` case of `performAuthoritativeSync()`.
     // A failed background run must take the same bounded exponential backoff the
@@ -483,6 +550,44 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(callCount, 0)
     }
 
+    // A sign-out can land while cold-launch readiness is suspended. Its gate
+    // drop and first sweep must not be followed by the readiness-failure retry.
+    func testModelV3Executor_signOutDuringBootstrapFailureDoesNotRearmRetry() async {
+        let readinessGate = BackgroundSyncReadinessGate()
+        let authenticated = AuthGateBox(value: true)
+        taskScheduler.appRefreshTaskPending = true
+        taskScheduler.processingTaskPending = true
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncReadiness: {
+                await readinessGate.waitUntilReleased()
+            },
+            authoritativeSyncIsAuthenticated: { authenticated.value },
+            authoritativeSyncIsDurablySignedOut: { !authenticated.value }
+        )
+        let syncTask = Task {
+            await manager.performAuthoritativeSync()
+        }
+        await readinessGate.waitUntilStarted()
+
+        await MainActor.run {
+            authenticated.value = false
+            taskScheduler.cancelPendingTaskRequests()
+        }
+        await readinessGate.release(succeeded: false)
+        let success = await syncTask.value
+
+        XCTAssertFalse(success)
+        XCTAssertTrue(taskScheduler.retryBackoffs.isEmpty)
+        XCTAssertFalse(taskScheduler.appRefreshTaskPending)
+        XCTAssertFalse(taskScheduler.processingTaskPending)
+        XCTAssertEqual(
+            taskScheduler.cancelPendingTaskRequestsCount,
+            2,
+            "The post-readiness verdict should repeat the sign-out sweep, not submit"
+        )
+    }
+
     func testModelV3Executor_waitsForPersistenceBootstrapBeforeSyncing() async {
         let executor = await MainActor.run {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
@@ -508,6 +613,36 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertTrue(success)
         let finalCallCount = await MainActor.run { executor.callCount }
         XCTAssertEqual(finalCallCount, 1)
+    }
+
+    // Expiration may arrive while cold-launch readiness is suspended. Even
+    // when readiness ultimately succeeds, the cancelled worker must still
+    // sweep the cadence its handler re-armed for a durable sign-out.
+    func testModelV3Executor_cancelledDuringReadinessDurableSignOutSweepsHandlerRearm() async {
+        taskScheduler.appRefreshTaskPending = true
+        taskScheduler.processingTaskPending = true
+        let readinessGate = BackgroundSyncReadinessGate()
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncReadiness: {
+                await readinessGate.waitUntilReleased()
+            },
+            authoritativeSyncIsAuthenticated: { false },
+            authoritativeSyncIsDurablySignedOut: { true }
+        )
+        let syncTask = Task {
+            await manager.performAuthoritativeSync()
+        }
+        await readinessGate.waitUntilStarted()
+
+        syncTask.cancel()
+        await readinessGate.release(succeeded: true)
+        let success = await syncTask.value
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.cancelPendingTaskRequestsCount, 1)
+        XCTAssertFalse(taskScheduler.appRefreshTaskPending)
+        XCTAssertFalse(taskScheduler.processingTaskPending)
     }
 
     func testModelV3Executor_bootstrapFailureDoesNotTouchSyncEngine() async {
@@ -542,6 +677,555 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertTrue(success)
         let callCount = await MainActor.run { executor.callCount }
         XCTAssertEqual(callCount, 0)
+    }
+
+    // Sign-out drops the auth gate and cancels requests contiguously on the
+    // MainActor. Every executor-completion submit must pair a fresh gate check
+    // with its submit in another MainActor slice: whichever slice wins, no
+    // request can survive behind the sign-out sweep.
+    func testModelV3Executor_signOutBeforeRetryingResult_doesNotRearmBackgroundWork() async {
+        let retryingResults: [(String, BackgroundMailboxSyncExecutionResult)] = [
+            ("failed", .failed),
+            ("quiescence-blocked", .blocked(by: nil)),
+            ("pending-actions-blocked", .blocked(by: .pendingActions)),
+            ("needs-follow-up", .needsFollowUp)
+        ]
+
+        for (label, result) in retryingResults {
+            let scheduler = BackgroundTaskSchedulerSpy()
+            taskScheduler = scheduler
+            let authenticated = AuthGateBox(value: true)
+            let executor = await MainActor.run {
+                BackgroundMailboxSyncExecutorSpy(result: result) {
+                    authenticated.value = false
+                    scheduler.cancelPendingTaskRequests()
+                }
+            }
+            let manager = makeManager(
+                legacyDeltaSyncEnabled: false,
+                authoritativeSyncExecutor: executor,
+                authoritativeSyncIsAuthenticated: { authenticated.value }
+            )
+
+            let success = await manager.performAuthoritativeSync(budget: .appRefresh)
+
+            XCTAssertFalse(success, label)
+            XCTAssertEqual(scheduler.cancelPendingTaskRequestsCount, 1, label)
+            XCTAssertTrue(scheduler.retryBackoffs.isEmpty, label)
+            XCTAssertEqual(scheduler.processingScheduleCount, 0, label)
+        }
+    }
+
+    // Sign-out intent becomes durable before the published auth fields are
+    // cleared. Post-executor scheduling must reject that intent even while the
+    // old `canAccessMailbox` value is still true during account drains.
+    func testModelV3Executor_durableSignOutIntentBeforeFailure_doesNotRearmRetry() async {
+        let scheduler = taskScheduler!
+        let authenticated = AuthGateBox(value: true)
+        let durablySignedOut = AuthGateBox(value: false)
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .failed) {
+                durablySignedOut.value = true
+                scheduler.cancelPendingTaskRequests()
+            }
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncIsAuthenticated: { authenticated.value },
+            authoritativeSyncIsDurablySignedOut: { durablySignedOut.value }
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(scheduler.cancelPendingTaskRequestsCount, 1)
+        XCTAssertTrue(scheduler.retryBackoffs.isEmpty)
+    }
+
+    // Expiration can arrive after the cooperative Task cancellation check.
+    // The per-BGTask scheduling gate is expired from the auth-check hook, at
+    // the final boundary before submission, so the retry and its counter update
+    // must still be rejected atomically.
+    func testModelV3Executor_cancellationAtFailureSubmitGateDoesNotConsumeRetry() async {
+        let readinessGate = BackgroundSyncReadinessGate()
+        let schedulingGate = BackgroundTaskSchedulingGate()
+        let authenticated = AuthCancellationCheckBox(cancelOnCheck: 2)
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .failed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncReadiness: {
+                await readinessGate.waitUntilReleased()
+            },
+            authoritativeSyncIsAuthenticated: { authenticated.check() }
+        )
+        let cancelledRun = Task {
+            await manager.performAuthoritativeSync(schedulingGate: schedulingGate)
+        }
+        await MainActor.run {
+            authenticated.cancel = {
+                schedulingGate.expire()
+                cancelledRun.cancel()
+            }
+        }
+        await readinessGate.release(succeeded: true)
+
+        let cancelledRunSucceeded = await cancelledRun.value
+        XCTAssertFalse(cancelledRunSucceeded)
+        XCTAssertTrue(taskScheduler.retryBackoffs.isEmpty)
+
+        let nextRunSucceeded = await manager.performAuthoritativeSync()
+        XCTAssertFalse(nextRunSucceeded)
+        XCTAssertEqual(
+            taskScheduler.retryBackoffs,
+            [60],
+            "The expired run must not spend the first retry-counter slot"
+        )
+    }
+
+    func testModelV3Executor_cancellationAtFollowUpSubmitGateSchedulesNothing() async {
+        let readinessGate = BackgroundSyncReadinessGate()
+        let schedulingGate = BackgroundTaskSchedulingGate()
+        let authenticated = AuthCancellationCheckBox(cancelOnCheck: 2)
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncReadiness: {
+                await readinessGate.waitUntilReleased()
+            },
+            authoritativeSyncIsAuthenticated: { authenticated.check() }
+        )
+        let cancelledRun = Task {
+            await manager.performAuthoritativeSync(
+                budget: .appRefresh,
+                schedulingGate: schedulingGate
+            )
+        }
+        await MainActor.run {
+            authenticated.cancel = {
+                schedulingGate.expire()
+                cancelledRun.cancel()
+            }
+        }
+        await readinessGate.release(succeeded: true)
+
+        let cancelledRunSucceeded = await cancelledRun.value
+        XCTAssertFalse(cancelledRunSucceeded)
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 0)
+        XCTAssertTrue(taskScheduler.retryBackoffs.isEmpty)
+    }
+
+    // A BGTask handler re-arms before its Swift worker is installed. If system
+    // expiration wins that installation race, the pre-cancelled worker must
+    // still remove the just-submitted cadence for a durable sign-out.
+    func testModelV3Executor_preCancelledDurableSignOutSweepsHandlerRearm() async {
+        taskScheduler.appRefreshTaskPending = true
+        taskScheduler.processingTaskPending = true
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncIsAuthenticated: { false },
+            authoritativeSyncIsDurablySignedOut: { true }
+        )
+        let workerStartGate = BackgroundSyncReadinessGate()
+        let cancellationLatch = BackgroundTaskCancellationLatch()
+        let worker = Task {
+            _ = await workerStartGate.waitUntilReleased()
+            return await manager.performAuthoritativeSync()
+        }
+        await workerStartGate.waitUntilStarted()
+
+        cancellationLatch.expire()
+        cancellationLatch.install { worker.cancel() }
+        await workerStartGate.release(succeeded: true)
+        let success = await worker.value
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.cancelPendingTaskRequestsCount, 1)
+        XCTAssertFalse(taskScheduler.appRefreshTaskPending)
+        XCTAssertFalse(taskScheduler.processingTaskPending)
+    }
+
+    // The system can expire a delivered BGTask synchronously while its handler
+    // is still creating the Swift worker. Both handler budgets must apply that
+    // remembered cancellation before work starts, run the signed-out sweep,
+    // and only then report completion.
+    func testTaskRunner_expirationBeforeWorkerCreationSweepsBeforeCompletion() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncIsAuthenticated: { false },
+            authoritativeSyncIsDurablySignedOut: { true }
+        )
+
+        for (index, budget) in [
+            BackgroundMailboxSyncBudget.appRefresh,
+            .processing
+        ].enumerated() {
+            taskScheduler.appRefreshTaskPending = true
+            taskScheduler.processingTaskPending = true
+            let completion = BackgroundTaskCompletionProbe()
+
+            manager.runBackgroundTaskOperation(
+                budget: budget,
+                installExpirationHandler: { handler in handler() },
+                onComplete: { completion.record($0) }
+            )
+            await waitUntil { completion.outcomes.count == 1 }
+
+            XCTAssertEqual(completion.outcomes, [false], "Budget: \(budget)")
+            XCTAssertEqual(
+                taskScheduler.cancelPendingTaskRequestsCount,
+                index + 1,
+                "Completion must observe the durable sweep for budget: \(budget)"
+            )
+            XCTAssertFalse(taskScheduler.appRefreshTaskPending)
+            XCTAssertFalse(taskScheduler.processingTaskPending)
+        }
+
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 0)
+    }
+
+    // Expiration requests cancellation while readiness is suspended, but must
+    // retain the BG execution grant until the cancelled worker resumes, runs
+    // its durable sweep, and returns. This pins the ordering shared by both
+    // real BGTask handlers without constructing Apple's private task classes.
+    func testTaskRunner_expirationDefersCompletionUntilCancelledWorkerUnwinds() async {
+        for budget in [BackgroundMailboxSyncBudget.appRefresh, .processing] {
+            taskScheduler.appRefreshTaskPending = true
+            taskScheduler.processingTaskPending = true
+            let readinessGate = BackgroundSyncReadinessGate()
+            let expiration = BackgroundTaskExpirationHandlerProbe()
+            let completion = BackgroundTaskCompletionProbe()
+            let manager = makeManager(
+                legacyDeltaSyncEnabled: false,
+                authoritativeSyncReadiness: {
+                    await readinessGate.waitUntilReleased()
+                },
+                authoritativeSyncIsAuthenticated: { false },
+                authoritativeSyncIsDurablySignedOut: { true }
+            )
+
+            manager.runBackgroundTaskOperation(
+                budget: budget,
+                installExpirationHandler: { expiration.install($0) },
+                onComplete: { completion.record($0) }
+            )
+            await readinessGate.waitUntilStarted()
+
+            expiration.fire()
+            XCTAssertTrue(completion.outcomes.isEmpty)
+            XCTAssertTrue(taskScheduler.appRefreshTaskPending)
+            XCTAssertTrue(taskScheduler.processingTaskPending)
+
+            await readinessGate.release(succeeded: true)
+            await waitUntil { completion.outcomes.count == 1 }
+
+            XCTAssertEqual(completion.outcomes, [false], "Budget: \(budget)")
+            XCTAssertFalse(taskScheduler.appRefreshTaskPending)
+            XCTAssertFalse(taskScheduler.processingTaskPending)
+        }
+    }
+
+    // `BGTaskScheduler.getPendingTaskRequests` is callback-based and the system
+    // does not promise when that callback arrives. Expiration must still unwind
+    // a refresh worker that is waiting to decide whether processing escalation
+    // is already pending; a late system callback must be harmless.
+    func testTaskRunner_expirationUnblocksHungPendingRequestQuery() async {
+        let callbackProbe = BackgroundPendingRequestsCallbackProbe()
+        let scheduler = BackgroundTaskScheduler(
+            pendingTaskRequestsProvider: { callbackProbe.install($0) }
+        )
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
+        }
+        let expiration = BackgroundTaskExpirationHandlerProbe()
+        let completion = BackgroundTaskCompletionProbe()
+        let manager = makeManager(
+            taskSchedulerOverride: scheduler,
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        manager.runBackgroundTaskOperation(
+            budget: .appRefresh,
+            installExpirationHandler: { expiration.install($0) },
+            onComplete: { completion.record($0) }
+        )
+        await waitUntil { callbackProbe.hasCallback }
+
+        expiration.fire()
+        await waitUntil(timeout: 1.0) { completion.outcomes.count == 1 }
+
+        XCTAssertEqual(completion.outcomes, [false])
+        callbackProbe.fire(requests: [])
+        await waitUntil { completion.outcomes.count == 1 }
+        XCTAssertEqual(completion.outcomes, [false])
+    }
+
+    // Revert-check: fails if the unauthenticated branch of
+    // `performAuthoritativeSync()` drops its self-heal call to
+    // `taskScheduler.cancelPendingTaskRequests()`. Devices that signed out
+    // before sign-out learned to cancel its pending BGTask requests are stuck
+    // in a perpetual re-arm chain — the handlers re-arm at entry, then the
+    // unauthenticated guard turns the run into a no-op — so this call is the
+    // only thing that ever removes their requests.
+    func testModelV3Executor_unauthenticatedDurablySignedOut_cancelsPendingTaskRequests() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncIsAuthenticated: { false },
+            authoritativeSyncIsDurablySignedOut: { true }
+        )
+        taskScheduler.appRefreshTaskPending = true
+        taskScheduler.processingTaskPending = true
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertTrue(success, "The stale request itself is still a successful no-op")
+        XCTAssertEqual(taskScheduler.cancelPendingTaskRequestsCount, 1)
+        XCTAssertFalse(taskScheduler.appRefreshTaskPending)
+        XCTAssertFalse(taskScheduler.processingTaskPending)
+        XCTAssertEqual(
+            taskScheduler.retryBackoffs,
+            [],
+            "A durably signed-out device must not queue any follow-up work"
+        )
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 0)
+    }
+
+    // Revert-check: fails if the self-heal stops consulting
+    // `authoritativeSyncIsDurablySignedOut` and cancels on the unauthenticated
+    // guard alone. Bootstrap "success" also covers a cold-launch restore that
+    // failed transiently (e.g. network down) with the keychain-persisted
+    // session intact; cancelling then would disarm a signed-in user's
+    // background cadence until their next foreground backgrounding re-arms it.
+    func testModelV3Executor_unauthenticatedTransientRestoreFailure_keepsPendingTaskRequests() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncIsAuthenticated: { false },
+            authoritativeSyncIsDurablySignedOut: { false }
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertTrue(success)
+        XCTAssertEqual(
+            taskScheduler.cancelPendingTaskRequestsCount,
+            0,
+            "An indeterminate or possibly-live session must keep its pending requests"
+        )
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 0)
+    }
+
+    // A registered removal is definitive before sign-out clears the published
+    // auth state. That positive verdict must close execution immediately.
+    func testModelV3Executor_authenticatedRemovalIntent_cancelsPendingTaskRequests() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed)
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor,
+            authoritativeSyncIsAuthenticated: { true },
+            authoritativeSyncIsDurablySignedOut: { true }
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertTrue(success)
+        XCTAssertEqual(taskScheduler.cancelPendingTaskRequestsCount, 1)
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 0)
+    }
+
+    // Revert-check: fails if `AuthSession.isDurablySignedOut()` stops treating
+    // a definitive keychain `.itemNotFound` as the signed-out verdict — a
+    // completed sign-out deletes the persisted email inside its durable
+    // credential transaction, so absence is exactly the pre-fix population the
+    // background self-heal exists to disarm.
+    func testDurableSignOutVerdict_persistedEmailAbsent_reportsSignedOut() async {
+        let keychain = MockKeychainService()
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(keychain: keychain).isDurablySignedOut()
+        }
+
+        XCTAssertTrue(verdict)
+    }
+
+    // Older builds could leave a valid Google SDK session without ever
+    // persisting this app's email key. That SDK marker makes a missing email
+    // indeterminate during a transient cold-launch restore failure.
+    func testDurableSignOutVerdict_legacySDKSessionWithoutPersistedEmail_reportsPossiblyLive() async {
+        let keychain = MockKeychainService()
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(
+                keychain: keychain,
+                hasPreviousGoogleSignIn: { true }
+            ).isDurablySignedOut()
+        }
+
+        XCTAssertFalse(verdict)
+    }
+
+    // GoogleSignIn's Boolean probe suppresses keychain and decode errors. The
+    // raw item still being present must therefore override a false Boolean.
+    func testDurableSignOutVerdict_rawLegacySDKItemPresent_reportsPossiblyLive() async {
+        let keychain = MockKeychainService()
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(
+                keychain: keychain,
+                hasPreviousGoogleSignIn: { false },
+                googleSignInKeychainPresence: { .present }
+            ).isDurablySignedOut()
+        }
+
+        XCTAssertFalse(verdict)
+    }
+
+    func testDurableSignOutVerdict_sdkKeychainReadIndeterminate_reportsPossiblyLive() async {
+        let keychain = MockKeychainService()
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(
+                keychain: keychain,
+                googleSignInKeychainPresence: { .indeterminate }
+            ).isDurablySignedOut()
+        }
+
+        XCTAssertFalse(verdict)
+    }
+
+    func testDurableSignOutVerdict_liveAuthenticatedStateOverridesMissingCredentials() async {
+        let keychain = MockKeychainService()
+
+        let verdict = await MainActor.run { () -> Bool in
+            let session = makeDurableSignOutProbeSession(keychain: keychain)
+            session.isAuthenticated = true
+            return session.isDurablySignedOut()
+        }
+
+        XCTAssertFalse(verdict)
+    }
+
+    func testDurableSignOutVerdict_cleanupIntentOverridesSurvivingEmail() async throws {
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([
+            KeychainService.Key.googleUserEmail.rawValue: "old@example.com"
+        ])
+        try keychain.save(
+            Data([1]),
+            for: KeychainService.Key.localStoreResetRequired.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(keychain: keychain).isDurablySignedOut()
+        }
+
+        XCTAssertTrue(verdict)
+    }
+
+    func testDurableSignOutVerdict_durableMarkerOverridesSurvivingSDKAndEmail() async throws {
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([
+            KeychainService.Key.googleUserEmail.rawValue: "old@example.com"
+        ])
+        try keychain.save(
+            Data([1]),
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(
+                keychain: keychain,
+                hasPreviousGoogleSignIn: { true },
+                googleSignInKeychainPresence: { .present }
+            ).isDurablySignedOut()
+        }
+
+        XCTAssertTrue(
+            verdict,
+            "App-owned sign-out intent must outlive a failed SDK keychain delete"
+        )
+    }
+
+    // A persisted app email plus an unreadable SDK source remains possibly
+    // live. The app-owned key cannot authenticate by itself, but neither may a
+    // transient SDK keychain failure be collapsed into definitive absence.
+    func testDurableSignOutVerdict_persistedEmailWithIndeterminateSDK_reportsPossiblyLive() async {
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([
+            KeychainService.Key.googleUserEmail.rawValue: "user@example.com"
+        ])
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(
+                keychain: keychain,
+                googleSignInKeychainPresence: { .indeterminate }
+            ).isDurablySignedOut()
+        }
+
+        XCTAssertFalse(verdict)
+    }
+
+    // The SDK session is the restorable authority. A readable orphaned app
+    // email must not preserve the perpetual handler re-arm when both Google
+    // probes definitively report no session.
+    func testDurableSignOutVerdict_persistedEmailWithDefinitiveSDKAbsence_reportsSignedOut() async {
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([
+            KeychainService.Key.googleUserEmail.rawValue: "orphaned@example.com"
+        ])
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(
+                keychain: keychain,
+                hasPreviousGoogleSignIn: { false },
+                googleSignInKeychainPresence: { .absent }
+            ).isDurablySignedOut()
+        }
+
+        XCTAssertTrue(verdict)
+    }
+
+    // Revert-check: fails if `isDurablySignedOut()` collapses an indeterminate
+    // keychain failure into "signed out" — e.g. if reimplemented on top of
+    // `currentOrPersistedUserEmail() == nil`, which returns nil for *any*
+    // keychain error. A read rejected before first unlock says nothing about
+    // the session, and cancelling on it would disarm a signed-in user's
+    // background cadence, so an unreadable keychain must fail safe.
+    func testDurableSignOutVerdict_indeterminateKeychainRead_failsSafeAsPossiblyLive() async {
+        let keychain = MockKeychainService()
+        keychain.errorToThrow = KeychainError.unhandledError(status: errSecInteractionNotAllowed)
+
+        let verdict = await MainActor.run {
+            makeDurableSignOutProbeSession(keychain: keychain).isDurablySignedOut()
+        }
+
+        XCTAssertFalse(verdict)
     }
 
     func testStartupBootstrap_coalescesConcurrentPersistencePreparation() async {
@@ -1338,17 +2022,19 @@ final class BackgroundSyncManagerTests: XCTestCase {
     }
 
     private func makeManager(
+        taskSchedulerOverride: (any BackgroundTaskScheduling)? = nil,
         legacyDeltaSyncEnabled: Bool = true,
         authoritativeSyncExecutor: (any BackgroundMailboxSyncExecuting)? = nil,
         authoritativeSyncReadiness: @escaping @Sendable () async -> Bool = { true },
-        authoritativeSyncIsAuthenticated: @escaping @MainActor @Sendable () -> Bool = { true }
+        authoritativeSyncIsAuthenticated: @escaping @MainActor @Sendable () -> Bool = { true },
+        authoritativeSyncIsDurablySignedOut: @escaping @MainActor @Sendable () -> Bool = { false }
     ) -> BackgroundSyncManager {
         let apiClient = apiClient!
         let syncCoordinator = BackgroundSyncNoopCoordinator()
         let executor = authoritativeSyncExecutor
         let assertions = sceneAssertions!
         return BackgroundSyncManager(
-            taskScheduler: taskScheduler,
+            taskScheduler: taskSchedulerOverride ?? taskScheduler,
             coreDataStack: coreDataStack,
             defaults: defaults,
             syncRunCoordinator: SyncRunCoordinator(),
@@ -1359,9 +2045,10 @@ final class BackgroundSyncManagerTests: XCTestCase {
             },
             authoritativeSyncReadiness: authoritativeSyncReadiness,
             authoritativeSyncIsAuthenticated: authoritativeSyncIsAuthenticated,
+            authoritativeSyncIsDurablySignedOut: authoritativeSyncIsDurablySignedOut,
             syncCoordinatorProvider: { syncCoordinator },
-            beginSceneBackgroundAssertion: {
-                assertions.begin()
+            beginSceneBackgroundAssertion: { onExpiration in
+                assertions.begin(onExpiration: onExpiration)
                 return { assertions.end() }
             }
         )
@@ -1388,6 +2075,28 @@ final class BackgroundSyncManagerTests: XCTestCase {
         BackgroundSyncStateManager(
             coreDataStack: coreDataStack,
             defaults: defaults
+        )
+    }
+
+    /// A fully isolated `AuthSession` for probing `isDurablySignedOut()`:
+    /// every singleton-typed collaborator is a fresh instance, so the verdict
+    /// comes only from the injected keychain and SDK-session signal.
+    @MainActor
+    private func makeDurableSignOutProbeSession(
+        keychain: MockKeychainService,
+        hasPreviousGoogleSignIn: @escaping @MainActor @Sendable () -> Bool = { false },
+        googleSignInKeychainPresence: @escaping @Sendable () -> GoogleSignInKeychainPresence = { .absent }
+    ) -> AuthSession {
+        AuthSession(
+            tokenManagerProvider: { MockTokenManager() },
+            keychainService: keychain,
+            hasPreviousGoogleSignIn: hasPreviousGoogleSignIn,
+            googleSignInKeychainPresence: googleSignInKeychainPresence,
+            userDefaults: UserDefaults(
+                suiteName: "BackgroundSyncManagerTests-auth-\(UUID().uuidString)"
+            )!,
+            syncRunCoordinator: SyncRunCoordinator(),
+            outboundTaskRegistry: OutboundTaskRegistry()
         )
     }
 
@@ -1422,11 +2131,16 @@ final class BackgroundSyncManagerTests: XCTestCase {
 @MainActor
 private final class BackgroundMailboxSyncExecutorSpy: BackgroundMailboxSyncExecuting {
     private let result: BackgroundMailboxSyncExecutionResult
+    private let onPerform: @MainActor () -> Void
     private(set) var callCount = 0
     private(set) var budgets: [BackgroundMailboxSyncBudget] = []
 
-    init(result: BackgroundMailboxSyncExecutionResult) {
+    init(
+        result: BackgroundMailboxSyncExecutionResult,
+        onPerform: @escaping @MainActor () -> Void = {}
+    ) {
         self.result = result
+        self.onPerform = onPerform
     }
 
     func performIncrementalSyncForBackground(
@@ -1434,6 +2148,7 @@ private final class BackgroundMailboxSyncExecutorSpy: BackgroundMailboxSyncExecu
     ) async -> BackgroundMailboxSyncExecutionResult {
         callCount += 1
         budgets.append(budget)
+        onPerform()
         return result
     }
 }
@@ -1592,6 +2307,7 @@ private final class BackgroundTaskSchedulerSpy: BackgroundTaskScheduling {
     private(set) var registrationCount = 0
     private(set) var appRefreshScheduleCount = 0
     private(set) var processingScheduleCount = 0
+    private(set) var cancelPendingTaskRequestsCount = 0
     var processingTaskPending = false
     var appRefreshTaskPending = false
 
@@ -1627,10 +2343,76 @@ private final class BackgroundTaskSchedulerSpy: BackgroundTaskScheduling {
         return appRefreshTaskPending
     }
 
+    func cancelPendingTaskRequests() {
+        cancelPendingTaskRequestsCount += 1
+        appRefreshTaskPending = false
+        processingTaskPending = false
+    }
+
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval) {
         retryBackoffs.append(backoff)
         // Backoff retries submit the refresh identifier.
         appRefreshTaskPending = true
+    }
+}
+
+private final class BackgroundTaskCompletionProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedOutcomes: [Bool] = []
+
+    var outcomes: [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedOutcomes
+    }
+
+    func record(_ outcome: Bool) {
+        lock.lock()
+        storedOutcomes.append(outcome)
+        lock.unlock()
+    }
+}
+
+private final class BackgroundTaskExpirationHandlerProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (() -> Void)?
+
+    func install(_ handler: @escaping () -> Void) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    func fire() {
+        lock.lock()
+        let handler = self.handler
+        lock.unlock()
+        handler?()
+    }
+}
+
+private final class BackgroundPendingRequestsCallbackProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: (([BGTaskRequest]) -> Void)?
+
+    var hasCallback: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return callback != nil
+    }
+
+    func install(_ callback: @escaping ([BGTaskRequest]) -> Void) {
+        lock.lock()
+        self.callback = callback
+        lock.unlock()
+    }
+
+    func fire(requests: [BGTaskRequest]) {
+        lock.lock()
+        let callback = self.callback
+        self.callback = nil
+        lock.unlock()
+        callback?(requests)
     }
 }
 
@@ -1647,6 +2429,25 @@ private final class AuthGateBox {
     nonisolated init(value: Bool) { self.value = value }
 }
 
+@MainActor
+private final class AuthCancellationCheckBox {
+    private let cancelOnCheck: Int
+    private var checkCount = 0
+    var cancel: @MainActor () -> Void = {}
+
+    nonisolated init(cancelOnCheck: Int) {
+        self.cancelOnCheck = cancelOnCheck
+    }
+
+    func check() -> Bool {
+        checkCount += 1
+        if checkCount == cancelOnCheck {
+            cancel()
+        }
+        return true
+    }
+}
+
 /// Records the background-execution assertion pairing around
 /// `armBackgroundTasksForSceneBackground()`. Counters are mutated on the
 /// MainActor (begin in the arm method, end in its MainActor-inherited Task)
@@ -1654,9 +2455,55 @@ private final class AuthGateBox {
 private final class SceneBackgroundAssertionSpy {
     private(set) var beginCount = 0
     private(set) var endCount = 0
+    private(set) var endInvocationCount = 0
+    var shouldGrant = true
+    private var isActive = false
+    private var onExpiration: (@MainActor @Sendable () -> Void)?
 
-    func begin() { beginCount += 1 }
-    func end() { endCount += 1 }
+    @MainActor
+    func begin(onExpiration: @escaping @MainActor @Sendable () -> Void) {
+        guard !isActive else { return }
+        beginCount += 1
+        guard shouldGrant else {
+            onExpiration()
+            return
+        }
+        isActive = true
+        self.onExpiration = onExpiration
+    }
+
+    @MainActor
+    func end() {
+        endInvocationCount += 1
+        guard isActive else { return }
+        isActive = false
+        onExpiration = nil
+        endCount += 1
+    }
+
+    @MainActor
+    func expire() {
+        guard isActive else { return }
+        onExpiration?()
+        end()
+    }
+}
+
+private final class BackgroundPendingCheckCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
 }
 
 private final class BackgroundSyncNoopCoordinator: @unchecked Sendable, BackgroundSyncMessageCoordinating {

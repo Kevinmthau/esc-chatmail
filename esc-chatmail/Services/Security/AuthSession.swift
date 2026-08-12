@@ -1,13 +1,53 @@
 import CoreData
 import Foundation
 import GoogleSignIn
+import Security
 import UIKit
+
+enum GoogleSignInKeychainPresence: Equatable, Sendable {
+    case present
+    case absent
+    case indeterminate
+}
+
+private enum GoogleSignInKeychainProbe {
+    /// GoogleSignIn 9 stores its GTMAppAuth session as a generic-password item
+    /// with service `auth` and account `OAuth`. Query the raw item's presence
+    /// instead of unarchiving it: the SDK's public `hasPreviousSignIn()` drops
+    /// keychain and decoding errors into `false`, while either a present item or
+    /// an OSStatus failure must remain possibly-live for background scheduling.
+    static func currentPresence() -> GoogleSignInKeychainPresence {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "OAuth",
+            kSecAttrService as String: "auth",
+            kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: false
+        ]
+
+        switch SecItemCopyMatching(query as CFDictionary, nil) {
+        case errSecSuccess:
+            return .present
+        case errSecItemNotFound:
+            return .absent
+        default:
+            return .indeterminate
+        }
+    }
+}
 
 @MainActor
 private final class AuthenticatedGoogleUserBox {
     var user: GIDGoogleUser?
     var restoreOutcome: AuthRestoreOutcome = .retryableFailure
     var didReplaceGoogleSession = false
+    var didClearGoogleSession = false
+}
+
+private struct InterruptedCleanupResumeResult {
+    let outcome: AuthRestoreOutcome
+    let shouldSweepBackgroundTasksOnTransitionEnd: Bool
 }
 
 enum AuthRestoreOutcome: Equatable, Sendable {
@@ -213,6 +253,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private lazy var tokenManager: TokenManagerProtocol = tokenManagerProvider()
     private let keychainService: KeychainServiceProtocol
     private let hasPreviousGoogleSignIn: @MainActor @Sendable () -> Bool
+    private let googleSignInKeychainPresence: @Sendable () -> GoogleSignInKeychainPresence
     private let restorePreviousGoogleSignIn: @MainActor @Sendable (
         @escaping (GIDGoogleUser?, Error?) -> Void
     ) -> Void
@@ -243,6 +284,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private var nextAccountRemovalEpoch: UInt64 = 0
     private var pendingAccountRemovalRequests: Set<AccountRemovalRequest> = []
     private var isAuthenticationTransitionActive = false
+    private var isSignedOutCleanupActive = false
     private var authenticationTransitionWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
@@ -250,6 +292,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         keychainService: KeychainServiceProtocol = KeychainService.shared,
         hasPreviousGoogleSignIn: @escaping @MainActor @Sendable () -> Bool = {
             GIDSignIn.sharedInstance.hasPreviousSignIn()
+        },
+        googleSignInKeychainPresence: @escaping @Sendable () -> GoogleSignInKeychainPresence = {
+            GoogleSignInKeychainProbe.currentPresence()
         },
         restorePreviousGoogleSignIn: @escaping @MainActor @Sendable (
             @escaping (GIDGoogleUser?, Error?) -> Void
@@ -370,6 +415,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         self.tokenManagerProvider = tokenManagerProvider
         self.keychainService = keychainService
         self.hasPreviousGoogleSignIn = hasPreviousGoogleSignIn
+        self.googleSignInKeychainPresence = googleSignInKeychainPresence
         self.restorePreviousGoogleSignIn = restorePreviousGoogleSignIn
         self.interactiveGoogleSignIn = interactiveGoogleSignIn
         self.signOutGoogleSession = signOutGoogleSession
@@ -402,7 +448,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     @discardableResult
     func restorePreviousSignIn() async -> AuthRestoreOutcome {
         await beginAuthenticationTransition()
-        defer { endAuthenticationTransition() }
+        var shouldSweepBackgroundTasksOnTransitionEnd = false
+        defer {
+            endAuthenticationTransition(
+                sweepIfDurablySignedOut: shouldSweepBackgroundTasksOnTransitionEnd
+            )
+        }
 
         guard !isAccountRemovalRequested else {
             return .retryableFailure
@@ -412,10 +463,17 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // account drains and store/file cleanup. The durable marker wins over
         // SDK restore state and is resumed before any account can be published
         // or background-readable credentials remain available.
-        if let outcome = await resumeInterruptedAccountRemovalIfNeeded() {
-            return outcome
+        if let result = await resumeInterruptedAccountRemovalIfNeeded() {
+            shouldSweepBackgroundTasksOnTransitionEnd =
+                result.shouldSweepBackgroundTasksOnTransitionEnd
+            return result.outcome
         }
-        if let outcome = await resumeInterruptedCredentialCleanupIfNeeded() {
+        if let result = await resumeInterruptedCredentialCleanupIfNeeded() {
+            shouldSweepBackgroundTasksOnTransitionEnd =
+                result.shouldSweepBackgroundTasksOnTransitionEnd
+            return result.outcome
+        }
+        if let outcome = resumeDurableSignedOutStateIfNeeded() {
             return outcome
         }
 
@@ -426,8 +484,35 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             return .authenticated
         }
 
-        guard hasPreviousGoogleSignIn() else {
-            return .terminalNoSession
+        var shouldRejectOrphanedAppCredentials = false
+        if !hasPreviousGoogleSignIn() {
+            // GoogleSignIn's Boolean probe collapses keychain/unarchive errors
+            // into false. An unreadable query must let bootstrap retry. A
+            // present item still enters the SDK restore path so an invalid
+            // archive can surface the normal terminal error. If the raw SDK
+            // item is absent, app-owned credentials cannot restore on their
+            // own: reject any orphaned material under the normal quiescence
+            // boundary, while keeping a clean install on the fast path.
+            switch googleSignInKeychainPresence() {
+            case .absent:
+                do {
+                    guard try hasPersistedBackgroundCredentialMaterial() else {
+                        shouldSweepBackgroundTasksOnTransitionEnd = true
+                        return .terminalNoSession
+                    }
+                    shouldRejectOrphanedAppCredentials = true
+                } catch {
+                    Log.warning(
+                        "Could not determine whether orphaned app credentials remain; deferring restore",
+                        category: .auth
+                    )
+                    return .retryableFailure
+                }
+            case .indeterminate:
+                return .retryableFailure
+            case .present:
+                break
+            }
         }
 
         let outboundTransition = outboundTaskRegistry.closeAdmission()
@@ -436,64 +521,74 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await clearParticipantCaches()
         await cleanupDownloads()
         let restoredUser = AuthenticatedGoogleUserBox()
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            restorePreviousGoogleSignIn { [weak self] user, error in
-                Task { @MainActor [weak self] in
-                    defer { continuation.resume() }
+        if shouldRejectOrphanedAppCredentials {
+            restoredUser.didClearGoogleSession = true
+            restoredUser.restoreOutcome = clearFailedGoogleSession()
+                ? .terminalNoSession
+                : .retryableFailure
+        } else {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                restorePreviousGoogleSignIn { [weak self] user, error in
+                    Task { @MainActor [weak self] in
+                        defer { continuation.resume() }
 
-                    if let error {
-                        Log.warning("Failed to restore previous sign-in: \(error.localizedDescription)", category: .auth)
-                    }
+                        if let error {
+                            Log.warning("Failed to restore previous sign-in: \(error.localizedDescription)", category: .auth)
+                        }
 
-                    guard let self else { return }
-                    guard let user else {
-                        if error.map(Self.isCredentialInvalidatingRestoreError) ?? true {
+                        guard let self else { return }
+                        guard let user else {
+                            if error.map(Self.isCredentialInvalidatingRestoreError) ?? true {
+                                restoredUser.didClearGoogleSession = true
+                                restoredUser.restoreOutcome = self.clearFailedGoogleSession()
+                                    ? .terminalNoSession
+                                    : .retryableFailure
+                            } else {
+                                restoredUser.restoreOutcome = .retryableFailure
+                            }
+                            return
+                        }
+                        guard self.hasRequiredGmailScope(user) else {
+                            Log.warning("Restored session missing Gmail scope; user must sign in again to grant Gmail access", category: .auth)
+                            restoredUser.didClearGoogleSession = true
                             restoredUser.restoreOutcome = self.clearFailedGoogleSession()
                                 ? .terminalNoSession
                                 : .retryableFailure
-                        } else {
-                            restoredUser.restoreOutcome = .retryableFailure
+                            return
                         }
-                        return
-                    }
-                    guard self.hasRequiredGmailScope(user) else {
-                        Log.warning("Restored session missing Gmail scope; user must sign in again to grant Gmail access", category: .auth)
-                        restoredUser.restoreOutcome = self.clearFailedGoogleSession()
-                            ? .terminalNoSession
-                            : .retryableFailure
-                        return
-                    }
-                    guard !self.isAccountRemovalRequested else {
-                        restoredUser.restoreOutcome = .retryableFailure
-                        return
-                    }
-
-                    do {
-                        // A previous account's store must be repaired before
-                        // authenticated UI can expose any local rows.
-                        try await self.prepareLocalStoreForAuthenticatedAccount(user.profile?.email)
                         guard !self.isAccountRemovalRequested else {
                             restoredUser.restoreOutcome = .retryableFailure
                             return
                         }
-                        try self.persistSessionForBackgroundAccess(
-                            accessToken: user.accessToken.tokenString,
-                            refreshToken: user.refreshToken.tokenString,
-                            expirationDate: user.accessToken.expirationDate ?? Date().addingTimeInterval(3600),
-                            email: user.profile?.email
-                        )
-                    } catch {
-                        Log.error("Failed to isolate restored account state", category: .auth, error: error)
-                        _ = self.clearFailedGoogleSession()
-                        restoredUser.restoreOutcome = .retryableFailure
-                        return
-                    }
 
-                    // Stage the restored user only after local-store isolation
-                    // and credential persistence succeed. Publication happens
-                    // after account-scoped admission reopens and quiescence is
-                    // released.
-                    restoredUser.user = user
+                        do {
+                            // A previous account's store must be repaired before
+                            // authenticated UI can expose any local rows.
+                            try await self.prepareLocalStoreForAuthenticatedAccount(user.profile?.email)
+                            guard !self.isAccountRemovalRequested else {
+                                restoredUser.restoreOutcome = .retryableFailure
+                                return
+                            }
+                            try self.persistSessionForBackgroundAccess(
+                                accessToken: user.accessToken.tokenString,
+                                refreshToken: user.refreshToken.tokenString,
+                                expirationDate: user.accessToken.expirationDate ?? Date().addingTimeInterval(3600),
+                                email: user.profile?.email
+                            )
+                        } catch {
+                            Log.error("Failed to isolate restored account state", category: .auth, error: error)
+                            restoredUser.didClearGoogleSession = true
+                            _ = self.clearFailedGoogleSession()
+                            restoredUser.restoreOutcome = .retryableFailure
+                            return
+                        }
+
+                        // Stage the restored user only after local-store isolation
+                        // and credential persistence succeed. Publication happens
+                        // after account-scoped admission reopens and quiescence is
+                        // released.
+                        restoredUser.user = user
+                    }
                 }
             }
         }
@@ -514,12 +609,19 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             case .discardCredentials:
                 // Runs before endQuiescence(), matching signIn's catch order:
                 // the clear mutates account-scoped defaults and published state.
+                restoredUser.didClearGoogleSession = true
                 restoredUser.restoreOutcome = discardRestoredSessionAfterFailedReopen()
             }
         }
         await syncRunCoordinator.endQuiescence()
 
         guard let user = restoredUser.user, didReopenAccountWork else {
+            if restoredUser.didClearGoogleSession {
+                // The first sweep happened when credentials were rejected.
+                // Repeat it after the transition's final suspension so a task
+                // delivered in between cannot leave its entry re-arm behind.
+                cancelBackgroundTaskRequests()
+            }
             return restoredUser.restoreOutcome
         }
         publishAuthenticatedSession(user, recordsCompletedSignIn: false)
@@ -530,7 +632,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     @MainActor
     func signIn(presenting viewController: UIViewController, loginHint: String? = nil) async throws {
         await beginAuthenticationTransition()
-        defer { endAuthenticationTransition() }
+        var shouldSweepBackgroundTasksOnTransitionEnd = false
+        defer {
+            endAuthenticationTransition(
+                sweepIfDurablySignedOut: shouldSweepBackgroundTasksOnTransitionEnd
+            )
+        }
 
         guard !isAccountRemovalRequested else {
             throw CancellationError()
@@ -577,6 +684,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     await reopenPreSignInAccountWork(after: outboundTransition)
                 }
                 await syncRunCoordinator.endQuiescence()
+            }
+            if signedInUser.didReplaceGoogleSession {
+                cancelBackgroundTaskRequests()
+            } else {
+                shouldSweepBackgroundTasksOnTransitionEnd = true
             }
             throw error
         }
@@ -672,8 +784,15 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // the reset marker or persist a replacement session.
         let removalRequest = registerAccountRemovalRequest()
         outboundTaskRegistry.closeAdmission()
+        // Registration makes the durable local-cleanup marker a definitive
+        // sign-out verdict. Sweep before the first suspension; all later
+        // scheduling gates also reject that verdict until cleanup finishes.
+        cancelBackgroundTaskRequests()
         await beginAuthenticationTransition()
         defer {
+            // A delivered handler can re-arm while the account drains suspend.
+            // Sweep once more at the transition boundary after all such awaits.
+            cancelBackgroundTaskRequests()
             finishAccountRemovalRequest(removalRequest)
             endAuthenticationTransition()
         }
@@ -831,8 +950,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
         let removalRequest = registerAccountRemovalRequest()
         outboundTaskRegistry.closeAdmission()
+        cancelBackgroundTaskRequests()
         await beginAuthenticationTransition()
         defer {
+            cancelBackgroundTaskRequests()
             finishAccountRemovalRequest(removalRequest)
             endAuthenticationTransition()
         }
@@ -988,6 +1109,98 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// App-owned credentials support background access only after the Google
+    /// SDK session has restored. Presence therefore identifies remnants to
+    /// clean, while any non-item-not-found error remains indeterminate.
+    private func hasPersistedBackgroundCredentialMaterial() throws -> Bool {
+        for key in [
+            KeychainService.Key.googleAccessToken,
+            .googleRefreshToken,
+            .googleUserEmail
+        ] {
+            do {
+                _ = try keychainService.load(for: key.rawValue)
+                return true
+            } catch KeychainError.itemNotFound {
+                continue
+            }
+        }
+        return false
+    }
+
+    /// Whether this device has definitively concluded signed out.
+    ///
+    /// Not equivalent to `currentOrPersistedUserEmail() == nil`, which also
+    /// returns nil when the keychain read *fails* and treats an orphaned email
+    /// as live without consulting SDK evidence. Positive account-removal intent
+    /// is definitive because it is persisted before the in-process request is
+    /// registered. Every live/transitioning signal and every unreadable
+    /// credential source otherwise fails safe as possibly authenticated.
+    ///
+    /// The raw SDK-keychain check protects legacy upgrades. GoogleSignIn's
+    /// Boolean `hasPreviousSignIn()` suppresses keychain/unarchive errors. A
+    /// readable app credential may be an orphan but cannot restore without the
+    /// SDK session, while any unreadable app or SDK source remains possibly live.
+    func isDurablySignedOut() -> Bool {
+        // Registration follows the successful durable marker write without a
+        // MainActor suspension, so this is positive sign-out evidence even
+        // before the async account drains have cleared published state.
+        if isAccountRemovalRequested || isSignedOutCleanupActive {
+            return true
+        }
+
+        guard !isAuthenticated, currentUser == nil, userEmail == nil else {
+            return false
+        }
+
+        // Interactive sign-in and restore temporarily have no published or
+        // persisted app credentials. Do not infer absence while either is
+        // still capable of publishing a session.
+        guard !isAuthenticationTransitionActive else {
+            return false
+        }
+
+        if userDefaults.bool(forKey: Self.localStoreResetRequiredKey)
+            || userDefaults.bool(forKey: Self.credentialCleanupRequiredKey) {
+            return true
+        }
+
+        do {
+            if try hasPersistedDurableSignedOutState()
+                || hasPersistedLocalCleanupRequirement()
+                || hasPersistedCredentialCleanupRequirement() {
+                return true
+            }
+        } catch {
+            Log.warning(
+                "Treating unreadable account-removal intent as a possibly-live session",
+                category: .auth
+            )
+            return false
+        }
+
+        do {
+            _ = try hasPersistedBackgroundCredentialMaterial()
+        } catch {
+            Log.warning(
+                "Treating unreadable persisted app credentials as a possibly-live session",
+                category: .auth
+            )
+            return false
+        }
+
+        guard !hasPreviousGoogleSignIn() else {
+            return false
+        }
+
+        switch googleSignInKeychainPresence() {
+        case .absent:
+            return true
+        case .present, .indeterminate:
+            return false
+        }
+    }
+
     func persistSessionForBackgroundAccess(
         accessToken: String,
         refreshToken: String?,
@@ -1004,6 +1217,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             expirationDate: expirationDate
         )
         try persistUserEmailForBackgroundAccess(email)
+        // The app-owned sign-out verdict outlives GoogleSignIn keychain errors.
+        // Consume it only after the replacement session is fully persisted;
+        // if deletion fails, the credential transaction remains marked and the
+        // caller rejects this partial sign-in rather than silently disabling BG sync.
+        try clearDurableSignedOutState()
         try clearCredentialCleanupRequirement()
     }
 
@@ -1073,6 +1291,24 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
     @discardableResult
     private func clearFailedGoogleSession() -> Bool {
+        // Persist both the cleanup transaction and the long-lived signed-out
+        // verdict before mutating the SDK session. If the process dies after
+        // `signOutGoogleSession()`, launch recovery can still finish the reject.
+        var firstError: Error?
+        do {
+            try persistCredentialCleanupRequirement()
+        } catch {
+            firstError = error
+            userDefaults.set(true, forKey: Self.credentialCleanupRequiredKey)
+            Log.error("Failed to persist rejected-session cleanup prerequisite", category: .auth, error: error)
+        }
+        do {
+            try persistDurableSignedOutState()
+        } catch {
+            firstError = firstError ?? error
+            Log.error("Failed to persist durable signed-out state", category: .auth, error: error)
+        }
+
         signOutGoogleSession()
         clearAuthState()
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
@@ -1085,18 +1321,6 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // (swept here) or arms nothing.
         cancelBackgroundTaskRequests()
 
-        // Persist before the first delete so a crash or partial Keychain
-        // failure always has a launch-time retry path. UserDefaults is a
-        // compatibility fallback when Keychain itself is temporarily unable
-        // to accept the marker.
-        do {
-            try persistCredentialCleanupRequirement()
-        } catch {
-            userDefaults.set(true, forKey: Self.credentialCleanupRequiredKey)
-            Log.error("Failed to persist rejected-session cleanup prerequisite", category: .auth, error: error)
-        }
-
-        var firstError: Error?
         do {
             try tokenManager.clearTokens()
         } catch {
@@ -1288,6 +1512,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             }
         }
 
+        // Hand the transaction from "cleanup still required" to the durable
+        // signed-out verdict before consuming the former marker. There is no
+        // crash point at which both are absent, and a failed second write keeps
+        // launch recovery armed instead of reporting that sign-out never began.
+        try persistDurableSignedOutState()
         try clearPersistedCleanupRequirement(
             key: .localStoreResetRequired,
             defaultsKey: Self.localStoreResetRequiredKey
@@ -1312,19 +1541,70 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         try clearCredentialCleanupRequirement()
     }
 
+    /// Rejects an SDK session that survived a previously completed sign-out.
+    /// GoogleSignIn's `signOut()` ignores keychain deletion errors, so the
+    /// app-owned verdict must win before automatic SDK restore is attempted.
+    private func resumeDurableSignedOutStateIfNeeded() -> AuthRestoreOutcome? {
+        let isDurablySignedOut: Bool
+        do {
+            isDurablySignedOut = try hasPersistedDurableSignedOutState()
+        } catch {
+            Log.warning("Could not read durable signed-out state; deferring restore", category: .auth)
+            return .retryableFailure
+        }
+        guard isDurablySignedOut else { return nil }
+
+        signOutGoogleSession()
+        clearAuthState()
+        userDefaults.removeObject(forKey: "hasCompletedSignIn")
+        clearAccountScopedSyncDefaults()
+        BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        cancelBackgroundTaskRequests()
+
+        do {
+            try performDurableCredentialCleanup()
+            return .terminalNoSession
+        } catch {
+            Log.error("Failed to clear credentials preserved after sign-out", category: .auth, error: error)
+            return .retryableFailure
+        }
+    }
+
     /// Completes a sign-out that was interrupted after its durable marker was
     /// written. This runs even when Google has no previous session to restore.
-    private func resumeInterruptedAccountRemovalIfNeeded() async -> AuthRestoreOutcome? {
+    private func resumeInterruptedAccountRemovalIfNeeded() async -> InterruptedCleanupResumeResult? {
         let cleanupRequired: Bool
         do {
             cleanupRequired = try hasPersistedLocalCleanupRequirement()
         } catch {
             Log.warning("Could not determine whether account cleanup is pending; deferring restore", category: .auth)
-            return .retryableFailure
+            return InterruptedCleanupResumeResult(
+                outcome: .retryableFailure,
+                shouldSweepBackgroundTasksOnTransitionEnd: false
+            )
         }
         guard cleanupRequired else { return nil }
+        do {
+            // Migrate interrupted removals created before the durable marker
+            // existed before consuming their older cleanup prerequisite.
+            try persistDurableSignedOutState()
+        } catch {
+            Log.warning("Could not persist durable signed-out state; deferring cleanup", category: .auth)
+            return InterruptedCleanupResumeResult(
+                outcome: .retryableFailure,
+                shouldSweepBackgroundTasksOnTransitionEnd: true
+            )
+        }
+        isSignedOutCleanupActive = true
+        defer {
+            // The early sweep below can race a handler delivered while cleanup
+            // suspends. Keep the positive verdict live through one final sweep.
+            cancelBackgroundTaskRequests()
+            isSignedOutCleanupActive = false
+        }
 
         outboundTaskRegistry.closeAdmission()
+        cancelBackgroundTaskRequests()
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
         await resetPendingActionRetryState()
@@ -1350,23 +1630,44 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             failureMessage: "Failed to resume interrupted account cleanup"
         )
         await syncRunCoordinator.endQuiescence()
-        return cleanupSucceeded ? .terminalNoSession : .retryableFailure
+        return InterruptedCleanupResumeResult(
+            outcome: cleanupSucceeded ? .terminalNoSession : .retryableFailure,
+            shouldSweepBackgroundTasksOnTransitionEnd: false
+        )
     }
 
     /// Completes a credential transaction interrupted during a rejected sign-in
     /// or restore. Unlike full account removal, the isolated local store and
     /// attachment files remain available for a later authenticated retry.
-    private func resumeInterruptedCredentialCleanupIfNeeded() async -> AuthRestoreOutcome? {
+    private func resumeInterruptedCredentialCleanupIfNeeded() async -> InterruptedCleanupResumeResult? {
         let cleanupRequired: Bool
         do {
             cleanupRequired = try hasPersistedCredentialCleanupRequirement()
         } catch {
             Log.warning("Could not determine whether credential cleanup is pending; deferring restore", category: .auth)
-            return .retryableFailure
+            return InterruptedCleanupResumeResult(
+                outcome: .retryableFailure,
+                shouldSweepBackgroundTasksOnTransitionEnd: false
+            )
         }
         guard cleanupRequired else { return nil }
+        do {
+            try persistDurableSignedOutState()
+        } catch {
+            Log.warning("Could not persist durable signed-out state; deferring cleanup", category: .auth)
+            return InterruptedCleanupResumeResult(
+                outcome: .retryableFailure,
+                shouldSweepBackgroundTasksOnTransitionEnd: true
+            )
+        }
+        isSignedOutCleanupActive = true
+        defer {
+            cancelBackgroundTaskRequests()
+            isSignedOutCleanupActive = false
+        }
 
         outboundTaskRegistry.closeAdmission()
+        cancelBackgroundTaskRequests()
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
         await resetPendingActionRetryState()
@@ -1392,7 +1693,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             cleanupSucceeded = false
         }
         await syncRunCoordinator.endQuiescence()
-        return cleanupSucceeded ? .terminalNoSession : .retryableFailure
+        return InterruptedCleanupResumeResult(
+            outcome: cleanupSucceeded ? .terminalNoSession : .retryableFailure,
+            shouldSweepBackgroundTasksOnTransitionEnd: false
+        )
     }
 
     /// Keychain is the crash-durable source of truth. UserDefaults remains as
@@ -1410,6 +1714,17 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             key: .credentialCleanupRequired,
             defaultsKey: Self.credentialCleanupRequiredKey
         )
+    }
+
+    private func hasPersistedDurableSignedOutState() throws -> Bool {
+        do {
+            _ = try keychainService.load(for: KeychainService.Key.durableSignedOut.rawValue)
+            return true
+        } catch KeychainError.itemNotFound {
+            return false
+        } catch {
+            throw error
+        }
     }
 
     private func hasPersistedCleanupRequirement(
@@ -1449,6 +1764,18 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             withAccess: .afterFirstUnlockThisDeviceOnly
         )
         userDefaults.set(true, forKey: Self.credentialCleanupRequiredKey)
+    }
+
+    private func persistDurableSignedOutState() throws {
+        try keychainService.save(
+            Data([1]),
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+    }
+
+    private func clearDurableSignedOutState() throws {
+        try keychainService.delete(for: KeychainService.Key.durableSignedOut.rawValue)
     }
 
     private func clearCredentialCleanupRequirement() throws {
@@ -1549,10 +1876,18 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func endAuthenticationTransition() {
+    private func endAuthenticationTransition(sweepIfDurablySignedOut: Bool = false) {
         guard isAuthenticationTransitionActive else { return }
         guard !authenticationTransitionWaiters.isEmpty else {
             isAuthenticationTransitionActive = false
+            // Background-task handlers re-arm before their worker can ask for
+            // the durable verdict. While a transition owns this lease that
+            // verdict deliberately fails safe, so a cancelled sign-in (or a
+            // queued restore's terminal fast path) must sweep once the final
+            // owner has conclusively returned to signed-out state.
+            if sweepIfDurablySignedOut, isDurablySignedOut() {
+                cancelBackgroundTaskRequests()
+            }
             return
         }
 

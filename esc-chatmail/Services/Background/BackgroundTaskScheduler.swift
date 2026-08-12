@@ -5,15 +5,26 @@ import BackgroundTasks
 final class BackgroundTaskScheduler {
     static let shared = BackgroundTaskScheduler()
 
+    typealias PendingTaskRequestsProvider = (@escaping ([BGTaskRequest]) -> Void) -> Void
+
     private let refreshTaskIdentifier = "com.esc.inboxchat.refresh"
     private let processingTaskIdentifier = "com.esc.inboxchat.processing"
+    private let pendingTaskRequestsProvider: PendingTaskRequestsProvider
 
     /// Callback for app refresh tasks
     var onAppRefresh: ((BGAppRefreshTask) -> Void)?
     /// Callback for processing tasks
     var onProcessing: ((BGProcessingTask) -> Void)?
 
-    private init() {}
+    private convenience init() {
+        self.init { completion in
+            BGTaskScheduler.shared.getPendingTaskRequests(completionHandler: completion)
+        }
+    }
+
+    init(pendingTaskRequestsProvider: @escaping PendingTaskRequestsProvider) {
+        self.pendingTaskRequestsProvider = pendingTaskRequestsProvider
+    }
 
     /// Registers background tasks with the system
     func registerBackgroundTasks() {
@@ -61,13 +72,7 @@ final class BackgroundTaskScheduler {
     /// and push its `earliestBeginDate` another hour out, so escalation paths
     /// must check this before re-submitting.
     func isProcessingTaskPending() async -> Bool {
-        await withCheckedContinuation { continuation in
-            BGTaskScheduler.shared.getPendingTaskRequests { [processingTaskIdentifier] requests in
-                continuation.resume(
-                    returning: requests.contains { $0.identifier == processingTaskIdentifier }
-                )
-            }
-        }
+        await isTaskPending(identifier: processingTaskIdentifier)
     }
 
     /// Cancels the pending refresh and processing requests. Sign-out relies on
@@ -91,12 +96,30 @@ final class BackgroundTaskScheduler {
     /// cadence re-arms should skip rather than replace, preserving the
     /// sooner-dated backoff/catch-up retries that share the identifier.
     func isAppRefreshTaskPending() async -> Bool {
-        await withCheckedContinuation { continuation in
-            BGTaskScheduler.shared.getPendingTaskRequests { [refreshTaskIdentifier] requests in
-                continuation.resume(
-                    returning: requests.contains { $0.identifier == refreshTaskIdentifier }
-                )
+        await isTaskPending(identifier: refreshTaskIdentifier)
+    }
+
+    /// Bridges `BGTaskScheduler`'s callback without trapping a cancelled
+    /// background worker if the system never invokes that callback. Returning
+    /// `true` on cancellation is conservative: every caller interprets it as
+    /// "leave the existing request alone" and therefore submits nothing.
+    private func isTaskPending(identifier: String) async -> Bool {
+        let resultGate = SingleFireContinuationGate<Bool>()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if let settledResult = resultGate.install(continuation) {
+                    continuation.resume(returning: settledResult)
+                    return
+                }
+
+                pendingTaskRequestsProvider { requests in
+                    resultGate.resume(
+                        returning: requests.contains { $0.identifier == identifier }
+                    )
+                }
             }
+        } onCancel: {
+            resultGate.resume(returning: true)
         }
     }
 

@@ -147,6 +147,11 @@ final class AuthSessionTests: XCTestCase {
     func testPersistSessionForBackgroundAccess_migratesLegacyTokensToBackgroundReadableAccess() throws {
         let defaults = makeDefaults()
         let keychain = MockKeychainService()
+        try keychain.save(
+            Data([1]),
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
         var defaultsMarkerWasClearedBeforeKeychainDelete = false
         keychain.onDelete = { key in
             guard key == KeychainService.Key.credentialCleanupRequired.rawValue else { return }
@@ -224,6 +229,10 @@ final class AuthSessionTests: XCTestCase {
         )
         XCTAssertTrue(defaultsMarkerWasClearedBeforeKeychainDelete)
         XCTAssertFalse(defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
+        XCTAssertFalse(
+            keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue),
+            "A fully persisted replacement session must consume the signed-out verdict"
+        )
     }
 
     func testCredentialPersistenceFailureLeavesMarkerAndLaunchCleanupDeletesPartialTokens() async throws {
@@ -276,6 +285,129 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertTrue(cleanup.downloadsCleared)
         XCTAssertFalse(cleanup.storeReset, "Credential recovery must preserve an already-isolated local store")
         XCTAssertFalse(cleanup.attachmentFilesCleared)
+    }
+
+    func testRestoreDurableSignedOutStateRejectsSurvivingSDKSession() async throws {
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([
+            KeychainService.Key.googleUserEmail.rawValue: "signed-out@example.com"
+        ])
+        try keychain.save(
+            Data([1]),
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        let tokenManager = MockTokenManager()
+        let cleanup = AuthSessionCleanupRecorder()
+        var restoreCallCount = 0
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: keychain,
+            hasPreviousGoogleSignIn: { true },
+            googleSignInKeychainPresence: { .present },
+            restorePreviousGoogleSignIn: { completion in
+                restoreCallCount += 1
+                completion(nil, NSError(domain: kGIDSignInErrorDomain, code: -4))
+            },
+            signOutGoogleSession: { cleanup.record("google-sign-out") }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(restoreCallCount, 0, "Durable sign-out must win before SDK restore")
+        XCTAssertEqual(tokenManager.clearTokensCallCount, 1)
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleUserEmail.rawValue))
+        XCTAssertTrue(keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue))
+        XCTAssertEqual(cleanup.events, ["google-sign-out"])
+    }
+
+    func testRestorePublicSDKAbsenceWithIndeterminateRawQueryIsRetryable() async {
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            hasPreviousGoogleSignIn: { false },
+            googleSignInKeychainPresence: { .indeterminate },
+            restorePreviousGoogleSignIn: { _ in cleanup.record("google-restore") }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        XCTAssertTrue(cleanup.events.isEmpty)
+    }
+
+    func testRestoreDefinitiveSDKAbsenceClearsOrphanedAppCredentialsWithoutSDKRestore() async {
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([
+            KeychainService.Key.googleUserEmail.rawValue: "orphaned@example.com"
+        ])
+        let tokenManager = MockTokenManager()
+        let cleanup = AuthSessionCleanupRecorder()
+        var restoreCallCount = 0
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: keychain,
+            hasPreviousGoogleSignIn: { false },
+            googleSignInKeychainPresence: { .absent },
+            restorePreviousGoogleSignIn: { _ in restoreCallCount += 1 },
+            signOutGoogleSession: { cleanup.record("google-sign-out") },
+            cancelBackgroundTaskRequests: { cleanup.record("background-cancel") }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(restoreCallCount, 0)
+        XCTAssertEqual(tokenManager.clearTokensCallCount, 1)
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleUserEmail.rawValue))
+        XCTAssertTrue(keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue))
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
+        XCTAssertTrue(cleanup.events.contains("google-sign-out"))
+        XCTAssertEqual(cleanup.events.filter { $0 == "background-cancel" }.count, 2)
+    }
+
+    func testRestoreDefinitiveSDKAbsenceWithoutAppCredentialsKeepsFastTerminalPath() async {
+        let keychain = MockKeychainService()
+        let tokenManager = MockTokenManager()
+        var restoreCallCount = 0
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: keychain,
+            hasPreviousGoogleSignIn: { false },
+            googleSignInKeychainPresence: { .absent },
+            restorePreviousGoogleSignIn: { _ in restoreCallCount += 1 }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(restoreCallCount, 0)
+        XCTAssertEqual(tokenManager.clearTokensCallCount, 0)
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue))
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
+    }
+
+    func testRestorePublicSDKAbsenceWithPresentRawItemClassifiesSDKError() async {
+        let keychain = MockKeychainService()
+        let tokenManager = MockTokenManager()
+        var restoreCallCount = 0
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: keychain,
+            hasPreviousGoogleSignIn: { false },
+            googleSignInKeychainPresence: { .present },
+            restorePreviousGoogleSignIn: { completion in
+                restoreCallCount += 1
+                completion(nil, NSError(domain: kGIDSignInErrorDomain, code: -4))
+            }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(restoreCallCount, 1)
+        XCTAssertEqual(tokenManager.clearTokensCallCount, 1)
+        XCTAssertTrue(keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue))
     }
 
     func testRestoreTransientErrorPreservesGoogleAndPersistedCredentials() async {
@@ -756,6 +888,141 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    func testDurableSignOutVerdict_activeInteractiveSignInFailsSafe() async throws {
+        let interactiveSignIn = AuthSessionInteractiveSignInGate()
+        let keychain = MockKeychainService()
+        let cleanup = AuthSessionCleanupRecorder()
+        try keychain.save(
+            Data([1]),
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        let session = makeAuthSession(
+            keychainService: keychain,
+            interactiveGoogleSignIn: { _, _, completion in
+                interactiveSignIn.begin(completion: completion)
+            },
+            cancelBackgroundTaskRequests: { cleanup.record("background-cancel") },
+            outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
+        )
+        let signInTask = Task { @MainActor in
+            try await session.signIn(presenting: UIViewController())
+        }
+        await interactiveSignIn.waitUntilStarted()
+
+        XCTAssertFalse(
+            session.isDurablySignedOut(),
+            "A transition that can still publish a session must remain indeterminate"
+        )
+        XCTAssertTrue(cleanup.events.isEmpty)
+
+        interactiveSignIn.cancel()
+        do {
+            try await signInTask.value
+            XCTFail("Expected the injected interactive sign-in cancellation")
+        } catch {
+            // Expected.
+        }
+        XCTAssertTrue(session.isDurablySignedOut())
+        XCTAssertEqual(cleanup.events, ["background-cancel"])
+    }
+
+    func testQueuedTerminalRestoreSweepsWhenFinalAuthenticationTransitionEnds() async {
+        let interactiveSignIn = AuthSessionInteractiveSignInGate()
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            interactiveGoogleSignIn: { _, _, completion in
+                interactiveSignIn.begin(completion: completion)
+            },
+            cancelBackgroundTaskRequests: { cleanup.record("background-cancel") },
+            outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
+        )
+        let signInTask = Task { @MainActor in
+            try await session.signIn(presenting: UIViewController())
+        }
+        await interactiveSignIn.waitUntilStarted()
+
+        let restoreTask = Task { @MainActor in
+            await session.restorePreviousSignIn()
+        }
+        await session.waitUntilAuthenticationTransitionWaiterCountForTesting(1)
+        interactiveSignIn.cancel()
+
+        do {
+            try await signInTask.value
+            XCTFail("Expected the injected interactive sign-in cancellation")
+        } catch {
+            // Expected.
+        }
+        let restoreOutcome = await restoreTask.value
+        XCTAssertEqual(restoreOutcome, .terminalNoSession)
+        XCTAssertTrue(session.isDurablySignedOut())
+        XCTAssertEqual(
+            cleanup.events,
+            ["background-cancel"],
+            "Only the final transition owner may sweep the stale re-arm"
+        )
+    }
+
+    func testQueuedRetryableCleanupRestoreSweepsWhenDurableMarkerSaveFails() async throws {
+        struct MarkerSaveFailure: Error {}
+
+        for marker in [
+            KeychainService.Key.localStoreResetRequired,
+            KeychainService.Key.credentialCleanupRequired
+        ] {
+            let interactiveSignIn = AuthSessionInteractiveSignInGate()
+            let cleanup = AuthSessionCleanupRecorder()
+            let keychain = MockKeychainService()
+            try keychain.save(
+                Data([1]),
+                for: marker.rawValue,
+                withAccess: .afterFirstUnlockThisDeviceOnly
+            )
+            keychain.failNextSave(
+                for: KeychainService.Key.durableSignedOut.rawValue,
+                with: MarkerSaveFailure()
+            )
+            let session = makeAuthSession(
+                keychainService: keychain,
+                interactiveGoogleSignIn: { _, _, completion in
+                    interactiveSignIn.begin(completion: completion)
+                },
+                cancelBackgroundTaskRequests: { cleanup.record("background-cancel") },
+                outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
+            )
+            let signInTask = Task { @MainActor in
+                try await session.signIn(presenting: UIViewController())
+            }
+            await interactiveSignIn.waitUntilStarted()
+
+            let restoreTask = Task { @MainActor in
+                await session.restorePreviousSignIn()
+            }
+            await session.waitUntilAuthenticationTransitionWaiterCountForTesting(1)
+            interactiveSignIn.cancel()
+
+            do {
+                try await signInTask.value
+                XCTFail("Expected the injected interactive sign-in cancellation")
+            } catch {
+                // Expected.
+            }
+            let restoreOutcome = await restoreTask.value
+            XCTAssertEqual(restoreOutcome, .retryableFailure, "Marker: \(marker.rawValue)")
+            XCTAssertTrue(session.isDurablySignedOut(), "Marker: \(marker.rawValue)")
+            XCTAssertEqual(
+                cleanup.events,
+                ["background-cancel"],
+                "Confirmed cleanup intent must sweep even when marker migration fails: \(marker.rawValue)"
+            )
+            XCTAssertTrue(keychain.exists(for: marker.rawValue))
+            XCTAssertFalse(
+                keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue)
+            )
+        }
+    }
+
     func testRestoreTerminalGoogleErrorClearsRejectedCredentials() async {
         let keychain = MockKeychainService()
         keychain.preloadStrings([
@@ -1000,6 +1267,32 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    func testSignOutDurableStateHandoffFailureKeepsAcceptedRemovalRecoverable() async {
+        struct DurableStatePersistenceFailure: Error {}
+        let keychain = MockKeychainService()
+        keychain.failNextSave(
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            with: DurableStatePersistenceFailure()
+        )
+        let session = makeAuthSession(keychainService: keychain)
+        session.isAuthenticated = true
+        session.userEmail = "person@example.com"
+
+        let accepted = await session.signOut()
+
+        XCTAssertTrue(accepted, "The first cleanup marker already committed removal intent")
+        XCTAssertFalse(session.isAuthenticated)
+        XCTAssertTrue(keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue))
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue))
+
+        let recoverySession = makeAuthSession(keychainService: keychain)
+        let outcome = await recoverySession.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue))
+        XCTAssertTrue(keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue))
+    }
+
     // Revert-check: fails if `signOut()` drops its `cancelBackgroundTaskRequests()`
     // step. Without it the pending com.esc.inboxchat.refresh/.processing requests
     // survive sign-out, and each fire re-arms itself at handler entry before the
@@ -1008,7 +1301,9 @@ final class AuthSessionTests: XCTestCase {
     func testSignOutCancelsPendingBackgroundTaskRequestsEvenWhenStoreResetFails() async {
         struct StoreResetFailure: Error {}
         let cleanup = AuthSessionCleanupRecorder()
+        let keychain = MockKeychainService()
         let session = makeAuthSession(
+            keychainService: keychain,
             cancelBackgroundTaskRequests: { cleanup.record("bg-task-requests-cancelled") },
             resetCoreDataStore: { throw StoreResetFailure() }
         )
@@ -1017,8 +1312,16 @@ final class AuthSessionTests: XCTestCase {
 
         XCTAssertEqual(
             cleanup.events,
-            ["bg-task-requests-cancelled"],
-            "Sign-out must disarm pending background sync task requests even when durable cleanup will retry"
+            [
+                "bg-task-requests-cancelled",
+                "bg-task-requests-cancelled",
+                "bg-task-requests-cancelled"
+            ],
+            "Sign-out must sweep before, during, and after its suspending cleanup"
+        )
+        XCTAssertTrue(
+            keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
+            "Failed cleanup must retain its original durable recovery marker"
         )
     }
 
@@ -1040,8 +1343,12 @@ final class AuthSessionTests: XCTestCase {
 
         XCTAssertEqual(
             cleanup.events,
-            ["bg-task-requests-cancelled"],
-            "Disconnect must disarm pending background sync task requests even when remote revocation fails"
+            [
+                "bg-task-requests-cancelled",
+                "bg-task-requests-cancelled",
+                "bg-task-requests-cancelled"
+            ],
+            "Disconnect must sweep before, during, and after its suspending cleanup"
         )
     }
 
@@ -1065,7 +1372,14 @@ final class AuthSessionTests: XCTestCase {
         let outcome = await session.restorePreviousSignIn()
 
         XCTAssertEqual(outcome, .terminalNoSession)
-        XCTAssertEqual(cleanup.events, ["bg-task-requests-cancelled"])
+        XCTAssertEqual(
+            cleanup.events,
+            [
+                "bg-task-requests-cancelled",
+                "bg-task-requests-cancelled",
+                "bg-task-requests-cancelled"
+            ]
+        )
     }
 
     // Revert-check: fails if `resumeInterruptedCredentialCleanupIfNeeded()` drops
@@ -1088,7 +1402,14 @@ final class AuthSessionTests: XCTestCase {
         let outcome = await session.restorePreviousSignIn()
 
         XCTAssertEqual(outcome, .terminalNoSession)
-        XCTAssertEqual(cleanup.events, ["bg-task-requests-cancelled"])
+        XCTAssertEqual(
+            cleanup.events,
+            [
+                "bg-task-requests-cancelled",
+                "bg-task-requests-cancelled",
+                "bg-task-requests-cancelled"
+            ]
+        )
     }
 
     // Revert-check: fails if `clearFailedGoogleSession()` drops its
@@ -1112,7 +1433,10 @@ final class AuthSessionTests: XCTestCase {
         let outcome = await session.restorePreviousSignIn()
 
         XCTAssertEqual(outcome, .terminalNoSession)
-        XCTAssertEqual(cleanup.events, ["bg-task-requests-cancelled"])
+        XCTAssertEqual(
+            cleanup.events,
+            ["bg-task-requests-cancelled", "bg-task-requests-cancelled"]
+        )
     }
 
     // HONEST SCOPE: this pins the deliberate seam — BGTask disarming belongs to
@@ -2626,6 +2950,7 @@ final class AuthSessionTests: XCTestCase {
         tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol = { MockTokenManager() },
         keychainService: KeychainServiceProtocol = MockKeychainService(),
         hasPreviousGoogleSignIn: @escaping @MainActor @Sendable () -> Bool = { false },
+        googleSignInKeychainPresence: @escaping @Sendable () -> GoogleSignInKeychainPresence = { .absent },
         restorePreviousGoogleSignIn: @escaping @MainActor @Sendable (
             @escaping (GIDGoogleUser?, Error?) -> Void
         ) -> Void = { _ in },
@@ -2659,6 +2984,7 @@ final class AuthSessionTests: XCTestCase {
             tokenManagerProvider: tokenManagerProvider,
             keychainService: keychainService,
             hasPreviousGoogleSignIn: hasPreviousGoogleSignIn,
+            googleSignInKeychainPresence: googleSignInKeychainPresence,
             restorePreviousGoogleSignIn: restorePreviousGoogleSignIn,
             interactiveGoogleSignIn: interactiveGoogleSignIn,
             signOutGoogleSession: signOutGoogleSession,
