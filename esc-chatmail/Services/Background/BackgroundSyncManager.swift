@@ -149,8 +149,15 @@ final class BackgroundSyncManager {
         taskScheduler.scheduleAppRefresh()
     }
 
-    func scheduleProcessingTask() {
-        taskScheduler.scheduleProcessingTask()
+    /// Submits a processing-task request only when none is already pending.
+    /// A `BGTaskScheduler` re-submit with the same identifier REPLACES the
+    /// pending request and pushes its `earliestBeginDate` another hour out,
+    /// so a caller that fires on every scene-background transition would
+    /// otherwise postpone the processing task indefinitely.
+    func scheduleProcessingTaskIfNotPending() async {
+        if await !taskScheduler.isProcessingTaskPending() {
+            taskScheduler.scheduleProcessingTask()
+        }
     }
 
     // MARK: - Task Handlers

@@ -204,7 +204,13 @@ struct esc_chatmailApp: App {
             dependencies.foregroundSyncCoordinator.stop(reason: "sceneBackground")
             if dependencies.authSession.canAccessMailbox {
                 dependencies.backgroundSyncManager.scheduleAppRefresh()
-                dependencies.backgroundSyncManager.scheduleProcessingTask()
+                // Guarded: a re-submit with the same identifier REPLACES the
+                // pending processing request and pushes its earliestBeginDate
+                // another hour out, so scheduling unconditionally on every
+                // backgrounding postponed the processing task indefinitely.
+                Task {
+                    await dependencies.backgroundSyncManager.scheduleProcessingTaskIfNotPending()
+                }
             }
         case .active:
             // Foreground sync is now app-scoped (independent of the conversation list lifecycle).

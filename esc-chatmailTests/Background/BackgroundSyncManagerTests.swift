@@ -107,12 +107,12 @@ final class BackgroundSyncManagerTests: XCTestCase {
         )
     }
 
-    func testModelV3Executor_registersHandlersAndSchedulesBackgroundWork() {
+    func testModelV3Executor_registersHandlersAndSchedulesBackgroundWork() async {
         let manager = makeManager(legacyDeltaSyncEnabled: false)
 
         manager.registerBackgroundTasks()
         manager.scheduleAppRefresh()
-        manager.scheduleProcessingTask()
+        await manager.scheduleProcessingTaskIfNotPending()
 
         XCTAssertEqual(taskScheduler.registrationCount, 1)
         XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
@@ -222,6 +222,38 @@ final class BackgroundSyncManagerTests: XCTestCase {
             "A pending processing request must not be replaced (and thereby postponed)"
         )
         XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
+    }
+
+    // Revert-check: fails if `BackgroundSyncManager.scheduleProcessingTaskIfNotPending()`
+    // stops consulting `taskScheduler.isProcessingTaskPending()` and submits
+    // unconditionally — the regression the scene-background call site in
+    // `esc_chatmailApp.handleScenePhaseChange` had before it was guarded. A
+    // BGTask re-submit with the same identifier REPLACES the pending request
+    // and pushes its earliestBeginDate another hour out, so backgrounding the
+    // app more often than hourly postponed the processing task indefinitely.
+    // (The unguarded manager-level pass-through no longer exists, so reverting
+    // the call site itself fails to compile rather than silently regressing.)
+    func testScheduleProcessingTaskIfNotPending_doesNotReplacePendingRequest() async {
+        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        taskScheduler.processingTaskPending = true
+
+        await manager.scheduleProcessingTaskIfNotPending()
+
+        XCTAssertEqual(
+            taskScheduler.processingScheduleCount,
+            0,
+            "A pending processing request must not be replaced (and thereby postponed)"
+        )
+    }
+
+    // Companion to the pending-request test above: proves the guard is a guard,
+    // not a no-op, so the pair together pins both sides of the branch.
+    func testScheduleProcessingTaskIfNotPending_submitsWhenNoRequestIsPending() async {
+        let manager = makeManager(legacyDeltaSyncEnabled: false)
+
+        await manager.scheduleProcessingTaskIfNotPending()
+
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
     }
 
     // Revert-check: fails if `BackgroundSyncManager.scheduleFailureBackoffRetry()`
@@ -736,11 +768,11 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(callCount, 0)
     }
 
-    func testLegacyGateOn_preservesSchedulingForCharacterizationTests() {
+    func testLegacyGateOn_preservesSchedulingForCharacterizationTests() async {
         let manager = makeManager(legacyDeltaSyncEnabled: true)
 
         manager.scheduleAppRefresh()
-        manager.scheduleProcessingTask()
+        await manager.scheduleProcessingTaskIfNotPending()
 
         XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
         XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
