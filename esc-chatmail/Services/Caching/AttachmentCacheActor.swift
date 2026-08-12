@@ -1,3 +1,4 @@
+import AVFoundation
 import UIKit
 
 struct AttachmentCacheAccountGeneration: Equatable, Sendable {
@@ -173,6 +174,109 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         }
 
         return result
+    }
+
+    // MARK: - Video Thumbnail Loading
+
+    /// Extracts and caches a poster frame for a video attachment. Routed
+    /// through the same budgeted, memory-pressure-evictable thumbnail LRU as
+    /// every other attachment image, so decoded video frames are never pinned
+    /// outside the cache's budget and re-appearing cards hit the cache
+    /// instead of re-running AVAssetImageGenerator.
+    func loadVideoThumbnail(
+        for attachmentId: String,
+        messageId: String? = nil,
+        from path: String?,
+        targetSize: CGSize
+    ) async -> UIImage? {
+        guard targetSize.width > 0, targetSize.height > 0,
+              targetSize.width.isFinite, targetSize.height.isFinite else {
+            return nil
+        }
+        guard acceptsAccountWork,
+              let path,
+              AttachmentPaths.isReadableStoragePath(
+                  path,
+                  messageId: messageId,
+                  attachmentId: attachmentId
+              ) else {
+            return nil
+        }
+        let generation = accountGeneration
+        let cacheIdentity = registerCacheIdentity(
+            attachmentId: attachmentId,
+            messageId: messageId
+        )
+        let cacheKey = Self.videoThumbnailCacheKey(
+            cacheIdentity,
+            sourcePath: path,
+            targetSize: targetSize,
+            generation: generation
+        )
+
+        // Check memory cache
+        if let cached = await thumbnailCache.get(cacheKey) {
+            guard acceptsAccountWork, generation == accountGeneration else { return nil }
+            return cached
+        }
+
+        guard let url = AttachmentPaths.fullURL(for: path) else {
+            return nil
+        }
+
+        // Capture screen scale on main actor so the frame is sized for the
+        // display, not a fixed oversize.
+        let scale = await MainActor.run { UIScreen.main.scale }
+        let maximumPixelSize = CGSize(
+            width: targetSize.width * scale,
+            height: targetSize.height * scale
+        )
+
+        let result = await requestManager.deduplicated(key: cacheKey) {
+            await Self.extractVideoPosterFrame(at: url, maximumPixelSize: maximumPixelSize)
+        }
+
+        guard acceptsAccountWork, generation == accountGeneration else { return nil }
+
+        if let image = result {
+            let cost = image.jpegData(compressionQuality: 0.8)?.count ?? 0
+            await thumbnailCache.set(cacheKey, value: image, sizeBytes: cost)
+            guard acceptsAccountWork, generation == accountGeneration else {
+                await thumbnailCache.remove(cacheKey)
+                return nil
+            }
+            cacheIdentitiesByAttachmentId[attachmentId, default: []].insert(cacheIdentity)
+        }
+
+        return result
+    }
+
+    private static func extractVideoPosterFrame(
+        at url: URL,
+        maximumPixelSize: CGSize
+    ) async -> UIImage? {
+        let asset = AVAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = maximumPixelSize
+        let time = CMTime(seconds: 0.5, preferredTimescale: 600)
+        do {
+            let (cgImage, _) = try await generator.image(at: time)
+            return UIImage(cgImage: cgImage)
+        } catch is CancellationError {
+            // Not currently reachable: the request manager runs this in its
+            // own unstructured Task that no caller cancels — frames complete
+            // and get cached, which is what makes scroll-back a cache hit.
+            // Kept so a future cancelling caller stays silent here.
+            return nil
+        } catch {
+            // Real extraction failures (undecodable video) must reach the log.
+            Log.debug(
+                "Video poster frame extraction failed: \(Log.redact(error: error))",
+                category: .attachment
+            )
+            return nil
+        }
     }
 
     // MARK: - Downsampled Image Loading
@@ -582,6 +686,17 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         generation: UInt64
     ) -> String {
         "g\(generation):full_\(attachmentId)|"
+    }
+
+    private nonisolated static func videoThumbnailCacheKey(
+        _ attachmentId: String,
+        sourcePath: String,
+        targetSize: CGSize,
+        generation: UInt64
+    ) -> String {
+        // Shares the thumbnail prefix so identity-based invalidation and the
+        // aggressive-clear path cover video frames with no extra bookkeeping.
+        "\(thumbnailCachePrefix(attachmentId, generation: generation))video|\(sourcePath)|\(Int(targetSize.width))x\(Int(targetSize.height))"
     }
 
     private nonisolated static func downsampledCacheKey(

@@ -10,6 +10,14 @@ final class AttachmentThumbnailLoader: ObservableObject {
     private let cache = AttachmentCacheActor.shared
     private var loadTask: Task<Void, Never>?
     private var currentRequest: LoadRequest?
+    /// Seam for tests: production routes to AttachmentCacheActor's budgeted,
+    /// deduplicated video-frame extraction.
+    private let loadVideoThumbnailOperation: @Sendable (
+        _ attachmentId: String,
+        _ messageId: String?,
+        _ localPath: String?,
+        _ targetSize: CGSize
+    ) async -> UIImage?
 
     private enum LoadRequest: Equatable {
         case thumbnail(
@@ -25,6 +33,28 @@ final class AttachmentThumbnailLoader: ObservableObject {
             targetSize: CGSize,
             isImage: Bool
         )
+        case videoThumbnail(
+            attachmentId: String,
+            messageId: String?,
+            localPath: String?,
+            targetSize: CGSize
+        )
+    }
+
+    init(
+        loadVideoThumbnailOperation: (@Sendable (
+            String, String?, String?, CGSize
+        ) async -> UIImage?)? = nil
+    ) {
+        self.loadVideoThumbnailOperation = loadVideoThumbnailOperation
+            ?? { attachmentId, messageId, localPath, targetSize in
+                await AttachmentCacheActor.shared.loadVideoThumbnail(
+                    for: attachmentId,
+                    messageId: messageId,
+                    from: localPath,
+                    targetSize: targetSize
+                )
+            }
     }
 
     deinit {
@@ -136,6 +166,45 @@ final class AttachmentThumbnailLoader: ObservableObject {
                 )
             }
 
+            guard !Task.isCancelled else { return }
+            self.image = loadedImage
+            self.isLoading = false
+        }
+    }
+
+    /// Load a poster frame for a video attachment from its local file.
+    func loadVideoThumbnail(
+        attachmentId: String?,
+        messageId: String? = nil,
+        localPath: String?,
+        targetSize: CGSize
+    ) {
+        guard let attachmentId else {
+            reset()
+            return
+        }
+        let request = LoadRequest.videoThumbnail(
+            attachmentId: attachmentId,
+            messageId: messageId,
+            localPath: localPath,
+            targetSize: targetSize
+        )
+        prepare(for: request)
+        guard AttachmentPaths.isReadableStoragePath(
+            localPath,
+            messageId: messageId,
+            attachmentId: attachmentId
+        ), image == nil, !isLoading else {
+            return
+        }
+
+        // Cancel any existing task to prevent orphaned tasks
+        loadTask?.cancel()
+
+        isLoading = true
+        let operation = loadVideoThumbnailOperation
+        loadTask = Task {
+            let loadedImage = await operation(attachmentId, messageId, localPath, targetSize)
             guard !Task.isCancelled else { return }
             self.image = loadedImage
             self.isLoading = false

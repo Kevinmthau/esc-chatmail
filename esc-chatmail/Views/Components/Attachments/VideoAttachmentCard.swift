@@ -1,4 +1,3 @@
-import AVFoundation
 import SwiftUI
 
 struct VideoAttachmentCard: View {
@@ -6,9 +5,12 @@ struct VideoAttachmentCard: View {
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
 
-    @State private var thumbnailImage: UIImage?
-    @State private var isLoadingThumbnail = false
-    @State private var thumbnailTask: Task<Void, Never>?
+    /// Poster-frame loading routes through the shared loader seam: request
+    /// identity, cancel-keeps-image on disappear (no re-decode churn on
+    /// scroll-backs), deinit cancellation if SwiftUI destroys the card
+    /// without onDisappear, and frames cached in AttachmentCacheActor's
+    /// budgeted, memory-pressure-evictable thumbnail LRU.
+    @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
     private let thumbnailSize = CGSize(width: 100, height: 60)
 
@@ -58,22 +60,26 @@ struct VideoAttachmentCard: View {
             triggerDownloadIfNeeded()
         }
         .onChange(of: attachment.localURL) { _, _ in
-            resetThumbnail()
+            // A changed source invalidates the displayed frame: full reset
+            // (discards the image), then reload from the new file.
+            thumbnailLoader.reset()
             loadThumbnailIfNeeded()
         }
         .onDisappear {
-            resetThumbnail()
+            // Cancel keeps the decoded image so a scroll-back re-renders
+            // instantly instead of re-extracting the frame.
+            thumbnailLoader.cancel()
         }
     }
 
     @ViewBuilder
     private var videoThumbnail: some View {
         ZStack {
-            if let image = thumbnailImage {
+            if let image = thumbnailLoader.image {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-            } else if isLoadingThumbnail {
+            } else if thumbnailLoader.isLoading {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color(UIColor.tertiarySystemFill))
                     .overlay(
@@ -156,40 +162,11 @@ struct VideoAttachmentCard: View {
     }
 
     private func loadThumbnailIfNeeded() {
-        guard thumbnailImage == nil, !isLoadingThumbnail else { return }
-        guard let localPath = attachment.readableLocalURLValue,
-              let fileURL = AttachmentPaths.fullURL(for: localPath),
-              FileManager.default.fileExists(atPath: fileURL.path) else {
-            return
-        }
-
-        isLoadingThumbnail = true
-
-        thumbnailTask = Task.detached(priority: .userInitiated) {
-            let asset = AVAsset(url: fileURL)
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 400, height: 400)
-
-            let time = CMTime(seconds: 0.5, preferredTimescale: 600)
-            let cgImage = try? generator.copyCGImage(at: time, actualTime: nil)
-
-            await MainActor.run {
-                guard !Task.isCancelled else { return }
-                guard attachment.readableLocalURLValue == localPath else { return }
-                thumbnailTask = nil
-                isLoadingThumbnail = false
-                if let cgImage = cgImage {
-                    thumbnailImage = UIImage(cgImage: cgImage)
-                }
-            }
-        }
-    }
-
-    private func resetThumbnail() {
-        thumbnailTask?.cancel()
-        thumbnailTask = nil
-        thumbnailImage = nil
-        isLoadingThumbnail = false
+        thumbnailLoader.loadVideoThumbnail(
+            attachmentId: attachment.id,
+            messageId: attachment.message?.id,
+            localPath: attachment.readableLocalURLValue,
+            targetSize: thumbnailSize
+        )
     }
 }
