@@ -23,13 +23,42 @@ enum BackgroundMailboxSyncExecutionResult: Equatable, Sendable {
     case failed
 }
 
+enum BackgroundMailboxSyncBudget: Equatable, Sendable {
+    case appRefresh
+    case processing
+
+    var historyPageLimit: Int {
+        switch self {
+        case .appRefresh:
+            return SyncConfig.maxHistoryPagesPerAppRefreshSlice
+        case .processing:
+            return SyncConfig.maxHistoryPagesPerProcessingSlice
+        }
+    }
+
+    var historyPageSize: Int {
+        switch self {
+        case .appRefresh:
+            return SyncConfig.maxHistoryResultsPerAppRefreshRequest
+        case .processing:
+            return SyncConfig.maxHistoryResultsPerProcessingRequest
+        }
+    }
+
+    var allowsExpensiveRecovery: Bool {
+        self == .processing
+    }
+}
+
 /// The model-v3 mailbox sync entry point used by `BGTask` launches. The
 /// production implementation owns and cancels the exact incremental run it
 /// starts, while tests can exercise the background hand-off without creating
 /// `BGTask` instances (which Apple does not expose public initializers for).
 @MainActor
 protocol BackgroundMailboxSyncExecuting: AnyObject, Sendable {
-    func performIncrementalSyncForBackground() async -> BackgroundMailboxSyncExecutionResult
+    func performIncrementalSyncForBackground(
+        budget: BackgroundMailboxSyncBudget
+    ) async -> BackgroundMailboxSyncExecutionResult
 }
 
 extension SyncEngine: BackgroundMailboxSyncExecuting {}
@@ -128,18 +157,18 @@ final class BackgroundSyncManager {
 
     private func handleAppRefresh(task: BGAppRefreshTask) {
         taskScheduler.scheduleAppRefresh()
-        runBackgroundTask(task, isProcessingTask: false)
+        runBackgroundTask(task, budget: .appRefresh)
     }
 
     private func handleProcessing(task: BGProcessingTask) {
         taskScheduler.scheduleProcessingTask()
-        runBackgroundTask(task, isProcessingTask: true)
+        runBackgroundTask(task, budget: .processing)
     }
 
     /// Shared implementation for both app-refresh and processing background tasks.
     /// Uses an atomic flag to ensure `setTaskCompleted` is called exactly once,
     /// preventing a race between normal completion and the expiration handler.
-    private func runBackgroundTask(_ task: BGTask, isProcessingTask: Bool) {
+    private func runBackgroundTask(_ task: BGTask, budget: BackgroundMailboxSyncBudget) {
         let latch = BackgroundTaskCompletionLatch { success in
             task.setTaskCompleted(success: success)
         }
@@ -151,9 +180,9 @@ final class BackgroundSyncManager {
             }
             let success: Bool
             if self.legacyDeltaSyncEnabled {
-                success = await self.performDeltaSync(isProcessingTask: isProcessingTask)
+                success = await self.performDeltaSync(isProcessingTask: budget == .processing)
             } else {
-                success = await self.performAuthoritativeSync()
+                success = await self.performAuthoritativeSync(budget: budget)
             }
             latch.complete(success: success)
         }
@@ -166,7 +195,9 @@ final class BackgroundSyncManager {
 
     /// Executes the authoritative model-v3 sync and preserves structured task
     /// cancellation so a `BGTask` expiration reaches the exact underlying run.
-    func performAuthoritativeSync() async -> Bool {
+    func performAuthoritativeSync(
+        budget: BackgroundMailboxSyncBudget = .processing
+    ) async -> Bool {
         guard !Task.isCancelled else { return false }
         guard await authoritativeSyncReadiness() else {
             // Bootstrap failure is a real failure, not a verdict on the mailbox,
@@ -186,7 +217,7 @@ final class BackgroundSyncManager {
 
         BackgroundSyncStateManager.clearContinuationState(in: defaults)
         let executor = await MainActor.run { authoritativeSyncExecutorProvider() }
-        let result = await executor.performIncrementalSyncForBackground()
+        let result = await executor.performIncrementalSyncForBackground(budget: budget)
         // The system asked an expired task to stop: the handlers already queued
         // the next ordinary cycle before this run started, so schedule nothing.
         guard !Task.isCancelled else { return false }
@@ -199,6 +230,19 @@ final class BackgroundSyncManager {
             stateManager.resetRetryCount()
             return true
         case .needsFollowUp:
+            if budget == .appRefresh {
+                // A short refresh slice should not grow into initial sync or a
+                // long catch-up run. Ensure the processing queue has an
+                // opportunity to take over while refresh retries remain small.
+                // Only submit when no processing request is pending: a
+                // re-submit REPLACES the pending request and pushes its
+                // earliestBeginDate another hour out, so frequent refresh
+                // slices would otherwise starve the very task this escalation
+                // exists to arm.
+                if await !taskScheduler.isProcessingTaskPending() {
+                    taskScheduler.scheduleProcessingTask()
+                }
+            }
             scheduleCatchUpRetry()
             return false
         case .blocked(let activeKind):

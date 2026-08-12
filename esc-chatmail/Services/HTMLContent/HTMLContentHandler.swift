@@ -153,15 +153,20 @@ final class HTMLContentHandler: @unchecked Sendable {
             directoryKey: directoryKey,
             expectedGeneration: nil
         ) {
-            guard FileManager.default.fileExists(atPath: messagesDirectory.path) else {
+            do {
+                let contents = try FileManager.default.contentsOfDirectory(
+                    at: messagesDirectory,
+                    includingPropertiesForKeys: nil
+                )
+                return !contents.isEmpty
+            } catch let error as CocoaError
+                where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
                 return false
+            } catch {
+                // Protection, permission, and I/O failures do not prove that
+                // another account's canonical HTML is absent.
+                throw error
             }
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: messagesDirectory,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            )
-            return !contents.isEmpty
         } ?? true
     }
 

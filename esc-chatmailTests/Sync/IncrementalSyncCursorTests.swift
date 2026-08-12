@@ -328,6 +328,58 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertNotNil(terminalLastSuccess)
     }
 
+    // Revert-check: fails if `IncrementalSyncOrchestrator.performSync` drops its
+    // `historyPageLimit`/`historyPageSize` parameters and goes back to the `lazy var
+    // historyCollectionPhase` built from the instance-wide 10-page/500-result
+    // defaults. All four pages would then be fetched at maxResults 500, the run
+    // would end terminal (no checkpoint, no needsFollowUp) and advance the cursor.
+    @MainActor
+    func testRunSpecificHistoryPageLimitOverridesForegroundDefault() async throws {
+        apiClient.setHistoryResponsesByPageToken(makeHistoryPages(pageCount: 4))
+        for index in 0..<4 {
+            apiClient.getMessageResponses["m\(index)"] = makeFullMessage(id: "m\(index)")
+        }
+
+        let result = try await makeOrchestrator().performSync(
+            historyPageLimit: BackgroundMailboxSyncBudget.appRefresh.historyPageLimit,
+            historyPageSize: BackgroundMailboxSyncBudget.appRefresh.historyPageSize,
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(result.needsFollowUp)
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), [nil, "p1", "p2"])
+        XCTAssertEqual(apiClient.listHistoryCalls.map(\.maxResults), [100, 100, 100])
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertEqual(checkpoint?.pageToken, "p3")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+    }
+
+    // Revert-check: fails if the `guard allowsExpensiveRecovery` that precedes the
+    // "No account/historyId found" initial-sync fallback in `performSync` is removed.
+    // The injected `initialSyncFallback` would then run inside a BGAppRefreshTask
+    // window instead of returning `needsFollowUp` for a processing task to pick up.
+    @MainActor
+    func testAppRefreshBudgetDefersInitialSyncFallback() async throws {
+        try await setAccountHistoryId(nil)
+        let fallbackCalled = LockedFlag()
+
+        let result = try await makeOrchestrator().performSync(
+            historyPageLimit: BackgroundMailboxSyncBudget.appRefresh.historyPageLimit,
+            historyPageSize: BackgroundMailboxSyncBudget.appRefresh.historyPageSize,
+            allowsExpensiveRecovery: BackgroundMailboxSyncBudget.appRefresh.allowsExpensiveRecovery,
+            progressHandler: { _, _ in },
+            initialSyncFallback: { fallbackCalled.set() }
+        )
+
+        XCTAssertFalse(fallbackCalled.value)
+        XCTAssertTrue(result.hadWarnings)
+        XCTAssertTrue(result.needsFollowUp)
+        XCTAssertEqual(apiClient.listHistoryCallCount, 0)
+        XCTAssertEqual(apiClient.getMessageCallCount, 0)
+    }
+
     @MainActor
     func testFiftyOneHistoryPagesCompleteAcrossFreshOrchestrators() async throws {
         let pageCount = 51
@@ -1136,6 +1188,31 @@ final class IncrementalSyncCursorTests: XCTestCase {
     }
 
     // MARK: - History-recovery scenarios
+
+    // Revert-check: fails if the `guard allowsExpensiveRecovery` inside `performSync`'s
+    // `.historyIdExpired` branch (after the `syncRecoveryEnabled` remote-config gate)
+    // is removed. Recovery would issue the profile/list calls this test pins at zero,
+    // and the frozen `startingHistoryId` cursor would advance inside a refresh slice.
+    @MainActor
+    func testAppRefreshBudgetDefersExpiredHistoryRecovery() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+
+        let result = try await makeOrchestrator().performSync(
+            historyPageLimit: BackgroundMailboxSyncBudget.appRefresh.historyPageLimit,
+            historyPageSize: BackgroundMailboxSyncBudget.appRefresh.historyPageSize,
+            allowsExpensiveRecovery: BackgroundMailboxSyncBudget.appRefresh.allowsExpensiveRecovery,
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(result.hadWarnings)
+        XCTAssertTrue(result.needsFollowUp)
+        XCTAssertEqual(apiClient.listHistoryCallCount, 1)
+        XCTAssertEqual(apiClient.getProfileCallCount, 0)
+        XCTAssertEqual(apiClient.listMessagesCallCount, 0)
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+    }
 
     /// A clean recovery run advances the cursor to the profile's historyId,
     /// clears previously deferred rows (the re-scan recovered them), and

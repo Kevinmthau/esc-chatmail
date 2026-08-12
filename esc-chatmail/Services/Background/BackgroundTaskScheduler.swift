@@ -56,6 +56,20 @@ final class BackgroundTaskScheduler {
         }
     }
 
+    /// Whether a processing-task request is already waiting with the system.
+    /// Submitting the same identifier again would REPLACE the pending request
+    /// and push its `earliestBeginDate` another hour out, so escalation paths
+    /// must check this before re-submitting.
+    func isProcessingTaskPending() async -> Bool {
+        await withCheckedContinuation { continuation in
+            BGTaskScheduler.shared.getPendingTaskRequests { [processingTaskIdentifier] requests in
+                continuation.resume(
+                    returning: requests.contains { $0.identifier == processingTaskIdentifier }
+                )
+            }
+        }
+    }
+
     /// Schedules a retry after the specified backoff interval
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval) {
         let request = BGAppRefreshTaskRequest(identifier: refreshTaskIdentifier)

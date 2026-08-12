@@ -10,6 +10,7 @@ protocol BackgroundTaskScheduling: AnyObject {
     func registerBackgroundTasks()
     func scheduleAppRefresh()
     func scheduleProcessingTask()
+    func isProcessingTaskPending() async -> Bool
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval)
 }
 

@@ -17,6 +17,24 @@ struct FreshInstallHandler {
     private static let installTimestampKey = "installTimestamp"
     private static let isFreshInstallKey = "isFreshInstall"
 
+    /// Consecutive indeterminate keychain reads, accumulated across bootstrap
+    /// retries. Static because AppStartupBootstrap constructs a fresh handler
+    /// per preparation attempt; attempts are serialized by the bootstrap, so
+    /// unsynchronized access is single-flight in practice. After
+    /// `indeterminateReadBackstop` failures the handler stops deferring and
+    /// lets startup proceed without fresh-install determination — a keychain
+    /// that fails every read (e.g. errSecMissingEntitlement) must not pin the
+    /// app to the loading screen forever, and destructive cleanup still never
+    /// runs on uncertainty.
+    private static var consecutiveIndeterminateReads = 0
+    private static let indeterminateReadBackstop = 5
+
+#if DEBUG
+    static func resetIndeterminateReadBackstopForTesting() {
+        consecutiveIndeterminateReads = 0
+    }
+#endif
+
     init(
         userDefaults: UserDefaults = .standard,
         keychainService: KeychainService = .shared,
@@ -41,23 +59,37 @@ struct FreshInstallHandler {
             keychainInstallationId = try loadInstallationId()
         } catch KeychainError.itemNotFound {
             keychainInstallationId = nil
+        } catch KeychainError.unexpectedData {
+            // The item exists but cannot be decoded as an installation ID.
+            // Unlike an OSStatus failure, this is positive evidence that the
+            // stored identity is unusable, so the fail-safe cleanup below is
+            // appropriate.
+            Log.error("Installation ID data is corrupt; performing fail-safe fresh-install cleanup", category: .auth)
+            keychainInstallationId = nil
         } catch {
-            if Self.isTransientProtectedDataError(error) {
-                // Background launches can run before the first device unlock,
-                // when AfterFirstUnlock items are temporarily inaccessible.
-                // Never interpret that protected-data state as an install
-                // mismatch because the cleanup below is destructive.
-                Log.warning("Installation ID is temporarily unavailable; deferring fresh-install handling", category: .auth)
+            // A Keychain OSStatus (including protected-data, service
+            // availability, and I/O failures) does not prove that the item is
+            // absent. Background launches are especially likely to encounter
+            // temporary failures, so retry instead of entering the destructive
+            // mismatch cleanup path.
+            Self.consecutiveIndeterminateReads += 1
+            guard Self.consecutiveIndeterminateReads >= Self.indeterminateReadBackstop else {
+                Log.warning("Installation ID could not be read; deferring fresh-install handling: \(error.localizedDescription)", category: .auth)
                 return false
             }
-
-            // An unreadable or permanently unavailable installation ID cannot
-            // safely prove continuity with the current install. Preserve the
-            // fail-closed behavior by treating it as missing: cleanup replaces
-            // stale credentials/state, while bootstrap can still make progress.
-            Log.error("Installation ID could not be read; performing fail-safe fresh-install cleanup", category: .auth, error: error)
-            keychainInstallationId = nil
+            // The keychain has failed every read this launch: proceed without
+            // fresh-install determination rather than holding startup hostage
+            // to a signal that will never arrive. No cleanup and no new
+            // installation bookkeeping — determination resumes on the next
+            // launch whose keychain answers.
+            Log.error(
+                "Installation ID unreadable after \(Self.consecutiveIndeterminateReads) consecutive attempts; proceeding without fresh-install determination",
+                category: .auth,
+                error: error
+            )
+            return true
         }
+        Self.consecutiveIndeterminateReads = 0
 
         if !hasUserDefaultsID {
             await handleFreshInstall(hasKeychainData: keychainInstallationId != nil)
@@ -73,14 +105,6 @@ struct FreshInstallHandler {
     }
 
     // MARK: - Private Methods
-
-    private static func isTransientProtectedDataError(_ error: Error) -> Bool {
-        guard let keychainError = error as? KeychainError,
-              case .unhandledError(let status) = keychainError else {
-            return false
-        }
-        return status == errSecInteractionNotAllowed
-    }
 
     private func handleFreshInstall(hasKeychainData: Bool) async {
         Log.info("Fresh install detected - UserDefaults cleared", category: .auth)
@@ -252,13 +276,13 @@ struct FreshInstallHandler {
 
         // Clear Application Support
         if let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            try? fileManager.removeItem(at: appSupportURL.appendingPathComponent("Attachments"))
-            try? fileManager.removeItem(at: appSupportURL.appendingPathComponent("Previews"))
+            try? fileManager.removeItem(at: appSupportURL.appendingPathComponent(AttachmentPaths.attachmentsFolder))
+            try? fileManager.removeItem(at: appSupportURL.appendingPathComponent(AttachmentPaths.previewsFolder))
         }
 
         // Clear Caches
         if let cacheURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            try? fileManager.removeItem(at: cacheURL.appendingPathComponent("AttachmentCache"))
+            try? fileManager.removeItem(at: cacheURL.appendingPathComponent(AttachmentPaths.legacyAttachmentCacheFolder))
         }
 
         Log.debug("Attachment files cleared", category: .attachment)

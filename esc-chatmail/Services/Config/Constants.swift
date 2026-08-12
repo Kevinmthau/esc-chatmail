@@ -100,6 +100,19 @@ struct SyncConfig {
     /// bound while model-v3 checkpoints carry larger backlogs across runs.
     static let maxHistoryPagesPerForegroundSlice = 10
 
+    /// App refresh launches have a much shorter execution window than
+    /// processing tasks. Keep their model-v3 slice aligned with the retired
+    /// background writer's three-page budget so a continuation can commit
+    /// before expiration.
+    static let maxHistoryPagesPerAppRefreshSlice = 3
+
+    /// Keep each short-refresh page at Gmail's ordinary 100-record scale.
+    static let maxHistoryResultsPerAppRefreshRequest = 100
+
+    /// Processing tasks can use the full foreground-sized model-v3 slice.
+    static let maxHistoryPagesPerProcessingSlice = maxHistoryPagesPerForegroundSlice
+    static let maxHistoryResultsPerProcessingRequest = maxHistoryResultsPerRequest
+
     /// Maximum concurrent message fetch requests to prevent resource exhaustion
     static let maxConcurrentMessageFetches = 15
 

@@ -237,6 +237,7 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
                         await savePhotoURLToCache(
                             email: email,
                             url: fileURL,
+                            replacingURL: cachedURL,
                             accountGeneration: accountGeneration
                         )
                     }
@@ -315,6 +316,7 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
     private func savePhotoURLToCache(
         email: String,
         url: String,
+        replacingURL expectedURL: String? = nil,
         accountGeneration: ParticipantCacheAccountGenerationToken
     ) async {
         guard isCurrentAccountGeneration(accountGeneration), !Task.isCancelled else { return }
@@ -327,8 +329,12 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
                 request.fetchLimit = 1
 
                 if let person = try? context.fetch(request).first {
-                    // Only update if not already set
-                    if person.avatarURL == nil || person.avatarURL?.isEmpty == true {
+                    // A legacy data URL is replaced only if it is still the
+                    // value this request migrated. Other callers must not
+                    // overwrite a newer nonempty avatar URL.
+                    if person.avatarURL == nil
+                        || person.avatarURL?.isEmpty == true
+                        || person.avatarURL == expectedURL {
                         person.avatarURL = url
                         context.saveOrLog(operation: "update person avatar URL")
                     }

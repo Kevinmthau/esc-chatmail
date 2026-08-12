@@ -25,6 +25,57 @@ struct LocalMailboxStoreInspection: Equatable, Sendable {
     let hasAccountScopedMailboxData: Bool
 }
 
+enum AccountScopedMailboxFileInspector {
+    static func hasStoredFiles(fileManager: FileManager = .default) -> Bool {
+        guard let appSupportDirectory = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
+        let cachesDirectory = fileManager.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        ).first else {
+            // An indeterminate sandbox layout must never be reported as an
+            // accountless empty store.
+            return true
+        }
+        return hasStoredFiles(
+            appSupportDirectory: appSupportDirectory,
+            cachesDirectory: cachesDirectory,
+            fileManager: fileManager
+        )
+    }
+
+    static func hasStoredFiles(
+        appSupportDirectory: URL,
+        cachesDirectory: URL,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        let directories = [
+            appSupportDirectory.appendingPathComponent(AttachmentPaths.attachmentsFolder, isDirectory: true),
+            appSupportDirectory.appendingPathComponent(AttachmentPaths.previewsFolder, isDirectory: true),
+            cachesDirectory.appendingPathComponent(AttachmentPaths.legacyAttachmentCacheFolder, isDirectory: true),
+            cachesDirectory.appendingPathComponent(EmailPreviewSnapshotCache.directoryName, isDirectory: true)
+        ]
+
+        for directory in directories {
+            do {
+                if try !fileManager.contentsOfDirectory(atPath: directory.path).isEmpty {
+                    return true
+                }
+            } catch let error as CocoaError
+                where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+                continue
+            } catch {
+                // Permission, protection, and I/O errors do not prove absence.
+                Log.warning("Could not inspect account-scoped mailbox files; requiring cleanup", category: .auth)
+                return true
+            }
+        }
+        return false
+    }
+}
+
 private enum ProductionLocalMailboxStoreInspector {
     /// Every non-Account entity in the single-account store belongs to the
     /// mailbox owner. Keep this explicit so a newly added entity must make an
@@ -62,6 +113,10 @@ private enum ProductionLocalMailboxStoreInspector {
                 if !hasAccountScopedMailboxData {
                     hasAccountScopedMailboxData = try HTMLContentHandler.shared
                         .hasStoredHTMLFiles()
+                }
+                if !hasAccountScopedMailboxData {
+                    hasAccountScopedMailboxData = AccountScopedMailboxFileInspector
+                        .hasStoredFiles()
                 }
             }
 
@@ -106,6 +161,10 @@ private enum ProductionParticipantCacheAccountTransition {
 /// - GIDSignIn callbacks bridge into MainActor tasks before mutating session state
 @MainActor
 final class AuthSession: ObservableObject, @unchecked Sendable {
+    private struct AccountRemovalRequest: Hashable {
+        let epoch: UInt64
+    }
+
     static let shared = AuthSession()
     static let localStoreResetRequiredKey = "auth.localStoreResetRequired.v1"
     static let credentialCleanupRequiredKey = "auth.credentialCleanupRequired.v1"
@@ -144,6 +203,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private let revokeGoogleToken: @Sendable (String) async throws -> Void
     private let syncRunCoordinator: SyncRunCoordinator
     private let outboundTaskRegistry: OutboundTaskRegistry
+    private var nextAccountRemovalEpoch: UInt64 = 0
+    private var pendingAccountRemovalRequests: Set<AccountRemovalRequest> = []
+    private var isAuthenticationTransitionActive = false
+    private var authenticationTransitionWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol = { TokenManager.shared },
@@ -285,10 +348,17 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     
     @discardableResult
     func restorePreviousSignIn() async -> AuthRestoreOutcome {
-        // A crash after sign-out was requested can leave Google already signed
-        // out while store/file cleanup is still pending. The durable marker
-        // wins over SDK restore state and is resumed before any account can be
-        // published or background-readable credentials remain available.
+        await beginAuthenticationTransition()
+        defer { endAuthenticationTransition() }
+
+        guard !isAccountRemovalRequested else {
+            return .retryableFailure
+        }
+
+        // A crash after sign-out was requested can happen before or during the
+        // account drains and store/file cleanup. The durable marker wins over
+        // SDK restore state and is resumed before any account can be published
+        // or background-readable credentials remain available.
         if let outcome = await resumeInterruptedAccountRemovalIfNeeded() {
             return outcome
         }
@@ -340,11 +410,19 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                             : .retryableFailure
                         return
                     }
+                    guard !self.isAccountRemovalRequested else {
+                        restoredUser.restoreOutcome = .retryableFailure
+                        return
+                    }
 
                     do {
                         // A previous account's store must be repaired before
                         // authenticated UI can expose any local rows.
                         try await self.prepareLocalStoreForAuthenticatedAccount(user.profile?.email)
+                        guard !self.isAccountRemovalRequested else {
+                            restoredUser.restoreOutcome = .retryableFailure
+                            return
+                        }
                         try self.persistSessionForBackgroundAccess(
                             accessToken: user.accessToken.tokenString,
                             refreshToken: user.refreshToken.tokenString,
@@ -384,6 +462,13 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     
     @MainActor
     func signIn(presenting viewController: UIViewController, loginHint: String? = nil) async throws {
+        await beginAuthenticationTransition()
+        defer { endAuthenticationTransition() }
+
+        guard !isAccountRemovalRequested else {
+            throw CancellationError()
+        }
+
         let wasAuthenticated = isAuthenticated
         let outboundTransition = outboundTaskRegistry.closeAdmission()
         await syncRunCoordinator.beginQuiescence()
@@ -447,6 +532,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     }
                     stagedUser.didReplaceGoogleSession = true
 
+                    guard !self.isAccountRemovalRequested else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+
                     guard self.hasRequiredGmailScope(result.user) else {
                         self.clearAuthState()
                         continuation.resume(throwing: AuthError.missingRequiredScopes)
@@ -459,6 +549,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         // persistent store. Never publish authenticated UI on
                         // top of mismatched local data.
                         try await self.prepareLocalStoreForAuthenticatedAccount(result.user.profile?.email)
+                        guard !self.isAccountRemovalRequested else {
+                            throw CancellationError()
+                        }
 
                         // Save tokens and account email with background-readable access so
                         // BGTask cold starts can recover legacy sessions before Sign-In restore runs.
@@ -490,23 +583,34 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     @MainActor
     @discardableResult
     func signOut() async -> Bool {
-        // Close send admission before the first suspension point. While this
-        // transition waits for an active sync, UI may still be authenticated,
-        // but it can no longer admit an old-account optimistic send.
-        let outboundTransition = outboundTaskRegistry.closeAdmission()
-        // Acquire the exclusive account-transition lease before publishing
-        // logged-out UI. A new interactive sign-in therefore cannot start
-        // until every old-account writer and this cleanup have finished.
-        await syncRunCoordinator.beginQuiescence()
-        await outboundTaskRegistry.cancelAndAwaitAll()
         do {
             try persistLocalCleanupRequirement()
         } catch {
             Log.error("Failed to persist the sign-out cleanup prerequisite", category: .auth, error: error)
-            _ = outboundTaskRegistry.reopenAdmission(after: outboundTransition)
-            await syncRunCoordinator.endQuiescence()
             return false
         }
+        // Record intent before waiting behind another auth transition. Closing
+        // outbound admission then deliberately supersedes that transition; its
+        // Google callback observes the pending request before it can consume
+        // the reset marker or persist a replacement session.
+        let removalRequest = registerAccountRemovalRequest()
+        outboundTaskRegistry.closeAdmission()
+        await beginAuthenticationTransition()
+        defer {
+            finishAccountRemovalRequest(removalRequest)
+            endAuthenticationTransition()
+        }
+
+        // Acquire the exclusive account-transition lease before publishing
+        // logged-out UI. A new interactive sign-in therefore cannot start
+        // until every old-account writer and this cleanup have finished.
+        // The marker is durable before either drain can suspend. It records
+        // logout intent without touching the store: admitted sends still own
+        // their reconciliation rows until the drain below has completed. A
+        // process restart observes the marker and resumes the same ordered
+        // drain-before-destruction path.
+        await syncRunCoordinator.beginQuiescence()
+        await outboundTaskRegistry.cancelAndAwaitAll()
         await clearParticipantCaches()
         signOutGoogleSession()
         currentUser = nil
@@ -529,7 +633,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await cleanupDownloads()
 
         await completeDurableLocalCleanupForAccountRemoval(
-            failureMessage: "Failed to clear Core Data during sign-out"
+            failureMessage: "Failed to clear Core Data during sign-out",
+            removalRequest: removalRequest
         )
         await syncRunCoordinator.endQuiescence()
         Log.info("Sign-out cleanup completed", category: .auth)
@@ -558,7 +663,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear any cache directories
         if let cacheURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            let attachmentCacheURL = cacheURL.appendingPathComponent("AttachmentCache")
+            let attachmentCacheURL = cacheURL.appendingPathComponent(AttachmentPaths.legacyAttachmentCacheFolder)
             if fileManager.fileExists(atPath: attachmentCacheURL.path) {
                 try fileManager.removeItem(at: attachmentCacheURL)
             }
@@ -611,17 +716,24 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func signOutAndDisconnect() async throws {
-        let outboundTransition = outboundTaskRegistry.closeAdmission()
-        await syncRunCoordinator.beginQuiescence()
-        await outboundTaskRegistry.cancelAndAwaitAll()
         do {
             try persistLocalCleanupRequirement()
         } catch {
             Log.error("Failed to persist the disconnect cleanup prerequisite", category: .auth, error: error)
-            _ = outboundTaskRegistry.reopenAdmission(after: outboundTransition)
-            await syncRunCoordinator.endQuiescence()
             throw AuthError.cleanupPrerequisitePersistenceFailed(error)
         }
+        let removalRequest = registerAccountRemovalRequest()
+        outboundTaskRegistry.closeAdmission()
+        await beginAuthenticationTransition()
+        defer {
+            finishAccountRemovalRequest(removalRequest)
+            endAuthenticationTransition()
+        }
+
+        // Keep admitted sends and their durable ambiguity records intact until
+        // every live outbound owner has reconciled and released its reservation.
+        await syncRunCoordinator.beginQuiescence()
+        await outboundTaskRegistry.cancelAndAwaitAll()
         await clearParticipantCaches()
 
         // Capture the old credential before local SDK sign-out clears it. Use
@@ -655,7 +767,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await cleanupDownloads()
 
         await completeDurableLocalCleanupForAccountRemoval(
-            failureMessage: "Failed to clear Core Data during disconnect"
+            failureMessage: "Failed to clear Core Data during disconnect",
+            removalRequest: removalRequest
         )
 
         let disconnectError: Error?
@@ -697,7 +810,16 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             throw AuthError.missingAccountEmail
         }
 
-        var resetRequired = hasPersistedLocalCleanupRequirement
+        let hasCleanupRequirement: Bool
+        do {
+            hasCleanupRequirement = try hasPersistedLocalCleanupRequirement()
+        } catch {
+            // A Keychain read failure cannot prove that a crash-durable reset
+            // marker is absent. Refuse to publish an account until a later
+            // attempt can distinguish "missing" from "temporarily unreadable."
+            throw AuthError.localAccountIsolationFailed(error)
+        }
+        var resetRequired = hasCleanupRequirement
         if !resetRequired {
             let storeInspection: LocalMailboxStoreInspection
             do {
@@ -734,8 +856,6 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             throw AuthError.localAccountIsolationFailed(error)
         }
 
-        clearAccountScopedSyncDefaults()
-        BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
     }
 
     func currentOrPersistedUserEmail() -> String? {
@@ -913,7 +1033,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func performDurableLocalCleanup() async throws {
+    private func performDurableLocalCleanup(
+        removalRequest: AccountRemovalRequest? = nil
+    ) async throws {
         // Try every independent cleanup even when one fails, but retain the
         // durable marker until all credential, store, and file work succeeds.
         // This prevents a transient Keychain failure from becoming the sole
@@ -947,10 +1069,34 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         if let firstError {
             throw firstError
         }
-        try keychainService.delete(
-            for: KeychainService.Key.localStoreResetRequired.rawValue
+
+        // These defaults are part of the same account-scoped transaction as
+        // the store and files. Flush their removal before deleting the durable
+        // marker so a crash can never expose a reset store with the previous
+        // account's recovery windows or continuation cursor.
+        clearAccountScopedSyncDefaults()
+        BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        if let removalRequest {
+            // An earlier removal can complete its destructive work while a
+            // later removal remains queued. The shared marker belongs to both;
+            // only the final pending request may consume it.
+            guard pendingAccountRemovalRequests.count == 1,
+                  pendingAccountRemovalRequests.contains(removalRequest) else {
+                return
+            }
+        } else {
+            // Account preparation or launch recovery does not own an in-process
+            // removal request. A removal that arrived while this cleanup was
+            // suspended supersedes it and retains the marker for its own turn.
+            guard pendingAccountRemovalRequests.isEmpty else {
+                throw CancellationError()
+            }
+        }
+
+        try clearPersistedCleanupRequirement(
+            key: .localStoreResetRequired,
+            defaultsKey: Self.localStoreResetRequiredKey
         )
-        userDefaults.removeObject(forKey: Self.localStoreResetRequiredKey)
     }
 
     private func performDurableCredentialCleanup() throws {
@@ -974,7 +1120,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// Completes a sign-out that was interrupted after its durable marker was
     /// written. This runs even when Google has no previous session to restore.
     private func resumeInterruptedAccountRemovalIfNeeded() async -> AuthRestoreOutcome? {
-        guard hasPersistedLocalCleanupRequirement else { return nil }
+        let cleanupRequired: Bool
+        do {
+            cleanupRequired = try hasPersistedLocalCleanupRequirement()
+        } catch {
+            Log.warning("Could not determine whether account cleanup is pending; deferring restore", category: .auth)
+            return .retryableFailure
+        }
+        guard cleanupRequired else { return nil }
 
         outboundTaskRegistry.closeAdmission()
         await syncRunCoordinator.beginQuiescence()
@@ -1006,7 +1159,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// or restore. Unlike full account removal, the isolated local store and
     /// attachment files remain available for a later authenticated retry.
     private func resumeInterruptedCredentialCleanupIfNeeded() async -> AuthRestoreOutcome? {
-        guard hasPersistedCredentialCleanupRequirement else { return nil }
+        let cleanupRequired: Bool
+        do {
+            cleanupRequired = try hasPersistedCredentialCleanupRequirement()
+        } catch {
+            Log.warning("Could not determine whether credential cleanup is pending; deferring restore", category: .auth)
+            return .retryableFailure
+        }
+        guard cleanupRequired else { return nil }
 
         outboundTaskRegistry.closeAdmission()
         await syncRunCoordinator.beginQuiescence()
@@ -1038,16 +1198,39 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// Keychain is the crash-durable source of truth. UserDefaults remains as
     /// a compatibility mirror so installs that entered the pre-fix failure
     /// state still fail closed and retry cleanup.
-    private var hasPersistedLocalCleanupRequirement: Bool {
-        keychainService.exists(
-            for: KeychainService.Key.localStoreResetRequired.rawValue
-        ) || userDefaults.bool(forKey: Self.localStoreResetRequiredKey)
+    private func hasPersistedLocalCleanupRequirement() throws -> Bool {
+        try hasPersistedCleanupRequirement(
+            key: .localStoreResetRequired,
+            defaultsKey: Self.localStoreResetRequiredKey
+        )
     }
 
-    private var hasPersistedCredentialCleanupRequirement: Bool {
-        keychainService.exists(
-            for: KeychainService.Key.credentialCleanupRequired.rawValue
-        ) || userDefaults.bool(forKey: Self.credentialCleanupRequiredKey)
+    private func hasPersistedCredentialCleanupRequirement() throws -> Bool {
+        try hasPersistedCleanupRequirement(
+            key: .credentialCleanupRequired,
+            defaultsKey: Self.credentialCleanupRequiredKey
+        )
+    }
+
+    private func hasPersistedCleanupRequirement(
+        key: KeychainService.Key,
+        defaultsKey: String
+    ) throws -> Bool {
+        // The defaults mirror is sufficient positive evidence and avoids a
+        // protected-data Keychain read during early background launches.
+        if userDefaults.bool(forKey: defaultsKey) {
+            return true
+        }
+        do {
+            _ = try keychainService.load(for: key.rawValue)
+            return true
+        } catch KeychainError.itemNotFound {
+            return false
+        } catch {
+            // Unlike KeychainService.exists(), preserve indeterminate OSStatus
+            // failures so callers can fail closed without destroying data.
+            throw error
+        }
     }
 
     private func persistLocalCleanupRequirement() throws {
@@ -1069,16 +1252,48 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     }
 
     private func clearCredentialCleanupRequirement() throws {
-        try keychainService.delete(
-            for: KeychainService.Key.credentialCleanupRequired.rawValue
+        try clearPersistedCleanupRequirement(
+            key: .credentialCleanupRequired,
+            defaultsKey: Self.credentialCleanupRequiredKey
         )
-        userDefaults.removeObject(forKey: Self.credentialCleanupRequiredKey)
+    }
+
+    private func clearPersistedCleanupRequirement(
+        key: KeychainService.Key,
+        defaultsKey: String
+    ) throws {
+        // Persist removal of the compatibility mirror while Keychain still
+        // proves cleanup is pending. If the process dies after this flush but
+        // before the final delete, the Keychain marker safely retries cleanup;
+        // the inverse order could resurrect a stale defaults marker after a
+        // new account or credential set had already been published.
+        // synchronize() is a best-effort flush only: on modern iOS it is a
+        // no-op returning true, and a false return carries no information
+        // worth failing a completed sign-in over — the Keychain marker stays
+        // authoritative either way.
+        userDefaults.removeObject(forKey: defaultsKey)
+        if !userDefaults.synchronize() {
+            Log.warning("Defaults mirror flush reported failure; keychain marker remains authoritative", category: .auth)
+        }
+        do {
+            try keychainService.delete(for: key.rawValue)
+        } catch {
+            // Preserve the compatibility mirror when the authoritative marker
+            // could not be cleared. Keychain remains the source of truth even
+            // if this best-effort re-flush also fails.
+            userDefaults.set(true, forKey: defaultsKey)
+            _ = userDefaults.synchronize()
+            throw error
+        }
     }
 
     @discardableResult
-    private func completeDurableLocalCleanupForAccountRemoval(failureMessage: String) async -> Bool {
+    private func completeDurableLocalCleanupForAccountRemoval(
+        failureMessage: String,
+        removalRequest: AccountRemovalRequest? = nil
+    ) async -> Bool {
         do {
-            try await performDurableLocalCleanup()
+            try await performDurableLocalCleanup(removalRequest: removalRequest)
             return true
         } catch {
             // Keep localStoreResetRequiredKey set. Interactive sign-in and
@@ -1103,6 +1318,60 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         userDefaults.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
         userDefaults.removeObject(forKey: SyncConfig.lastReconciliationTimeKey)
     }
+
+    private var isAccountRemovalRequested: Bool {
+        !pendingAccountRemovalRequests.isEmpty
+    }
+
+    private func registerAccountRemovalRequest() -> AccountRemovalRequest {
+        nextAccountRemovalEpoch &+= 1
+        let request = AccountRemovalRequest(epoch: nextAccountRemovalEpoch)
+        pendingAccountRemovalRequests.insert(request)
+        return request
+    }
+
+    private func finishAccountRemovalRequest(_ request: AccountRemovalRequest) {
+        pendingAccountRemovalRequests.remove(request)
+    }
+
+    /// Serializes Google SDK work and account admission transitions before
+    /// either operation can advance `OutboundTaskRegistry`'s generation. In
+    /// particular, a bootstrap restore retry waits for interactive sign-in to
+    /// publish (or fail), then rechecks `isAuthenticated` under this lease.
+    private func beginAuthenticationTransition() async {
+        guard isAuthenticationTransitionActive else {
+            isAuthenticationTransitionActive = true
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            authenticationTransitionWaiters.append(continuation)
+        }
+    }
+
+    private func endAuthenticationTransition() {
+        guard isAuthenticationTransitionActive else { return }
+        guard !authenticationTransitionWaiters.isEmpty else {
+            isAuthenticationTransitionActive = false
+            return
+        }
+
+        let nextOwner = authenticationTransitionWaiters.removeFirst()
+        nextOwner.resume()
+    }
+
+#if DEBUG
+    /// Bounded so a regression fails the calling test's next assertion instead
+    /// of hanging the whole suite on an unreachable waiter count. Kept short:
+    /// tests may call this several times, and each timed-out call burns the
+    /// full bound before the downstream assertions fail.
+    func waitUntilAuthenticationTransitionWaiterCountForTesting(_ count: Int) async {
+        let deadline = Date().addingTimeInterval(2)
+        while authenticationTransitionWaiters.count < count, Date() < deadline {
+            await Task.yield()
+        }
+    }
+#endif
 }
 
 enum AuthError: LocalizedError {

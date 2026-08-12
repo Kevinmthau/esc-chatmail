@@ -16,6 +16,22 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
         XCTAssertTrue(hasLegacyHTML)
     }
 
+    // HONEST SCOPE: this does NOT fail under a revert of `hasStoredHTMLFiles()`'s
+    // do/catch rewrite — the pre-fix `fileExists` guard also let a non-directory's
+    // `contentsOfDirectory` error propagate. It pins the rewrite's error taxonomy:
+    // only `.fileReadNoSuchFile`/`.fileNoSuchFile` may return false, so widening that
+    // catch (or swapping in `try?`) turns an unreadable directory into "no HTML here"
+    // and lets `prepareLocalStoreForAuthenticatedAccount` publish over another account.
+    func testStoredHTMLInspectionDoesNotTreatEnumerationFailureAsEmpty() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTMLContentStoredFiles-\(UUID().uuidString)")
+        try Data([1]).write(to: path)
+        let handler = HTMLContentHandler(messagesDirectory: path)
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        XCTAssertThrowsError(try handler.hasStoredHTMLFiles())
+    }
+
     func testCloseIsSharedAcrossHandlersAndRejectsStaleGenerationAfterReopen() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("HTMLContentAccountBoundaryTests-\(UUID().uuidString)", isDirectory: true)
