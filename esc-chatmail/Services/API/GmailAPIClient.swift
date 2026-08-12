@@ -248,6 +248,17 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         var logContext = "Request"
     }
 
+    /// Cancellation while waiting to retry a request whose prior attempt was
+    /// definitively rejected or never transmitted. No request is in flight at
+    /// this point, so non-idempotent callers must not treat it as ambiguous.
+    struct RetryCancelledBeforeRetransmission: LocalizedError {
+        let lastFailure: Error
+
+        var errorDescription: String? {
+            "Retry cancelled before retransmission: \(lastFailure.localizedDescription)"
+        }
+    }
+
     /// One retry engine for both Gmail request paths.
     ///
     /// `handleStatus` receives every status the engine does not own (anything
@@ -333,7 +344,11 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                     }
 
                     await rateLimitTracker.recordBackoff(delay)
-                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    try await sleepBeforeRetry(
+                        delay: delay,
+                        behavior: behavior,
+                        lastFailure: APIError.rateLimited(retryAfter: headerRetryAfter)
+                    )
                     retryDelay = min(delay * 2, retryStrategy.maxDelay)
                     continue
 
@@ -348,7 +363,11 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                             Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
                             throw APIError.serverError(httpResponse.statusCode)
                         }
-                        try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                        try await sleepBeforeRetry(
+                            delay: retryDelay,
+                            behavior: behavior,
+                            lastFailure: APIError.serverError(httpResponse.statusCode)
+                        )
                         retryDelay = min(retryDelay * 2, retryStrategy.maxDelay)
                         continue
                     }
@@ -415,13 +434,32 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                         throw lastError ?? URLError(.timedOut)
                     }
                     Log.info("Retrying in \(retryDelay) seconds...", category: .api)
-                    try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                    try await sleepBeforeRetry(
+                        delay: retryDelay,
+                        behavior: behavior,
+                        lastFailure: error
+                    )
                     retryDelay = min(retryDelay * 2, retryStrategy.maxDelay)
                 }
             }
         }
 
         throw lastError ?? URLError(.unknown)
+    }
+
+    private nonisolated func sleepBeforeRetry(
+        delay: TimeInterval,
+        behavior: GmailRetryPathBehavior,
+        lastFailure: Error
+    ) async throws {
+        do {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        } catch is CancellationError {
+            guard !behavior.allowsRetransmission else {
+                throw CancellationError()
+            }
+            throw RetryCancelledBeforeRetransmission(lastFailure: lastFailure)
+        }
     }
 
     /// Gmail uses 403 for both retryable rate limiting and terminal

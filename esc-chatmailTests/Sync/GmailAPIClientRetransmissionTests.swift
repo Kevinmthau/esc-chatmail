@@ -9,6 +9,39 @@ private actor GmailSendAdmissionProbe {
     }
 }
 
+private final class ProbedNetworkRetryStrategy: RetryStrategy, @unchecked Sendable {
+    let maxRetries: Int
+    let initialDelay: TimeInterval
+    let maxDelay: TimeInterval
+
+    private let base: NetworkRetryStrategy
+    private let lock = NSLock()
+    private var _retryDecisionCount = 0
+
+    init(maxRetries: Int, initialDelay: TimeInterval, maxDelay: TimeInterval) {
+        self.maxRetries = maxRetries
+        self.initialDelay = initialDelay
+        self.maxDelay = maxDelay
+        self.base = NetworkRetryStrategy(
+            maxRetries: maxRetries,
+            initialDelay: initialDelay,
+            maxDelay: maxDelay
+        )
+    }
+
+    var retryDecisionCount: Int {
+        lock.withLock { _retryDecisionCount }
+    }
+
+    func shouldRetry(error: Error, attempt: Int) -> Bool {
+        let shouldRetry = base.shouldRetry(error: error, attempt: attempt)
+        if shouldRetry {
+            lock.withLock { _retryDecisionCount += 1 }
+        }
+        return shouldRetry
+    }
+}
+
 /// Verifies that non-idempotent requests (messages.send) are never retransmitted
 /// after ambiguous failures, while idempotent requests keep full retry behavior.
 final class GmailAPIClientRetransmissionTests: XCTestCase {
@@ -188,6 +221,126 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         )
     }
 
+    // Revert-check: fails if `GmailAPIClient.sleepBeforeRetry()` stops throwing
+    // `RetryCancelledBeforeRetransmission` on the `allowsRetransmission: false` backoff
+    // path — cancellation during the 429 backoff would surface as `ambiguousDelivery` again.
+    func testSendMessage_cancellationDuring429Backoff_isDefinite() async {
+        installLongBackoffClient()
+        StubURLProtocol.script = [
+            .status(429),
+            .data(200, Self.sendResponseBody)
+        ]
+
+        let task = Task {
+            try await client.sendMessage(rawMessage: "raw")
+        }
+
+        let enteredBackoff = await waitUntil {
+            await self.client.rateLimitTracker.currentCumulativeBackoff > 0
+        }
+        guard enteredBackoff else {
+            task.cancel()
+            _ = try? await task.value
+            return XCTFail("Timed out waiting for the 429 backoff")
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation before retransmission")
+        } catch let error as GmailAPIClient.RetryCancelledBeforeRetransmission {
+            guard let apiError = error.lastFailure as? APIError,
+                  case .rateLimited = apiError else {
+                return XCTFail("Expected a definite rate-limit rejection, got \(error.lastFailure)")
+            }
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            XCTFail("Cancellation during a definite backoff is not ambiguous: \(underlying)")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
+    // Revert-check: fails if `GmailAPIClient.sleepBeforeRetry()` no longer covers the
+    // rate-limit-403 sleep site reached via `isDefiniteRetryableRejection` — that backoff
+    // follows a provably rejected send, so cancellation there must stay definite.
+    func testSendMessage_cancellationDuringRateLimit403Backoff_isDefinite() async {
+        let retryProbe = installLongBackoffClient()
+        StubURLProtocol.script = [
+            .data(403, Self.userRateLimitBody),
+            .data(200, Self.sendResponseBody)
+        ]
+
+        let task = Task {
+            try await client.sendMessage(rawMessage: "raw")
+        }
+
+        let enteredBackoff = await waitUntil {
+            retryProbe.retryDecisionCount > 0
+        }
+        guard enteredBackoff else {
+            task.cancel()
+            _ = try? await task.value
+            return XCTFail("Timed out waiting for the 403 backoff")
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation before retransmission")
+        } catch let error as GmailAPIClient.RetryCancelledBeforeRetransmission {
+            guard let apiError = error.lastFailure as? APIError,
+                  case .rateLimited = apiError else {
+                return XCTFail("Expected a definite rate-limit rejection, got \(error.lastFailure)")
+            }
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            XCTFail("Cancellation during a definite backoff is not ambiguous: \(underlying)")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
+    // Revert-check: fails if `GmailAPIClient.sleepBeforeRetry()` no longer covers the
+    // pre-transmission connection-failure sleep site (`ConnectionErrorDetector.isPreTransmissionError`)
+    // — the request never reached the wire, so cancellation there must stay definite.
+    func testSendMessage_cancellationDuringPreTransmissionBackoff_isDefinite() async {
+        let retryProbe = installLongBackoffClient()
+        StubURLProtocol.script = [
+            .error(URLError(.cannotConnectToHost)),
+            .data(200, Self.sendResponseBody)
+        ]
+
+        let task = Task {
+            try await client.sendMessage(rawMessage: "raw")
+        }
+
+        let enteredBackoff = await waitUntil {
+            retryProbe.retryDecisionCount > 0
+        }
+        guard enteredBackoff else {
+            task.cancel()
+            _ = try? await task.value
+            return XCTFail("Timed out waiting for the connection-failure backoff")
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation before retransmission")
+        } catch let error as GmailAPIClient.RetryCancelledBeforeRetransmission {
+            XCTAssertEqual((error.lastFailure as? URLError)?.code, .cannotConnectToHost)
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            XCTFail("Cancellation before a safe retransmission is not ambiguous: \(underlying)")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
     func testSendMessage_unauthorized_refreshesTokenAndRetries() async throws {
         StubURLProtocol.script = [
             .status(401),
@@ -225,5 +378,34 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
         XCTAssertEqual(message.id, "m1")
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "Idempotent requests must keep retrying timeouts")
+    }
+
+    @discardableResult
+    private func installLongBackoffClient() -> ProbedNetworkRetryStrategy {
+        let retryStrategy = ProbedNetworkRetryStrategy(
+            maxRetries: 3,
+            initialDelay: 30,
+            maxDelay: 30
+        )
+        client = GmailAPIClient(
+            tokenManager: tokenManager,
+            retryStrategy: retryStrategy,
+            session: StubURLProtocol.makeSession()
+        )
+        return retryStrategy
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 2,
+        _ condition: () async -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        return await condition()
     }
 }
