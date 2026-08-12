@@ -81,20 +81,22 @@ extension MimeBuilder {
     }
 
     static func formatFromHeader(email: String, name: String?) -> String {
+        let sanitizedEmail = sanitizeHeaderValue(email)
         guard let name = name, !name.isEmpty else {
-            return email
+            return sanitizedEmail
         }
 
         // Check if name needs encoding for non-ASCII characters
         let encodedName = encodeHeaderIfNeeded(name)
 
         // Format as "Name <email@example.com>"
-        // If name contains special characters, quote it
+        // If name contains special characters, quote it. Quote-escaping alone cannot
+        // neutralize CRLF, so the quoted-name path must sanitize before escaping.
         if name.contains(where: { $0 == "\"" || $0 == "<" || $0 == ">" || $0 == "," || $0 == "@" }) {
-            let quotedName = name.replacingOccurrences(of: "\"", with: "\\\"")
-            return "\"\(quotedName)\" <\(email)>"
+            let quotedName = sanitizeHeaderValue(name).replacingOccurrences(of: "\"", with: "\\\"")
+            return "\"\(quotedName)\" <\(sanitizedEmail)>"
         } else {
-            return "\(encodedName) <\(email)>"
+            return "\(encodedName) <\(sanitizedEmail)>"
         }
     }
 }

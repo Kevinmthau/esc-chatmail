@@ -219,6 +219,229 @@ final class GmailSendServiceTests: XCTestCase {
         XCTAssertEqual(try emittedMessageIDValue(in: preserved), deterministicID)
     }
 
+    func testSendNew_toRecipientHeaderInjection_isCollapsedIntoSingleHeader() async throws {
+        // Revert-check: MimeBuilder.sanitizeHeaderValue applied per-recipient to the To:
+        // header in MimeBuilder.buildSimpleMessage. Without that call the raw CRLF in a
+        // recipient reaches the MIME and the injected "Bcc:" becomes a real header line.
+        _ = try await sendService.sendNew(
+            to: [injectedRecipient],
+            body: "Hello world",
+            subject: "Subject"
+        )
+
+        let mime = try decodedMIMEFromFirstSendCall()
+        XCTAssertEqual(headerLines(in: mime, named: "Bcc"), [])
+        XCTAssertEqual(headerLines(in: mime, named: "To"), [collapsedInjectedToHeader])
+    }
+
+    func testBuildSimpleMessage_toRecipients_blockInjectionAndPreserveCleanRecipients() throws {
+        // Revert-check: MimeBuilder.sanitizeHeaderValue applied per-recipient to the To:
+        // header in MimeBuilder.buildSimpleMessage.
+        let injected = try decodedMIME(
+            MimeBuilder.buildSimpleMessage(
+                to: [injectedRecipient, "second@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: []
+            )
+        )
+        XCTAssertEqual(headerLines(in: injected, named: "Bcc"), [])
+        XCTAssertEqual(
+            headerLines(in: injected, named: "To"),
+            ["\(collapsedInjectedToHeader), second@example.com"]
+        )
+
+        let clean = try decodedMIME(
+            MimeBuilder.buildSimpleMessage(
+                to: ["a@example.com", "b@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: []
+            )
+        )
+        XCTAssertEqual(headerLines(in: clean, named: "To"), ["To: a@example.com, b@example.com"])
+    }
+
+    func testBuildAlternativeMessage_toRecipients_blockInjectionAndPreserveCleanRecipients() throws {
+        // Revert-check: MimeBuilder.sanitizeHeaderValue applied per-recipient to the To:
+        // header in MimeBuilder.buildAlternativeMessage.
+        let injected = try decodedMIME(
+            MimeBuilder.buildAlternativeMessage(
+                to: [injectedRecipient, "second@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                htmlBody: "<p>Hello world</p>",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [],
+                inlineAttachments: []
+            )
+        )
+        XCTAssertEqual(headerLines(in: injected, named: "Bcc"), [])
+        XCTAssertEqual(
+            headerLines(in: injected, named: "To"),
+            ["\(collapsedInjectedToHeader), second@example.com"]
+        )
+
+        let clean = try decodedMIME(
+            MimeBuilder.buildAlternativeMessage(
+                to: ["a@example.com", "b@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                htmlBody: "<p>Hello world</p>",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [],
+                inlineAttachments: []
+            )
+        )
+        XCTAssertEqual(headerLines(in: clean, named: "To"), ["To: a@example.com, b@example.com"])
+    }
+
+    func testBuildMultipartMessage_toRecipients_blockInjectionAndPreserveCleanRecipients() throws {
+        // Revert-check: MimeBuilder.sanitizeHeaderValue applied per-recipient to the To:
+        // header in MimeBuilder.buildMultipartMessage.
+        let attachment = AttachmentData(
+            data: Data("attachment".utf8),
+            filename: "note.txt",
+            mimeType: "text/plain"
+        )
+        let injected = try decodedMIME(
+            MimeBuilder.buildMultipartMessage(
+                to: [injectedRecipient, "second@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [attachment]
+            )
+        )
+        XCTAssertEqual(headerLines(in: injected, named: "Bcc"), [])
+        XCTAssertEqual(
+            headerLines(in: injected, named: "To"),
+            ["\(collapsedInjectedToHeader), second@example.com"]
+        )
+
+        let clean = try decodedMIME(
+            MimeBuilder.buildMultipartMessage(
+                to: ["a@example.com", "b@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [attachment]
+            )
+        )
+        XCTAssertEqual(headerLines(in: clean, named: "To"), ["To: a@example.com, b@example.com"])
+    }
+
+    func testBuildSimpleMessage_fromEmailHeaderInjection_isCollapsedIntoSingleHeader() throws {
+        // Revert-check: MimeBuilder.sanitizeHeaderValue applied to the email in
+        // MimeBuilder.formatFromHeader (every builder interpolates its return value
+        // raw into the From: header).
+        let injected = try decodedMIME(
+            MimeBuilder.buildSimpleMessage(
+                to: ["to@example.com"],
+                from: injectedFromEmail,
+                fromName: nil,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: []
+            )
+        )
+        XCTAssertEqual(headerLines(in: injected, named: "Bcc"), [])
+        XCTAssertEqual(
+            headerLines(in: injected, named: "From"),
+            ["From: \(collapsedInjectedFromEmail)"]
+        )
+    }
+
+    func testFormatFromHeader_emailInjection_isCollapsedOnEveryReturnPath() {
+        // Revert-check: MimeBuilder.sanitizeHeaderValue applied to the email in
+        // MimeBuilder.formatFromHeader. The email is interpolated on all three return
+        // paths (bare email, encoded name, quoted name), so each must collapse CRLF.
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: injectedFromEmail, name: nil),
+            collapsedInjectedFromEmail
+        )
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: injectedFromEmail, name: "Plain Name"),
+            "Plain Name <\(collapsedInjectedFromEmail)>"
+        )
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: injectedFromEmail, name: "Quoted, Name"),
+            "\"Quoted, Name\" <\(collapsedInjectedFromEmail)>"
+        )
+    }
+
+    func testFormatFromHeader_quotedNameWithQuoteAndCRLF_isCollapsedInsideQuotes() throws {
+        // Revert-check: MimeBuilder.sanitizeHeaderValue applied to the quoted-name path in
+        // MimeBuilder.formatFromHeader. Quote-escaping alone leaves the CRLF intact, so a
+        // display name carrying a quote AND a CRLF used to inject a header.
+        let result = MimeBuilder.formatFromHeader(
+            email: "sender@example.com",
+            name: "Evil \"Name\r\nBcc: attacker@example.com"
+        )
+        XCTAssertEqual(
+            result,
+            "\"Evil \\\"Name Bcc: attacker@example.com\" <sender@example.com>"
+        )
+
+        let injected = try decodedMIME(
+            MimeBuilder.buildSimpleMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: "Evil \"Name\r\nBcc: attacker@example.com",
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: []
+            )
+        )
+        XCTAssertEqual(headerLines(in: injected, named: "Bcc"), [])
+        XCTAssertEqual(
+            headerLines(in: injected, named: "From"),
+            ["From: \"Evil \\\"Name Bcc: attacker@example.com\" <sender@example.com>"]
+        )
+    }
+
+    func testFormatFromHeader_cleanIdentity_isPreservedByteIdentically() {
+        // HONEST SCOPE: this test PASSES with the sanitizeHeaderValue calls deleted — it
+        // pins the no-op direction only, failing if the sanitizer is ever STRENGTHENED to
+        // rewrite a clean identity. The optimistic sender-name round trip
+        // (GmailSendService+OptimisticUpdates) stores
+        // extractDisplayName(formatFromHeader(...)) and must stay byte-equal to what the
+        // echo's persister parses back; a rewrite here would silently fork the two.
+        // Deletion of the calls is caught by the injection tests instead.
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: nil),
+            "sender@example.com"
+        )
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: "Sender"),
+            "Sender <sender@example.com>"
+        )
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: "Kevin \"KT\" Thau"),
+            "\"Kevin \\\"KT\\\" Thau\" <sender@example.com>"
+        )
+    }
+
     func testSendReply_passesThreadIdToInjectedGmailAPIClient() async throws {
         _ = try await sendService.sendReply(
             to: ["to@example.com"],
@@ -402,6 +625,12 @@ final class GmailSendServiceTests: XCTestCase {
 
 private let injectedMessageID = "<a@b>\r\nBcc: attacker@example.com"
 private let collapsedInjectedMessageIDHeader = "Message-ID: <a@b> Bcc: attacker@example.com"
+
+private let injectedRecipient = "victim@example.com\r\nBcc: attacker@example.com"
+private let collapsedInjectedToHeader = "To: victim@example.com Bcc: attacker@example.com"
+
+private let injectedFromEmail = "sender@example.com\r\nBcc: attacker@example.com"
+private let collapsedInjectedFromEmail = "sender@example.com Bcc: attacker@example.com"
 
 private enum TransmissionBarrierTestError: Error {
     case persistenceFailed

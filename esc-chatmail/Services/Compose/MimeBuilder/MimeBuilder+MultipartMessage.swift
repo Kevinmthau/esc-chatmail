@@ -19,7 +19,7 @@ extension MimeBuilder {
         // Headers
         let fromHeader = formatFromHeader(email: from, name: fromName)
         mime += "From: \(fromHeader)\r\n"
-        mime += "To: \(to.joined(separator: ", "))\r\n"
+        mime += "To: \(to.map { sanitizeHeaderValue($0) }.joined(separator: ", "))\r\n"
 
         if let subject = subject, !subject.isEmpty {
             let encodedSubject = encodeHeaderIfNeeded(subject)
