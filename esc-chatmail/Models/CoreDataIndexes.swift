@@ -117,7 +117,7 @@ extension CoreDataStack {
 
         // Schedule periodic maintenance
         Task { @MainActor in
-            DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
+            await DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
         }
     }
 

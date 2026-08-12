@@ -19,9 +19,10 @@ final class DatabaseMaintenanceService: ObservableObject {
 
     // Internal for extension access
     let coreDataStack = CoreDataStack.shared
-    let taskRegistry = BackgroundTaskRegistry.shared
+    let taskRegistry: BackgroundTaskRegistry
 
-    private init() {
+    init(taskRegistry: BackgroundTaskRegistry = .shared) {
+        self.taskRegistry = taskRegistry
         registerBackgroundTasks()
         loadLastMaintenanceDate()
     }
@@ -66,10 +67,18 @@ final class DatabaseMaintenanceService: ObservableObject {
         )
     }
 
-    func scheduleMaintenanceTasks() {
-        taskRegistry.schedule(Self.vacuumTaskIdentifier)
-        taskRegistry.schedule(Self.analyzeTaskIdentifier)
-        taskRegistry.schedule(Self.cleanupTaskIdentifier)
+    /// Submits the three maintenance requests, skipping any still pending with
+    /// the system. This runs on every cold launch, and a `BGTaskScheduler`
+    /// submit with a pending identifier REPLACES that request — unconditional
+    /// re-submits pushed cleanup/analyze eligibility past every overnight
+    /// window for a user who launches daily (and vacuum's for anyone launching
+    /// within its week), so the cleanup task never ran at all.
+    func scheduleMaintenanceTasks() async {
+        await taskRegistry.scheduleIfNotPending([
+            Self.vacuumTaskIdentifier,
+            Self.analyzeTaskIdentifier,
+            Self.cleanupTaskIdentifier
+        ])
     }
 
     // MARK: - Full Maintenance Orchestration

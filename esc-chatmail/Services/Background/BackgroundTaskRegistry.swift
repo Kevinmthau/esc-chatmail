@@ -10,7 +10,36 @@ final class BackgroundTaskRegistry {
     private var taskHandlers: [String: () async -> Bool] = [:]
     private var taskConfigurations: [String: BackgroundTaskConfiguration] = [:]
 
-    private init() {}
+    /// `BGTaskScheduler` seams. Injectable because the real scheduler cannot
+    /// back hosted unit tests: launch handlers may only be registered during
+    /// app launch, and the simulator rejects submits outright.
+    private let registerLaunchHandler: (String, @escaping (BGTask) -> Void) -> Void
+    private let submitTaskRequest: (BGTaskRequest) throws -> Void
+    private let pendingTaskIdentifiers: () async -> Set<String>
+
+    init(
+        registerLaunchHandler: @escaping (String, @escaping (BGTask) -> Void) -> Void = { identifier, launchHandler in
+            _ = BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: identifier,
+                using: nil,
+                launchHandler: launchHandler
+            )
+        },
+        submitTaskRequest: @escaping (BGTaskRequest) throws -> Void = { request in
+            try BGTaskScheduler.shared.submit(request)
+        },
+        pendingTaskIdentifiers: @escaping () async -> Set<String> = {
+            await withCheckedContinuation { continuation in
+                BGTaskScheduler.shared.getPendingTaskRequests { requests in
+                    continuation.resume(returning: Set(requests.map(\.identifier)))
+                }
+            }
+        }
+    ) {
+        self.registerLaunchHandler = registerLaunchHandler
+        self.submitTaskRequest = submitTaskRequest
+        self.pendingTaskIdentifiers = pendingTaskIdentifiers
+    }
 
     // MARK: - Registration
 
@@ -27,10 +56,7 @@ final class BackgroundTaskRegistry {
 
         switch config.taskType {
         case .appRefresh:
-            BGTaskScheduler.shared.register(
-                forTaskWithIdentifier: config.identifier,
-                using: nil
-            ) { [weak self] task in
+            registerLaunchHandler(config.identifier) { [weak self] task in
                 guard let appRefreshTask = task as? BGAppRefreshTask else {
                     Log.error("Unexpected task type for appRefresh: \(type(of: task))", category: .background)
                     task.setTaskCompleted(success: false)
@@ -40,10 +66,7 @@ final class BackgroundTaskRegistry {
             }
 
         case .processing:
-            BGTaskScheduler.shared.register(
-                forTaskWithIdentifier: config.identifier,
-                using: nil
-            ) { [weak self] task in
+            registerLaunchHandler(config.identifier) { [weak self] task in
                 guard let processingTask = task as? BGProcessingTask else {
                     Log.error("Unexpected task type for processing: \(type(of: task))", category: .background)
                     task.setTaskCompleted(success: false)
@@ -83,10 +106,33 @@ final class BackgroundTaskRegistry {
         }
 
         do {
-            try BGTaskScheduler.shared.submit(request)
+            try submitTaskRequest(request)
             Log.debug("Scheduled background task: \(identifier)", category: .background)
         } catch {
             Log.error("Failed to schedule task: \(identifier)", category: .background, error: error)
+        }
+    }
+
+    /// Schedules each identifier whose request is not already waiting with the
+    /// system, using a single pending-request fetch for the whole batch.
+    ///
+    /// A `BGTaskScheduler` submit with an already-pending identifier REPLACES
+    /// the pending request and pushes its `earliestBeginDate` out by the full
+    /// configured interval, so launch-path re-scheduling must skip pending
+    /// identifiers — an unconditional re-submit on every cold launch keeps a
+    /// daily task perpetually ineligible for any user who launches more often
+    /// than the interval. The post-fire re-arm in `handleTask` deliberately
+    /// stays a plain `schedule(_:)`: the fired request was just consumed, so
+    /// nothing is pending and the guard would only add a needless fetch.
+    func scheduleIfNotPending(_ identifiers: [String]) async {
+        let pending = await pendingTaskIdentifiers()
+
+        for identifier in identifiers {
+            if pending.contains(identifier) {
+                Log.debug("Skipping still-pending background task: \(identifier)", category: .background)
+            } else {
+                schedule(identifier)
+            }
         }
     }
 

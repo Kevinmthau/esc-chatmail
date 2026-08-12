@@ -123,7 +123,7 @@ struct esc_chatmailApp: App {
         logStartupTiming("CacheCoordinator started")
 
         if !isRunningUITests {
-            DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
+            await DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
             logStartupTiming("Database maintenance scheduled")
         }
 
