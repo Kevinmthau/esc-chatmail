@@ -76,11 +76,28 @@ final class BackgroundTaskScheduler {
     /// request that survives sign-out wakes the signed-out device on the sync
     /// cadence indefinitely. The database-maintenance identifiers are
     /// deliberately not cancelled — they are store-scoped, not account-scoped,
-    /// and `initializeApp` re-arms them unconditionally at every launch.
+    /// and `initializeApp` re-arms any that are not still pending at every
+    /// launch.
     func cancelPendingTaskRequests() {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: refreshTaskIdentifier)
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: processingTaskIdentifier)
         Log.debug("Cancelled pending background sync task requests", category: .background)
+    }
+
+    /// Whether an app-refresh request is already waiting with the system.
+    /// Same REPLACE semantics as the processing identifier. Every submit path
+    /// for this identifier uses a delay of at most 15 minutes, so a pending
+    /// request always begins no later than a fresh re-submit would — ordinary
+    /// cadence re-arms should skip rather than replace, preserving the
+    /// sooner-dated backoff/catch-up retries that share the identifier.
+    func isAppRefreshTaskPending() async -> Bool {
+        await withCheckedContinuation { continuation in
+            BGTaskScheduler.shared.getPendingTaskRequests { [refreshTaskIdentifier] requests in
+                continuation.resume(
+                    returning: requests.contains { $0.identifier == refreshTaskIdentifier }
+                )
+            }
+        }
     }
 
     /// Schedules a retry after the specified backoff interval

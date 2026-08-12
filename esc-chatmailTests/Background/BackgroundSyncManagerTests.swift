@@ -12,6 +12,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     private var defaultsSuiteName: String!
     private var apiClient: MockGmailAPIClient!
     private var taskScheduler: BackgroundTaskSchedulerSpy!
+    private var sceneAssertions: SceneBackgroundAssertionSpy!
 
     override func setUp() {
         super.setUp()
@@ -23,10 +24,12 @@ final class BackgroundSyncManagerTests: XCTestCase {
         defaults = UserDefaults(suiteName: defaultsSuiteName)!
         apiClient = MockGmailAPIClient()
         taskScheduler = BackgroundTaskSchedulerSpy()
+        sceneAssertions = SceneBackgroundAssertionSpy()
     }
 
     override func tearDown() {
         defaults.removePersistentDomain(forName: defaultsSuiteName)
+        sceneAssertions = nil
         taskScheduler = nil
         apiClient = nil
         defaults = nil
@@ -111,8 +114,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
         let manager = makeManager(legacyDeltaSyncEnabled: false)
 
         manager.registerBackgroundTasks()
-        manager.scheduleAppRefresh()
-        await manager.scheduleProcessingTaskIfNotPending()
+        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
+        await waitUntil { self.sceneAssertions.endCount == 1 }
 
         XCTAssertEqual(taskScheduler.registrationCount, 1)
         XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
@@ -178,7 +181,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     }
 
     // Revert-check: fails if the `budget == .appRefresh` branch that calls
-    // `taskScheduler.scheduleProcessingTask()` is dropped from the `.needsFollowUp`
+    // `scheduleProcessingTaskIfNotPending()` is dropped from the `.needsFollowUp`
     // case of `performAuthoritativeSync()`. A deferred short slice would then only
     // re-arm the catch-up retry and never hand the backlog to a processing task,
     // so an app-refresh-only device could never drain a deferred initial sync.
@@ -198,7 +201,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
     }
 
-    // Revert-check: fails if the escalation branch stops consulting
+    // Revert-check: fails if the escalation branch's guarded helper
+    // (`scheduleProcessingTaskIfNotPending()`) stops consulting
     // `taskScheduler.isProcessingTaskPending()` before re-submitting. A BGTask
     // re-submit with the same identifier REPLACES the pending request and
     // pushes its earliestBeginDate another hour out, so app-refresh slices
@@ -246,6 +250,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
         )
     }
 
+    // Revert-check: fails if the `taskScheduler.scheduleProcessingTask()` submit
+    // is dropped from `BackgroundSyncManager.scheduleProcessingTaskIfNotPending()`.
     // Companion to the pending-request test above: proves the guard is a guard,
     // not a no-op, so the pair together pins both sides of the branch.
     func testScheduleProcessingTaskIfNotPending_submitsWhenNoRequestIsPending() async {
@@ -253,6 +259,101 @@ final class BackgroundSyncManagerTests: XCTestCase {
 
         await manager.scheduleProcessingTaskIfNotPending()
 
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
+    }
+
+    // Revert-check: fails if `armBackgroundTasksForSceneBackground()` stops
+    // consulting `taskScheduler.isAppRefreshTaskPending()` before re-arming the
+    // refresh identifier. An unconditional re-submit REPLACES the pending
+    // request — including a sooner-dated failure-backoff or catch-up retry that
+    // shares the identifier — postponing it to the plain 15-minute cadence.
+    // Skipping never postpones: every refresh submit path uses a delay of at
+    // most 15 minutes, so a pending request always begins no later than a
+    // fresh re-submit would.
+    func testArmBackgroundTasksForSceneBackground_doesNotReplacePendingRefreshRequest() async {
+        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        taskScheduler.appRefreshTaskPending = true
+
+        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
+        await waitUntil { self.sceneAssertions.endCount == 1 }
+
+        XCTAssertEqual(
+            taskScheduler.appRefreshScheduleCount,
+            0,
+            "A pending refresh request (possibly a sooner-dated retry) must not be replaced"
+        )
+        XCTAssertEqual(
+            taskScheduler.processingScheduleCount,
+            1,
+            "Skipping the refresh re-arm must not skip the processing arm"
+        )
+    }
+
+    // Revert-check: fails if `armBackgroundTasksForSceneBackground()` stops
+    // routing its processing submit through
+    // `scheduleProcessingTaskIfNotPending()` (e.g. a direct
+    // `taskScheduler.scheduleProcessingTask()` call) — the unguarded
+    // scene-background submit is the exact regression the guarded method
+    // exists to prevent, now pinned at the entry point the scene handler uses.
+    func testArmBackgroundTasksForSceneBackground_doesNotReplacePendingProcessingRequest() async {
+        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        taskScheduler.processingTaskPending = true
+
+        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
+        await waitUntil { self.sceneAssertions.endCount == 1 }
+
+        XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
+        XCTAssertEqual(
+            taskScheduler.processingScheduleCount,
+            0,
+            "A pending processing request must not be replaced (and thereby postponed)"
+        )
+    }
+
+    // Revert-check: fails if `armBackgroundTasksForSceneBackground()` stops
+    // consulting `authoritativeSyncIsAuthenticated` — the auth gate that
+    // previously lived at the scene call site. A signed-out backgrounding must
+    // arm nothing and take no background-execution assertion. (The assertion
+    // is taken synchronously when the gate passes, so a dropped gate shows up
+    // in `beginCount` immediately, with no async wait.)
+    func testArmBackgroundTasksForSceneBackground_whenUnauthenticated_armsNothing() async {
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncIsAuthenticated: { false }
+        )
+
+        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
+
+        XCTAssertEqual(sceneAssertions.beginCount, 0)
+        XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 0)
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 0)
+    }
+
+    // Revert-check: fails if `armBackgroundTasksForSceneBackground()` stops
+    // taking the background-execution assertion synchronously before its async
+    // pending checks, or stops releasing it when the arm completes. Without
+    // the assertion iOS may suspend the process between the scene transition
+    // and the deferred submits, silently losing the arm for that backgrounding
+    // — the guarantee the old synchronous submit provided by construction.
+    // The begin count is read inside the same MainActor slice that called the
+    // method: the arm's MainActor Task cannot have started yet, so a begin
+    // moved inside the Task reads 0 here deterministically instead of racing
+    // the Task's completion.
+    func testArmBackgroundTasksForSceneBackground_holdsAssertionUntilArmCompletes() async {
+        let manager = makeManager(legacyDeltaSyncEnabled: false)
+
+        let beginCountAtReturn = await MainActor.run { () -> Int in
+            manager.armBackgroundTasksForSceneBackground()
+            return sceneAssertions.beginCount
+        }
+
+        XCTAssertEqual(
+            beginCountAtReturn,
+            1,
+            "The assertion must be taken synchronously, before the scene transition completes"
+        )
+        await waitUntil { self.sceneAssertions.endCount == 1 }
+        XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
         XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
     }
 
@@ -771,8 +872,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
     func testLegacyGateOn_preservesSchedulingForCharacterizationTests() async {
         let manager = makeManager(legacyDeltaSyncEnabled: true)
 
-        manager.scheduleAppRefresh()
-        await manager.scheduleProcessingTaskIfNotPending()
+        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
+        await waitUntil { self.sceneAssertions.endCount == 1 }
 
         XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
         XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
@@ -1206,6 +1307,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
         let apiClient = apiClient!
         let syncCoordinator = BackgroundSyncNoopCoordinator()
         let executor = authoritativeSyncExecutor
+        let assertions = sceneAssertions!
         return BackgroundSyncManager(
             taskScheduler: taskScheduler,
             coreDataStack: coreDataStack,
@@ -1218,8 +1320,29 @@ final class BackgroundSyncManagerTests: XCTestCase {
             },
             authoritativeSyncReadiness: authoritativeSyncReadiness,
             authoritativeSyncIsAuthenticated: authoritativeSyncIsAuthenticated,
-            syncCoordinatorProvider: { syncCoordinator }
+            syncCoordinatorProvider: { syncCoordinator },
+            beginSceneBackgroundAssertion: {
+                assertions.begin()
+                return { assertions.end() }
+            }
         )
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
     private func makeStateManager() -> BackgroundSyncStateManager {
@@ -1431,15 +1554,46 @@ private final class BackgroundTaskSchedulerSpy: BackgroundTaskScheduling {
     private(set) var appRefreshScheduleCount = 0
     private(set) var processingScheduleCount = 0
     var processingTaskPending = false
+    var appRefreshTaskPending = false
 
     func registerBackgroundTasks() { registrationCount += 1 }
-    func scheduleAppRefresh() { appRefreshScheduleCount += 1 }
-    func scheduleProcessingTask() { processingScheduleCount += 1 }
+
+    // Submits mirror the real scheduler's read-your-write coupling: a
+    // synchronous `BGTaskScheduler.submit` is immediately visible to a
+    // subsequent `getPendingTaskRequests`, so the guarded arms are idempotent
+    // across sequential calls in production — the spy must not model the
+    // pending state as absent or a double-submit regression would look normal
+    // here while production submits once.
+    func scheduleAppRefresh() {
+        appRefreshScheduleCount += 1
+        appRefreshTaskPending = true
+    }
+
+    func scheduleProcessingTask() {
+        processingScheduleCount += 1
+        processingTaskPending = true
+    }
+
     func isProcessingTaskPending() async -> Bool { processingTaskPending }
+    func isAppRefreshTaskPending() async -> Bool { appRefreshTaskPending }
 
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval) {
         retryBackoffs.append(backoff)
+        // Backoff retries submit the refresh identifier.
+        appRefreshTaskPending = true
     }
+}
+
+/// Records the background-execution assertion pairing around
+/// `armBackgroundTasksForSceneBackground()`. Counters are mutated on the
+/// MainActor (begin in the arm method, end in its MainActor-inherited Task)
+/// and only polled read-only by tests.
+private final class SceneBackgroundAssertionSpy {
+    private(set) var beginCount = 0
+    private(set) var endCount = 0
+
+    func begin() { beginCount += 1 }
+    func end() { endCount += 1 }
 }
 
 private final class BackgroundSyncNoopCoordinator: @unchecked Sendable, BackgroundSyncMessageCoordinating {

@@ -67,29 +67,37 @@ struct esc_chatmailApp: App {
     
     var body: some Scene {
         WindowGroup {
-            if isInitialized {
-                ContentView()
-                    .environment(\.managedObjectContext, dependencies.viewContext)
-                    .environmentObject(dependencies)
-                    .environmentObject(dependencies.authSession) // backward compatibility
-                    .onOpenURL { url in
-                        GIDSignIn.sharedInstance.handle(url)
-                    }
-                    .onChange(of: scenePhase) { oldPhase, newPhase in
-                        handleScenePhaseChange(newPhase)
-                    }
-                    .onChange(of: dependencies.authSession.isAuthenticated) { _, isAuthenticated in
-                        handleAuthStateChange(isAuthenticated)
-                    }
-                    .onChange(of: dependencies.authSession.requiresReauthentication) { _, isRequired in
-                        handleReauthenticationRequirementChange(isRequired)
-                    }
-            } else {
-                AppLoadingView()
-                    .task {
-                        logStartupTiming("AppLoadingView.task started")
-                        await initializeApp()
-                    }
+            Group {
+                if isInitialized {
+                    ContentView()
+                        .environment(\.managedObjectContext, dependencies.viewContext)
+                        .environmentObject(dependencies)
+                        .environmentObject(dependencies.authSession) // backward compatibility
+                        .onOpenURL { url in
+                            GIDSignIn.sharedInstance.handle(url)
+                        }
+                        .onChange(of: dependencies.authSession.isAuthenticated) { _, isAuthenticated in
+                            handleAuthStateChange(isAuthenticated)
+                        }
+                        .onChange(of: dependencies.authSession.requiresReauthentication) { _, isRequired in
+                            handleReauthenticationRequirementChange(isRequired)
+                        }
+                } else {
+                    AppLoadingView()
+                        .task {
+                            logStartupTiming("AppLoadingView.task started")
+                            await initializeApp()
+                        }
+                }
+            }
+            // Attached to the container, not ContentView: a scene-phase change
+            // during cold-start initialization (AppLoadingView showing) must
+            // still reach the handler. Attached inside `isInitialized`, a
+            // backgrounding during init was dropped entirely — no background
+            // task was armed for that session, and `onChange` never delivers
+            // the current phase retroactively when ContentView later appears.
+            .onChange(of: scenePhase) { oldPhase, newPhase in
+                handleScenePhaseChange(newPhase)
             }
         }
     }
@@ -151,12 +159,29 @@ struct esc_chatmailApp: App {
 
         // Start app-scoped foreground sync as soon as auth is available.
         // Scene callbacks may not fire during cold-start when already active.
+        // If the user backgrounded the app while initialization was still
+        // running, the `.background` transition may have fired before auth was
+        // restored (arming nothing); arm the background tasks now instead —
+        // starting foreground sync here would leave it running with no
+        // matching stop, and the session would otherwise end with nothing
+        // armed. Gated on canAccessMailbox (not isAuthenticated): revoked
+        // credentials must start no sync work in either direction, matching
+        // the reauthentication flow's contract.
         if dependencies.authSession.canAccessMailbox && !isRunningUITests {
-            startForegroundSyncSession(
-                reason: "appInitialized",
-                triggerImmediateSync: true,
-                processPendingActionsIfStarted: true
-            )
+            // `scenePhase` cannot be consulted here: this method runs inside
+            // AppLoadingView's `.task` closure, which captured the App-struct
+            // copy from the launch render — `@Environment` stores its resolved
+            // value inline, so that copy's `scenePhase` stays frozen at its
+            // launch-time value. Ask UIKit for the live state instead.
+            if UIApplication.shared.applicationState == .background {
+                dependencies.backgroundSyncManager.armBackgroundTasksForSceneBackground()
+            } else {
+                startForegroundSyncSession(
+                    reason: "appInitialized",
+                    triggerImmediateSync: true,
+                    processPendingActionsIfStarted: true
+                )
+            }
         }
 
         // 4. Ready to show main UI
@@ -197,25 +222,32 @@ struct esc_chatmailApp: App {
     }
     
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
-        if isRunningUITests { return }
+        // The scene-phase observer sits outside the `isInitialized` gate, so it
+        // can fire in the unit-test host; keep the app's machinery idle there
+        // for the same reasons `initializeApp()` no-ops (touching the shared
+        // Dependencies graph mid-suite races the tests).
+        if isRunningUnitTests || isRunningUITests { return }
 
         switch newPhase {
         case .background:
             dependencies.foregroundSyncCoordinator.stop(reason: "sceneBackground")
-            if dependencies.authSession.canAccessMailbox {
-                dependencies.backgroundSyncManager.scheduleAppRefresh()
-                // Guarded: a re-submit with the same identifier REPLACES the
-                // pending processing request and pushes its earliestBeginDate
-                // another hour out, so scheduling unconditionally on every
-                // backgrounding postponed the processing task indefinitely.
-                Task {
-                    await dependencies.backgroundSyncManager.scheduleProcessingTaskIfNotPending()
-                }
-            }
+            // Arming policy (auth gate, guarded submits, the background
+            // assertion covering the async pending checks) lives in the
+            // manager so it stays testable — unconditional scheduling here
+            // once postponed the processing task indefinitely, because a
+            // re-submit with a pending identifier REPLACES the pending
+            // request. The manager's gate is canAccessMailbox, so revoked
+            // credentials arm nothing.
+            dependencies.backgroundSyncManager.armBackgroundTasksForSceneBackground()
         case .active:
             // Foreground sync is now app-scoped (independent of the conversation list lifecycle).
             // Also process pending actions and duplicate cleanup.
-            if dependencies.authSession.canAccessMailbox {
+            // Gated on `isInitialized`: with the observer attached outside the
+            // gate, a pre-init activation could start foreground sync before
+            // `initializeApp` has started CacheCoordinator (a cold background
+            // launch's bootstrap can restore auth first) — init's completion
+            // starts sync itself once the startup order is satisfied.
+            if isInitialized && dependencies.authSession.canAccessMailbox {
                 startForegroundSyncSession(
                     reason: "sceneActive",
                     triggerImmediateSync: true,
