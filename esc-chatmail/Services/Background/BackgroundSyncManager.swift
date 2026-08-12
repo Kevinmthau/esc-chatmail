@@ -102,7 +102,7 @@ final class BackgroundSyncManager {
             await AppStartupBootstrap.shared.prepareForBackgroundSync()
         },
         authoritativeSyncIsAuthenticated: @escaping @MainActor @Sendable () -> Bool = {
-            AuthSession.shared.isAuthenticated
+            AuthSession.shared.canAccessMailbox
         },
         syncCoordinatorProvider: @escaping @MainActor @Sendable () -> BackgroundSyncMessageCoordinating = {
             SyncEngine.shared

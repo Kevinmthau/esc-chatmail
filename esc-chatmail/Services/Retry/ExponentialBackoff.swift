@@ -48,34 +48,3 @@ public struct ExponentialBackoff: Sendable {
         attempt
     }
 }
-
-/// Actor wrapper for thread-safe exponential backoff usage.
-public actor ExponentialBackoffActor {
-    private var backoff: ExponentialBackoff
-
-    public init(
-        baseDelay: TimeInterval = 1.0,
-        maxDelay: TimeInterval = 60.0,
-        factor: Double = 2.0,
-        jitter: Double = 0.1
-    ) {
-        self.backoff = ExponentialBackoff(
-            baseDelay: baseDelay,
-            maxDelay: maxDelay,
-            factor: factor,
-            jitter: jitter
-        )
-    }
-
-    public func nextDelay() -> TimeInterval {
-        backoff.nextDelay()
-    }
-
-    public func reset() {
-        backoff.reset()
-    }
-
-    public var currentAttempt: Int {
-        backoff.currentAttempt
-    }
-}

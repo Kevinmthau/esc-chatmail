@@ -154,6 +154,7 @@ extension PendingActionsManager {
         let sourceConversationId = action.conversationIdValue
         let payloadString = action.payloadValue
         let retryCount = action.retryCountValue
+        let actionCreatedAt = action.createdAt
 
         // Mark as processing
         await updateActionStatus(objectID: objectID, status: "processing", context: context)
@@ -173,7 +174,12 @@ extension PendingActionsManager {
             )
 
             await updateActionStatus(objectID: objectID, status: "completed", context: context)
-            await clearLocalModifications(messageId: messageId, payload: payload, context: context)
+            await clearLocalModifications(
+                actionType: type,
+                messageId: messageId,
+                payload: payload,
+                completedActionCreatedAt: actionCreatedAt
+            )
 
             Log.diagnostic(
                 .pendingActions,
@@ -337,33 +343,135 @@ extension PendingActionsManager {
         }
     }
 
-    /// Clears local modification flags after successful sync.
-    func clearLocalModifications(messageId: String?, payload: [String: Any]?, context: NSManagedObjectContext) async {
-        if let messageId = messageId {
-            await clearLocalModification(forMessageId: messageId, context: context)
-        } else if let messageIds = payload?["messageIds"] as? [String] {
-            for msgId in messageIds {
-                await clearLocalModification(forMessageId: msgId, context: context)
+    /// Clears local modification flags after successful sync, unless another
+    /// live action or a newer optimistic mutation still needs the marker.
+    func clearLocalModifications(
+        actionType: PendingAction.ActionType,
+        messageId: String?,
+        payload: [String: Any]?,
+        completedActionCreatedAt: Date
+    ) async {
+        let completedTargetIDs = Self.executedTargetMessageIDs(
+            actionType: actionType,
+            messageId: messageId,
+            payload: payload
+        )
+        guard !completedTargetIDs.isEmpty else { return }
+
+        // This short-lived context uses store-trump only for reconciliation
+        // marker clearing. If a newer optimistic mutation commits after the
+        // timestamp fetch but before this save, its marker must win instead
+        // of being overwritten by the completed action's nil.
+        let markerContext = coreDataStack.newBackgroundContext()
+        markerContext.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
+
+        let stagedChanges = await markerContext.perform {
+            do {
+                let actionRequest = NSFetchRequest<PendingAction>(entityName: "PendingAction")
+                actionRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    NSPredicate(format: "status IN %@", ["pending", "processing", "failed"]),
+                    NSCompoundPredicate(orPredicateWithSubpredicates: [
+                        NSPredicate(format: "messageId IN %@", Array(completedTargetIDs)),
+                        NSPredicate(format: "payload != nil")
+                    ])
+                ])
+                actionRequest.fetchBatchSize = 50
+
+                var protectedTargetIDs = Set<String>()
+                for action in try markerContext.fetch(actionRequest) {
+                    let targetIDs = Self.executedTargetMessageIDs(
+                        actionType: action.actionTypeEnum,
+                        messageId: action.messageIdValue,
+                        payloadString: action.payloadValue
+                    )
+                    protectedTargetIDs.formUnion(targetIDs.intersection(completedTargetIDs))
+                }
+
+                let clearableTargetIDs = completedTargetIDs.subtracting(protectedTargetIDs)
+                guard !clearableTargetIDs.isEmpty else { return false }
+
+                let messageRequest = NSFetchRequest<Message>(entityName: "Message")
+                messageRequest.predicate = NSPredicate(
+                    format: "id IN %@ AND localModifiedAt != nil AND localModifiedAt <= %@",
+                    Array(clearableTargetIDs),
+                    completedActionCreatedAt as NSDate
+                )
+
+                for message in try markerContext.fetch(messageRequest) {
+                    message.setValue(nil, forKey: "localModifiedAt")
+                }
+                return markerContext.hasChanges
+            } catch {
+                // Failing closed leaves reconciliation protection in place;
+                // the 30-minute maxLocalModificationAge staleness escape in
+                // HistoryProcessor.hasPendingLocalModification is the backstop
+                // if no later scan clears the marker.
+                Log.debug("Failed to clear completed pending-action modifications", category: .sync)
+                return false
             }
+        }
+
+        guard stagedChanges else { return }
+        await lifecycleHooks.localModificationClearDidStageChanges?()
+
+        await markerContext.perform {
+            // Failing closed leaves reconciliation protection in place; the
+            // 30-minute maxLocalModificationAge staleness escape in
+            // HistoryProcessor.hasPendingLocalModification is the backstop if
+            // no later scan clears the marker.
+            _ = markerContext.saveOrLog(
+                operation: "clear completed pending-action modifications",
+                category: .sync
+            )
         }
     }
 
-    /// Clears the localModifiedAt flag for a single message.
-    func clearLocalModification(forMessageId messageId: String, context: NSManagedObjectContext) async {
-        await context.perform {
-            let request = NSFetchRequest<Message>(entityName: "Message")
-            request.predicate = NSPredicate(format: "id == %@", messageId)
-
-            do {
-                if let message = try context.fetch(request).first {
-                    message.setValue(nil, forKey: "localModifiedAt")
-                    try context.save()
-                }
-            } catch {
-                // Non-critical: local modification flag will be cleared on next sync
-                Log.debug("Failed to clear local modification for message \(messageId)", category: .sync)
-            }
+    private nonisolated static func executedTargetMessageIDs(
+        actionType: PendingAction.ActionType?,
+        messageId: String?,
+        payload: [String: Any]?
+    ) -> Set<String> {
+        var directMessageIDs = Set<String>()
+        if let messageId, !messageId.isEmpty {
+            directMessageIDs.insert(messageId)
         }
+        let payloadMessageIDs = Set(
+            (payload?["messageIds"] as? [String] ?? []).filter { !$0.isEmpty }
+        )
+
+        guard let actionType else {
+            // An invalid live row will be abandoned when processed. Until
+            // then, retain every marker it might plausibly describe.
+            return directMessageIDs.union(payloadMessageIDs)
+        }
+
+        switch actionType {
+        case .markRead:
+            return payloadMessageIDs.isEmpty ? directMessageIDs : payloadMessageIDs
+        case .archiveConversation, .reportSpam:
+            return payloadMessageIDs
+        case .markUnread, .archive, .star, .unstar:
+            return directMessageIDs
+        }
+    }
+
+    private nonisolated static func executedTargetMessageIDs(
+        actionType: PendingAction.ActionType?,
+        messageId: String?,
+        payloadString: String?
+    ) -> Set<String> {
+        let payload: [String: Any]?
+        if let payloadString,
+           let data = payloadString.data(using: .utf8) {
+            payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        } else {
+            payload = nil
+        }
+        return executedTargetMessageIDs(
+            actionType: actionType,
+            messageId: messageId,
+            payload: payload
+        )
     }
 
     /// Cleans up completed actions from the database.

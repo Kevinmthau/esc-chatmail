@@ -2,22 +2,23 @@ import Foundation
 
 // MARK: - Token Refresh Implementation
 extension TokenManager {
-    func performTokenRefresh() async throws -> String {
+    func performTokenRefresh(ifCacheEpochMatches epochAtStart: UInt64) async throws -> String {
         var lastError: Error?
-
-        // Snapshot the sign-in generation before the network round-trip. If a
-        // sign-out retires it while the refresh is in flight, the gated
-        // saveTokens below writes nothing (keychain or cache), so a refresh
-        // that completes after sign-out cannot resurrect the account — not
-        // even across relaunch via isAuthenticated()'s keychain read.
-        let epochAtStart = cacheEpoch()
+        var retryBackoff = ExponentialBackoff()
 
         for attempt in 0..<maxRetryAttempts {
+            guard cacheEpochMatches(epochAtStart) else {
+                throw CancellationError()
+            }
+
             do {
                 // Use exponential backoff for retries
                 if attempt > 0 {
-                    let delay = await refreshBackoff.nextDelay()
+                    let delay = retryBackoff.nextDelay()
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    guard cacheEpochMatches(epochAtStart) else {
+                        throw CancellationError()
+                    }
                 }
 
                 // Attempt to refresh using the token refresher
@@ -34,19 +35,47 @@ extension TokenManager {
                     ifCacheEpochMatches: epochAtStart
                 )
                 if !saved {
-                    Log.info("Token refresh completed after sign-out; discarding tokens", category: .auth)
+                    Log.info("Token refresh completed for a retired session; discarding tokens", category: .auth)
+                    throw CancellationError()
                 }
 
-                await refreshBackoff.reset()
                 return tokens.accessToken
 
             } catch let error {
+                guard cacheEpochMatches(epochAtStart) else {
+                    throw CancellationError()
+                }
+                if error is CancellationError {
+                    throw error
+                }
                 lastError = error
 
                 // Check if error is retryable
                 if !isRetryableError(error) {
-                    // Wrap invalid_grant errors specifically so callers can detect revoked credentials
-                    let thrownError: Error = isInvalidGrantError(error) ? TokenManagerError.invalidCredentials : error
+                    // Wrap every invalid-credential verdict consistently and
+                    // surface reauthentication without deleting the isolated
+                    // mailbox or its durable pending actions.
+                    let credentialsWereRevoked: Bool
+                    if let tokenError = error as? TokenManagerError {
+                        switch tokenError {
+                        case .invalidCredentials:
+                            credentialsWereRevoked = true
+                        case .refreshFailed(let underlyingError):
+                            credentialsWereRevoked = isInvalidGrantError(underlyingError)
+                        default:
+                            credentialsWereRevoked = false
+                        }
+                    } else {
+                        credentialsWereRevoked = isInvalidGrantError(error)
+                    }
+                    let thrownError: Error = credentialsWereRevoked
+                        ? TokenManagerError.invalidCredentials
+                        : error
+                    if credentialsWereRevoked {
+                        await publishCredentialRevocation(
+                            ifCacheEpochMatches: epochAtStart
+                        )
+                    }
                     await MainActor.run {
                         self.lastRefreshError = thrownError
                     }
@@ -59,6 +88,9 @@ extension TokenManager {
         }
 
         // All retries failed
+        guard cacheEpochMatches(epochAtStart) else {
+            throw CancellationError()
+        }
         let finalError = lastError ?? TokenManagerError.refreshFailed(NSError(domain: "TokenManager", code: -1))
         await MainActor.run {
             self.lastRefreshError = finalError
@@ -119,6 +151,18 @@ extension TokenManager {
         guard let error = error else { return false }
 
         let nsError = error as NSError
+
+        // AppAuth reports token-endpoint OAuth failures in this canonical
+        // domain/code shape, with the response fields nested in userInfo.
+        if nsError.domain == "org.openid.appauth.oauth_token",
+           nsError.code == -10 {
+            return true
+        }
+
+        if let response = nsError.userInfo["OIDOAuthErrorResponseErrorKey"] as? [String: Any],
+           (response["error"] as? String) == "invalid_grant" {
+            return true
+        }
 
         // Check userInfo directly for OAuth error code (locale-independent)
         // This is the most reliable way to detect invalid_grant
