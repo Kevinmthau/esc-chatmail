@@ -147,28 +147,13 @@ final class IncrementalSyncOrchestrator {
         let accountTimer = timing.start("accountData")
         let accountData: AccountData?
         do {
-            accountData = try await messagePersister.fetchAccountData()
+            accountData = try await fetchValidatedAccountData()
         } catch {
             timing.finish(accountTimer, detail: "failed=true")
             timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
             throw error
         }
         timing.finish(accountTimer, detail: "hasHistory=\(accountData?.historyId != nil)")
-
-        // Validate every surviving Account row before deciding whether its
-        // missing cursor should trigger initial sync. Otherwise a failed store
-        // reset could route a newly authenticated user into initial sync on
-        // top of the previous account's data.
-        if let accountData, let authenticatedAccountEmail {
-            let authenticatedEmail = authenticatedAccountEmail()
-            guard let authenticatedEmail,
-                  authenticatedEmail.caseInsensitiveCompare(accountData.email) == .orderedSame else {
-                throw IncrementalSyncAccountError.authenticatedAccountMismatch(
-                    authenticated: authenticatedEmail,
-                    stored: accountData.email
-                )
-            }
-        }
 
         guard let accountData = accountData, let historyId = accountData.historyId else {
             guard allowsExpensiveRecovery else {
@@ -193,7 +178,7 @@ final class IncrementalSyncOrchestrator {
                 // Initial sync deliberately leaves the durable cursor unset
                 // when message or ledger work is incomplete. Re-read committed
                 // account state so its follow-up intent survives this fallback.
-                let refreshedAccountData = try await messagePersister.fetchAccountData()
+                let refreshedAccountData = try await fetchValidatedAccountData()
                 initialSyncIncomplete = refreshedAccountData?.historyId == nil
                 timing.finish(
                     fallbackTimer,
@@ -590,6 +575,37 @@ final class IncrementalSyncOrchestrator {
             timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
             throw error
         }
+    }
+
+    /// Validates every surviving account row before selecting a history
+    /// cursor. A failed account reset can leave both old and new rows in the
+    /// store, so validating only whichever row Core Data returns first would
+    /// make account isolation nondeterministic.
+    private func fetchValidatedAccountData() async throws -> AccountData? {
+        let accountRows = try await messagePersister.fetchAllAccountData()
+        guard let accountData = accountRows.first else {
+            return nil
+        }
+
+        if let authenticatedAccountEmail {
+            let authenticatedEmail = authenticatedAccountEmail()
+            guard let authenticatedEmail else {
+                throw IncrementalSyncAccountError.authenticatedAccountMismatch(
+                    authenticated: authenticatedEmail,
+                    stored: accountData.email
+                )
+            }
+            if let mismatchedAccount = accountRows.first(where: {
+                authenticatedEmail.caseInsensitiveCompare($0.email) != .orderedSame
+            }) {
+                throw IncrementalSyncAccountError.authenticatedAccountMismatch(
+                    authenticated: authenticatedEmail,
+                    stored: mismatchedAccount.email
+                )
+            }
+        }
+
+        return accountData
     }
 
     // MARK: - Abandoned Message Retry

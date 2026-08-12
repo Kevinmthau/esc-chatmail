@@ -552,6 +552,47 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(apiClient.getMessageCallCount, 0)
     }
 
+    // Revert-check: fails if `IncrementalSyncOrchestrator.fetchValidatedAccountData()`
+    // drops back to the fetchLimit-1 `fetchAccountData` lookup — a stale second
+    // Account row would then abort only when SQLite happened to return it first.
+    // NOTE: revert detection relies on seeding order — the suite's setUp inserts
+    // the MATCHING account before this test adds the stale row, so under rowid
+    // order the limit-1 fetch returns the matching row and the revert reliably
+    // flips this abort into a clean run.
+    @MainActor
+    func testMismatchedAccountRowAbortsEvenWhenFirstAccountMatchesAuthentication() async throws {
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            _ = AccountBuilder()
+                .withId("stale-account")
+                .withEmail("stale@example.com")
+                .withHistoryId("stale-history")
+                .build(in: context)
+        }
+        try await coreDataStack.saveAsync(context: context)
+
+        let fallbackCalled = LockedFlag()
+        let sut = makeOrchestrator(authenticatedAccountEmail: { Self.myEmail })
+
+        do {
+            _ = try await sut.performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { fallbackCalled.set() }
+            )
+            XCTFail("A stale account row must abort before selecting the matching account cursor")
+        } catch let error as IncrementalSyncAccountError {
+            guard case .authenticatedAccountMismatch(let authenticated, let stored) = error else {
+                return XCTFail("Unexpected account error: \(error)")
+            }
+            XCTAssertEqual(authenticated, Self.myEmail)
+            XCTAssertEqual(stored, "stale@example.com")
+        }
+
+        XCTAssertFalse(fallbackCalled.value)
+        XCTAssertEqual(apiClient.listHistoryCallCount, 0)
+        XCTAssertEqual(apiClient.getMessageCallCount, 0)
+    }
+
     @MainActor
     func testInitialSyncFallbackWithoutDurableHistoryRequestsImmediateFollowUp() async throws {
         try await setAccountHistoryId(nil)

@@ -108,6 +108,12 @@ extension MessagePersister {
             message.setValue(processedMessage.headers.messageId, forKey: "messageId")
             message.setValue(processedMessage.headers.references.joined(separator: " "), forKey: "references")
             message.setValue(processedMessage.plainTextBody, forKey: "bodyText")
+            self.preserveSupersededOptimisticContentIfNeeded(
+                remoteCommittedSendMutation,
+                for: processedMessage,
+                on: message,
+                in: context
+            )
 
             if let from = processedMessage.headers.from {
                 if let email = EmailNormalizer.extractEmail(from: from) {
