@@ -46,8 +46,9 @@ struct ParsedListId: Equatable, Sendable {
         }
 
         // Some bulk-mail providers put an internal account token in the phrase
-        // position (for example, Mailchimp's "<opaque-token>mc list"). It is
-        // metadata, not a title, even though the header is syntactically valid.
+        // position (Mailchimp's "<opaque-token>mc list", Brevo's bare
+        // "<opaque-token>"). It is metadata, not a title, even though the
+        // header is syntactically valid.
         title = sanitizedDisplayTitle(title, listId: id)
 
         return ParsedListId(id: id, title: title)
@@ -66,8 +67,11 @@ struct ParsedListId: Equatable, Sendable {
         return title
     }
 
-    /// Recognizes both the bare normalized List-Id fallback and provider labels
-    /// made from an opaque List-Id component plus a known generic suffix.
+    /// Recognizes the bare normalized List-Id fallback, provider labels made
+    /// from an opaque List-Id component plus a known generic suffix
+    /// (Mailchimp's "<token>mc list"), and a bare token that restates an
+    /// identifier label on its own (Brevo emits
+    /// "ODI2OTI3Ny04MTYyNi0z <ODI2OTI3Ny04MTYyNi0z.list-id.mailin.fr>").
     static func isIdentifierDerivedDisplayTitle(_ rawTitle: String?, listId: String?) -> Bool {
         guard let title = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
               let listId = listId?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -83,12 +87,30 @@ struct ParsedListId: Equatable, Sendable {
         let titleKey = alphanumericKey(title)
         guard !titleKey.isEmpty else { return false }
 
-        return listId.split(separator: ".").contains { label in
-            let labelKey = alphanumericKey(String(label))
-            guard isOpaqueIdentifierKey(labelKey), titleKey.hasPrefix(labelKey) else {
+        // A phrase with internal whitespace is human wording even when it
+        // compresses to the same alphanumeric key as an identifier label
+        // ("Formula 1 2024 Round 12 Highlights" vs
+        // "formula1-2024-round12-highlights"); only an unbroken token can be
+        // the identifier itself restated in the phrase position.
+        let titleIsBareToken = title.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+
+        let labels = listId.split(separator: ".")
+        return labels.indices.contains { index in
+            let labelKey = alphanumericKey(String(labels[index]))
+            guard !labelKey.isEmpty, titleKey.hasPrefix(labelKey) else {
                 return false
             }
+            // Labels ahead of a literal "list-id" label are machine
+            // identifiers by construction — bulk-mail providers mint
+            // "<token>.list-id.<provider domain>" ids — so they count even
+            // when the token's shape defeats the opaqueness heuristic.
+            let labelIsIdentifier = isOpaqueIdentifierKey(labelKey)
+                || labels[(index + 1)...].contains { $0.lowercased() == "list-id" }
+            guard labelIsIdentifier else { return false }
             let suffixKey = String(titleKey.dropFirst(labelKey.count))
+            if suffixKey.isEmpty {
+                return titleIsBareToken
+            }
             return providerGenericTitleSuffixKeys.contains(suffixKey)
         }
     }
@@ -118,7 +140,12 @@ struct ParsedListId: Equatable, Sendable {
             previousWasNumber = isNumber
         }
 
-        return digitCount >= 6 && kindTransitions >= 4
+        // Two machine-token profiles: digit-heavy account identifiers, and
+        // base64 of numeric ids (Brevo's "8269277-81626-3" encodes to
+        // "ODI2OTI3Ny04MTYyNi0z"), where literal digits are sparse but keep
+        // interleaving with letters far more often than words do.
+        return (digitCount >= 6 && kindTransitions >= 4)
+            || (digitCount >= 4 && kindTransitions >= 6)
     }
 
     /// Mailchimp emits `<account-token>mc list`. Keep this allowlist narrow so
