@@ -213,18 +213,25 @@ export function encodeHeaderIfNeeded(text: string): string {
 }
 
 /**
- * `Name <email>` From-header formatting: empty name → bare address; names
- * with `"<>,@\` specials are quoted (RFC 5322 quoted-string: backslashes
- * escaped first, then quotes); other names are RFC-2047-encoded when needed.
- * Deviation from iOS: the name is CRLF-stripped before the specials check
- * (strictly safer).
+ * `Name <email>` From-header formatting: empty name → bare address; ASCII
+ * names with `"<>,@\` specials are quoted (RFC 5322 quoted-string:
+ * backslashes escaped first, then quotes); all other names are
+ * RFC-2047-encoded when needed. A name needing BOTH quoting and encoding is
+ * emitted as an encoded-word INSTEAD of quoted: an encoded-word is entirely
+ * RFC 5322 atext so it needs no quoting, whereas a quoted-string carrying
+ * raw 8-bit UTF-8 is malformed for strict relays (matches iOS
+ * MimeBuilder.formatFromHeader). Deviation from iOS: the specials/ASCII
+ * checks run on the CRLF-stripped name (strictly safer).
  */
 export function formatFromHeader(email: string, name?: string): string {
   const sanitizedEmail = sanitizeHeaderValue(email)
   const sanitizedName = name === undefined ? '' : sanitizeHeaderValue(name)
   if (sanitizedName === '') return sanitizedEmail
 
-  if (/["<>,@\\]/.test(sanitizedName)) {
+  const needsQuoting = /["<>,@\\]/.test(sanitizedName)
+  // eslint-disable-next-line no-control-regex
+  const isAsciiOnly = /^[\x00-\x7F]*$/.test(sanitizedName)
+  if (needsQuoting && isAsciiOnly) {
     const escaped = sanitizedName.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
     return `"${escaped}" <${sanitizedEmail}>`
   }

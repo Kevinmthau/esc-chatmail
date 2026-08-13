@@ -136,6 +136,21 @@ describe('formatFromHeader', () => {
   it('RFC-2047 encodes non-ASCII names', () => {
     expect(formatFromHeader('a@b.com', 'Zoë Müller')).toBe(`${rfc2047('Zoë Müller')} <a@b.com>`)
   })
+
+  it('RFC-2047 encodes a non-ASCII name with specials instead of quoting it', () => {
+    // A name needing BOTH quoting and encoding ships as an encoded-word: it
+    // is entirely RFC 5322 atext, so it needs no quoting, whereas a
+    // quoted-string carrying raw 8-bit UTF-8 is malformed for strict relays.
+    const header = formatFromHeader('a@b.com', 'Ekström, Åsa')
+    expect(header).toBe('=?UTF-8?B?RWtzdHLDtm0sIMOFc2E=?= <a@b.com>')
+    expect(header).toBe(`${rfc2047('Ekström, Åsa')} <a@b.com>`)
+    // The whole header value must be printable ASCII on the wire.
+    expect(/^[ -~]+$/.test(header)).toBe(true)
+  })
+
+  it('still quotes the ASCII twin of a specials name', () => {
+    expect(formatFromHeader('a@b.com', 'Ekstrom, Asa')).toBe('"Ekstrom, Asa" <a@b.com>')
+  })
 })
 
 describe('formatRfc2822Date', () => {
