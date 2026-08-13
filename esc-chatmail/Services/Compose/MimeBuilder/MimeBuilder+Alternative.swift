@@ -117,7 +117,7 @@ extension MimeBuilder {
             if hasInlineAttachments {
                 // Add inline attachments
                 for attachment in inlineAttachments {
-                    let safeFilename = sanitizeHeaderValue(attachment.filename)
+                    let safeFilename = quoteParameterValue(attachment.filename)
                     let safeMimeType = sanitizeHeaderValue(attachment.mimeType)
                     let safeContentId = sanitizeHeaderValue(attachment.contentId)
 
@@ -139,7 +139,7 @@ extension MimeBuilder {
 
             // Add regular attachments
             for attachment in attachments {
-                let safeFilename = sanitizeHeaderValue(attachment.filename)
+                let safeFilename = quoteParameterValue(attachment.filename)
                 let safeMimeType = sanitizeHeaderValue(attachment.mimeType)
 
                 mime += "--\(mixedBoundary)\r\n"

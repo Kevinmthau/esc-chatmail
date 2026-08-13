@@ -68,6 +68,19 @@ extension MimeBuilder {
             .trimmingCharacters(in: .whitespaces)
     }
 
+    /// Escapes a value for interpolation inside a quoted MIME parameter string
+    /// (`name="…"` / `filename="…"`). CRLF sanitization alone is insufficient in
+    /// that position: a double-quote in the value terminates the quoted-string
+    /// early and smuggles extra parameters into the part header. Backslashes are
+    /// escaped first — the same order as formatFromHeader's quoted-name path — so
+    /// a trailing bare backslash cannot turn the closing quote into a quoted-pair
+    /// and swallow the rest of the header line.
+    static func quoteParameterValue(_ value: String) -> String {
+        sanitizeHeaderValue(value)
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
     static func encodeHeaderIfNeeded(_ text: String) -> String {
         let sanitized = sanitizeHeaderValue(text)
         let asciiOnly = sanitized.unicodeScalars.allSatisfy { $0.isASCII }
