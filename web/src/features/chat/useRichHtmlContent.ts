@@ -27,10 +27,13 @@ export function clearRichContentCacheForTests(): void {
 
 export function useRichHtmlContent(message: MessageRow): boolean {
   const needsBody = message.hasHtmlBody === 1 && !richContentCache.has(message.id)
-  const bodyHtml = useAccountLiveQuery((db) => {
-    if (!needsBody) return null
-    return queryMessageBody(db, message.id)
-  }, [message.id, needsBody])
+  const bodyHtml = useAccountLiveQuery(
+    (db) => {
+      if (!needsBody) return null
+      return queryMessageBody(db, message.id)
+    },
+    [message.id, needsBody],
+  )
 
   return useMemo(() => {
     if (message.hasHtmlBody !== 1) return false
