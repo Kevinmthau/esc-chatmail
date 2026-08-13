@@ -649,11 +649,12 @@ final class GmailSendServiceTests: XCTestCase {
     }
 
     func testQuoteParameterValue_escapesBackslashesBeforeQuotesAndCollapsesCRLF() {
-        // Revert-check: the backslash-then-quote escape order in
-        // MimeBuilder.quoteParameterValue. Escaping quotes first would double-escape
-        // the backslashes it adds; skipping the backslash escape lets a trailing bare
-        // backslash turn the closing quote into an RFC 5322 quoted-pair, leaving the
-        // quoted parameter unterminated.
+        // Revert-check: the backslash-then-quote escape order AND the inner
+        // sanitizeHeaderValue(value) call in MimeBuilder.quoteParameterValue. Escaping
+        // quotes first would double-escape the backslashes it adds; skipping the
+        // backslash escape lets a trailing bare backslash turn the closing quote into
+        // an RFC 5322 quoted-pair, leaving the quoted parameter unterminated; removing
+        // the sanitizeHeaderValue call lets the final assertion's CRLF survive.
         XCTAssertEqual(MimeBuilder.quoteParameterValue("report.pdf"), "report.pdf")
         XCTAssertEqual(
             MimeBuilder.quoteParameterValue(injectedAttachmentFilename),
@@ -664,6 +665,234 @@ final class GmailSendServiceTests: XCTestCase {
         XCTAssertEqual(
             MimeBuilder.quoteParameterValue("evil.png\"\r\nBcc: attacker@example.com"),
             "evil.png\\\" Bcc: attacker@example.com"
+        )
+    }
+
+    func testQuoteParameterValue_escapesQuoteAndCollapsesNewlineAdjacentToCombiningMark() {
+        // Revert-check: `options: .literal` on the replacingOccurrences calls in
+        // MimeBuilder.quoteParameterValue and MimeBuilder.sanitizeHeaderValue. Without
+        // .literal, default grapheme/canonical matching treats a quote (or LF) that is
+        // the base of a combining sequence (here U+0301) as one grapheme cluster and
+        // leaves it UNMATCHED — the quote would escape unescaped, reopening the exact
+        // quoted-string breakout the fix closes, and the newline would survive.
+        XCTAssertEqual(
+            MimeBuilder.quoteParameterValue("a\"\u{0301}b"),
+            "a\\\"\u{0301}b"
+        )
+        XCTAssertFalse(
+            MimeBuilder.quoteParameterValue("x\r\n\u{0301}Bcc: attacker@example.com")
+                .unicodeScalars.contains("\n")
+        )
+    }
+
+    func testQuoteParameterValue_nonASCIIFilename_passesThroughRaw() {
+        // HONEST SCOPE: passes with quoteParameterValue's escapes deleted — it pins the
+        // documented non-ASCII behavior (raw 8-bit UTF-8 inside the quoted string, no
+        // RFC 2047/2231 encoding) so a future encoding change is a deliberate,
+        // test-visible decision rather than a silent fingerprint-forking one.
+        XCTAssertEqual(MimeBuilder.quoteParameterValue("réçu.pdf"), "réçu.pdf")
+    }
+
+    func testBuildAlternativeMessage_attachmentMimeTypeInjection_isNarrowedToToken() throws {
+        // Revert-check: MimeBuilder.sanitizeMimeType, applied to the media type in
+        // MimeBuilder.attachmentPartHeaders. The media type is interpolated UNQUOTED
+        // ahead of name="…", so with only sanitizeHeaderValue a ';'/'"'-bearing type
+        // smuggles parameters into — or unbalances the quoting of — the part header the
+        // filename escaping protects. A non-token type falls back to octet-stream.
+        let injected = try decodedMIME(
+            MimeBuilder.buildAlternativeMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                htmlBody: "<p>Hello world</p>",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [
+                    AttachmentData(
+                        data: Data("attachment".utf8),
+                        filename: "report.pdf",
+                        mimeType: "application/pdf\"; malicious=\"1"
+                    )
+                ],
+                inlineAttachments: []
+            )
+        )
+        XCTAssertEqual(
+            attachmentNameHeaderLines(in: injected),
+            ["Content-Type: application/octet-stream; name=\"report.pdf\""]
+        )
+        XCTAssertEqual(headerLines(in: injected, named: "malicious"), [])
+    }
+
+    func testBuildAlternativeMessage_inlineContentIDInjection_stripsInteriorBrackets() throws {
+        // Revert-check: MimeBuilder.sanitizeContentId, applied in
+        // MimeBuilder.attachmentPartHeaders. The builder supplies the <…> delimiters, so
+        // with only sanitizeHeaderValue an interior '<'/'>' (survivable, since that only
+        // strips CR/LF) nests or prematurely closes them and malforms the msg-id.
+        let injected = try decodedMIME(
+            MimeBuilder.buildAlternativeMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                htmlBody: "<p>Hello world</p>",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [],
+                inlineAttachments: [
+                    InlineAttachmentData(
+                        data: Data("image".utf8),
+                        contentId: "real><evil@attacker",
+                        filename: "photo.png",
+                        mimeType: "image/png"
+                    )
+                ]
+            )
+        )
+        XCTAssertEqual(
+            headerLines(in: injected, named: "Content-ID"),
+            ["Content-ID: <realevil@attacker>"]
+        )
+    }
+
+    func testBuildMultipartMessage_attachmentFilenameCRLFInjection_doesNotCreateHeaderLine() throws {
+        // Revert-check: the inner sanitizeHeaderValue CRLF collapse in
+        // MimeBuilder.quoteParameterValue (via attachmentPartHeaders). A filename-borne
+        // CRLF must not open a new header line at the builder level.
+        let injected = try decodedMIME(
+            MimeBuilder.buildMultipartMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [
+                    AttachmentData(
+                        data: Data("attachment".utf8),
+                        filename: "evil.pdf\r\nBcc: attacker@example.com",
+                        mimeType: "application/pdf"
+                    )
+                ]
+            )
+        )
+        XCTAssertEqual(headerLines(in: injected, named: "Bcc"), [])
+        XCTAssertEqual(
+            attachmentNameHeaderLines(in: injected),
+            ["Content-Type: application/pdf; name=\"evil.pdf Bcc: attacker@example.com\""]
+        )
+    }
+
+    func testBuildAlternativeMessage_combinedInlineAndRegularAttachments_escapeEachFilename() throws {
+        // Revert-check: MimeBuilder.attachmentPartHeaders routes BOTH the inline
+        // (multipart/related) and regular (multipart/mixed) loops through the same
+        // escaping. This is the only case that emits two distinct name= lines in one
+        // message, so it pins that neither loop regresses independently.
+        let injected = try decodedMIME(
+            MimeBuilder.buildAlternativeMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                htmlBody: "<p>Hello world</p>",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [
+                    AttachmentData(
+                        data: Data("attachment".utf8),
+                        filename: injectedAttachmentFilename,
+                        mimeType: "application/pdf"
+                    )
+                ],
+                inlineAttachments: [
+                    InlineAttachmentData(
+                        data: Data("image".utf8),
+                        contentId: "cid-1",
+                        filename: injectedAttachmentFilename,
+                        mimeType: "image/png"
+                    )
+                ]
+            )
+        )
+        // Inline part (related) is emitted before the regular part (mixed).
+        XCTAssertEqual(
+            attachmentNameHeaderLines(in: injected),
+            [
+                "Content-Type: image/png; name=\"\(escapedInjectedAttachmentFilename)\"",
+                "Content-Type: application/pdf; name=\"\(escapedInjectedAttachmentFilename)\""
+            ]
+        )
+        XCTAssertEqual(
+            headerLines(in: injected, named: "Content-Disposition"),
+            [
+                "Content-Disposition: inline; filename=\"\(escapedInjectedAttachmentFilename)\"",
+                "Content-Disposition: attachment; filename=\"\(escapedInjectedAttachmentFilename)\""
+            ]
+        )
+        XCTAssertEqual(headerLines(in: injected, named: "Content-ID"), ["Content-ID: <cid-1>"])
+    }
+
+    func testBuildMultipartMessage_emptyFilename_fallsBackToAttachment() throws {
+        // Revert-check: MimeBuilder.sanitizeAttachmentFilename, applied in
+        // attachmentPartHeaders. An empty/whitespace name would otherwise emit
+        // name=""/filename="" — an unnamed, effectively undownloadable part.
+        let injected = try decodedMIME(
+            MimeBuilder.buildMultipartMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: [],
+                attachments: [
+                    AttachmentData(
+                        data: Data("attachment".utf8),
+                        filename: "   ",
+                        mimeType: "application/pdf"
+                    )
+                ]
+            )
+        )
+        XCTAssertEqual(
+            attachmentNameHeaderLines(in: injected),
+            ["Content-Type: application/pdf; name=\"attachment\""]
+        )
+        XCTAssertEqual(
+            headerLines(in: injected, named: "Content-Disposition"),
+            ["Content-Disposition: attachment; filename=\"attachment\""]
+        )
+    }
+
+    func testFormatFromHeader_backslashOnlyName_isQuotedAndEscaped() throws {
+        // Revert-check: the `\\` entry in MimeBuilder.formatFromHeader's needs-quoting
+        // trigger set. A display name whose only special character is a backslash would
+        // otherwise take the unquoted encodedName path and emit a bare backslash — an
+        // RFC 5322-invalid phrase.
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: "C:\\Users\\kevin"),
+            "\"C:\\\\Users\\\\kevin\" <sender@example.com>"
+        )
+
+        let injected = try decodedMIME(
+            MimeBuilder.buildSimpleMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: "C:\\Users\\kevin",
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: []
+            )
+        )
+        XCTAssertEqual(
+            headerLines(in: injected, named: "From"),
+            ["From: \"C:\\\\Users\\\\kevin\" <sender@example.com>"]
         )
     }
 

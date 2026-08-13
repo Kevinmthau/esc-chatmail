@@ -117,16 +117,12 @@ extension MimeBuilder {
             if hasInlineAttachments {
                 // Add inline attachments
                 for attachment in inlineAttachments {
-                    let safeFilename = quoteParameterValue(attachment.filename)
-                    let safeMimeType = sanitizeHeaderValue(attachment.mimeType)
-                    let safeContentId = sanitizeHeaderValue(attachment.contentId)
-
                     mime += "--\(relatedBoundary)\r\n"
-                    mime += "Content-Type: \(safeMimeType); name=\"\(safeFilename)\"\r\n"
-                    mime += "Content-Transfer-Encoding: base64\r\n"
-                    mime += "Content-ID: <\(safeContentId)>\r\n"
-                    mime += "Content-Disposition: inline; filename=\"\(safeFilename)\"\r\n"
-                    mime += "\r\n"
+                    mime += attachmentPartHeaders(
+                        mimeType: attachment.mimeType,
+                        filename: attachment.filename,
+                        contentId: attachment.contentId
+                    )
 
                     let base64String = attachment.data.base64EncodedString(options: .lineLength64Characters)
                     mime += base64String
@@ -139,14 +135,12 @@ extension MimeBuilder {
 
             // Add regular attachments
             for attachment in attachments {
-                let safeFilename = quoteParameterValue(attachment.filename)
-                let safeMimeType = sanitizeHeaderValue(attachment.mimeType)
-
                 mime += "--\(mixedBoundary)\r\n"
-                mime += "Content-Type: \(safeMimeType); name=\"\(safeFilename)\"\r\n"
-                mime += "Content-Transfer-Encoding: base64\r\n"
-                mime += "Content-Disposition: attachment; filename=\"\(safeFilename)\"\r\n"
-                mime += "\r\n"
+                mime += attachmentPartHeaders(
+                    mimeType: attachment.mimeType,
+                    filename: attachment.filename,
+                    contentId: nil
+                )
 
                 let base64String = attachment.data.base64EncodedString(options: .lineLength64Characters)
                 mime += base64String

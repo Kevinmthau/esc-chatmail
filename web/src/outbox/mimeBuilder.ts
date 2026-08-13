@@ -407,9 +407,9 @@ export function sanitizeMimeType(mimeType: string): string {
 
 /**
  * Escapes a value for an RFC 2045 quoted-string parameter (`filename="…"`):
- * backslashes first, then quotes. Deviation from iOS, which interpolates the
- * filename raw — a name containing `"` would otherwise close the parameter
- * early and let the rest of the name be parsed as header syntax.
+ * backslashes first, then quotes. Matches iOS's MimeBuilder.quoteParameterValue
+ * (same order) — a name containing `"` would otherwise close the parameter early
+ * and let the rest of the name be parsed as header syntax.
  *
  * Non-ASCII stays raw UTF-8 inside the quoted string, matching iOS: strictly
  * RFC 2045 headers are ASCII (RFC 2231 `filename*=` is the conformant spell),

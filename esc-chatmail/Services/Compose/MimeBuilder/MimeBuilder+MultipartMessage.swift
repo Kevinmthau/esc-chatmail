@@ -55,12 +55,12 @@ extension MimeBuilder {
 
         // Attachments
         for attachment in attachments {
-            let safeFilename = quoteParameterValue(attachment.filename)
             mime += "--\(boundary)\r\n"
-            mime += "Content-Type: \(sanitizeHeaderValue(attachment.mimeType)); name=\"\(safeFilename)\"\r\n"
-            mime += "Content-Transfer-Encoding: base64\r\n"
-            mime += "Content-Disposition: attachment; filename=\"\(safeFilename)\"\r\n"
-            mime += "\r\n"
+            mime += attachmentPartHeaders(
+                mimeType: attachment.mimeType,
+                filename: attachment.filename,
+                contentId: nil
+            )
 
             // Convert to standard base64 (not base64url)
             let base64String = attachment.data.base64EncodedString(options: .lineLength64Characters)
