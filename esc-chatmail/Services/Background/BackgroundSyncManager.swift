@@ -82,6 +82,14 @@ final class BackgroundSyncManager {
     private let authoritativeSyncExecutorProvider: @MainActor @Sendable () -> any BackgroundMailboxSyncExecuting
     private let authoritativeSyncReadiness: @Sendable () async -> Bool
     private let authoritativeSyncIsAuthenticated: @MainActor @Sendable () -> Bool
+    /// Takes a background-execution assertion and returns the closure that
+    /// releases it. `armBackgroundTasksForSceneBackground()`'s pending checks
+    /// are async, so without the assertion iOS could suspend the process
+    /// between the scene transition and the deferred submits, silently losing
+    /// the arm for that backgrounding. The default releases on UIKit's
+    /// expiration handler too (`SceneBackgroundAssertionLatch`) — an unended
+    /// assertion past its grant is a watchdog kill, not a suspension.
+    private let beginSceneBackgroundAssertion: @MainActor @Sendable () -> (@MainActor @Sendable () -> Void)
     /// Characterization tests can still exercise the retired delta writer, but
     /// production routes every new and already-submitted request through the
     /// same model-v3 executor used for foreground sync.
@@ -106,6 +114,11 @@ final class BackgroundSyncManager {
         },
         syncCoordinatorProvider: @escaping @MainActor @Sendable () -> BackgroundSyncMessageCoordinating = {
             SyncEngine.shared
+        },
+        beginSceneBackgroundAssertion: @escaping @MainActor @Sendable () -> (@MainActor @Sendable () -> Void) = {
+            let latch = SceneBackgroundAssertionLatch()
+            latch.begin(name: "BackgroundSyncManager.armBackgroundTasksForSceneBackground")
+            return { latch.end() }
         }
     ) {
         self.taskScheduler = taskScheduler
@@ -125,6 +138,7 @@ final class BackgroundSyncManager {
         self.authoritativeSyncExecutorProvider = authoritativeSyncExecutorProvider
         self.authoritativeSyncReadiness = authoritativeSyncReadiness
         self.authoritativeSyncIsAuthenticated = authoritativeSyncIsAuthenticated
+        self.beginSceneBackgroundAssertion = beginSceneBackgroundAssertion
         self.legacyDeltaSyncEnabled = legacyDeltaSyncEnabled
 
         setupTaskHandlers()
@@ -145,12 +159,76 @@ final class BackgroundSyncManager {
         taskScheduler.registerBackgroundTasks()
     }
 
-    func scheduleAppRefresh() {
-        taskScheduler.scheduleAppRefresh()
+    /// Arms both background-task requests when the scene enters the background.
+    ///
+    /// The policy lives here rather than in the scene handler so it stays
+    /// spy-testable (the App struct runs under no test plan). Both submits are
+    /// guarded because a `BGTaskScheduler` re-submit with a pending identifier
+    /// REPLACES the pending request: unguarded scheduling on every
+    /// backgrounding postponed the processing task indefinitely (the scene
+    /// handler's original bug), and an unguarded refresh re-arm resets a
+    /// sooner-dated backoff/catch-up retry sharing the refresh identifier to
+    /// the plain 15-minute cadence. Skipping the refresh re-arm never
+    /// postpones it: every refresh submit path uses a delay of at most
+    /// 15 minutes, so a pending request always begins no later than a fresh
+    /// submit would.
+    ///
+    /// The pending checks are async (`getPendingTaskRequests`), so the submits
+    /// no longer complete synchronously inside the scene callback; the
+    /// background-execution assertion taken here, before the transition
+    /// completes, keeps the process runnable until the arm finishes —
+    /// restoring the schedule-before-suspend guarantee the synchronous calls
+    /// had.
+    @MainActor
+    func armBackgroundTasksForSceneBackground() {
+        guard authoritativeSyncIsAuthenticated() else {
+            Log.debug("Scene-background arm skipped: cannot access mailbox", category: .background)
+            return
+        }
+        let endAssertion = beginSceneBackgroundAssertion()
+        Task {
+            defer { endAssertion() }
+            let refreshPending = await taskScheduler.isAppRefreshTaskPending()
+            let processingPending = await taskScheduler.isProcessingTaskPending()
+            // Re-checked in the same MainActor slice as the submits: sign-out
+            // drops the gate and then sweeps pending requests
+            // (cancelPendingTaskRequests) while this Task is suspended in the
+            // pending fetches, so a submit behind a stale gate would re-arm
+            // the wakes that sweep just disarmed. With gate and submits in
+            // one suspension-free slice, an arm either wholly precedes the
+            // sweep (its submits get swept) or observes the dropped gate and
+            // submits nothing.
+            guard authoritativeSyncIsAuthenticated() else {
+                Log.debug("Scene-background arm abandoned: signed out during pending checks", category: .background)
+                return
+            }
+            if refreshPending {
+                Log.debug("Skipping still-pending refresh request", category: .background)
+            } else {
+                taskScheduler.scheduleAppRefresh()
+            }
+            if processingPending {
+                Log.debug("Skipping still-pending processing request", category: .background)
+            } else {
+                taskScheduler.scheduleProcessingTask()
+            }
+        }
     }
 
-    func scheduleProcessingTask() {
-        taskScheduler.scheduleProcessingTask()
+    /// Submits a processing-task request only when none is already pending.
+    /// A `BGTaskScheduler` re-submit with the same identifier REPLACES the
+    /// pending request and pushes its `earliestBeginDate` another hour out,
+    /// so a caller that fires on every scene-background transition would
+    /// otherwise postpone the processing task indefinitely.
+    ///
+    /// Best-effort, not atomic: the pending check and the submit straddle an
+    /// await, so concurrent arm attempts can race. A racing re-submit shifts
+    /// `earliestBeginDate` only by the race window (each submit re-anchors to
+    /// its own "now"), never by the pending request's full interval.
+    func scheduleProcessingTaskIfNotPending() async {
+        if await !taskScheduler.isProcessingTaskPending() {
+            taskScheduler.scheduleProcessingTask()
+        }
     }
 
     // MARK: - Task Handlers
@@ -234,14 +312,12 @@ final class BackgroundSyncManager {
                 // A short refresh slice should not grow into initial sync or a
                 // long catch-up run. Ensure the processing queue has an
                 // opportunity to take over while refresh retries remain small.
-                // Only submit when no processing request is pending: a
-                // re-submit REPLACES the pending request and pushes its
-                // earliestBeginDate another hour out, so frequent refresh
-                // slices would otherwise starve the very task this escalation
-                // exists to arm.
-                if await !taskScheduler.isProcessingTaskPending() {
-                    taskScheduler.scheduleProcessingTask()
-                }
+                // The guarded helper skips the submit while a request is
+                // pending — an unguarded re-submit would REPLACE it and push
+                // its earliestBeginDate another hour out, so frequent refresh
+                // slices would starve the very task this escalation exists
+                // to arm.
+                await scheduleProcessingTaskIfNotPending()
             }
             scheduleCatchUpRetry()
             return false
