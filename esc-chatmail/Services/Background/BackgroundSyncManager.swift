@@ -181,14 +181,37 @@ final class BackgroundSyncManager {
     /// had.
     @MainActor
     func armBackgroundTasksForSceneBackground() {
-        guard authoritativeSyncIsAuthenticated() else { return }
+        guard authoritativeSyncIsAuthenticated() else {
+            Log.debug("Scene-background arm skipped: cannot access mailbox", category: .background)
+            return
+        }
         let endAssertion = beginSceneBackgroundAssertion()
         Task {
-            if await !taskScheduler.isAppRefreshTaskPending() {
+            defer { endAssertion() }
+            let refreshPending = await taskScheduler.isAppRefreshTaskPending()
+            let processingPending = await taskScheduler.isProcessingTaskPending()
+            // Re-checked in the same MainActor slice as the submits: sign-out
+            // drops the gate and then sweeps pending requests
+            // (cancelPendingTaskRequests) while this Task is suspended in the
+            // pending fetches, so a submit behind a stale gate would re-arm
+            // the wakes that sweep just disarmed. With gate and submits in
+            // one suspension-free slice, an arm either wholly precedes the
+            // sweep (its submits get swept) or observes the dropped gate and
+            // submits nothing.
+            guard authoritativeSyncIsAuthenticated() else {
+                Log.debug("Scene-background arm abandoned: signed out during pending checks", category: .background)
+                return
+            }
+            if refreshPending {
+                Log.debug("Skipping still-pending refresh request", category: .background)
+            } else {
                 taskScheduler.scheduleAppRefresh()
             }
-            await scheduleProcessingTaskIfNotPending()
-            endAssertion()
+            if processingPending {
+                Log.debug("Skipping still-pending processing request", category: .background)
+            } else {
+                taskScheduler.scheduleProcessingTask()
+            }
         }
     }
 

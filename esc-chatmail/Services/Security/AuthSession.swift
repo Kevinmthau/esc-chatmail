@@ -699,7 +699,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // Disarm pending background sync wakes. This runs after
         // isAuthenticated is false and inside quiescence, so neither the
         // scene handler nor an in-flight background run can re-arm a request
-        // behind this sweep.
+        // behind this sweep: the scene arm re-checks its auth gate in the
+        // same MainActor slice as its submits, so it either submitted before
+        // this sweep (and is swept here) or observes the dropped flag and
+        // arms nothing.
         cancelBackgroundTaskRequests()
 
         // Clear conversation cache to prevent leaking previous user's data
@@ -1071,7 +1074,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // Every caller concludes signed out with credentials cleared, so any
         // pending BGTask request is the same perpetual no-op wake sign-out
         // disarms. All call sites hold quiescence, and clearAuthState() above
-        // dropped the flag the scene handler re-arms on.
+        // dropped the flag the scene arm re-checks in the same MainActor
+        // slice as its submits — an in-flight arm either already submitted
+        // (swept here) or arms nothing.
         cancelBackgroundTaskRequests()
 
         // Persist before the first delete so a crash or partial Keychain

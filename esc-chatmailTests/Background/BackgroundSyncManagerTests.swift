@@ -290,11 +290,12 @@ final class BackgroundSyncManagerTests: XCTestCase {
     }
 
     // Revert-check: fails if `armBackgroundTasksForSceneBackground()` stops
-    // routing its processing submit through
-    // `scheduleProcessingTaskIfNotPending()` (e.g. a direct
-    // `taskScheduler.scheduleProcessingTask()` call) — the unguarded
-    // scene-background submit is the exact regression the guarded method
-    // exists to prevent, now pinned at the entry point the scene handler uses.
+    // consulting the processing identifier's pending state before its submit —
+    // the unguarded scene-background submit is the exact regression this arm
+    // exists to prevent, pinned at the entry point the scene handler uses.
+    // (The submit is deliberately direct rather than routed through
+    // `scheduleProcessingTaskIfNotPending()`: it must share one MainActor
+    // slice with the sign-out gate re-check below.)
     func testArmBackgroundTasksForSceneBackground_doesNotReplacePendingProcessingRequest() async {
         let manager = makeManager(legacyDeltaSyncEnabled: false)
         taskScheduler.processingTaskPending = true
@@ -327,6 +328,44 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(sceneAssertions.beginCount, 0)
         XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 0)
         XCTAssertEqual(taskScheduler.processingScheduleCount, 0)
+    }
+
+    // Revert-check: fails if `armBackgroundTasksForSceneBackground()` stops
+    // re-checking `authoritativeSyncIsAuthenticated` in the same MainActor
+    // slice as its submits. The entry gate alone is insufficient: sign-out
+    // drops the gate and then sweeps pending requests
+    // (`cancelPendingTaskRequests`) while the arm is suspended in its pending
+    // fetches, and a submit behind that stale gate re-arms the very wakes the
+    // sweep just disarmed — the signed-out device then wakes on the sync
+    // cadence indefinitely, the exact failure #171's disarm exists to prevent.
+    func testArmBackgroundTasksForSceneBackground_signOutDuringPendingChecks_armsNothing() async {
+        let authenticated = AuthGateBox(value: true)
+        taskScheduler.onPendingCheck = {
+            await MainActor.run { authenticated.value = false }
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncIsAuthenticated: { authenticated.value }
+        )
+
+        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
+        await waitUntil { self.sceneAssertions.endCount == 1 }
+
+        XCTAssertEqual(
+            sceneAssertions.beginCount,
+            1,
+            "The gate passed at entry, so the assertion was taken"
+        )
+        XCTAssertEqual(
+            taskScheduler.appRefreshScheduleCount,
+            0,
+            "A sign-out during the pending checks must abandon the refresh submit"
+        )
+        XCTAssertEqual(
+            taskScheduler.processingScheduleCount,
+            0,
+            "A sign-out during the pending checks must abandon the processing submit"
+        )
     }
 
     // Revert-check: fails if `armBackgroundTasksForSceneBackground()` stops
@@ -1574,14 +1613,38 @@ private final class BackgroundTaskSchedulerSpy: BackgroundTaskScheduling {
         processingTaskPending = true
     }
 
-    func isProcessingTaskPending() async -> Bool { processingTaskPending }
-    func isAppRefreshTaskPending() async -> Bool { appRefreshTaskPending }
+    /// Runs inside the arm's suspension points, letting tests mutate state
+    /// (e.g. drop the auth gate) exactly where a concurrent sign-out could.
+    var onPendingCheck: (@Sendable () async -> Void)?
+
+    func isProcessingTaskPending() async -> Bool {
+        await onPendingCheck?()
+        return processingTaskPending
+    }
+
+    func isAppRefreshTaskPending() async -> Bool {
+        await onPendingCheck?()
+        return appRefreshTaskPending
+    }
 
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval) {
         retryBackoffs.append(backoff)
         // Backoff retries submit the refresh identifier.
         appRefreshTaskPending = true
     }
+}
+
+/// MainActor-isolated mutable authentication gate: tests flip it at a precise
+/// suspension point inside the arm (via the scheduler spy's `onPendingCheck`
+/// hook) to model a sign-out landing while the arm is suspended. All access —
+/// the manager's `@MainActor` gate closure and the hook's flip — goes through
+/// the MainActor, so reads and writes cannot race.
+@MainActor
+private final class AuthGateBox {
+    var value: Bool
+    /// Nonisolated so nonisolated async test bodies can construct the box;
+    /// a nonisolated init may initialize isolated stored properties directly.
+    nonisolated init(value: Bool) { self.value = value }
 }
 
 /// Records the background-execution assertion pairing around
