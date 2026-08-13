@@ -490,6 +490,76 @@ final class AuthSessionTests: XCTestCase {
         }
     }
 
+    // Revert-check: fails if reopenPreSignInAccountWork(after:)'s
+    // undrained-sends leg starts rolling back downloads and participant caches
+    // the way its superseded leg does — the recorded events grow the two
+    // rollback entries the assertion excludes. No newer transition exists
+    // whose teardown that rollback would protect; it would only strip a live,
+    // published session of the capabilities it retains on top of the send
+    // latch it already suffers.
+    //
+    // HONEST SCOPE: the undrained entry is manufactured by re-adopting an
+    // already-finished reservation via handOff(_:to:) from the injected
+    // cleanupDownloads closure, after signIn's cancelAndAwaitAll() has
+    // drained. No production caller reuses a finished reservation, and
+    // signIn's own drain makes this state unreachable through real send
+    // flows.
+    func testPreSignInReopenDegradesInsteadOfRollingBackWhenSendsAreUndrained() async throws {
+        let cleanup = AuthSessionCleanupRecorder()
+        let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
+        let finishedReservation = try XCTUnwrap(outboundTaskRegistry.reserve())
+        outboundTaskRegistry.finish(finishedReservation)
+        let leakGate = AuthSessionDownloadDrainGate()
+        let leakedTask = Task { await leakGate.waitUntilReleased() }
+        let cancellation = NSError(domain: kGIDSignInErrorDomain, code: -5)
+        let session = makeAuthSession(
+            interactiveGoogleSignIn: { _, _, completion in
+                completion(nil, cancellation)
+            },
+            clearParticipantCaches: { cleanup.record("participants-closed") },
+            reopenParticipantCaches: { cleanup.record("participants-reopened") },
+            cleanupDownloads: { @MainActor in
+                cleanup.record("downloads-closed")
+                // Runs after signIn's cancelAndAwaitAll() has drained, so this
+                // plants the undrained entry the outbound reopen will find.
+                outboundTaskRegistry.handOff(finishedReservation, to: leakedTask)
+            },
+            reopenDownloads: {
+                cleanup.record("downloads-reopened")
+                return true
+            },
+            outboundTaskRegistry: outboundTaskRegistry
+        )
+        session.isAuthenticated = true
+
+        do {
+            try await session.signIn(presenting: UIViewController())
+            XCTFail("Expected interactive sign-in cancellation")
+        } catch let error as NSError {
+            XCTAssertEqual(error.domain, kGIDSignInErrorDomain)
+            XCTAssertEqual(error.code, -5)
+        }
+
+        XCTAssertEqual(
+            cleanup.events,
+            [
+                "participants-closed",
+                "downloads-closed",
+                "participants-reopened",
+                "downloads-reopened"
+            ],
+            "An undrained send must degrade the pre-sign-in reopen, not widen it into the superseded rollback"
+        )
+        XCTAssertTrue(session.isAuthenticated)
+        XCTAssertNil(
+            outboundTaskRegistry.reserve(),
+            "Outbound admission stays latched until the leaked send unwinds"
+        )
+
+        await leakGate.release()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+    }
+
     func testRetryableStartupRestoreThenInteractiveSignInSkipsLaterBootstrapRestore() async {
         let cleanup = AuthSessionCleanupRecorder()
         let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
@@ -520,7 +590,7 @@ final class AuthSessionTests: XCTestCase {
         // Model the account boundary established by a successful interactive
         // sign-in after the transient restore left the signed-out UI visible.
         let interactiveTransition = outboundTaskRegistry.closeAdmission()
-        XCTAssertTrue(outboundTaskRegistry.reopenAdmission(after: interactiveTransition))
+        XCTAssertEqual(outboundTaskRegistry.reopenAdmission(after: interactiveTransition), .reopened)
         session.isAuthenticated = true
 
         let backgroundResult = await bootstrap.prepareForBackgroundSync()
@@ -1985,6 +2055,66 @@ final class AuthSessionTests: XCTestCase {
             registry.reserve(),
             "A superseded transition must leave every account-scoped admission closed"
         )
+    }
+
+    // Revert-check: fails if AuthSession.reopenAccountWork(after:) maps
+    // OutboundAdmissionReopenResult.undrainedSends back to
+    // .supersededByAccountRemoval (the conflation this split removed) or stops
+    // rolling back the already-reopened subsystems. No queued sign-out exists
+    // in this state, so a supersession verdict would tell the restore path
+    // that another transition owns the staged credentials when nothing does.
+    //
+    // HONEST SCOPE: the undrained reservation is manufactured by reserving
+    // before closeAdmission() and never finishing. AuthSession's own
+    // transition paths cannot reach this state today, because every one of
+    // them runs cancelAndAwaitAll() — which waits for the entry table to
+    // drain — before any reopen. This pins the contract against a future
+    // leak, not a reachable regression.
+    func testUndrainedOutboundSendReportsLatchedRefusalAndRollsBack() async throws {
+        let registry = OutboundTaskRegistry(admissionOpen: true)
+        let leakedReservation = try XCTUnwrap(registry.reserve())
+        let transition = registry.closeAdmission()
+        let cleanup = AuthSessionCleanupRecorder()
+        let session = makeAuthSession(
+            clearParticipantCaches: { cleanup.record("participants-rollback") },
+            reopenParticipantCaches: { cleanup.record("participants-reopened") },
+            cleanupDownloads: { cleanup.record("downloads-rollback") },
+            reopenDownloads: {
+                cleanup.record("downloads-reopened")
+                return true
+            },
+            cleanupHTMLContent: { cleanup.record("html-rollback") },
+            reopenHTMLContent: { cleanup.record("html-reopened") },
+            outboundTaskRegistry: registry
+        )
+
+        let reopenOutcome = await session.reopenAccountWork(after: transition)
+
+        XCTAssertEqual(
+            reopenOutcome,
+            .latchedRefusal,
+            "An undrained send has no superseding sign-out to own it; reporting supersession would be false"
+        )
+        XCTAssertEqual(
+            cleanup.events,
+            [
+                "html-reopened",
+                "participants-reopened",
+                "downloads-reopened",
+                "downloads-rollback",
+                "participants-rollback",
+                "html-rollback"
+            ]
+        )
+        XCTAssertNil(
+            registry.reserve(),
+            "An undrained send must leave every account-scoped admission closed"
+        )
+
+        // The latch is the leaked reservation, not the generation: draining it
+        // lets this same transition reopen outbound admission.
+        registry.finish(leakedReservation)
+        XCTAssertEqual(registry.reopenAdmission(after: transition), .reopened)
     }
 
     func testSignOutWaitsForActiveAccountWorkBeforeResettingStore() async {

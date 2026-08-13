@@ -12,6 +12,25 @@ struct OutboundSendReservation: Equatable, Sendable {
     fileprivate let id: UUID
 }
 
+/// How `OutboundTaskRegistry.reopenAdmission(after:)` resolved.
+///
+/// The two refusal causes are not interchangeable: supersession means a newer
+/// transition owns the account boundary (including its own credential
+/// cleanup), while undrained sends mean this transition is still the owner and
+/// admission is merely latched closed until the leaked work unwinds.
+enum OutboundAdmissionReopenResult: Equatable, Sendable {
+    /// This transition is the most recent one and every earlier send has
+    /// drained; admission is open again.
+    case reopened
+    /// A newer transition closed admission after this one. That transition
+    /// owns the boundary now; the caller must unwind without reopening.
+    case supersededByNewerTransition
+    /// This transition is still the most recent one, but at least one send
+    /// reservation has not drained. Admission stays closed until that work
+    /// unwinds; no newer transition exists to own the refusal.
+    case undrainedSends
+}
+
 /// Account-scoped boundary for outbound sends.
 ///
 /// This stays independent of `SyncRunCoordinator`: sending and syncing may run
@@ -68,14 +87,21 @@ final class OutboundTaskRegistry {
     /// has drained. A queued newer transition therefore cannot be undone by an
     /// older sign-in finishing later.
     @discardableResult
-    func reopenAdmission(after transition: OutboundAccountTransition) -> Bool {
-        guard transition.generation == transitionGeneration,
-              entries.isEmpty else {
-            return false
+    func reopenAdmission(after transition: OutboundAccountTransition) -> OutboundAdmissionReopenResult {
+        // Supersession is checked first on purpose. When a stale transition
+        // also finds undrained entries, the newer transition owns the boundary
+        // and the drain; reporting a latch instead would route a launch
+        // restore into discarding credentials whose cleanup the queued
+        // sign-out already owns.
+        guard transition.generation == transitionGeneration else {
+            return .supersededByNewerTransition
+        }
+        guard entries.isEmpty else {
+            return .undrainedSends
         }
 
         acceptsNewSends = true
-        return true
+        return .reopened
     }
 
     func reserve() -> OutboundSendReservation? {
