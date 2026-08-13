@@ -19,15 +19,17 @@ struct OutboundSendReservation: Equatable, Sendable {
 /// cleanup), while undrained sends mean this transition is still the owner and
 /// admission is merely latched closed until the leaked work unwinds.
 enum OutboundAdmissionReopenResult: Equatable, Sendable {
-    /// This transition is the most recent one and every earlier send has
-    /// drained; admission is open again.
+    /// This transition is the most recent one and admission is open for it —
+    /// either every earlier send had drained and this call opened it, or a
+    /// prior call for the same transition already had.
     case reopened
     /// A newer transition closed admission after this one. That transition
     /// owns the boundary now; the caller must unwind without reopening.
     case supersededByNewerTransition
-    /// This transition is still the most recent one, but at least one send
-    /// reservation has not drained. Admission stays closed until that work
-    /// unwinds; no newer transition exists to own the refusal.
+    /// This transition is still the most recent one, but admission is closed
+    /// and at least one send reservation has not drained. Draining alone
+    /// never reopens admission — only a later reopen call for a current
+    /// transition can — and no newer transition exists to own the refusal.
     case undrainedSends
 }
 
@@ -85,8 +87,9 @@ final class OutboundTaskRegistry {
 
     /// Reopens only for the most recent transition, after every earlier send
     /// has drained. A queued newer transition therefore cannot be undone by an
-    /// older sign-in finishing later.
-    @discardableResult
+    /// older sign-in finishing later. The verdict drives credential
+    /// disposition, so it carries no `@discardableResult`: every caller must
+    /// branch on it.
     func reopenAdmission(after transition: OutboundAccountTransition) -> OutboundAdmissionReopenResult {
         // Supersession is checked first on purpose. When a stale transition
         // also finds undrained entries, the newer transition owns the boundary
@@ -95,6 +98,13 @@ final class OutboundTaskRegistry {
         // sign-out already owns.
         guard transition.generation == transitionGeneration else {
             return .supersededByNewerTransition
+        }
+        // Already open for this same transition: a repeat call must not
+        // mistake the current account's healthy in-flight sends for an
+        // undrained latch. .undrainedSends is reserved for a closed admission
+        // whose old-account work failed to drain.
+        if acceptsNewSends {
+            return .reopened
         }
         guard entries.isEmpty else {
             return .undrainedSends

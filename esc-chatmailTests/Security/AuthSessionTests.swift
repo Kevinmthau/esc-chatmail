@@ -551,13 +551,77 @@ final class AuthSessionTests: XCTestCase {
             "An undrained send must degrade the pre-sign-in reopen, not widen it into the superseded rollback"
         )
         XCTAssertTrue(session.isAuthenticated)
+        // Bind-and-finish the probe: a non-nil result is already a failure,
+        // and leaving its entry in the table would park the trailing
+        // cancelAndAwaitAll() forever, turning that failure into a suite hang.
+        let latchProbe = outboundTaskRegistry.reserve()
         XCTAssertNil(
-            outboundTaskRegistry.reserve(),
-            "Outbound admission stays latched until the leaked send unwinds"
+            latchProbe,
+            "Outbound admission stays latched while the leaked send is outstanding"
         )
+        if let latchProbe {
+            outboundTaskRegistry.finish(latchProbe)
+        }
 
         await leakGate.release()
         await outboundTaskRegistry.cancelAndAwaitAll()
+    }
+
+    // Revert-check: fails if reopenPreSignInAccountWork(after:)'s
+    // .supersededByNewerTransition leg stops rolling back downloads and
+    // participant caches — e.g. it collapses into the undrained-sends degrade
+    // leg or a bare break. A failed sign-in superseded by a queued sign-out
+    // would then leave the stale account's downloads and caches admitted
+    // while the sign-out's teardown runs.
+    func testPreSignInReopenRollsBackWhenSupersededByQueuedSignOut() async {
+        let cleanup = AuthSessionCleanupRecorder()
+        let outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
+        let cancellation = NSError(domain: kGIDSignInErrorDomain, code: -5)
+        let session = makeAuthSession(
+            interactiveGoogleSignIn: { _, _, completion in
+                completion(nil, cancellation)
+            },
+            clearParticipantCaches: { cleanup.record("participants-closed") },
+            reopenParticipantCaches: { cleanup.record("participants-reopened") },
+            cleanupDownloads: { @MainActor in
+                cleanup.record("downloads-closed")
+                // Model a sign-out queueing behind the auth gate mid-sign-in:
+                // its closeAdmission() runs synchronously pre-gate and bumps
+                // the generation, superseding this sign-in's token.
+                outboundTaskRegistry.closeAdmission()
+            },
+            reopenDownloads: {
+                cleanup.record("downloads-reopened")
+                return true
+            },
+            outboundTaskRegistry: outboundTaskRegistry
+        )
+        session.isAuthenticated = true
+
+        do {
+            try await session.signIn(presenting: UIViewController())
+            XCTFail("Expected interactive sign-in cancellation")
+        } catch let error as NSError {
+            XCTAssertEqual(error.domain, kGIDSignInErrorDomain)
+            XCTAssertEqual(error.code, -5)
+        }
+
+        XCTAssertEqual(
+            cleanup.events,
+            [
+                "participants-closed",
+                "downloads-closed",
+                "participants-reopened",
+                "downloads-reopened",
+                "downloads-closed",
+                "participants-closed"
+            ],
+            "A superseded pre-sign-in reopen must roll back every stale account-work reopen"
+        )
+        XCTAssertNil(
+            outboundTaskRegistry.reserve(),
+            "Admission belongs to the superseding transition and must stay closed"
+        )
     }
 
     func testRetryableStartupRestoreThenInteractiveSignInSkipsLaterBootstrapRestore() async {
@@ -2106,10 +2170,17 @@ final class AuthSessionTests: XCTestCase {
                 "html-rollback"
             ]
         )
+        // Bind-and-finish the probe so a failing run doesn't leak an entry
+        // that would cascade the reopen assertion below into a second,
+        // misleading failure.
+        let admissionProbe = registry.reserve()
         XCTAssertNil(
-            registry.reserve(),
+            admissionProbe,
             "An undrained send must leave every account-scoped admission closed"
         )
+        if let admissionProbe {
+            registry.finish(admissionProbe)
+        }
 
         // The latch is the leaked reservation, not the generation: draining it
         // lets this same transition reopen outbound admission.

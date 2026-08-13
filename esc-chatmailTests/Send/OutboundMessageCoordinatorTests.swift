@@ -693,6 +693,32 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(outboundTaskRegistry.reopenAdmission(after: newerTransition), .reopened)
     }
 
+    // Revert-check: fails if reopenAdmission(after:) drops its already-open
+    // short-circuit and reports .undrainedSends for a healthy, open admission
+    // with in-flight sends of the current account — a verdict AuthSession
+    // answers with the destructive .latchedRefusal rollback against a session
+    // that is working correctly.
+    func testRegistry_repeatReopenWithLiveSendsReportsReopenedNotUndrained() throws {
+        let transition = outboundTaskRegistry.closeAdmission()
+        XCTAssertEqual(outboundTaskRegistry.reopenAdmission(after: transition), .reopened)
+        let liveSend = try XCTUnwrap(outboundTaskRegistry.reserve())
+
+        XCTAssertEqual(
+            outboundTaskRegistry.reopenAdmission(after: transition),
+            .reopened,
+            "A repeat reopen for an open admission must not mistake live sends for an undrained latch"
+        )
+        let admissionStillOpen = outboundTaskRegistry.reserve()
+        XCTAssertNotNil(
+            admissionStillOpen,
+            "The repeat reopen must leave the open admission untouched"
+        )
+        if let admissionStillOpen {
+            outboundTaskRegistry.finish(admissionStillOpen)
+        }
+        outboundTaskRegistry.finish(liveSend)
+    }
+
     func testRegistry_closeDuringSuccessfulMarkerPersistenceDrainsAdmittedTask() async throws {
         let gate = OutboundSendTestGate()
         let reservation = try XCTUnwrap(outboundTaskRegistry.reserve())
