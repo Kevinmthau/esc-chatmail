@@ -89,6 +89,10 @@ function rfc2047(text: string): string {
   return `=?UTF-8?B?${Buffer.from(text, 'utf8').toString('base64')}?=`
 }
 
+function decodeRfc2047(word: string): string {
+  return Buffer.from(word.slice('=?UTF-8?B?'.length, -2), 'base64').toString('utf8')
+}
+
 describe('sanitizeHeaderValue', () => {
   it('replaces CR/LF sequences with spaces and trims', () => {
     expect(sanitizeHeaderValue('  a\r\nb\rc\nd  ')).toBe('a b c d')
@@ -103,6 +107,16 @@ describe('encodeHeaderIfNeeded', () => {
   it('RFC-2047 encodes non-ASCII as UTF-8 base64', () => {
     expect(encodeHeaderIfNeeded('Zoë Müller')).toBe(rfc2047('Zoë Müller'))
     expect(encodeHeaderIfNeeded('Zoë Müller')).toBe('=?UTF-8?B?Wm/DqyBNw7xsbGVy?=')
+  })
+
+  it('splits long values into legal encoded-words at UTF-8 character boundaries', () => {
+    const text = `${'A'.repeat(44)}é`
+    const words = encodeHeaderIfNeeded(text).split('\r\n ')
+
+    expect(encodeHeaderIfNeeded(`${'A'.repeat(43)}é`)).toBe(rfc2047(`${'A'.repeat(43)}é`))
+    expect(words).toEqual([rfc2047('A'.repeat(44)), rfc2047('é')])
+    expect(words.every((word) => word.length <= 75)).toBe(true)
+    expect(words.map(decodeRfc2047).join('')).toBe(text)
   })
 })
 
@@ -150,6 +164,25 @@ describe('formatFromHeader', () => {
 
   it('still quotes the ASCII twin of a specials name', () => {
     expect(formatFromHeader('a@b.com', 'Ekstrom, Asa')).toBe('"Ekstrom, Asa" <a@b.com>')
+  })
+
+  it('folds a long encoded display name into legal whole-character encoded-words', () => {
+    const name = `${'A'.repeat(43)},🙂`
+    const header = formatFromHeader('a@b.com', name)
+    const words = header.split('\r\n ').slice(0, -1)
+
+    expect(header).toBe(`${rfc2047('A'.repeat(42))}\r\n ${rfc2047('A,🙂')}\r\n <a@b.com>`)
+    expect(words.every((word) => word.length <= 75)).toBe(true)
+    expect(words.map(decodeRfc2047).join('')).toBe(name)
+    expect(`From: ${header}`.split('\r\n').every((line) => line.length <= 76)).toBe(true)
+  })
+
+  it('folds the address when it would overflow a single encoded-name line', () => {
+    const name = `${'A'.repeat(38)}🙂`
+    const header = formatFromHeader('sender@example.com', name)
+
+    expect(header).toBe(`${rfc2047(name)}\r\n <sender@example.com>`)
+    expect(`From: ${header}`.split('\r\n').every((line) => line.length <= 76)).toBe(true)
   })
 })
 
@@ -210,6 +243,21 @@ describe('buildNew', () => {
     )
     expect(encoded).toContain(`From: ${rfc2047('Zoë Müller')} <a@b.com>\r\n`)
     expect(encoded).toContain(`Subject: ${rfc2047('Grüße')}\r\n`)
+  })
+
+  it('folds long encoded subjects within RFC 2047 line limits', () => {
+    mockUuid()
+    const subject = `${'A'.repeat(38)}🙂`
+    const mime = buildNew(
+      { from: { email: 'a@b.com' }, to: ['x@y.com'], subject, textBody: 'b' },
+      { now: NOW },
+    )
+    const subjectLines = mime
+      .split('\r\n')
+      .filter((line) => line.startsWith('Subject: ') || line.startsWith(' =?UTF-8?B?'))
+
+    expect(mime).toContain(`Subject: ${rfc2047('A'.repeat(38))}\r\n ${rfc2047('🙂')}\r\n`)
+    expect(subjectLines.every((line) => line.length <= 76)).toBe(true)
   })
 
   it('strips CRLF from every header value (header-injection defense)', () => {
