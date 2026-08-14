@@ -34,8 +34,14 @@ enum AccountWorkReopenOutcome: Hashable, CaseIterable, Sendable {
     case transientFailure
     /// A subsystem refused because work from the closed account is still
     /// outstanding — a drain that already awaited every task it owned did not
-    /// clear it. That admission stays closed until the leaked work unwinds, so
-    /// repeating this transition is not expected to help.
+    /// clear it (a leaked attachment operation, or an undrained outbound send
+    /// reservation). That admission stays closed until the leaked work
+    /// unwinds, so repeating this transition is not expected to help. Only
+    /// the outbound cause proves no superseding transition exists (the
+    /// registry checks transition currency before reporting its latch); the
+    /// download cause cannot check, and a sign-out queued mid-reopen behind
+    /// it is benign — gate-serialized after, and convergent with, the
+    /// restore's credential discard.
     case latchedRefusal
     /// A newer account transition (a queued sign-out) superseded this one. That
     /// transition owns the teardown, including credential cleanup, so this one
@@ -1149,30 +1155,45 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             // a superseded transition does rather than publishing a session
             // whose attachment work can never start.
             Log.error("Failed to reopen account download admission", category: .auth)
-            await cleanupDownloads()
-            await clearParticipantCaches()
-            do {
-                try await cleanupHTMLContent()
-            } catch {
-                Log.error("Failed to roll back account work after refused download reopen", category: .auth, error: error)
-            }
+            await rollBackReopenedAccountWork(after: "refused download reopen")
             return .latchedRefusal
         }
-        guard outboundTaskRegistry.reopenAdmission(after: transition) else {
+        switch outboundTaskRegistry.reopenAdmission(after: transition) {
+        case .reopened:
+            return .reopened
+        case .supersededByNewerTransition:
             // A newer account transition superseded this one while the async
             // reopen sequence was yielding. Return every component to the
             // closed state so the stale transition cannot expose partial work
             // during the newer teardown.
-            await cleanupDownloads()
-            await clearParticipantCaches()
-            do {
-                try await cleanupHTMLContent()
-            } catch {
-                Log.error("Failed to roll back account work after stale reopen", category: .auth, error: error)
-            }
+            await rollBackReopenedAccountWork(after: "stale reopen")
             return .supersededByAccountRemoval
+        case .undrainedSends:
+            // The transition is still current, but a send reservation survived
+            // the cancelAndAwaitAll() drain. No queued sign-out exists to own
+            // credential cleanup, so reporting supersession here would be
+            // false; this is the same latched shape as a refused download
+            // reopen and takes the same all-or-none rollback.
+            Log.error("Failed to reopen outbound admission: send reservation never drained", category: .auth)
+            await rollBackReopenedAccountWork(after: "refused outbound reopen")
+            return .latchedRefusal
         }
-        return .reopened
+    }
+
+    /// Rolls back every subsystem `reopenAccountWork(after:)` already
+    /// admitted, in the reverse of reopen order, so a refused transition
+    /// cannot expose partial work. Serves only that function's three
+    /// full-rollback refusal legs; the `.transientFailure` leg (HTML only)
+    /// and `reopenPreSignInAccountWork`'s deliberately partial rollback keep
+    /// their own shapes.
+    private func rollBackReopenedAccountWork(after failureContext: String) async {
+        await cleanupDownloads()
+        await clearParticipantCaches()
+        do {
+            try await cleanupHTMLContent()
+        } catch {
+            Log.error("Failed to roll back account work after \(failureContext)", category: .auth, error: error)
+        }
     }
 
     private func reopenPreSignInAccountWork(after transition: OutboundAccountTransition) async {
@@ -1186,12 +1207,24 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             // costs downloads and imports until relaunch. Degrade, don't widen.
             Log.error("Failed to reopen download admission for the pre-sign-in account", category: .auth)
         }
-        guard outboundTaskRegistry.reopenAdmission(after: transition) else {
+        switch outboundTaskRegistry.reopenAdmission(after: transition) {
+        case .reopened:
+            break
+        case .supersededByNewerTransition:
             // A newer transition superseded this failed sign-in while its
             // Google UI was active. Roll back every stale account-work reopen.
             await cleanupDownloads()
             await clearParticipantCaches()
-            return
+        case .undrainedSends:
+            // Same degrade-don't-widen shape as the refused download reopen
+            // above: no newer transition exists whose teardown a rollback
+            // would protect, so closing downloads and caches would only strip
+            // the still-published session of the capabilities it retains.
+            // Sending alone is lost — draining never reopens admission, so
+            // the latch holds until the next auth transition's
+            // drain-then-reopen cycle or a relaunch, not until the leaked
+            // reservation unwinds.
+            Log.error("Failed to reopen outbound admission for the pre-sign-in account", category: .auth)
         }
     }
 

@@ -618,15 +618,105 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let olderTransition = outboundTaskRegistry.closeAdmission()
         let newerTransition = outboundTaskRegistry.closeAdmission()
 
-        XCTAssertFalse(outboundTaskRegistry.reopenAdmission(after: olderTransition))
+        XCTAssertEqual(
+            outboundTaskRegistry.reopenAdmission(after: olderTransition),
+            .supersededByNewerTransition
+        )
         XCTAssertNil(outboundTaskRegistry.reserve())
-        XCTAssertTrue(outboundTaskRegistry.reopenAdmission(after: newerTransition))
+        XCTAssertEqual(outboundTaskRegistry.reopenAdmission(after: newerTransition), .reopened)
 
         let reservation = outboundTaskRegistry.reserve()
         XCTAssertNotNil(reservation)
         if let reservation {
             outboundTaskRegistry.finish(reservation)
         }
+    }
+
+    // Revert-check: fails if OutboundTaskRegistry.reopenAdmission(after:)
+    // collapses its two refusal causes back into one (the pre-split Bool):
+    // the undrained reservation stops reporting .undrainedSends, or draining
+    // it stops flipping the same transition's result to .reopened. AuthSession
+    // maps .undrainedSends to .latchedRefusal, whose restore disposition is
+    // credential discard — a supersession verdict would instead keep the
+    // credentials and wait for a queued sign-out that does not exist.
+    func testRegistry_undrainedReservationRefusesReopenUntilFinished() throws {
+        let reservation = try XCTUnwrap(outboundTaskRegistry.reserve())
+        let transition = outboundTaskRegistry.closeAdmission()
+
+        XCTAssertEqual(
+            outboundTaskRegistry.reopenAdmission(after: transition),
+            .undrainedSends,
+            "A current transition with an undrained reservation is latched, not superseded"
+        )
+        XCTAssertNil(outboundTaskRegistry.reserve())
+
+        outboundTaskRegistry.finish(reservation)
+        XCTAssertEqual(
+            outboundTaskRegistry.reopenAdmission(after: transition),
+            .reopened,
+            "The latch is the reservation, not the generation"
+        )
+        let postDrainReservation = outboundTaskRegistry.reserve()
+        XCTAssertNotNil(postDrainReservation)
+        if let postDrainReservation {
+            outboundTaskRegistry.finish(postDrainReservation)
+        }
+    }
+
+    // Revert-check: fails if reopenAdmission(after:) checks entries before the
+    // transition generation. When a stale transition also finds an undrained
+    // reservation, the newer transition owns the account boundary; reporting
+    // .undrainedSends would route AuthSession to .latchedRefusal and a launch
+    // restore into discarding credentials whose cleanup the superseding
+    // sign-out already owns.
+    func testRegistry_staleTransitionWithUndrainedReservationReportsSupersession() throws {
+        let reservation = try XCTUnwrap(outboundTaskRegistry.reserve())
+        let staleTransition = outboundTaskRegistry.closeAdmission()
+        let newerTransition = outboundTaskRegistry.closeAdmission()
+
+        XCTAssertEqual(
+            outboundTaskRegistry.reopenAdmission(after: staleTransition),
+            .supersededByNewerTransition,
+            "Supersession must win over the latch: only the newest transition may see .undrainedSends"
+        )
+        XCTAssertEqual(
+            outboundTaskRegistry.reopenAdmission(after: newerTransition),
+            .undrainedSends
+        )
+
+        outboundTaskRegistry.finish(reservation)
+        XCTAssertEqual(
+            outboundTaskRegistry.reopenAdmission(after: staleTransition),
+            .supersededByNewerTransition,
+            "Draining must not resurrect a superseded transition"
+        )
+        XCTAssertEqual(outboundTaskRegistry.reopenAdmission(after: newerTransition), .reopened)
+    }
+
+    // Revert-check: fails if reopenAdmission(after:) drops its already-open
+    // short-circuit and reports .undrainedSends for a healthy, open admission
+    // with in-flight sends of the current account — a verdict AuthSession
+    // answers with the destructive .latchedRefusal rollback against a session
+    // that is working correctly.
+    func testRegistry_repeatReopenWithLiveSendsReportsReopenedNotUndrained() throws {
+        let transition = outboundTaskRegistry.closeAdmission()
+        XCTAssertEqual(outboundTaskRegistry.reopenAdmission(after: transition), .reopened)
+        let liveSend = try XCTUnwrap(outboundTaskRegistry.reserve())
+
+        XCTAssertEqual(
+            outboundTaskRegistry.reopenAdmission(after: transition),
+            .reopened,
+            "A repeat reopen for an open admission must not mistake live sends for an undrained latch"
+        )
+        let admissionStillOpen = outboundTaskRegistry.reserve()
+        XCTAssertNotNil(
+            admissionStillOpen,
+            "The repeat reopen must leave the open admission untouched"
+        )
+        if let admissionStillOpen {
+            outboundTaskRegistry.finish(admissionStillOpen)
+        }
+        outboundTaskRegistry.finish(liveSend)
     }
 
     func testRegistry_closeDuringSuccessfulMarkerPersistenceDrainsAdmittedTask() async throws {
@@ -772,8 +862,9 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         await requestBuilderGate.waitUntilStarted()
 
         let transition = outboundTaskRegistry.closeAdmission()
-        XCTAssertFalse(
+        XCTAssertEqual(
             outboundTaskRegistry.reopenAdmission(after: transition),
+            .undrainedSends,
             "The request builder must own a reservation before its first suspension"
         )
 
@@ -793,7 +884,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
         XCTAssertTrue(wasCancelled)
         XCTAssertTrue(didDrain)
-        XCTAssertTrue(outboundTaskRegistry.reopenAdmission(after: transition))
+        XCTAssertEqual(outboundTaskRegistry.reopenAdmission(after: transition), .reopened)
         XCTAssertTrue(sendService.snapshot.createOptimisticCalls.isEmpty)
         XCTAssertTrue(sendService.snapshot.sendNewCalls.isEmpty)
     }
