@@ -203,32 +203,92 @@ export function sanitizeHeaderValue(value: string): string {
 
 /**
  * RFC-2047 encodes a header value when it contains non-ASCII characters:
- * `=?UTF-8?B?<base64>?=`. ASCII-only values pass through sanitized.
+ * `=?UTF-8?B?<base64>?=`. Long values are folded into independently valid
+ * encoded-words without splitting a UTF-8 character. ASCII-only values pass
+ * through sanitized.
  */
 export function encodeHeaderIfNeeded(text: string): string {
+  return encodeHeaderValue(text, 0)
+}
+
+const RFC2047_PREFIX = '=?UTF-8?B?'
+const RFC2047_SUFFIX = '?='
+const RFC2047_FOLD = '\r\n '
+const RFC2047_MAX_WORD_LENGTH = 75
+const RFC2047_MAX_LINE_LENGTH = 76
+const RFC2047_WRAPPER_LENGTH = RFC2047_PREFIX.length + RFC2047_SUFFIX.length
+const FROM_HEADER_PREFIX = 'From: '
+const SUBJECT_HEADER_PREFIX = 'Subject: '
+
+/** Maximum whole UTF-8 bytes whose base64 form fits on this physical line. */
+function rfc2047ByteLimit(linePrefixLength: number): number {
+  const wordLength = Math.min(RFC2047_MAX_WORD_LENGTH, RFC2047_MAX_LINE_LENGTH - linePrefixLength)
+  const base64Length = Math.floor((wordLength - RFC2047_WRAPPER_LENGTH) / 4) * 4
+  return (base64Length / 4) * 3
+}
+
+function encodeHeaderValue(text: string, firstLinePrefixLength: number): string {
   const sanitized = sanitizeHeaderValue(text)
   // eslint-disable-next-line no-control-regex
   if (/^[\x00-\x7F]*$/.test(sanitized)) return sanitized
-  return `=?UTF-8?B?${encodeUtf8Base64(sanitized)}?=`
+
+  const encodedWords: string[] = []
+  const utf8Encoder = new TextEncoder()
+  let chunk = ''
+  let chunkBytes = 0
+  let byteLimit = rfc2047ByteLimit(firstLinePrefixLength)
+
+  // String iteration preserves Unicode code points, so no encoded-word can
+  // end in the middle of a multi-byte UTF-8 character (RFC 2047 section 2).
+  for (const character of sanitized) {
+    const characterBytes = utf8Encoder.encode(character).length
+    if (chunk !== '' && chunkBytes + characterBytes > byteLimit) {
+      encodedWords.push(`${RFC2047_PREFIX}${encodeUtf8Base64(chunk)}${RFC2047_SUFFIX}`)
+      chunk = ''
+      chunkBytes = 0
+      byteLimit = rfc2047ByteLimit(1) // continuation lines start with one space
+    }
+    chunk += character
+    chunkBytes += characterBytes
+  }
+  if (chunk !== '') {
+    encodedWords.push(`${RFC2047_PREFIX}${encodeUtf8Base64(chunk)}${RFC2047_SUFFIX}`)
+  }
+  return encodedWords.join(RFC2047_FOLD)
 }
 
 /**
- * `Name <email>` From-header formatting: empty name → bare address; names
- * with `"<>,@\` specials are quoted (RFC 5322 quoted-string: backslashes
- * escaped first, then quotes); other names are RFC-2047-encoded when needed.
- * Deviation from iOS: the name is CRLF-stripped before the specials check
- * (strictly safer).
+ * `Name <email>` From-header formatting: empty name → bare address; ASCII
+ * names with `"<>,@\` specials are quoted (RFC 5322 quoted-string:
+ * backslashes escaped first, then quotes); all other names are
+ * RFC-2047-encoded when needed. A name needing BOTH quoting and encoding is
+ * emitted as an encoded-word INSTEAD of quoted: an encoded-word is entirely
+ * RFC 5322 atext so it needs no quoting, whereas a quoted-string carrying
+ * raw 8-bit UTF-8 is malformed for strict relays (matches iOS
+ * MimeBuilder.formatFromHeader). Long encoded names are split and folded per
+ * RFC 2047. Deviation from iOS: the specials/ASCII checks run on the
+ * CRLF-stripped name (strictly safer).
  */
 export function formatFromHeader(email: string, name?: string): string {
   const sanitizedEmail = sanitizeHeaderValue(email)
   const sanitizedName = name === undefined ? '' : sanitizeHeaderValue(name)
   if (sanitizedName === '') return sanitizedEmail
 
-  if (/["<>,@\\]/.test(sanitizedName)) {
+  const needsQuoting = /["<>,@\\]/.test(sanitizedName)
+  // eslint-disable-next-line no-control-regex
+  const isAsciiOnly = /^[\x00-\x7F]*$/.test(sanitizedName)
+  if (needsQuoting && isAsciiOnly) {
     const escaped = sanitizedName.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
     return `"${escaped}" <${sanitizedEmail}>`
   }
-  return `${encodeHeaderIfNeeded(sanitizedName)} <${sanitizedEmail}>`
+  if (isAsciiOnly) return `${sanitizedName} <${sanitizedEmail}>`
+
+  const encodedName = encodeHeaderValue(sanitizedName, FROM_HEADER_PREFIX.length)
+  const address = `<${sanitizedEmail}>`
+  const needsAddressFold =
+    encodedName.includes(RFC2047_FOLD) ||
+    FROM_HEADER_PREFIX.length + encodedName.length + 1 + address.length > RFC2047_MAX_LINE_LENGTH
+  return `${encodedName}${needsAddressFold ? RFC2047_FOLD : ' '}${address}`
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
@@ -472,11 +532,13 @@ function buildMime(
   if (recipients.length === 0) throw new NoValidRecipientsError()
 
   let mime = ''
-  mime += `From: ${formatFromHeader(fromEmail, input.from.name)}\r\n`
+  mime += `${FROM_HEADER_PREFIX}${formatFromHeader(fromEmail, input.from.name)}\r\n`
   mime += `To: ${recipients.join(', ')}\r\n`
 
   const subject = input.subject === undefined ? '' : sanitizeHeaderValue(input.subject)
-  mime += `Subject: ${subject === '' ? '(No Subject)' : encodeHeaderIfNeeded(subject)}\r\n`
+  mime += `${SUBJECT_HEADER_PREFIX}${
+    subject === '' ? '(No Subject)' : encodeHeaderValue(subject, SUBJECT_HEADER_PREFIX.length)
+  }\r\n`
 
   mime += `Date: ${formatRfc2822Date(options?.now ?? new Date())}\r\n`
   mime += `Message-ID: ${generateMessageId()}\r\n`
