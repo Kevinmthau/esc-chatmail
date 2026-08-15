@@ -233,6 +233,26 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(text.contains("Older thread should be hidden."))
     }
 
+    func testRemoveQuotes_tableHeaderAfterTelephoneSignature_truncates() {
+        let html = """
+        <div>Current reply.</div>
+        <div>Telephone: 415-555-1212</div>
+        <table>
+            <tr><td>From:</td><td>Alice Example &lt;alice@example.com&gt;</td></tr>
+            <tr><td>Sent:</td><td>Monday, January 1, 2026 9:00 AM</td></tr>
+            <tr><td>To:</td><td>Bob Example</td></tr>
+            <tr><td>Subject:</td><td>Re: Planning</td></tr>
+        </table>
+        <div>Older thread should be hidden.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertEqual(text, "Current reply.\n\nTelephone: 415-555-1212")
+        XCTAssertFalse(text.contains("Alice Example"))
+        XCTAssertFalse(text.contains("Older thread should be hidden."))
+    }
+
     func testRemoveQuotes_tableFieldStyleContentWithoutQuoteMarker_preservesContent() {
         let html = """
         <div>Trip details</div>
@@ -429,20 +449,123 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(text.contains("Older quoted content."))
     }
 
+    func testRemoveQuotes_signatureMode_preservesReferenceBeforeContactSignature() {
+        let referenceLines = [
+            "P2026-0815",
+            "Deadline: 2026-08-15",
+            "Case: 2026-0815",
+            "P-2026-0815",
+            "Case: 1234-5678",
+            "Invoice: 12345678",
+            "Invoice | 12345678",
+            "Invoice Number | 12345678",
+            "Reference Number | 1234-5678",
+            "Deadline: 08-15-2026",
+            "8-15-2026",
+            "2026-8-15"
+        ]
+
+        for referenceLine in referenceLines {
+            let html = """
+            <div>Current reply.</div>
+            <div>\(referenceLine)</div>
+            <div>John Smith</div>
+            <div>Partner</div>
+            <div>john@example.test</div>
+            <div>415-555-1212</div>
+            """
+
+            let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+            XCTAssertEqual(text, "Current reply.\n\n\(referenceLine)")
+            XCTAssertFalse(text.contains("John Smith"))
+            XCTAssertFalse(text.contains("john@example.test"))
+        }
+    }
+
+    func testRemoveQuotes_signatureMode_removesDelimitedPhoneExtensionSignatures() {
+        let phoneLines = [
+            "T 415-555-1212 | x112",
+            "T 415-555-1212, ext. 112",
+            "T 415-555-1212; x112",
+            "T 415-555-1212 / F 650-555-1212",
+            "T 415-555-1212 │ M 650-555-1212",
+            "T: 415-555-1212 F: 650-555-1213",
+            "Phone Number: 415-555-1212"
+        ]
+
+        for phoneLine in phoneLines {
+            let html = """
+            <div>Current reply.</div>
+            <div>John Smith</div>
+            <div>Partner</div>
+            <div>john@example.test</div>
+            <div>\(phoneLine)</div>
+            """
+
+            let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+            XCTAssertEqual(text, "Current reply.", "Expected signature removal for: \(phoneLine)")
+            XCTAssertFalse(text.contains("John Smith"), "Expected signature removal for: \(phoneLine)")
+            XCTAssertFalse(text.contains("415-555-1212"), "Expected signature removal for: \(phoneLine)")
+        }
+    }
+
     func testIsContactSignatureLine_phoneFormatsDistinguishesStandaloneLinesFromProse() {
         let signatureLines = [
             "415-555-1212",
             "(415) 555-1212",
             "+1 415 555 1212",
             "415-555-1212 x112",
+            "415-555-1212x112",
+            "415-555-1212 extension 112",
+            "415-555-1212, ext. 112",
+            "415-555-1212; x112",
+            "415-555-1212 (mobile)",
             "T (415) 227-3629",
+            "T | 415-555-1212",
+            "John Smith | Phone | 4155551212",
+            "T 415-555-1212 | x112",
+            "415-555-1212 | ext. 112",
+            "T 415-555-1212 | F 415-555-1213",
+            "T 415-555-1212 x100 | M 650-555-1212",
+            "415-555-1212 (office) | 650-555-1212 (mobile)",
+            "T 415-555-1212 / F 650-555-1212",
+            "T 415-555-1212 │ M 650-555-1212",
+            "T: 415-555-1212 F: 650-555-1213",
             "Phone: 415-555-1212",
-            "Cell: 650-255-5222"
+            "Phone Number: 415-555-1212",
+            "Cell: 650-255-5222",
+            "Telephone: 415-555-1212",
+            "Telephone Number: 415-555-1212",
+            "Téléphone: 415-555-1212",
+            "Teléfono: 415-555-1212",
+            "Home: 415-555-1212",
+            "Work: 415-555-1212",
+            "W: 415-555-1212",
+            "Main: 415-555-1212",
+            "John Smith | 415-555-1212"
         ]
         let proseLines = [
             "Can you give me a call? 415-283-6379",
             "Call me at (415) 555-1212 when you are free.",
-            "My mobile is +1 415 555 1212; text me first."
+            "My mobile is +1 415 555 1212; text me first.",
+            "Phone: 415-555-1212 if anything comes up.",
+            "P2026-0815",
+            "Deadline: 2026-08-15",
+            "Case: 2026-0815",
+            "P-2026-0815",
+            "Case: 1234-5678",
+            "Invoice: 12345678",
+            "Invoice | 12345678",
+            "Invoice Number | 12345678",
+            "Reference Number | 1234-5678",
+            "Deadline: 08-15-2026",
+            "8-15-2026",
+            "2026-8-15",
+            "P2 - 2026",
+            "P: 1.2.3.4",
+            "T: 12.30.00"
         ]
 
         for line in signatureLines {
