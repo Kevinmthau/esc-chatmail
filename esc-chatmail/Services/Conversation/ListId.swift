@@ -100,19 +100,34 @@ struct ParsedListId: Equatable, Sendable {
             guard !labelKey.isEmpty, titleKey.hasPrefix(labelKey) else {
                 return false
             }
-            // Labels ahead of a literal "list-id" label are machine
-            // identifiers by construction — bulk-mail providers mint
-            // "<token>.list-id.<provider domain>" ids — so they count even
-            // when the token's shape defeats the opaqueness heuristic.
-            let labelIsIdentifier = isOpaqueIdentifierKey(labelKey)
-                || labels[(index + 1)...].contains { $0.lowercased() == "list-id" }
-            guard labelIsIdentifier else { return false }
+            let labelIsOpaqueIdentifier = isOpaqueIdentifierKey(labelKey)
             let suffixKey = String(titleKey.dropFirst(labelKey.count))
             if suffixKey.isEmpty {
+                // Token shape is the general signal. The provider-specific
+                // fallback applies only to Brevo's verified bare-token form,
+                // so an unrelated `list-id` label cannot turn an ordinary
+                // one-word title into metadata.
+                let labelMatchesKnownProvider = isKnownProviderIdentifierLabel(
+                    at: index,
+                    in: labels
+                )
                 return titleIsBareToken
+                    && (labelIsOpaqueIdentifier || labelMatchesKnownProvider)
             }
-            return providerGenericTitleSuffixKeys.contains(suffixKey)
+            return labelIsOpaqueIdentifier
+                && providerGenericTitleSuffixKeys.contains(suffixKey)
         }
+    }
+
+    private static func isKnownProviderIdentifierLabel(
+        at index: Int,
+        in labels: [Substring]
+    ) -> Bool {
+        guard index == labels.startIndex else { return false }
+        let suffix = labels.dropFirst(index + 1)
+            .map { $0.lowercased() }
+            .joined(separator: ".")
+        return providerIdentifierSuffixes.contains(suffix)
     }
 
     private static func alphanumericKey(_ value: String) -> String {
@@ -151,5 +166,7 @@ struct ParsedListId: Equatable, Sendable {
     /// Mailchimp emits `<account-token>mc list`. Keep this allowlist narrow so
     /// digit-heavy human titles are not mistaken for provider metadata.
     private static let providerGenericTitleSuffixKeys: Set<String> = ["mclist"]
+    /// Brevo restates its account token before this exact List-Id suffix.
+    private static let providerIdentifierSuffixes: Set<String> = ["list-id.mailin.fr"]
     private static let hexadecimalCharacters = Set("0123456789abcdef")
 }
