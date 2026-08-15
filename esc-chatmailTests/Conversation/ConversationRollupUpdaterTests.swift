@@ -638,7 +638,10 @@ final class ConversationRollupUpdaterTests: XCTestCase {
 
     func testUpdateDisplayNameOnly_listKeepsStoredPhraseTitle() throws {
         // The List-Id display phrase seeded at creation must not be replaced
-        // by sender-derived names — list senders vary per message.
+        // by sender-derived names — list senders vary per message. This
+        // phrase's label key passes the opaqueness profile, so the title
+        // survives only through its internal whitespace (the titleIsBareToken
+        // gate) — keep it multi-word when editing.
         let storedTitle = "Formula 1 2024 Round 12 Highlights"
         let conversation = ConversationBuilder()
             .asList()
@@ -731,6 +734,34 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
 
         XCTAssertEqual(conversation.displayName, "Bedford Playhouse")
+    }
+
+    func testUpdateDisplayNameOnly_listBrevoIdentifierPhraseUpgradesToSingleSenderName() throws {
+        // Revert-check: the bare-token rule in
+        // ParsedListId.isIdentifierDerivedDisplayTitle — a stored Brevo token
+        // title must read as identifier-derived so the single-sender upgrade
+        // replaces it, exactly like the Mailchimp phrase above.
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("odi2oti3ny04mtyyni0z.list-id.mailin.fr")
+            .withDisplayName("ODI2OTI3Ny04MTYyNi0z")
+            .build(in: context)
+        addConversationParticipant(
+            email: "support@subdial.com",
+            displayName: nil,
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("brevo-list-single-sender")
+            .withSender(email: "support@subdial.com", name: "Subdial")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Subdial")
     }
 
     func testUpdateDisplayNameOnly_listMailchimpIdentifierPhraseDoesNotChurnAcrossMultipleSenders() throws {
