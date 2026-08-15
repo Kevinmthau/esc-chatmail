@@ -421,11 +421,9 @@ final class GmailSendServiceTests: XCTestCase {
     }
 
     func testFormatFromHeader_quotedNameWithBackslash_escapesQuotedPair() {
-        // Revert-check: the backslash escape on the quoted-name path in
-        // MimeBuilder.formatFromHeader. Without it a display name ending in a bare
-        // backslash turns the closing quote into an RFC 5322 quoted-pair, leaving the
-        // quoted-string unterminated so the address is swallowed and the From: header
-        // is unparseable (Gmail rejects the send with a 400).
+        // Revert-check: the shared quoted-value helper must escape backslashes before
+        // quotes. A trailing bare backslash would otherwise consume the closing quote,
+        // leaving the address inside an unterminated quoted-string.
         XCTAssertEqual(
             MimeBuilder.formatFromHeader(email: "sender@example.com", name: "Thau, Kevin\\"),
             "\"Thau, Kevin\\\\\" <sender@example.com>"
@@ -439,18 +437,133 @@ final class GmailSendServiceTests: XCTestCase {
         )
     }
 
-    func testFormatFromHeader_nonASCIIBackslashName_usesEncodedWord() {
-        let name = "Åsa\\Ekström"
+    func testFormatFromHeader_backslashOnlyName_takesQuotedPath() throws {
+        // Revert-check: backslash must trigger the quoted path even when it is the
+        // name's only special; RFC 5322 atext does not permit it bare.
+        let name = "DOMAIN\\user"
+        let header = "\"DOMAIN\\\\user\" <sender@example.com>"
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: name),
+            header
+        )
+
+        let mime = try decodedMIME(
+            MimeBuilder.buildSimpleMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: name,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: []
+            )
+        )
+        XCTAssertEqual(headerLines(in: mime, named: "From"), ["From: \(header)"])
+
+        // The parser strips quotes but intentionally does not unescape quoted-pairs.
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: header),
+            "DOMAIN\\\\user"
+        )
+    }
+
+    func testFormatFromHeader_nonASCIISpecialName_usesEncodedWord() throws {
+        let name = "Ekström, Åsa"
+        let encodedWord = "=?UTF-8?B?RWtzdHLDtm0sIMOFc2E=?="
+        let result = MimeBuilder.formatFromHeader(email: "sender@example.com", name: name)
+
+        XCTAssertEqual(result, "\(encodedWord) <sender@example.com>")
+        XCTAssertTrue(
+            result.unicodeScalars.allSatisfy(\.isASCII),
+            "The From header value must be pure ASCII on the wire"
+        )
+        XCTAssertEqual(EmailNormalizer.extractDisplayName(from: result), name)
+
+        // Gmail may echo encoded-words already decoded, either bare or re-quoted.
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: "\(name) <sender@example.com>"),
+            name
+        )
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: "\"\(name)\" <sender@example.com>"),
+            name
+        )
+
+        // Neighboring wire shapes remain unchanged.
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: "Åsa Ekström"),
+            "=?UTF-8?B?w4VzYSBFa3N0csO2bQ==?= <sender@example.com>"
+        )
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(email: "sender@example.com", name: "Ekstrom, Asa"),
+            "\"Ekstrom, Asa\" <sender@example.com>"
+        )
+
+        let mime = try decodedMIME(
+            MimeBuilder.buildSimpleMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: name,
+                body: "Hello world",
+                subject: "Subject",
+                inReplyTo: nil,
+                references: []
+            )
+        )
+        XCTAssertEqual(
+            headerLines(in: mime, named: "From"),
+            ["From: \(encodedWord) <sender@example.com>"]
+        )
+    }
+
+    func testEncodeHeaderIfNeeded_longNonASCIISubject_foldsWithinRFC2047Limits() throws {
+        let asciiPrefix = String(repeating: "A", count: 38)
+        let subject = asciiPrefix + "🙂"
+        let firstWord = "=?UTF-8?B?\(Data(asciiPrefix.utf8).base64EncodedString())?="
+        let secondWord = "=?UTF-8?B?\(Data("🙂".utf8).base64EncodedString())?="
+        let encodedSubject = MimeBuilder.encodeHeaderIfNeeded(subject)
+
+        XCTAssertEqual(encodedSubject, "\(firstWord)\r\n \(secondWord)")
+        XCTAssertTrue(
+            encodedSubject
+                .components(separatedBy: "\r\n ")
+                .allSatisfy { $0.utf8.count <= 75 }
+        )
+        XCTAssertEqual(RFC2047Decoder.decode(encodedSubject), subject)
+
+        let mime = try decodedMIME(
+            MimeBuilder.buildSimpleMessage(
+                to: ["to@example.com"],
+                from: "sender@example.com",
+                fromName: nil,
+                body: "Hello world",
+                subject: subject,
+                inReplyTo: nil,
+                references: []
+            )
+        )
+        let subjectLines = mime.components(separatedBy: "\r\n").filter {
+            $0.hasPrefix("Subject: ") || $0.hasPrefix(" =?UTF-8?B?")
+        }
+        XCTAssertEqual(subjectLines, ["Subject: \(firstWord)", " \(secondWord)"])
+        XCTAssertTrue(subjectLines.allSatisfy { $0.utf8.count <= 76 })
+    }
+
+    func testFormatFromHeader_singleEncodedWord_foldsAddressWithinLineLimit() {
+        let name = String(repeating: "A", count: 38) + "🙂"
+        let encodedWord = "=?UTF-8?B?\(Data(name.utf8).base64EncodedString())?="
         let result = MimeBuilder.formatFromHeader(
             email: "sender@example.com",
             name: name
         )
 
-        XCTAssertEqual(
-            result,
-            "=?UTF-8?B?w4VzYVxFa3N0csO2bQ==?= <sender@example.com>"
+        XCTAssertEqual(result, "\(encodedWord)\r\n <sender@example.com>")
+        XCTAssertLessThanOrEqual(encodedWord.utf8.count, 75)
+        XCTAssertTrue(
+            ("From: " + result)
+                .components(separatedBy: "\r\n")
+                .allSatisfy { $0.utf8.count <= 76 }
         )
-        XCTAssertTrue(result.unicodeScalars.allSatisfy { $0.isASCII })
         XCTAssertEqual(EmailNormalizer.extractDisplayName(from: result), name)
     }
 
@@ -932,33 +1045,6 @@ final class GmailSendServiceTests: XCTestCase {
         XCTAssertEqual(
             headerLines(in: injected, named: "Content-Disposition"),
             ["Content-Disposition: attachment; filename=\"attachment\""]
-        )
-    }
-
-    func testFormatFromHeader_backslashOnlyName_isQuotedAndEscaped() throws {
-        // Revert-check: the `\\` entry in MimeBuilder.formatFromHeader's needs-quoting
-        // trigger set. A display name whose only special character is a backslash would
-        // otherwise take the unquoted encodedName path and emit a bare backslash — an
-        // RFC 5322-invalid phrase.
-        XCTAssertEqual(
-            MimeBuilder.formatFromHeader(email: "sender@example.com", name: "C:\\Users\\kevin"),
-            "\"C:\\\\Users\\\\kevin\" <sender@example.com>"
-        )
-
-        let injected = try decodedMIME(
-            MimeBuilder.buildSimpleMessage(
-                to: ["to@example.com"],
-                from: "sender@example.com",
-                fromName: "C:\\Users\\kevin",
-                body: "Hello world",
-                subject: "Subject",
-                inReplyTo: nil,
-                references: []
-            )
-        )
-        XCTAssertEqual(
-            headerLines(in: injected, named: "From"),
-            ["From: \"C:\\\\Users\\\\kevin\" <sender@example.com>"]
         )
     }
 
