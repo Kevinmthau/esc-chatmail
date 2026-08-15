@@ -375,7 +375,6 @@ extension MessagePersister {
             var existingContentIds = Set(
                 existingMessage.attachmentsArray.compactMap { EmailDocument.normalizedContentID($0.contentId) }
             )
-            var consumedOptimisticAttachmentObjectIDs = Set<NSManagedObjectID>()
 
             // Remove duplicate inline attachments left by earlier syncs that
             // used non-deterministic (UUID-based) IDs.
@@ -384,6 +383,10 @@ extension MessagePersister {
 
             // Rebuild after dedup so the sets reflect current state.
             existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
+            let optimisticAttachmentMatchPlan = self.optimisticLocalAttachmentMatchPlan(
+                for: processedMessage.attachmentInfo,
+                in: existingMessage.attachmentsArray
+            )
 
             // Build fingerprint set for inline-data attachments to prevent
             // re-adding the same content under a new deterministic ID.
@@ -393,17 +396,13 @@ extension MessagePersister {
                 if let fp { existingInlineFingerprints.insert(fp) }
             }
 
-            for attachmentInfo in processedMessage.attachmentInfo {
+            for (attachmentIndex, attachmentInfo) in processedMessage.attachmentInfo.enumerated() {
                 self.refreshSynthesizedInlineStorageIfNeeded(
                     attachmentInfo,
                     on: existingMessage
                 )
 
-                if let optimisticAttachment = self.matchingOptimisticLocalAttachment(
-                    for: attachmentInfo,
-                    in: existingMessage.attachmentsArray,
-                    excluding: consumedOptimisticAttachmentObjectIDs
-                ) {
+                if let optimisticAttachment = optimisticAttachmentMatchPlan.matches[attachmentIndex] {
                     let previousAttachmentID = optimisticAttachment.id
                     self.migrateOptimisticAttachmentStorage(
                         optimisticAttachment,
@@ -411,7 +410,6 @@ extension MessagePersister {
                         remoteMessageID: existingMessage.id
                     )
                     self.reconcileOptimisticLocalAttachment(optimisticAttachment, with: attachmentInfo)
-                    consumedOptimisticAttachmentObjectIDs.insert(optimisticAttachment.objectID)
 
                     if let previousAttachmentID {
                         existingAttachmentIds.remove(previousAttachmentID)
@@ -447,6 +445,16 @@ extension MessagePersister {
                 }
                 if let incomingFP { existingInlineFingerprints.insert(incomingFP) }
             }
+
+            // If multiple local files collapse to the same emitted metadata,
+            // none can be assigned to a remote ID safely. Keep the authoritative
+            // remote rows created above and discard only those ambiguous cache
+            // rows; Gmail can redownload their bytes on demand.
+            for attachment in optimisticAttachmentMatchPlan.ambiguousCandidates
+            where !attachment.isDeleted {
+                context.delete(attachment)
+            }
+            context.processPendingChanges()
             existingMessage.hasAttachments = !existingMessage.attachmentsArray.isEmpty || processedMessage.hasAttachments
 
             var modifiedConversationID: NSManagedObjectID?
@@ -688,16 +696,40 @@ extension MessagePersister {
         return normalized.isEmpty ? nil : normalized
     }
 
-    nonisolated func matchingOptimisticLocalAttachment(
-        for attachmentInfo: AttachmentInfo,
-        in attachments: [Attachment],
-        excluding excludedObjectIDs: Set<NSManagedObjectID>
-    ) -> Attachment? {
-        optimisticLocalAttachmentCandidates(
-            for: attachmentInfo,
-            in: attachments,
-            excluding: excludedObjectIDs
-        ).first
+    private nonisolated func optimisticLocalAttachmentMatchPlan(
+        for attachmentInfos: [AttachmentInfo],
+        in attachments: [Attachment]
+    ) -> (matches: [Attachment?], ambiguousCandidates: [Attachment]) {
+        let candidateSets = attachmentInfos.map {
+            optimisticLocalAttachmentCandidates(
+                for: $0,
+                in: attachments,
+                excluding: []
+            )
+        }
+        var incomingMatchCountsByOptimisticObjectID: [NSManagedObjectID: Int] = [:]
+        for candidates in candidateSets {
+            for candidate in candidates {
+                incomingMatchCountsByOptimisticObjectID[candidate.objectID, default: 0] += 1
+            }
+        }
+
+        let matches = candidateSets.map { candidates -> Attachment? in
+            guard candidates.count == 1,
+                  let candidate = candidates.first,
+                  incomingMatchCountsByOptimisticObjectID[candidate.objectID] == 1 else {
+                return nil
+            }
+            return candidate
+        }
+        let matchedObjectIDs = Set(matches.compactMap { $0?.objectID })
+        var ambiguousCandidatesByObjectID: [NSManagedObjectID: Attachment] = [:]
+        for candidates in candidateSets {
+            for candidate in candidates where !matchedObjectIDs.contains(candidate.objectID) {
+                ambiguousCandidatesByObjectID[candidate.objectID] = candidate
+            }
+        }
+        return (matches, Array(ambiguousCandidatesByObjectID.values))
     }
 
     private nonisolated func optimisticLocalAttachmentCandidates(
@@ -727,8 +759,10 @@ extension MessagePersister {
 
         return localCandidates.filter {
             EmailDocument.normalizedContentID($0.contentId) == nil &&
-            normalizedAttachmentFilename($0.filename) == normalizedIncomingFilename &&
-            $0.mimeType == attachmentInfo.mimeType &&
+            normalizedAttachmentFilename(
+                MimeBuilder.sanitizeAttachmentFilename($0.filename)
+            ) == normalizedIncomingFilename &&
+            MimeBuilder.sanitizeMimeType($0.mimeType) == attachmentInfo.mimeType &&
             $0.byteSize == incomingSize
         }
     }

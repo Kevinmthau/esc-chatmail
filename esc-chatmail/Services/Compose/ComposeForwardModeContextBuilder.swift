@@ -21,13 +21,19 @@ struct ComposeForwardModeContextBuilder {
 
     func build(input: Input) -> ComposeForwardModeContext {
         let formattedMessage = messageFormatBuilder.formatForwardedMessage(input.source)
+        let canPreserveRichInlineContent = input.forwardedInlineAttachmentInfos.allSatisfy { info in
+            guard let contentId = info.contentId else { return false }
+            return MimeBuilder.canEmitContentIdVerbatim(contentId)
+        }
 
         return ComposeForwardModeContext(
             id: input.source.id,
             initialSubject: formattedMessage.subject,
             forwardedPlainTextBody: formattedMessage.body,
-            forwardedHTMLBody: formattedMessage.htmlBody,
-            forwardedInlineAttachmentInfos: input.forwardedInlineAttachmentInfos,
+            forwardedHTMLBody: canPreserveRichInlineContent ? formattedMessage.htmlBody : nil,
+            forwardedInlineAttachmentInfos: canPreserveRichInlineContent
+                ? input.forwardedInlineAttachmentInfos
+                : [],
             forwardedRegularAttachments: input.forwardedRegularAttachments
         )
     }

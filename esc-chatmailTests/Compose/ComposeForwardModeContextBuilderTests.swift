@@ -85,4 +85,39 @@ final class ComposeForwardModeContextBuilderTests: XCTestCase {
             ]
         )
     }
+
+    func testBuild_unsafeInlineContentIDFallsBackToPlainForward() {
+        let builder = ComposeForwardModeContextBuilder(
+            messageFormatBuilder: MessageFormatBuilder(
+                authSession: makeTestAuthSession(userEmail: "me@example.com")
+            )
+        )
+        let result = builder.build(
+            input: .init(
+                source: .init(
+                    id: "unsafe-inline-forward",
+                    subject: "Original Subject",
+                    internalDate: Date(timeIntervalSince1970: 1_704_326_400),
+                    isFromMe: false,
+                    bodyText: "Original message body",
+                    snippet: nil,
+                    originalHTML: "<html><body><img src=\"cid:real%3E%3Cevil@attacker\"></body></html>",
+                    participants: []
+                ),
+                forwardedInlineAttachmentInfos: [
+                    .init(
+                        localURL: "Attachments/unsafe-inline.png",
+                        filename: "inline.png",
+                        mimeType: "image/png",
+                        contentId: "real><evil@attacker"
+                    )
+                ],
+                forwardedRegularAttachments: []
+            )
+        )
+
+        XCTAssertTrue(result.forwardedPlainTextBody.contains("Original message body"))
+        XCTAssertNil(result.forwardedHTMLBody)
+        XCTAssertTrue(result.forwardedInlineAttachmentInfos.isEmpty)
+    }
 }

@@ -266,8 +266,8 @@ function encodeHeaderValue(text: string, firstLinePrefixLength: number): string 
  * RFC 5322 atext so it needs no quoting, whereas a quoted-string carrying
  * raw 8-bit UTF-8 is malformed for strict relays (matches iOS
  * MimeBuilder.formatFromHeader). Long encoded names are split and folded per
- * RFC 2047. Deviation from iOS: the specials/ASCII checks run on the
- * CRLF-stripped name (strictly safer).
+ * RFC 2047. The specials/ASCII checks match iOS and run on the CRLF-stripped
+ * name.
  */
 export function formatFromHeader(email: string, name?: string): string {
   const sanitizedEmail = sanitizeHeaderValue(email)
@@ -407,9 +407,9 @@ export function sanitizeMimeType(mimeType: string): string {
 
 /**
  * Escapes a value for an RFC 2045 quoted-string parameter (`filename="…"`):
- * backslashes first, then quotes. Deviation from iOS, which interpolates the
- * filename raw — a name containing `"` would otherwise close the parameter
- * early and let the rest of the name be parsed as header syntax.
+ * backslashes first, then quotes. Matches iOS's MimeBuilder.quoteParameterValue
+ * (same order) — a name containing `"` would otherwise close the parameter early
+ * and let the rest of the name be parsed as header syntax.
  *
  * Non-ASCII stays raw UTF-8 inside the quoted string, matching iOS: strictly
  * RFC 2045 headers are ASCII (RFC 2231 `filename*=` is the conformant spell),

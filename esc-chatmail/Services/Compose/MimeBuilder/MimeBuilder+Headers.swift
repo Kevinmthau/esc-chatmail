@@ -59,48 +59,216 @@ extension MimeBuilder {
         return optimisticMessageID
     }
 
-    /// Sanitizes header values to prevent CRLF injection attacks
+    /// Sanitizes header values to prevent CRLF injection attacks.
+    ///
+    /// `options: .literal` is load-bearing: the default `replacingOccurrences`
+    /// matches by canonical/grapheme equivalence, so a CR or LF that is the base
+    /// of a combining sequence (e.g. LF + U+0301) forms one grapheme cluster and
+    /// is NOT matched — the newline survives and can inject a header line.
+    /// `.literal` forces exact scalar matching so every CR/LF is collapsed.
     static func sanitizeHeaderValue(_ value: String) -> String {
         value
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r\n", with: " ", options: .literal)
+            .replacingOccurrences(of: "\r", with: " ", options: .literal)
+            .replacingOccurrences(of: "\n", with: " ", options: .literal)
             .trimmingCharacters(in: .whitespaces)
     }
 
+    /// Escapes a value for interpolation inside a quoted MIME parameter string
+    /// (`name="…"` / `filename="…"`). CRLF sanitization alone is insufficient in
+    /// that position: a double-quote in the value terminates the quoted-string
+    /// early and smuggles extra parameters into the part header. Backslashes are
+    /// escaped first so a trailing bare backslash cannot turn the closing quote
+    /// into a quoted-pair and swallow the rest of the header line.
+    /// `formatFromHeader`'s quoted display-name path delegates here (RFC 5322
+    /// quoted-string and RFC 2045 quoted-parameter share the same quoted-pair
+    /// grammar), so the escape order has one owner and cannot drift.
+    ///
+    /// `options: .literal` mirrors sanitizeHeaderValue: without it a quote or
+    /// backslash that is the base of a combining sequence is one grapheme and
+    /// escapes unmatched, reopening the very quoted-string breakout this closes.
+    ///
+    /// Non-ASCII stays raw UTF-8 inside quoted MIME parameters (matching the web
+    /// builder): strictly RFC 2045 headers are ASCII and RFC 2231 `filename*=`
+    /// is the conformant spell, but Gmail accepts the 8-bit form and echoes the
+    /// same bytes back, which keeps the attachment fingerprint stable. If a
+    /// receiving client mangles such a name, RFC 2231 is the fix — as its own
+    /// change, on both platforms.
+    static func quoteParameterValue(_ value: String) -> String {
+        sanitizeHeaderValue(value)
+            .replacingOccurrences(of: "\\", with: "\\\\", options: .literal)
+            .replacingOccurrences(of: "\"", with: "\\\"", options: .literal)
+    }
+
+    /// RFC 2045 token characters, used to validate a media type's `type/subtype`.
+    private static let mimeTypeTokenScalars: Set<Unicode.Scalar> =
+        Set("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".unicodeScalars)
+
+    /// Narrows a media type to `type/subtype` of RFC 2045 tokens, falling back to
+    /// `application/octet-stream`. The media type is interpolated UNQUOTED ahead
+    /// of `name="…"`, so without this a crafted type (`image/png; boundary="…"`)
+    /// adds parameters to — or unbalances the quoting of — the part header the
+    /// filename escaping protects. Case is preserved: media types are
+    /// case-insensitive, but the attachment echo fingerprint compares bytes, so
+    /// a legitimate type must not be rewritten.
+    static func sanitizeMimeType(_ mimeType: String) -> String {
+        let sanitized = sanitizeHeaderValue(mimeType)
+        guard let slashIndex = sanitized.firstIndex(of: "/") else {
+            return "application/octet-stream"
+        }
+        let type = sanitized[sanitized.startIndex..<slashIndex]
+        let subtype = sanitized[sanitized.index(after: slashIndex)...]
+        guard isMimeTypeToken(type), isMimeTypeToken(subtype) else {
+            return "application/octet-stream"
+        }
+        return "\(type)/\(subtype)"
+    }
+
+    private static func isMimeTypeToken(_ token: Substring) -> Bool {
+        !token.isEmpty && token.unicodeScalars.allSatisfy { mimeTypeTokenScalars.contains($0) }
+    }
+
+    /// Strips angle brackets and whitespace from a Content-ID body. The builder
+    /// supplies the `<…>` delimiters, so an interior `<`/`>` (which survives
+    /// sanitizeHeaderValue, since it only removes CR/LF) would nest or prematurely
+    /// close them and malform the msg-id. Returns "" when nothing usable remains,
+    /// so the caller can omit the header rather than emit `<>`.
+    static func sanitizeContentId(_ contentId: String) -> String {
+        let disallowed = CharacterSet(charactersIn: "<>").union(.whitespacesAndNewlines)
+        let scalars = sanitizeHeaderValue(contentId).unicodeScalars.filter { !disallowed.contains($0) }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
+    /// Whether a Content-ID can be emitted without changing the identifier that
+    /// the HTML body's `cid:` URL references. Lossy values must fall back together
+    /// with their rich HTML rather than silently breaking the inline relationship.
+    static func canEmitContentIdVerbatim(_ contentId: String) -> Bool {
+        !contentId.isEmpty && sanitizeContentId(contentId) == contentId
+    }
+
+    /// A non-empty attachment filename for the quoted `name=`/`filename=`
+    /// parameters. An unnamed part is effectively undownloadable, so an empty or
+    /// whitespace-only name falls back to "attachment" (matching the web builder).
+    static func sanitizeAttachmentFilename(_ filename: String) -> String {
+        let sanitized = sanitizeHeaderValue(filename)
+        return sanitized.isEmpty ? "attachment" : sanitized
+    }
+
+    /// Emits the header block for one attachment MIME part — Content-Type through
+    /// the blank line before the base64 body — routing every interpolated value
+    /// through the sanitizer its position requires, so no call site can
+    /// reintroduce the quoted-parameter or unquoted-token injection classes by
+    /// hand. `contentId == nil` → a regular attachment part (Content-Disposition:
+    /// attachment); non-nil → an inline part (Content-ID + Content-Disposition:
+    /// inline). A Content-ID that sanitizes to empty is omitted rather than
+    /// emitted as a malformed `<>`.
+    static func attachmentPartHeaders(mimeType: String, filename: String, contentId: String?) -> String {
+        let safeMimeType = sanitizeMimeType(mimeType)
+        let safeFilename = quoteParameterValue(sanitizeAttachmentFilename(filename))
+
+        var headers = "Content-Type: \(safeMimeType); name=\"\(safeFilename)\"\r\n"
+        headers += "Content-Transfer-Encoding: base64\r\n"
+        if let contentId {
+            let safeContentId = sanitizeContentId(contentId)
+            if !safeContentId.isEmpty {
+                headers += "Content-ID: <\(safeContentId)>\r\n"
+            }
+            headers += "Content-Disposition: inline; filename=\"\(safeFilename)\"\r\n"
+        } else {
+            headers += "Content-Disposition: attachment; filename=\"\(safeFilename)\"\r\n"
+        }
+        headers += "\r\n"
+        return headers
+    }
+
+    private static let rfc2047Prefix = "=?UTF-8?B?"
+    private static let rfc2047Suffix = "?="
+    private static let rfc2047Fold = "\r\n "
+    private static let rfc2047MaxWordLength = 75
+    private static let rfc2047MaxLineLength = 76
+
     static func encodeHeaderIfNeeded(_ text: String) -> String {
+        // This helper is used for Subject values; account for the field name on
+        // the first physical line just as formatFromHeader accounts for "From: ".
+        encodeHeaderValue(text, firstLinePrefixLength: "Subject: ".utf8.count)
+    }
+
+    /// RFC 2047 encoded-words are limited to 75 characters including their
+    /// wrapper. Splitting on Unicode scalars keeps every UTF-8 code point whole,
+    /// while the prefix-aware first chunk also keeps the physical header line at
+    /// or below 76 characters.
+    private static func encodeHeaderValue(_ text: String, firstLinePrefixLength: Int) -> String {
         let sanitized = sanitizeHeaderValue(text)
         let asciiOnly = sanitized.unicodeScalars.allSatisfy { $0.isASCII }
         if asciiOnly {
             return sanitized
         }
 
-        guard let data = sanitized.data(using: .utf8) else { return sanitized }
-        let base64 = data.base64EncodedString()
-        return "=?UTF-8?B?\(base64)?="
+        var encodedWords: [String] = []
+        var chunk = ""
+        var chunkByteCount = 0
+        var byteLimit = rfc2047ByteLimit(linePrefixLength: firstLinePrefixLength)
+
+        for scalar in sanitized.unicodeScalars {
+            let scalarText = String(scalar)
+            let scalarByteCount = scalarText.utf8.count
+            if !chunk.isEmpty, chunkByteCount + scalarByteCount > byteLimit {
+                encodedWords.append(rfc2047EncodedWord(chunk))
+                chunk = ""
+                chunkByteCount = 0
+                byteLimit = rfc2047ByteLimit(linePrefixLength: 1)
+            }
+            chunk += scalarText
+            chunkByteCount += scalarByteCount
+        }
+
+        if !chunk.isEmpty {
+            encodedWords.append(rfc2047EncodedWord(chunk))
+        }
+        return encodedWords.joined(separator: rfc2047Fold)
+    }
+
+    private static func rfc2047ByteLimit(linePrefixLength: Int) -> Int {
+        let wrapperLength = rfc2047Prefix.count + rfc2047Suffix.count
+        let wordLength = min(rfc2047MaxWordLength, rfc2047MaxLineLength - linePrefixLength)
+        let base64Length = ((wordLength - wrapperLength) / 4) * 4
+        return (base64Length / 4) * 3
+    }
+
+    private static func rfc2047EncodedWord(_ text: String) -> String {
+        let base64 = Data(text.utf8).base64EncodedString()
+        return "\(rfc2047Prefix)\(base64)\(rfc2047Suffix)"
     }
 
     static func formatFromHeader(email: String, name: String?) -> String {
         let sanitizedEmail = sanitizeHeaderValue(email)
-        guard let name = name, !name.isEmpty else {
+        let sanitizedName = sanitizeHeaderValue(name ?? "")
+        guard !sanitizedName.isEmpty else {
             return sanitizedEmail
         }
 
-        // Check if name needs encoding for non-ASCII characters
-        let encodedName = encodeHeaderIfNeeded(name)
-
-        // Format as "Name <email@example.com>"
-        // If name contains special characters, quote it. Quote-escaping alone cannot
-        // neutralize CRLF, so the quoted-name path must sanitize before escaping.
-        // Backslashes are escaped first (a trailing bare backslash would turn the
-        // closing quote into an RFC 5322 quoted-pair and swallow the address).
-        if name.contains(where: { $0 == "\"" || $0 == "<" || $0 == ">" || $0 == "," || $0 == "@" }) {
-            let quotedName = sanitizeHeaderValue(name)
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-            return "\"\(quotedName)\" <\(sanitizedEmail)>"
-        } else {
-            return "\(encodedName) <\(sanitizedEmail)>"
+        let needsQuoting = sanitizedName.contains {
+            $0 == "\"" || $0 == "\\" || $0 == "<" || $0 == ">" || $0 == "," || $0 == "@"
         }
+        let isASCIIOnly = sanitizedName.unicodeScalars.allSatisfy { $0.isASCII }
+
+        // An encoded-word is entirely ASCII atext, so non-ASCII names use that
+        // path even when their decoded value also contains a quoting special.
+        if needsQuoting && isASCIIOnly {
+            return "\"\(quoteParameterValue(sanitizedName))\" <\(sanitizedEmail)>"
+        }
+        if isASCIIOnly {
+            return "\(sanitizedName) <\(sanitizedEmail)>"
+        }
+
+        let fromPrefixLength = "From: ".utf8.count
+        let encodedName = encodeHeaderValue(
+            sanitizedName,
+            firstLinePrefixLength: fromPrefixLength
+        )
+        let address = "<\(sanitizedEmail)>"
+        let needsAddressFold = encodedName.contains(rfc2047Fold)
+            || fromPrefixLength + encodedName.utf8.count + 1 + address.utf8.count > rfc2047MaxLineLength
+        return "\(encodedName)\(needsAddressFold ? rfc2047Fold : " ")\(address)"
     }
 }

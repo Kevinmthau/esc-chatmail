@@ -37,6 +37,35 @@ extension MimeBuilder {
         inlineAttachments: [InlineAttachmentData],
         messageId: String? = nil
     ) -> Data {
+        // Rich HTML and its inline parts are one unit. If a Content-ID would
+        // need a lossy rewrite, fall back to the plain body so its `cid:` URL
+        // cannot diverge from the emitted part header.
+        guard inlineAttachments.allSatisfy({ canEmitContentIdVerbatim($0.contentId) }) else {
+            if attachments.isEmpty {
+                return buildSimpleMessage(
+                    to: to,
+                    from: from,
+                    fromName: fromName,
+                    body: body,
+                    subject: subject,
+                    inReplyTo: inReplyTo,
+                    references: references,
+                    messageId: messageId
+                )
+            }
+            return buildMultipartMessage(
+                to: to,
+                from: from,
+                fromName: fromName,
+                body: body,
+                subject: subject,
+                inReplyTo: inReplyTo,
+                references: references,
+                attachments: attachments,
+                messageId: messageId
+            )
+        }
+
         var mime = ""
         let mixedBoundary = generateBoundary()
         let relatedBoundary = generateBoundary()
@@ -117,16 +146,12 @@ extension MimeBuilder {
             if hasInlineAttachments {
                 // Add inline attachments
                 for attachment in inlineAttachments {
-                    let safeFilename = sanitizeHeaderValue(attachment.filename)
-                    let safeMimeType = sanitizeHeaderValue(attachment.mimeType)
-                    let safeContentId = sanitizeHeaderValue(attachment.contentId)
-
                     mime += "--\(relatedBoundary)\r\n"
-                    mime += "Content-Type: \(safeMimeType); name=\"\(safeFilename)\"\r\n"
-                    mime += "Content-Transfer-Encoding: base64\r\n"
-                    mime += "Content-ID: <\(safeContentId)>\r\n"
-                    mime += "Content-Disposition: inline; filename=\"\(safeFilename)\"\r\n"
-                    mime += "\r\n"
+                    mime += attachmentPartHeaders(
+                        mimeType: attachment.mimeType,
+                        filename: attachment.filename,
+                        contentId: attachment.contentId
+                    )
 
                     let base64String = attachment.data.base64EncodedString(options: .lineLength64Characters)
                     mime += base64String
@@ -139,14 +164,12 @@ extension MimeBuilder {
 
             // Add regular attachments
             for attachment in attachments {
-                let safeFilename = sanitizeHeaderValue(attachment.filename)
-                let safeMimeType = sanitizeHeaderValue(attachment.mimeType)
-
                 mime += "--\(mixedBoundary)\r\n"
-                mime += "Content-Type: \(safeMimeType); name=\"\(safeFilename)\"\r\n"
-                mime += "Content-Transfer-Encoding: base64\r\n"
-                mime += "Content-Disposition: attachment; filename=\"\(safeFilename)\"\r\n"
-                mime += "\r\n"
+                mime += attachmentPartHeaders(
+                    mimeType: attachment.mimeType,
+                    filename: attachment.filename,
+                    contentId: nil
+                )
 
                 let base64String = attachment.data.base64EncodedString(options: .lineLength64Characters)
                 mime += base64String
