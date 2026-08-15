@@ -396,6 +396,63 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(text.contains("From: Kevin Thau"))
     }
 
+    func testRemoveQuotes_signatureMode_preservesPhoneSentenceBeforeCorporateSignatureAndOutlookQuote() {
+        let html = """
+        <p>Hi Recipient,</p>
+        <p>&nbsp;</p>
+        <p>Can you give me a call? 415-555-0101</p>
+        <p>&nbsp;</p>
+        <table>
+          <tbody>
+            <tr><td>Example Firm</td></tr>
+            <tr><td>Alex Example</td></tr>
+            <tr><td>Partner</td></tr>
+            <tr><td>T (415) 555-0100</td></tr>
+            <tr><td>alex@example.test</td></tr>
+          </tbody>
+        </table>
+        <div style="border-top: solid #E1E1E1 1pt">
+          <p>
+            <b>From:</b> Sender Example &lt;sender@example.test&gt;<br>
+            <b>Sent:</b> Friday, August 14, 2026 11:37 AM<br>
+            <b>To:</b> Recipient Example &lt;recipient@example.test&gt;<br>
+            <b>Subject:</b> Re: Example
+          </p>
+        </div>
+        <p>Older quoted content.</p>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertEqual(text, "Hi Recipient,\n\nCan you give me a call? 415-555-0101")
+        XCTAssertFalse(text.contains("Example Firm"))
+        XCTAssertFalse(text.contains("Older quoted content."))
+    }
+
+    func testIsContactSignatureLine_phoneFormatsDistinguishesStandaloneLinesFromProse() {
+        let signatureLines = [
+            "415-555-1212",
+            "(415) 555-1212",
+            "+1 415 555 1212",
+            "415-555-1212 x112",
+            "T (415) 227-3629",
+            "Phone: 415-555-1212",
+            "Cell: 650-255-5222"
+        ]
+        let proseLines = [
+            "Can you give me a call? 415-283-6379",
+            "Call me at (415) 555-1212 when you are free.",
+            "My mobile is +1 415 555 1212; text me first."
+        ]
+
+        for line in signatureLines {
+            XCTAssertTrue(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected signature line: \(line)")
+        }
+        for line in proseLines {
+            XCTAssertFalse(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected prose line: \(line)")
+        }
+    }
+
     func testRemoveQuotes_signatureMode_preservesBodyLineBeforeContactSignatureWithoutBlank() {
         let html = """
         <div>The estimate changed.</div>

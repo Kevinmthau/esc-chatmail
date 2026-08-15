@@ -184,6 +184,13 @@ extension EmailDOMQuoteRemover {
 
     private static let signaturePhonePattern = SignaturePatterns.phone
 
+    private static let signaturePhonePrefixPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"^(?:m|c|o|f|d|t|p|tel|phone|cell|mobile|office|direct|fax)\s*[:.-]?\s*\(?\+?\d[\d\s().-]{5,}\b"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
     private static let signatureAddressPattern = SignaturePatterns.addressKeyword
 
     private static let signatureCityStateZipPattern: NSRegularExpression? = {
@@ -320,7 +327,7 @@ extension EmailDOMQuoteRemover {
         if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
             return true
         }
-        if signaturePhonePattern?.firstMatch(in: text, options: [], range: range) != nil {
+        if isSignaturePhoneLine(text) {
             return true
         }
         if signatureAddressPattern?.firstMatch(in: text, options: [], range: range) != nil {
@@ -347,7 +354,7 @@ extension EmailDOMQuoteRemover {
         if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
             return true
         }
-        if signaturePhonePattern?.firstMatch(in: text, options: [], range: range) != nil {
+        if isSignaturePhoneLine(text) {
             return true
         }
         if signatureAddressPattern?.firstMatch(in: text, options: [], range: range) != nil {
@@ -360,6 +367,42 @@ extension EmailDOMQuoteRemover {
             return true
         }
         return false
+    }
+
+    private static func isSignaturePhoneLine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let range = NSRange(location: 0, length: trimmed.utf16.count)
+
+        if signaturePhonePrefixPattern?.firstMatch(in: trimmed, options: [], range: range) != nil {
+            return true
+        }
+        guard signaturePhonePattern?.firstMatch(in: trimmed, options: [], range: range) != nil else {
+            return false
+        }
+
+        // Phone numbers are common in authored prose ("call me at ..."). Only
+        // treat an unlabeled number as signature data when the line is mostly
+        // the number itself, while retaining short extension markers.
+        let lowercase = trimmed.lowercased()
+        let letters = trimmed.unicodeScalars.reduce(into: 0) { count, scalar in
+            if CharacterSet.letters.contains(scalar) {
+                count += 1
+            }
+        }
+        let digits = trimmed.unicodeScalars.reduce(into: 0) { count, scalar in
+            if CharacterSet.decimalDigits.contains(scalar) {
+                count += 1
+            }
+        }
+
+        guard digits >= 7, trimmed.count <= 40 else { return false }
+        guard letters > 0 else { return true }
+
+        return letters <= 3 && (
+            lowercase.contains("ext") ||
+            lowercase.contains(" x") ||
+            lowercase.hasSuffix("x")
+        )
     }
 
     private static func isSignatureSupportLine(_ text: String) -> Bool {
