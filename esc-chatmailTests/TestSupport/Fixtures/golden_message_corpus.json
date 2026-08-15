@@ -111,6 +111,12 @@
       "expected": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached."
     },
     {
+      "id": "html_phone_sentence_before_corporate_signature_preserved",
+      "notes": "The HTML-to-bubble pipeline should preserve authored prose containing a phone number while removing the adjacent corporate signature and Outlook quote.",
+      "inputHTML": "<p>Hi Recipient,</p><p>&nbsp;</p><p>Can you give me a call? 415-555-0101</p><p>&nbsp;</p><table><tbody><tr><td>Example Firm</td></tr><tr><td>Alex Example</td></tr><tr><td>Partner</td></tr><tr><td>T (415) 555-0100</td></tr><tr><td>alex@example.test</td></tr></tbody></table><div style=\"border-top: solid #E1E1E1 1pt\"><p><b>From:</b> Sender Example &lt;sender@example.test&gt;<br><b>Sent:</b> Friday, August 14, 2026 11:37 AM<br><b>To:</b> Recipient Example &lt;recipient@example.test&gt;<br><b>Subject:</b> Re: Example</p></div><p>Older quoted content.</p>",
+      "expected": "Hi Recipient,\n\nCan you give me a call? 415-555-0101"
+    },
+    {
       "id": "outlook_mobile_signature_block_with_cid_logo_removed",
       "notes": "Outlook mobile signature wrappers should be stripped from bubble text so signature logo CID references do not leak into chat.",
       "inputHTML": "<div>Hope everyone had a good week! Can you please let me know on the below or if we need to discuss?</div><div id=\"ms-outlook-mobile-signature\"><p>Ally Varady</p><p><img src=\"cid:image001.png@01DC96AF.8C2488C0\" alt=\"A close up of a logo\"></p></div>",

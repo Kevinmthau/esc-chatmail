@@ -182,7 +182,49 @@ extension EmailDOMQuoteRemover {
 
     private static let signatureURLPattern = URLPatterns.webURL
 
-    private static let signaturePhonePattern = SignaturePatterns.phone
+    private static let signaturePhonePattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"(?<![\p{L}\p{N}_])\+?\(?\d(?:[\d\s().-]*\d)?"#,
+            options: []
+        )
+    }()
+
+    private static let signaturePhoneKnownLabelPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"^(?:m|c|o|f|d|t|p|w|h|tel|tél|telephone(?:\s+number)?|"# +
+                #"téléphone(?:\s+number)?|"# +
+                #"telefono|teléfono|telefon|"# +
+                #"phone(?:\s+number)?|cell(?:ular)?(?:\s+(?:phone|number))?|"# +
+                #"mobile(?:\s+(?:phone|number))?|office(?:\s+phone)?|"# +
+                #"m[oó]vil|portable|"# +
+                #"work(?:\s+phone)?|home(?:\s+phone)?|direct(?:\s+(?:phone|line))?|"# +
+                #"desk(?:\s+(?:phone|line))?|main(?:\s+(?:phone|line))?|fax)\s*(?:[:.]|\|)?$"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let signaturePhoneExtensionPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"^(?:x|ext\.?|extension|#)\s*:?\s*\d+\s*[.,;]?$"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let signaturePhoneSuffixLabelPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"^(?:\([\p{L}\p{M}][\p{L}\p{M}-]{0,20}\)|"# +
+                #"mobile|cell|office|work|home|direct|desk|main|fax)\s*[.,;]?$"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let signatureNonPhoneDatePattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"^(?:(?:19|20)\d{2}(?:-|\.)(?:\d{1,2}(?:-|\.)\d{1,2}|\d{4})|"# +
+                #"\d{1,2}(?:-|\.)\d{1,2}(?:-|\.)(?:19|20)\d{2})$"#,
+            options: []
+        )
+    }()
 
     private static let signatureAddressPattern = SignaturePatterns.addressKeyword
 
@@ -320,7 +362,7 @@ extension EmailDOMQuoteRemover {
         if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
             return true
         }
-        if signaturePhonePattern?.firstMatch(in: text, options: [], range: range) != nil {
+        if isSignaturePhoneLine(text) {
             return true
         }
         if signatureAddressPattern?.firstMatch(in: text, options: [], range: range) != nil {
@@ -347,7 +389,7 @@ extension EmailDOMQuoteRemover {
         if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
             return true
         }
-        if signaturePhonePattern?.firstMatch(in: text, options: [], range: range) != nil {
+        if isSignaturePhoneLine(text) {
             return true
         }
         if signatureAddressPattern?.firstMatch(in: text, options: [], range: range) != nil {
@@ -360,6 +402,151 @@ extension EmailDOMQuoteRemover {
             return true
         }
         return false
+    }
+
+    private static func isSignaturePhoneLine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let slashNormalized = trimmed.replacingOccurrences(
+            of: #"\s+/\s+"#,
+            with: "|",
+            options: .regularExpression
+        )
+        let normalized = slashNormalized.replacingOccurrences(
+            of: #"\s+(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
+            with: "|",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        let segments = normalized.split(omittingEmptySubsequences: false) { character in
+            "|•│┃¦".contains(character)
+        }.map { segment in
+            String(segment).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard !segments.isEmpty, segments.allSatisfy({ !$0.isEmpty }) else { return false }
+
+        var foundPhone = false
+        var requiresClearlyFormattedPhone = false
+        for segment in segments {
+            if isSignaturePhoneSegment(segment) {
+                if requiresClearlyFormattedPhone && !isClearlyFormattedSignaturePhoneSegment(segment) {
+                    return false
+                }
+                foundPhone = true
+                requiresClearlyFormattedPhone = false
+                continue
+            }
+
+            if foundPhone {
+                guard isSignaturePhoneModifier(segment) else { return false }
+            } else {
+                guard isSignaturePhoneLeadingSegment(segment) else { return false }
+                if isStandaloneSignaturePhoneLabel(segment) {
+                    requiresClearlyFormattedPhone = false
+                } else if !isStrongSignatureSupportLine(segment) {
+                    requiresClearlyFormattedPhone = true
+                }
+            }
+        }
+
+        return foundPhone
+    }
+
+    private static func isSignaturePhoneSegment(_ text: String) -> Bool {
+        let range = NSRange(location: 0, length: text.utf16.count)
+
+        let matches = signaturePhonePattern?.matches(in: text, options: [], range: range) ?? []
+        guard let match = matches.first(where: { match in
+            guard let candidateRange = Range(match.range, in: text) else { return false }
+            let candidate = String(text[candidateRange])
+            let digitCount = candidate.unicodeScalars.reduce(into: 0) { count, scalar in
+                if CharacterSet.decimalDigits.contains(scalar) {
+                    count += 1
+                }
+            }
+            return digitCount >= 7 && !matchesEntireLine(signatureNonPhoneDatePattern, text: candidate)
+        }), let matchRange = Range(match.range, in: text) else {
+            return false
+        }
+
+        let prefix = normalizedSignaturePhonePrefix(String(text[..<matchRange.lowerBound]))
+        let suffix = String(text[matchRange.upperBound...])
+        guard isAllowedSignaturePhoneSuffix(suffix) else { return false }
+
+        if prefix.isEmpty {
+            return true
+        }
+        if matchesEntireLine(signaturePhoneKnownLabelPattern, text: prefix) {
+            return true
+        }
+        return false
+    }
+
+    private static func isSignaturePhoneLeadingSegment(_ text: String) -> Bool {
+        if isStandaloneSignaturePhoneLabel(text) || isStrongSignatureSupportLine(text) {
+            return true
+        }
+
+        let words = text.split(whereSeparator: \.isWhitespace)
+        return words.count >= 2 && looksLikeSignatureNameSupportLine(text)
+    }
+
+    private static func isSignaturePhoneModifier(_ text: String) -> Bool {
+        matchesEntireLine(signaturePhoneExtensionPattern, text: text) ||
+            matchesEntireLine(signaturePhoneSuffixLabelPattern, text: text) ||
+            isStandaloneSignaturePhoneLabel(text)
+    }
+
+    private static func isStandaloneSignaturePhoneLabel(_ text: String) -> Bool {
+        matchesEntireLine(signaturePhoneKnownLabelPattern, text: text)
+    }
+
+    private static func isClearlyFormattedSignaturePhoneSegment(_ text: String) -> Bool {
+        if let firstDigit = text.firstIndex(where: \.isNumber) {
+            let prefix = normalizedSignaturePhonePrefix(String(text[..<firstDigit]))
+            if isStandaloneSignaturePhoneLabel(prefix) {
+                return true
+            }
+        }
+
+        if text.rangeOfCharacter(from: CharacterSet(charactersIn: "+():")) != nil {
+            return true
+        }
+
+        let separatorCount = text.unicodeScalars.reduce(into: 0) { count, scalar in
+            if CharacterSet.whitespaces.contains(scalar) || scalar == "-" || scalar == "." {
+                count += 1
+            }
+        }
+        let lowercased = text.lowercased()
+        return separatorCount >= 2 || lowercased.contains("ext") || lowercased.contains("x")
+    }
+
+    private static func normalizedSignaturePhonePrefix(_ rawPrefix: String) -> String {
+        var prefix = rawPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        while let last = prefix.last, last == "+" || last == "(" {
+            prefix.removeLast()
+            prefix = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return prefix
+    }
+
+    private static func isAllowedSignaturePhoneSuffix(_ rawSuffix: String) -> Bool {
+        var suffix = rawSuffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let first = suffix.first, ".,;".contains(first) {
+            suffix.removeFirst()
+            suffix = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !suffix.isEmpty else { return true }
+
+        return matchesEntireLine(signaturePhoneExtensionPattern, text: suffix) ||
+            matchesEntireLine(signaturePhoneSuffixLabelPattern, text: suffix)
+    }
+
+    private static func matchesEntireLine(_ pattern: NSRegularExpression?, text: String) -> Bool {
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return pattern?.firstMatch(in: text, options: [], range: range)?.range == range
     }
 
     private static func isSignatureSupportLine(_ text: String) -> Bool {
