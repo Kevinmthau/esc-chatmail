@@ -6,7 +6,6 @@ import { collapsedElementText, paragraphAwareText, parseHtmlDocument } from './h
 import {
   EMAIL_ADDRESS_PATTERN,
   FROM_HEADER_PREFIXES,
-  PHONE_PATTERN,
   SENT_OR_DATE_HEADER_PREFIXES,
   STANDALONE_CONTACT_LABEL_PATTERN,
   SUBJECT_HEADER_PREFIXES,
@@ -1288,6 +1287,26 @@ function truncateAtSignatureMarkers(document: Document): void {
 
 const SIGNATURE_CITY_STATE_ZIP_PATTERN = /^[A-Z][A-Z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$/i
 
+const SIGNATURE_PHONE_PATTERN = /(^|[^\p{L}\p{N}_])(\+?\(?\p{Nd}(?:[\p{Nd}\s().-]*\p{Nd})?)/gu
+
+const SIGNATURE_DECIMAL_DIGIT_PATTERN = /\p{Nd}/u
+
+const SIGNATURE_PHONE_FORMAT_SEPARATOR_PATTERN = /[\s.-]/u
+
+const SIGNATURE_PHONE_KNOWN_LABEL_PATTERN =
+  /^(?:m|c|o|f|d|t|p|w|h|tel|tél|telephone(?:\s+number)?|téléphone(?:\s+number)?|telefono|teléfono|telefon|phone(?:\s+number)?|cell(?:ular)?(?:\s+(?:phone|number))?|mobile(?:\s+(?:phone|number))?|office(?:\s+phone)?|m[oó]vil|portable|work(?:\s+phone)?|home(?:\s+phone)?|direct(?:\s+(?:phone|line))?|desk(?:\s+(?:phone|line))?|main(?:\s+(?:phone|line))?|fax)\s*(?:[:.]|\|)?$/iu
+
+const SIGNATURE_PHONE_EXTENSION_PATTERN = /^(?:x|ext\.?|extension|#)\s*:?\s*\p{Nd}+\s*[.,;]?$/iu
+
+const SIGNATURE_PHONE_SUFFIX_LABEL_PATTERN =
+  /^(?:\([\p{L}\p{M}][\p{L}\p{M}-]{0,20}\)|mobile|cell|office|work|home|direct|desk|main|fax)\s*[.,;]?$/iu
+
+const SIGNATURE_NON_PHONE_DATE_PATTERN =
+  /^(?:(?:19|20)\p{Nd}{2}(?:-|\.)(?:\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}|\p{Nd}{4})|\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}(?:-|\.)(?:19|20)\p{Nd}{2})$/u
+
+const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
+  /\s+(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)/gi
+
 const SIGNATURE_TITLE_KEYWORDS = [
   'director',
   'manager',
@@ -1440,7 +1459,7 @@ function isContactSignatureLine(text: string): boolean {
   if (text.length === 0) return false
   if (EMAIL_ADDRESS_PATTERN.test(text)) return true
   if (WEB_URL_PATTERN.test(text)) return true
-  if (PHONE_PATTERN.test(text)) return true
+  if (isSignaturePhoneLine(text)) return true
   if (ADDRESS_KEYWORD_PATTERN.test(text)) return true
   if (SIGNATURE_CITY_STATE_ZIP_PATTERN.test(text)) return true
   if (STANDALONE_CONTACT_LABEL_PATTERN.test(text)) return true
@@ -1453,11 +1472,135 @@ function containsEmailAddress(text: string): boolean {
 
 function hasNonEmailContactSignal(text: string): boolean {
   if (WEB_URL_PATTERN.test(text)) return true
-  if (PHONE_PATTERN.test(text)) return true
+  if (isSignaturePhoneLine(text)) return true
   if (ADDRESS_KEYWORD_PATTERN.test(text)) return true
   if (SIGNATURE_CITY_STATE_ZIP_PATTERN.test(text)) return true
   if (STANDALONE_CONTACT_LABEL_PATTERN.test(text)) return true
   return false
+}
+
+function isSignaturePhoneLine(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/\s+\/\s+/g, '|')
+    .replace(SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN, '|')
+  const segments = normalized.split(/[|•│┃¦]/u).map((segment) => segment.trim())
+  if (segments.length === 0 || segments.some((segment) => segment.length === 0)) {
+    return false
+  }
+
+  let foundPhone = false
+  let requiresClearlyFormattedPhone = false
+  for (const segment of segments) {
+    if (isSignaturePhoneSegment(segment)) {
+      if (requiresClearlyFormattedPhone && !isClearlyFormattedSignaturePhoneSegment(segment)) {
+        return false
+      }
+      foundPhone = true
+      requiresClearlyFormattedPhone = false
+      continue
+    }
+
+    if (foundPhone) {
+      if (!isSignaturePhoneModifier(segment)) return false
+      continue
+    }
+
+    if (!isSignaturePhoneLeadingSegment(segment)) return false
+    if (isStandaloneSignaturePhoneLabel(segment)) {
+      requiresClearlyFormattedPhone = false
+    } else if (!isStrongSignatureSupportLine(segment)) {
+      requiresClearlyFormattedPhone = true
+    }
+  }
+
+  return foundPhone
+}
+
+function isSignaturePhoneSegment(text: string): boolean {
+  let phone: string | undefined
+  let phoneStart = -1
+  for (const candidateMatch of text.matchAll(SIGNATURE_PHONE_PATTERN)) {
+    const boundary = candidateMatch[1] ?? ''
+    const candidate = candidateMatch[2] ?? ''
+    let digitCount = 0
+    for (const character of candidate) {
+      if (SIGNATURE_DECIMAL_DIGIT_PATTERN.test(character)) digitCount += 1
+    }
+    if (digitCount >= 7 && !SIGNATURE_NON_PHONE_DATE_PATTERN.test(candidate)) {
+      phone = candidate
+      phoneStart = (candidateMatch.index ?? 0) + boundary.length
+      break
+    }
+  }
+  if (!phone || phoneStart < 0) return false
+
+  const prefix = normalizedSignaturePhonePrefix(text.slice(0, phoneStart))
+  const suffix = text.slice(phoneStart + phone.length)
+  if (!isAllowedSignaturePhoneSuffix(suffix)) return false
+
+  return prefix.length === 0 || SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix)
+}
+
+function isSignaturePhoneLeadingSegment(text: string): boolean {
+  if (isStandaloneSignaturePhoneLabel(text) || isStrongSignatureSupportLine(text)) {
+    return true
+  }
+
+  const words = text.split(/\s+/).filter((word) => word.length > 0)
+  return words.length >= 2 && looksLikeSignatureNameSupportLine(text)
+}
+
+function isSignaturePhoneModifier(text: string): boolean {
+  return (
+    SIGNATURE_PHONE_EXTENSION_PATTERN.test(text) ||
+    SIGNATURE_PHONE_SUFFIX_LABEL_PATTERN.test(text) ||
+    isStandaloneSignaturePhoneLabel(text)
+  )
+}
+
+function isStandaloneSignaturePhoneLabel(text: string): boolean {
+  return SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(text)
+}
+
+function isClearlyFormattedSignaturePhoneSegment(text: string): boolean {
+  const firstDigit = text.search(SIGNATURE_DECIMAL_DIGIT_PATTERN)
+  if (firstDigit >= 0) {
+    const prefix = normalizedSignaturePhonePrefix(text.slice(0, firstDigit))
+    if (isStandaloneSignaturePhoneLabel(prefix)) return true
+  }
+
+  if (/[+():]/.test(text)) return true
+
+  let separatorCount = 0
+  for (const character of text) {
+    if (SIGNATURE_PHONE_FORMAT_SEPARATOR_PATTERN.test(character)) {
+      separatorCount += 1
+    }
+  }
+  const lowercased = text.toLowerCase()
+  return separatorCount >= 2 || lowercased.includes('ext') || lowercased.includes('x')
+}
+
+function normalizedSignaturePhonePrefix(rawPrefix: string): string {
+  let prefix = rawPrefix.trim()
+  while (prefix.endsWith('+') || prefix.endsWith('(')) {
+    prefix = prefix.slice(0, -1).trim()
+  }
+  return prefix
+}
+
+function isAllowedSignaturePhoneSuffix(rawSuffix: string): boolean {
+  let suffix = rawSuffix.trim()
+  if (/^[.,;]/.test(suffix)) {
+    suffix = suffix.slice(1).trim()
+  }
+  if (suffix.length === 0) return true
+
+  return (
+    SIGNATURE_PHONE_EXTENSION_PATTERN.test(suffix) ||
+    SIGNATURE_PHONE_SUFFIX_LABEL_PATTERN.test(suffix)
+  )
 }
 
 function isSignatureSupportLine(text: string): boolean {
