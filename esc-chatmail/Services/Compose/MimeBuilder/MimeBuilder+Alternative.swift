@@ -37,6 +37,35 @@ extension MimeBuilder {
         inlineAttachments: [InlineAttachmentData],
         messageId: String? = nil
     ) -> Data {
+        // Rich HTML and its inline parts are one unit. If a Content-ID would
+        // need a lossy rewrite, fall back to the plain body so its `cid:` URL
+        // cannot diverge from the emitted part header.
+        guard inlineAttachments.allSatisfy({ canEmitContentIdVerbatim($0.contentId) }) else {
+            if attachments.isEmpty {
+                return buildSimpleMessage(
+                    to: to,
+                    from: from,
+                    fromName: fromName,
+                    body: body,
+                    subject: subject,
+                    inReplyTo: inReplyTo,
+                    references: references,
+                    messageId: messageId
+                )
+            }
+            return buildMultipartMessage(
+                to: to,
+                from: from,
+                fromName: fromName,
+                body: body,
+                subject: subject,
+                inReplyTo: inReplyTo,
+                references: references,
+                attachments: attachments,
+                messageId: messageId
+            )
+        }
+
         var mime = ""
         let mixedBoundary = generateBoundary()
         let relatedBoundary = generateBoundary()

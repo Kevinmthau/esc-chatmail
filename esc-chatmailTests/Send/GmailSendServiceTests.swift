@@ -439,6 +439,58 @@ final class GmailSendServiceTests: XCTestCase {
         )
     }
 
+    func testFormatFromHeader_nonASCIIBackslashName_usesEncodedWord() {
+        let name = "Åsa\\Ekström"
+        let result = MimeBuilder.formatFromHeader(
+            email: "sender@example.com",
+            name: name
+        )
+
+        XCTAssertEqual(
+            result,
+            "=?UTF-8?B?w4VzYVxFa3N0csO2bQ==?= <sender@example.com>"
+        )
+        XCTAssertTrue(result.unicodeScalars.allSatisfy { $0.isASCII })
+        XCTAssertEqual(EmailNormalizer.extractDisplayName(from: result), name)
+    }
+
+    func testFormatFromHeader_longNonASCIISpecialName_foldsWithinRFC2047Limits() {
+        let name = String(repeating: "A", count: 43) + ",🙂"
+        let result = MimeBuilder.formatFromHeader(
+            email: "sender@example.com",
+            name: name
+        )
+        let segments = result.components(separatedBy: "\r\n ")
+        let encodedWords = segments.dropLast()
+
+        XCTAssertEqual(encodedWords.count, 2)
+        XCTAssertTrue(encodedWords.allSatisfy { $0.utf8.count <= 75 })
+        XCTAssertEqual(segments.last, "<sender@example.com>")
+        XCTAssertTrue(
+            ("From: " + result)
+                .components(separatedBy: "\r\n")
+                .allSatisfy { $0.utf8.count <= 76 }
+        )
+        XCTAssertEqual(EmailNormalizer.extractDisplayName(from: result), name)
+    }
+
+    func testFormatFromHeader_sanitizesNameBeforeChoosingWireShape() {
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(
+                email: "sender@example.com",
+                name: "Smith, John\u{00A0}"
+            ),
+            "\"Smith, John\" <sender@example.com>"
+        )
+        XCTAssertEqual(
+            MimeBuilder.formatFromHeader(
+                email: "sender@example.com",
+                name: "\u{00A0}\u{3000}"
+            ),
+            "sender@example.com"
+        )
+    }
+
     func testFormatFromHeader_cleanIdentity_isPreservedByteIdentically() {
         // HONEST SCOPE: this test PASSES with the sanitizeHeaderValue calls deleted — it
         // pins the no-op direction only, failing if the sanitizer is ever STRENGTHENED to
@@ -726,22 +778,28 @@ final class GmailSendServiceTests: XCTestCase {
         XCTAssertEqual(headerLines(in: injected, named: "malicious"), [])
     }
 
-    func testBuildAlternativeMessage_inlineContentIDInjection_stripsInteriorBrackets() throws {
-        // Revert-check: MimeBuilder.sanitizeContentId, applied in
-        // MimeBuilder.attachmentPartHeaders. The builder supplies the <…> delimiters, so
-        // with only sanitizeHeaderValue an interior '<'/'>' (survivable, since that only
-        // strips CR/LF) nests or prematurely closes them and malforms the msg-id.
+    func testBuildAlternativeMessage_unsafeInlineContentID_fallsBackAsOneUnit() throws {
+        // Revert-check: MimeBuilder.canEmitContentIdVerbatim at the alternative-builder
+        // boundary. Rewriting only the part header disconnects it from the HTML cid:
+        // reference, so unsafe rich HTML + inline parts fall back together while regular
+        // attachments remain attached.
         let injected = try decodedMIME(
             MimeBuilder.buildAlternativeMessage(
                 to: ["to@example.com"],
                 from: "sender@example.com",
                 fromName: nil,
                 body: "Hello world",
-                htmlBody: "<p>Hello world</p>",
+                htmlBody: "<p>Hello world</p><img src=\"cid:real%3E%3Cevil@attacker\">",
                 subject: "Subject",
                 inReplyTo: nil,
                 references: [],
-                attachments: [],
+                attachments: [
+                    AttachmentData(
+                        data: Data("attachment".utf8),
+                        filename: "report.pdf",
+                        mimeType: "application/pdf"
+                    )
+                ],
                 inlineAttachments: [
                     InlineAttachmentData(
                         data: Data("image".utf8),
@@ -752,9 +810,17 @@ final class GmailSendServiceTests: XCTestCase {
                 ]
             )
         )
+        XCTAssertEqual(headerLines(in: injected, named: "Content-ID"), [])
+        XCTAssertFalse(headerLines(in: injected, named: "Content-Type").contains {
+            $0.contains("text/html") || $0.contains("multipart/alternative")
+        })
         XCTAssertEqual(
-            headerLines(in: injected, named: "Content-ID"),
-            ["Content-ID: <realevil@attacker>"]
+            attachmentNameHeaderLines(in: injected),
+            ["Content-Type: application/pdf; name=\"report.pdf\""]
+        )
+        XCTAssertEqual(
+            headerLines(in: injected, named: "Content-Disposition"),
+            ["Content-Disposition: attachment; filename=\"report.pdf\""]
         )
     }
 

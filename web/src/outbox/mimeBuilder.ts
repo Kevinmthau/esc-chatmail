@@ -266,8 +266,8 @@ function encodeHeaderValue(text: string, firstLinePrefixLength: number): string 
  * RFC 5322 atext so it needs no quoting, whereas a quoted-string carrying
  * raw 8-bit UTF-8 is malformed for strict relays (matches iOS
  * MimeBuilder.formatFromHeader). Long encoded names are split and folded per
- * RFC 2047. Deviation from iOS: the specials/ASCII checks run on the
- * CRLF-stripped name (strictly safer).
+ * RFC 2047. The specials/ASCII checks match iOS and run on the CRLF-stripped
+ * name.
  */
 export function formatFromHeader(email: string, name?: string): string {
   const sanitizedEmail = sanitizeHeaderValue(email)

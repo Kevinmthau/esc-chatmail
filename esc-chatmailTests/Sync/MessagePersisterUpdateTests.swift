@@ -2420,6 +2420,189 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(savedAttachment.state, .uploaded)
     }
 
+    func testUpdateExistingMessage_reconcilesCanonicalizedOptimisticAttachmentWithoutDuplication() async throws {
+        let testID = UUID().uuidString
+        let messageID = "message-canonical-attachment-merge-\(testID)"
+        let localAttachmentID = "local_canonical_attachment_\(testID)"
+        let remoteAttachmentID = "remote_canonical_attachment_\(testID)"
+        let originalData = Data("canonicalized-original-\(testID)".utf8)
+        let localPath = AttachmentPaths.originalPath(idOrUUID: localAttachmentID, ext: "dat")
+        let remotePath = AttachmentPaths.originalPath(
+            messageId: messageID,
+            attachmentId: remoteAttachmentID,
+            ext: "dat"
+        )
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(originalData, to: localPath))
+        defer {
+            AttachmentPaths.deleteFile(at: localPath)
+            AttachmentPaths.deleteFile(at: remotePath)
+        }
+
+        let conversation = ConversationBuilder.simple(in: context)
+        let existingMessage = MessageBuilder()
+            .withId(messageID)
+            .inConversation(conversation)
+            .withAttachments()
+            .build(in: context)
+        let optimisticAttachment = AttachmentBuilder()
+            .withId(localAttachmentID)
+            .withFilename("   ")
+            .withMimeType("application/pdf\"; malicious=\"1")
+            .withByteSize(Int64(originalData.count))
+            .withLocalURL(localPath)
+            .forMessage(existingMessage)
+            .build(in: context)
+        optimisticAttachment.state = .uploaded
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: ProcessedHeaders(),
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: existingMessage.isUnread,
+            isNewsletter: existingMessage.isNewsletter,
+            hasAttachments: true,
+            attachmentInfo: [
+                AttachmentInfo(
+                    id: remoteAttachmentID,
+                    filename: "attachment",
+                    mimeType: "application/octet-stream",
+                    size: originalData.count,
+                    contentId: nil
+                )
+            ]
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.attachmentsArray.count, 1)
+        let savedAttachment = try XCTUnwrap(existingMessage.attachmentsArray.first)
+        XCTAssertEqual(savedAttachment.id, remoteAttachmentID)
+        XCTAssertEqual(savedAttachment.filename, "attachment")
+        XCTAssertEqual(savedAttachment.mimeType, "application/octet-stream")
+        XCTAssertEqual(savedAttachment.localURL, remotePath)
+        XCTAssertEqual(AttachmentPaths.loadData(from: remotePath), originalData)
+    }
+
+    // Revert-check: canonicalization can collapse distinct invalid MIME types
+    // onto the same remote fingerprint. Neither local file is safe to assign
+    // unless the local-to-remote match is unique in both directions, so the
+    // authoritative remote rows replace the ambiguous local cache rows.
+    func testUpdateExistingMessage_doesNotReconcileAmbiguousCanonicalizedMimeTypes() async throws {
+        let testID = UUID().uuidString
+        let messageID = "message-ambiguous-canonical-attachments-\(testID)"
+        let localAttachmentIDs = [
+            "local_ambiguous_canonical_first_\(testID)",
+            "local_ambiguous_canonical_second_\(testID)"
+        ]
+        let remoteAttachmentIDs = [
+            "remote_ambiguous_canonical_first_\(testID)",
+            "remote_ambiguous_canonical_second_\(testID)"
+        ]
+        let invalidMimeTypes = [
+            "application/pdf\"; malicious=\"1",
+            "text/plain\r\nX-Injected: yes"
+        ]
+        let localPaths = localAttachmentIDs.map {
+            AttachmentPaths.originalPath(idOrUUID: $0, ext: "dat")
+        }
+        let remotePaths = remoteAttachmentIDs.map {
+            AttachmentPaths.originalPath(
+                messageId: messageID,
+                attachmentId: $0,
+                ext: "dat"
+            )
+        }
+        let localData = [
+            Data(repeating: 0x11, count: 32),
+            Data(repeating: 0x22, count: 32)
+        ]
+        AttachmentPaths.setupDirectories()
+        for index in localPaths.indices {
+            XCTAssertTrue(AttachmentPaths.saveData(localData[index], to: localPaths[index]))
+            XCTAssertEqual(MimeBuilder.sanitizeMimeType(invalidMimeTypes[index]), "application/octet-stream")
+        }
+        XCTAssertNotEqual(invalidMimeTypes[0], invalidMimeTypes[1])
+        defer {
+            (localPaths + remotePaths).forEach(AttachmentPaths.deleteFile(at:))
+        }
+
+        let conversation = ConversationBuilder.simple(in: context)
+        let existingMessage = MessageBuilder()
+            .withId(messageID)
+            .inConversation(conversation)
+            .withAttachments()
+            .build(in: context)
+        let optimisticAttachments = localAttachmentIDs.indices.map { index in
+            let attachment = AttachmentBuilder()
+                .withId(localAttachmentIDs[index])
+                .withFilename("duplicate.dat")
+                .withMimeType(invalidMimeTypes[index])
+                .withByteSize(32)
+                .withLocalURL(localPaths[index])
+                .forMessage(existingMessage)
+                .build(in: context)
+            attachment.state = .uploaded
+            return attachment
+        }
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: ProcessedHeaders(),
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: existingMessage.isUnread,
+            isNewsletter: existingMessage.isNewsletter,
+            hasAttachments: true,
+            attachmentInfo: remoteAttachmentIDs.map {
+                AttachmentInfo(
+                    id: $0,
+                    filename: "duplicate.dat",
+                    mimeType: "application/octet-stream",
+                    size: 32,
+                    contentId: nil
+                )
+            }
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.attachmentsArray.count, 2)
+        XCTAssertTrue(existingMessage.attachmentsArray.allSatisfy {
+            !localAttachmentIDs.contains($0.id ?? "")
+        })
+        for index in optimisticAttachments.indices {
+            let remoteAttachment = try XCTUnwrap(
+                existingMessage.attachmentsArray.first { $0.id == remoteAttachmentIDs[index] }
+            )
+            XCTAssertNil(remoteAttachment.localURL)
+            XCTAssertEqual(remoteAttachment.state, .queued)
+            let remoteURL = try XCTUnwrap(AttachmentPaths.fullURL(for: remotePaths[index]))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: remoteURL.path))
+        }
+    }
+
     func testCreateNewMessage_inlineDataAttachment_isPersistedAsDownloaded() async throws {
         let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
 
