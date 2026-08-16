@@ -98,7 +98,7 @@ struct ChatReplyBar: View {
     @ViewBuilder
     private var attachmentStrip: some View {
         AttachmentPreviewStrip(attachments: attachments) { attachment in
-            AttachmentThumbnail(attachment: attachment) {
+            DraftAttachmentThumbnail(attachment: attachment) {
                 removeAttachment(attachment)
             }
         }
@@ -130,59 +130,6 @@ struct ChatReplyBar: View {
             }
             
             viewContext.delete(removed)
-        }
-    }
-}
-
-struct AttachmentThumbnail: View {
-    let attachment: Attachment
-    let onRemove: () -> Void
-    @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            // Thumbnail
-            if let image = thumbnailLoader.image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 60, height: 60)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(width: 60, height: 60)
-                    .overlay(
-                        Image(systemName: attachment.isPDF ? "doc.fill" : "photo")
-                            .foregroundColor(.gray)
-                    )
-            }
-
-            // Remove button
-            Button(action: onRemove) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundColor(.white)
-                    .background(Circle().fill(Color.black.opacity(0.5)))
-            }
-            .offset(x: 4, y: -4)
-        }
-        .onAppear {
-            thumbnailLoader.load(
-                attachmentId: attachment.id,
-                messageId: attachment.message?.id,
-                previewPath: attachment.previewURL
-            )
-        }
-        .onDisappear {
-            thumbnailLoader.cancel()
-        }
-        .onChange(of: attachment.previewURL) { _, newValue in
-            thumbnailLoader.load(
-                attachmentId: attachment.id,
-                messageId: attachment.message?.id,
-                previewPath: newValue
-            )
         }
     }
 }

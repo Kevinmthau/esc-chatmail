@@ -60,7 +60,7 @@ struct ComposeInputBar: View {
         VStack(spacing: 0) {
             if !viewModel.attachments.isEmpty {
                 AttachmentPreviewStrip(attachments: viewModel.attachments) { attachment in
-                    ComposeAttachmentThumbnail(attachment: attachment) {
+                    DraftAttachmentThumbnail(attachment: attachment) {
                         viewModel.removeAttachment(attachment)
                     }
                 }

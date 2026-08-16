@@ -1,7 +1,77 @@
 import XCTest
+import UIKit
 @testable import esc_chatmail
 
 final class AvatarStackViewTests: XCTestCase {
+
+    func testCachedImageSourceIdentityChangesWithImageData() {
+        let original = CachedAsyncImageSource(
+            imageData: Data([0x01]),
+            imageURL: "file:///tmp/avatar.jpg"
+        )
+        let updated = CachedAsyncImageSource(
+            imageData: Data([0x02]),
+            imageURL: "file:///tmp/avatar.jpg"
+        )
+
+        XCTAssertNotEqual(original, updated)
+    }
+
+    func testCachedImageSourceIdentityChangesWithURL() {
+        let original = CachedAsyncImageSource(
+            imageData: nil,
+            imageURL: "file:///tmp/original.jpg"
+        )
+        let updated = CachedAsyncImageSource(
+            imageData: nil,
+            imageURL: "file:///tmp/updated.jpg"
+        )
+
+        XCTAssertNotEqual(original, updated)
+    }
+
+    func testCachedImageSourceTreatsEmptyURLAsNoSource() {
+        let emptyURL = CachedAsyncImageSource(imageData: nil, imageURL: "")
+        let noURL = CachedAsyncImageSource(imageData: nil, imageURL: nil)
+
+        XCTAssertEqual(emptyURL, noURL)
+    }
+
+    @MainActor
+    func testCachedImageLoaderIgnoresCompletionFromSupersededSource() async {
+        let controlledLoader = ControlledImageLoader()
+        let loader = CachedAsyncImageLoader(
+            decodeImageData: { _ in nil },
+            loadImageURL: { urlString in
+                await controlledLoader.load(urlString)
+            }
+        )
+        let originalSource = CachedAsyncImageSource(
+            imageData: nil,
+            imageURL: "original"
+        )
+        let updatedSource = CachedAsyncImageSource(
+            imageData: nil,
+            imageURL: "updated"
+        )
+        let originalImage = UIImage()
+        let updatedImage = UIImage()
+
+        let originalTask = Task { await loader.load(for: originalSource) }
+        await controlledLoader.waitUntilRequested("original")
+        let updatedTask = Task { await loader.load(for: updatedSource) }
+        await controlledLoader.waitUntilRequested("updated")
+
+        await controlledLoader.complete("original", with: originalImage)
+        await originalTask.value
+        XCTAssertNil(loader.loadedSource)
+        XCTAssertNil(loader.image)
+
+        await controlledLoader.complete("updated", with: updatedImage)
+        await updatedTask.value
+        XCTAssertEqual(loader.loadedSource, updatedSource)
+        XCTAssertTrue(loader.image === updatedImage)
+    }
 
     func testResolvedLayout_withGroupConversationAndNoParticipants_usesGroupAvatar() {
         let result = AvatarStackView.resolvedLayout(
@@ -128,5 +198,28 @@ final class AvatarStackViewTests: XCTestCase {
         )
 
         XCTAssertNil(result)
+    }
+}
+
+private actor ControlledImageLoader {
+    private var requests: [String: CheckedContinuation<UIImage?, Never>] = [:]
+    private var requestWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func load(_ source: String) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            requests[source] = continuation
+            requestWaiters.removeValue(forKey: source)?.forEach { $0.resume() }
+        }
+    }
+
+    func waitUntilRequested(_ source: String) async {
+        guard requests[source] == nil else { return }
+        await withCheckedContinuation { continuation in
+            requestWaiters[source, default: []].append(continuation)
+        }
+    }
+
+    func complete(_ source: String, with image: UIImage?) {
+        requests.removeValue(forKey: source)?.resume(returning: image)
     }
 }
