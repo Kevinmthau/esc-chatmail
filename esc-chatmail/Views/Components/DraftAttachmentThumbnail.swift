@@ -1,13 +1,32 @@
 import SwiftUI
 
-struct ComposeAttachmentThumbnail: View {
+/// Shared presentation for locally-selected compose and reply attachments.
+struct DraftAttachmentThumbnail: View {
     @ObservedObject var attachment: Attachment
     let onRemove: () -> Void
+
     @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
+    @State private var activeLoadKey: LoadKey?
+
+    private struct LoadKey: Equatable {
+        let objectIdentity: ObjectIdentifier
+        let attachmentId: String?
+        let messageId: String?
+        let previewPath: String?
+    }
+
+    private var loadKey: LoadKey {
+        LoadKey(
+            objectIdentity: ObjectIdentifier(attachment),
+            attachmentId: attachment.attachmentId,
+            messageId: attachment.message?.id,
+            previewPath: attachment.previewURLValue
+        )
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            if let image = thumbnailLoader.image {
+            if activeLoadKey == loadKey, let image = thumbnailLoader.image {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -31,29 +50,20 @@ struct ComposeAttachmentThumbnail: View {
             }
             .offset(x: 4, y: -4)
         }
-        .onAppear {
+        .task(id: loadKey) {
+            if activeLoadKey != loadKey {
+                thumbnailLoader.reset()
+            }
             thumbnailLoader.load(
-                attachmentId: attachment.attachmentId,
-                messageId: attachment.message?.id,
-                previewPath: attachment.previewURLValue
+                attachmentId: loadKey.attachmentId,
+                messageId: loadKey.messageId,
+                previewPath: loadKey.previewPath
             )
-        }
-        .onChange(of: attachment.previewURLValue) { _, newValue in
-            thumbnailLoader.load(
-                attachmentId: attachment.attachmentId,
-                messageId: attachment.message?.id,
-                previewPath: newValue
-            )
-        }
-        .onChange(of: attachment.attachmentId) { _, newValue in
-            thumbnailLoader.load(
-                attachmentId: newValue,
-                messageId: attachment.message?.id,
-                previewPath: attachment.previewURLValue
-            )
+            activeLoadKey = loadKey
         }
         .onDisappear {
             thumbnailLoader.cancel()
+            activeLoadKey = nil
         }
     }
 

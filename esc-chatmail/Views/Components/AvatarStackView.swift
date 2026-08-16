@@ -362,21 +362,16 @@ struct SmallCachedAvatarView: View {
     let name: String?
     let size: CGFloat
 
-    @State private var loadedImage: UIImage?
-
     var body: some View {
-        Group {
-            if let image = loadedImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: size, height: size)
-                    .clipShape(Circle())
-                    .overlay(
-                        Circle()
-                            .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
-                    )
-            } else if let name = name {
+        CachedAsyncImage(
+            imageData: photo.imageData,
+            imageURL: photo.url,
+            size: size,
+            showsProgressWhileLoading: false,
+            imageBorderColor: Color(UIColor.systemBackground),
+            imageBorderWidth: 1.5
+        ) {
+            if let name {
                 InitialsAvatarView(name: name, style: .compact)
             } else {
                 Circle()
@@ -391,30 +386,6 @@ struct SmallCachedAvatarView: View {
                         Circle()
                             .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
                     )
-            }
-        }
-        .task {
-            await loadImage()
-        }
-    }
-
-    private func loadImage() async {
-        // Try imageData first (decode on background thread)
-        if let data = photo.imageData {
-            if let image = await ImageDecoder.decodeAsync(data) {
-                await MainActor.run {
-                    loadedImage = image
-                }
-                return
-            }
-        }
-
-        // Try URL - use enhanced cache (handles all URL types with disk caching)
-        guard let urlString = photo.url, !urlString.isEmpty else { return }
-
-        if let image = await EnhancedImageCache.shared.loadImage(from: urlString) {
-            await MainActor.run {
-                loadedImage = image
             }
         }
     }
