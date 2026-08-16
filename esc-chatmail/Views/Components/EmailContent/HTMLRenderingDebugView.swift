@@ -1,3 +1,4 @@
+#if DEBUG
 import SwiftUI
 import WebKit
 
@@ -150,3 +151,4 @@ private struct HTMLDebugWebView: UIViewRepresentable {
 #Preview {
     HTMLRenderingDebugView()
 }
+#endif
