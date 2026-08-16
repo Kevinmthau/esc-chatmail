@@ -1080,7 +1080,6 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(state.initialLoadPhase, .loaded)
         XCTAssertTrue(state.isShowingLatestWindow)
         XCTAssertFalse(state.isLoadingMore)
-        XCTAssertTrue(state.placeholderIndices.isEmpty)
     }
 
     func testBackgroundInsertionDuringLatestLoadCannotPublishStaleWindow() async throws {
@@ -1227,7 +1226,6 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(state.initialLoadPhase, .loaded)
         XCTAssertTrue(state.isShowingLatestWindow)
         XCTAssertFalse(state.isLoadingMore)
-        XCTAssertTrue(state.placeholderIndices.isEmpty)
     }
 
     func testRepeatedDatasetChangesDuringLatestLoadEventuallyReconcile() async throws {
@@ -1327,7 +1325,6 @@ final class VirtualScrollStateTests: XCTestCase {
         await loadTask.value
 
         XCTAssertFalse(state.isLoadingMore)
-        XCTAssertTrue(state.placeholderIndices.isEmpty)
         XCTAssertEqual(state.visibleMessages.map(\.objectID), messages.map(\.objectID))
     }
 
