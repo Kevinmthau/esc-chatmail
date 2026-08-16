@@ -74,14 +74,17 @@ struct ConversationWindowProvider {
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
         request.includesPendingChanges = true
 
-        do {
-            switch filter {
-            case .all, .unread:
-                request.fetchLimit = limit
-                let candidates = try context.fetch(request)
-                return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
+        let hasSearchText = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let shouldFetchPastInvisibleCandidates: Bool
+        switch filter {
+        case .all, .unread:
+            shouldFetchPastInvisibleCandidates = hasSearchText
+        case .contacts, .other:
+            shouldFetchPastInvisibleCandidates = true
+        }
 
-            case .contacts, .other:
+        do {
+            if shouldFetchPastInvisibleCandidates {
                 return try fetchFilteredWindow(
                     request: request,
                     in: context,
@@ -89,6 +92,10 @@ struct ConversationWindowProvider {
                     matchesVisibility: matchesVisibility
                 )
             }
+
+            request.fetchLimit = limit
+            let candidates = try context.fetch(request)
+            return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
         } catch {
             Log.error("Failed to fetch conversation window", category: .conversation, error: error)
             return []

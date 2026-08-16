@@ -271,6 +271,88 @@ final class ConversationListViewModelTests: XCTestCase {
         await waitForFilteredConversationIDs([carol.objectID], in: viewModel)
     }
 
+    func testSearchVariantsSurviveBoundedCandidatePagingReappearanceAndExpansion() async throws {
+        stack = TestCoreDataStack(storeKind: .sqlite)
+        context = stack.viewContext
+
+        for index in 0..<10 {
+            let compatibilityMatch = makeConversation(
+                name: "ＪＯＳＥ Compatibility \(index)",
+                snippet: "SQL-only candidate",
+                date: TimeInterval(1_000 - index)
+            )
+            compatibilityMatch.inboxUnreadCount = 1
+        }
+
+        let newestVariant = makeConversation(name: "José Newest", snippet: "variant", date: 300)
+        let olderVariant = makeConversation(name: "José Older", snippet: "variant", date: 200)
+        let exactMatch = makeConversation(name: "Jose Exact", snippet: "exact", date: 100)
+        newestVariant.inboxUnreadCount = 1
+        olderVariant.inboxUnreadCount = 1
+        exactMatch.inboxUnreadCount = 1
+        try context.save()
+
+        let rawCandidateRequest = Conversation.fetchRequest()
+        rawCandidateRequest.predicate = NSPredicate(format: "displayName CONTAINS[cd] %@", "Jose")
+        rawCandidateRequest.sortDescriptors = [
+            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
+        ]
+        rawCandidateRequest.fetchLimit = 2
+        let rawCandidates = try context.fetch(rawCandidateRequest)
+        XCTAssertEqual(
+            rawCandidates.compactMap(\.displayName),
+            ["ＪＯＳＥ Compatibility 0", "ＪＯＳＥ Compatibility 1"]
+        )
+
+        let viewModel = ConversationListViewModel(
+            searchService: ConversationSearchService(debounceInterval: 10_000_000),
+            windowProvider: ConversationWindowProvider(
+                configuration: VirtualScrollConfiguration(
+                    visibleItemCount: 1,
+                    bufferSize: 0,
+                    pageSize: 1,
+                    preloadThreshold: 1
+                )
+            )
+        )
+
+        viewModel.onAppear(in: context)
+        viewModel.searchText = "Jose"
+
+        await waitForFilteredConversationIDs(
+            [newestVariant.objectID, olderVariant.objectID],
+            in: viewModel
+        )
+
+        viewModel.onDisappear()
+        viewModel.onAppear(in: context)
+        XCTAssertEqual(
+            filteredConversationIDs(in: viewModel),
+            [newestVariant.objectID, olderVariant.objectID]
+        )
+
+        let lastVisibleItem = try XCTUnwrap(viewModel.filteredConversationItems.last)
+        viewModel.loadMoreIfNeeded(currentItem: lastVisibleItem)
+
+        XCTAssertEqual(
+            filteredConversationIDs(in: viewModel),
+            [newestVariant.objectID, olderVariant.objectID, exactMatch.objectID]
+        )
+
+        viewModel.currentFilter = .unread
+        XCTAssertEqual(
+            filteredConversationIDs(in: viewModel),
+            [newestVariant.objectID, olderVariant.objectID]
+        )
+
+        let lastUnreadItem = try XCTUnwrap(viewModel.filteredConversationItems.last)
+        viewModel.loadMoreIfNeeded(currentItem: lastUnreadItem)
+        XCTAssertEqual(
+            filteredConversationIDs(in: viewModel),
+            [newestVariant.objectID, olderVariant.objectID, exactMatch.objectID]
+        )
+    }
+
     func testContactFilterFetchesPastFirstCandidateBatch() async throws {
         let contactEmail = "contact@example.com"
 

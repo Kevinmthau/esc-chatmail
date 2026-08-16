@@ -132,11 +132,17 @@ final class ConversationFilterService: ObservableObject {
     }
 
     private func matchesSearch(_ conversation: Conversation, searchText: String) -> Bool {
-        guard !searchText.isEmpty else { return true }
+        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSearchText.isEmpty else { return true }
 
-        let lowercasedQuery = searchText.lowercased()
-        return conversation.displayName?.lowercased().contains(lowercasedQuery) ?? false ||
-            conversation.snippet?.lowercased().contains(lowercasedQuery) ?? false
+        let comparisonOptions: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        return conversation.displayName?.range(
+            of: trimmedSearchText,
+            options: comparisonOptions
+        ) != nil || conversation.snippet?.range(
+            of: trimmedSearchText,
+            options: comparisonOptions
+        ) != nil
     }
 
     private func matchesCurrentFilter(_ conversation: Conversation) -> Bool {
