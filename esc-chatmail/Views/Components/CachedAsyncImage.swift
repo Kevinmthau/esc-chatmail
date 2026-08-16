@@ -73,28 +73,3 @@ struct CachedAsyncImage: View {
         }
     }
 }
-
-// MARK: - Legacy ImageCache (forwards to EnhancedImageCache)
-
-/// Backwards-compatible wrapper - use EnhancedImageCache directly for new code
-final class ImageCache: Sendable {
-    static let shared = ImageCache()
-
-    private init() {}
-
-    func get(for key: String) async -> UIImage? {
-        await EnhancedImageCache.shared.get(for: key)
-    }
-
-    func set(_ image: UIImage, for key: String) async {
-        await EnhancedImageCache.shared.set(image, for: key)
-    }
-
-    func clear() async {
-        await EnhancedImageCache.shared.clearMemory()
-    }
-
-    func loadImage(from urlString: String) async -> UIImage? {
-        await EnhancedImageCache.shared.loadImage(from: urlString)
-    }
-}

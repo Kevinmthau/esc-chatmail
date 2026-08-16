@@ -908,26 +908,6 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
     }
 }
 
-final class OriginalEmailMetadataFormatterTests: XCTestCase {
-    func testSenderLineWithEmailOnlyPreservesRawAddress() {
-        let senderLine = OriginalEmailMetadataFormatter.senderLine(
-            senderName: nil,
-            senderEmail: "john.smith@example.com"
-        )
-
-        XCTAssertEqual(senderLine, "john.smith@example.com")
-    }
-
-    func testSenderLineWithNameAndEmailIncludesBoth() {
-        let senderLine = OriginalEmailMetadataFormatter.senderLine(
-            senderName: "John Smith",
-            senderEmail: "john.smith@example.com"
-        )
-
-        XCTAssertEqual(senderLine, "John Smith <john.smith@example.com>")
-    }
-}
-
 final class OriginalEmailLoadIdentityTests: XCTestCase {
     func testBaseLoadKeyDoesNotChangeWhenStoredHTMLChangesWithSameURI() throws {
         let messagesDirectory = FileManager.default.temporaryDirectory

@@ -123,9 +123,6 @@ final class ConversationRowViewTests: XCTestCase {
         XCTAssertFalse(
             ConversationRowView.shouldLoadParticipantInfo(conversationType: .list)
         )
-        XCTAssertFalse(
-            OptimizedConversationRow.shouldLoadParticipantInfo(conversationType: .list)
-        )
         XCTAssertTrue(
             ConversationRowView.resolvedAvatarDisplayNames(
                 conversationType: .list,
