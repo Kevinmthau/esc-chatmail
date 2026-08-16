@@ -1,22 +1,33 @@
 import Foundation
 import CoreData
 
+private func uuidSortsBefore(_ lhs: UUID, _ rhs: UUID) -> Bool {
+    (lhs as NSUUID).compare(rhs) == .orderedAscending
+}
+
 struct ConversationListItem: Identifiable, Equatable {
     let id: NSManagedObjectID
     let snapshot: ConversationSnapshot
+    private let stableID: UUID
 
     init(conversation: Conversation) {
         self.id = conversation.objectID
         self.snapshot = ConversationSnapshot(from: conversation)
+        self.stableID = conversation.id
     }
 
     fileprivate var sortKey: SortKey {
-        SortKey(pinned: snapshot.pinned, lastMessageDate: snapshot.lastMessageDate)
+        SortKey(
+            pinned: snapshot.pinned,
+            lastMessageDate: snapshot.lastMessageDate,
+            stableID: stableID
+        )
     }
 
     fileprivate struct SortKey: Equatable {
         let pinned: Bool
         let lastMessageDate: Date?
+        let stableID: UUID
     }
 }
 
@@ -55,7 +66,8 @@ struct ConversationWindowProvider {
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")
         request.sortDescriptors = [
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
-            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
+            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false),
+            NSSortDescriptor(keyPath: \Conversation.id, ascending: true)
         ]
         request.predicate = predicate(searchText: searchText, filter: filter)
         request.fetchBatchSize = min(pageSize, max(limit, 1))
@@ -89,27 +101,78 @@ struct ConversationWindowProvider {
         limit: Int,
         matchesVisibility: (Conversation) -> Bool
     ) throws -> [Conversation] {
-        var visibleConversations: [Conversation] = []
+        let pendingObjects = context.insertedObjects
+            .union(context.updatedObjects)
+            .union(context.deletedObjects)
+        let pendingConversations = pendingObjects.compactMap { $0 as? Conversation }
+        let pendingIDs = Set(pendingConversations.map(\.objectID))
+        let pendingVisibleConversations = pendingConversations
+            .filter { conversation in
+                !conversation.isDeleted &&
+                    conversation.archivedAt == nil &&
+                    matchesVisibility(conversation)
+            }
+            .sorted(by: sortsBefore(_:_:))
+            .prefix(limit)
+
+        // Core Data reapplies pending inserts and updates to every offset page
+        // when includesPendingChanges is true. Page only persisted rows, then
+        // merge the context's pending conversations once below.
+        request.includesPendingChanges = false
+
+        var persistedVisibleConversations: [Conversation] = []
+        var persistedVisibleIDs = Set<NSManagedObjectID>()
         var fetchOffset = 0
         let candidateBatchSize = max(limit * contactFilterCandidateMultiplier, limit, pageSize)
 
-        while visibleConversations.count < limit {
+        while persistedVisibleConversations.count < limit {
             request.fetchOffset = fetchOffset
             request.fetchLimit = candidateBatchSize
 
             let candidates = try context.fetch(request)
             guard !candidates.isEmpty else { break }
 
-            for conversation in candidates where matchesVisibility(conversation) {
-                visibleConversations.append(conversation)
-                guard visibleConversations.count < limit else { break }
+            for conversation in candidates {
+                guard !pendingIDs.contains(conversation.objectID),
+                      persistedVisibleIDs.insert(conversation.objectID).inserted,
+                      matchesVisibility(conversation) else {
+                    continue
+                }
+
+                persistedVisibleConversations.append(conversation)
+                guard persistedVisibleConversations.count < limit else { break }
             }
 
             fetchOffset += candidates.count
             guard candidates.count == candidateBatchSize else { break }
         }
 
-        return visibleConversations
+        var conversationsByID = Dictionary(
+            uniqueKeysWithValues: pendingVisibleConversations.map { ($0.objectID, $0) }
+        )
+        for conversation in persistedVisibleConversations {
+            conversationsByID[conversation.objectID] = conversation
+        }
+
+        return Array(
+            conversationsByID.values
+                .sorted(by: sortsBefore(_:_:))
+                .prefix(limit)
+        )
+    }
+
+    private func sortsBefore(_ lhs: Conversation, _ rhs: Conversation) -> Bool {
+        if lhs.pinned != rhs.pinned {
+            return lhs.pinned && !rhs.pinned
+        }
+
+        let lhsDate = lhs.lastMessageDate ?? .distantPast
+        let rhsDate = rhs.lastMessageDate ?? .distantPast
+        if lhsDate != rhsDate {
+            return lhsDate > rhsDate
+        }
+
+        return uuidSortsBefore(lhs.id, rhs.id)
     }
 
     private func predicate(searchText: String, filter: ConversationFilter) -> NSPredicate {
@@ -329,6 +392,6 @@ struct ConversationListStore {
             return lhsDate > rhsDate
         }
 
-        return false
+        return uuidSortsBefore(lhs.sortKey.stableID, rhs.sortKey.stableID)
     }
 }

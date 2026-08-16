@@ -411,13 +411,9 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     /// Called when view appears - performs initial setup
-    func onAppear<C: Sequence>(conversations: C, in context: NSManagedObjectContext) where C.Element == Conversation {
+    func onAppear(in context: NSManagedObjectContext) {
         startObservingConversationChanges(in: context)
-        refreshConversations(conversations)
-
-        // Prefetch photos immediately to avoid slow avatar loading in rows
-        // This needs to run before rows' .task blocks fire
-        prefetchPersonData(from: filteredConversationItems)
+        reloadConversationWindowFromStore()
 
         // Scheduled here rather than in deferredSetup: onDisappear cancels
         // deferredSetup, so a sheet or push in its 0.5s window used to kill
@@ -441,7 +437,6 @@ final class ConversationListViewModel: ObservableObject {
     func onDisappear(preservePreviewRepair: Bool = true) {
         // Keep observing Core Data changes across transient SwiftUI disappearances
         // caused by sheets and navigation pushes so optimistic send updates are not missed.
-        searchService.cleanup()
         selectionService.cancelTasks()
         filterService.cancelTasks()
         if preservePreviewRepair {
@@ -449,6 +444,7 @@ final class ConversationListViewModel: ObservableObject {
             // own per-launch guard and clears that guard if it exits incomplete.
             taskManager.cancelAll(except: [Self.repairMissingConversationPreviewsTaskKey])
         } else {
+            searchService.cleanup()
             taskManager.cancelAll()
         }
     }
