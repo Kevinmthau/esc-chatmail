@@ -26,6 +26,7 @@ protocol BackgroundTaskScheduling: AnyObject {
     func isProcessingTaskPending() async -> Bool
     func isAppRefreshTaskPending() async -> Bool
     func scheduleRetryAfterBackoff(_ backoff: TimeInterval)
+    func cancelPendingTaskRequests()
 }
 
 extension BackgroundTaskScheduler: BackgroundTaskScheduling {}

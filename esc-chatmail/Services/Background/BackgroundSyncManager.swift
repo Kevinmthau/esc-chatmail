@@ -82,14 +82,18 @@ final class BackgroundSyncManager {
     private let authoritativeSyncExecutorProvider: @MainActor @Sendable () -> any BackgroundMailboxSyncExecuting
     private let authoritativeSyncReadiness: @Sendable () async -> Bool
     private let authoritativeSyncIsAuthenticated: @MainActor @Sendable () -> Bool
+    private let authoritativeSyncIsDurablySignedOut: @MainActor @Sendable () -> Bool
     /// Takes a background-execution assertion and returns the closure that
     /// releases it. `armBackgroundTasksForSceneBackground()`'s pending checks
     /// are async, so without the assertion iOS could suspend the process
     /// between the scene transition and the deferred submits, silently losing
-    /// the arm for that backgrounding. The default releases on UIKit's
-    /// expiration handler too (`SceneBackgroundAssertionLatch`) — an unended
-    /// assertion past its grant is a watchdog kill, not a suspension.
-    private let beginSceneBackgroundAssertion: @MainActor @Sendable () -> (@MainActor @Sendable () -> Void)
+    /// the arm for that backgrounding. The default cancels that arm and
+    /// releases on UIKit's expiration handler too
+    /// (`SceneBackgroundAssertionLatch`) — an unended assertion past its grant
+    /// is a watchdog kill, not a suspension.
+    private let beginSceneBackgroundAssertion: @MainActor @Sendable (
+        _ onExpiration: @escaping @MainActor @Sendable () -> Void
+    ) -> (@MainActor @Sendable () -> Void)
     /// Characterization tests can still exercise the retired delta writer, but
     /// production routes every new and already-submitted request through the
     /// same model-v3 executor used for foreground sync.
@@ -112,12 +116,20 @@ final class BackgroundSyncManager {
         authoritativeSyncIsAuthenticated: @escaping @MainActor @Sendable () -> Bool = {
             AuthSession.shared.canAccessMailbox
         },
+        authoritativeSyncIsDurablySignedOut: @escaping @MainActor @Sendable () -> Bool = {
+            AuthSession.shared.isDurablySignedOut()
+        },
         syncCoordinatorProvider: @escaping @MainActor @Sendable () -> BackgroundSyncMessageCoordinating = {
             SyncEngine.shared
         },
-        beginSceneBackgroundAssertion: @escaping @MainActor @Sendable () -> (@MainActor @Sendable () -> Void) = {
+        beginSceneBackgroundAssertion: @escaping @MainActor @Sendable (
+            _ onExpiration: @escaping @MainActor @Sendable () -> Void
+        ) -> (@MainActor @Sendable () -> Void) = { onExpiration in
             let latch = SceneBackgroundAssertionLatch()
-            latch.begin(name: "BackgroundSyncManager.armBackgroundTasksForSceneBackground")
+            latch.begin(
+                name: "BackgroundSyncManager.armBackgroundTasksForSceneBackground",
+                onExpiration: onExpiration
+            )
             return { latch.end() }
         }
     ) {
@@ -138,6 +150,7 @@ final class BackgroundSyncManager {
         self.authoritativeSyncExecutorProvider = authoritativeSyncExecutorProvider
         self.authoritativeSyncReadiness = authoritativeSyncReadiness
         self.authoritativeSyncIsAuthenticated = authoritativeSyncIsAuthenticated
+        self.authoritativeSyncIsDurablySignedOut = authoritativeSyncIsDurablySignedOut
         self.beginSceneBackgroundAssertion = beginSceneBackgroundAssertion
         self.legacyDeltaSyncEnabled = legacyDeltaSyncEnabled
 
@@ -181,14 +194,19 @@ final class BackgroundSyncManager {
     /// had.
     @MainActor
     func armBackgroundTasksForSceneBackground() {
-        guard authoritativeSyncIsAuthenticated() else {
+        guard canScheduleAuthoritativeSync() else {
             Log.debug("Scene-background arm skipped: cannot access mailbox", category: .background)
             return
         }
-        let endAssertion = beginSceneBackgroundAssertion()
-        Task {
+        let cancellationLatch = BackgroundTaskCancellationLatch()
+        let endAssertion = beginSceneBackgroundAssertion {
+            cancellationLatch.expire()
+        }
+        let armTask = Task {
             defer { endAssertion() }
+            guard !Task.isCancelled else { return }
             let refreshPending = await taskScheduler.isAppRefreshTaskPending()
+            guard !Task.isCancelled else { return }
             let processingPending = await taskScheduler.isProcessingTaskPending()
             // Re-checked in the same MainActor slice as the submits: sign-out
             // drops the gate and then sweeps pending requests
@@ -198,8 +216,8 @@ final class BackgroundSyncManager {
             // one suspension-free slice, an arm either wholly precedes the
             // sweep (its submits get swept) or observes the dropped gate and
             // submits nothing.
-            guard authoritativeSyncIsAuthenticated() else {
-                Log.debug("Scene-background arm abandoned: signed out during pending checks", category: .background)
+            guard !Task.isCancelled, canScheduleAuthoritativeSync() else {
+                Log.debug("Scene-background arm abandoned during pending checks", category: .background)
                 return
             }
             if refreshPending {
@@ -213,6 +231,13 @@ final class BackgroundSyncManager {
                 taskScheduler.scheduleProcessingTask()
             }
         }
+        // The Task inherits MainActor isolation and cannot begin until this
+        // synchronous method returns. Installation therefore precedes work;
+        // the latch also remembers a test/system expiration delivered while
+        // the assertion itself is being created.
+        cancellationLatch.install {
+            armTask.cancel()
+        }
     }
 
     /// Submits a processing-task request only when none is already pending.
@@ -225,9 +250,22 @@ final class BackgroundSyncManager {
     /// await, so concurrent arm attempts can race. A racing re-submit shifts
     /// `earliestBeginDate` only by the race window (each submit re-anchors to
     /// its own "now"), never by the pending request's full interval.
-    func scheduleProcessingTaskIfNotPending() async {
+    func scheduleProcessingTaskIfNotPending(
+        schedulingGate: BackgroundTaskSchedulingGate? = nil
+    ) async {
+        guard !Task.isCancelled else { return }
         if await !taskScheduler.isProcessingTaskPending() {
-            taskScheduler.scheduleProcessingTask()
+            // Pair the post-await auth/cancellation re-check and submit in one
+            // MainActor slice. If sign-out wins first, this submits nothing;
+            // if this wins first, sign-out's subsequent cancellation sweeps it.
+            // The cancellation check also covers expiration while the pending
+            // query or actor hop was suspended.
+            await MainActor.run {
+                guard !Task.isCancelled, canScheduleAuthoritativeSync() else { return }
+                submitIfSchedulingActive(schedulingGate) {
+                    taskScheduler.scheduleProcessingTask()
+                }
+            }
         }
     }
 
@@ -243,58 +281,128 @@ final class BackgroundSyncManager {
         runBackgroundTask(task, budget: .processing)
     }
 
-    /// Shared implementation for both app-refresh and processing background tasks.
-    /// Uses an atomic flag to ensure `setTaskCompleted` is called exactly once,
-    /// preventing a race between normal completion and the expiration handler.
+    /// Shared implementation for both app-refresh and processing background
+    /// tasks. Completion is exactly once and waits for cancellation cleanup.
     private func runBackgroundTask(_ task: BGTask, budget: BackgroundMailboxSyncBudget) {
-        let latch = BackgroundTaskCompletionLatch { success in
-            task.setTaskCompleted(success: success)
+        runBackgroundTaskOperation(
+            budget: budget,
+            installExpirationHandler: { handler in
+                task.expirationHandler = handler
+            },
+            onComplete: { success in
+                task.setTaskCompleted(success: success)
+            }
+        )
+    }
+
+    /// Closure-based core keeps the BGTask-only lifecycle ordering directly
+    /// testable; Apple exposes no public initializer for its task subclasses.
+    func runBackgroundTaskOperation(
+        budget: BackgroundMailboxSyncBudget,
+        installExpirationHandler: (@escaping () -> Void) -> Void,
+        onComplete: @escaping (Bool) -> Void
+    ) {
+        let lifecycleState = BackgroundTaskLifecycleState()
+        let latch = BackgroundTaskCompletionLatch(
+            lifecycleState: lifecycleState,
+            onComplete: onComplete
+        )
+        let schedulingGate = BackgroundTaskSchedulingGate(
+            lifecycleState: lifecycleState
+        )
+        let cancellationLatch = BackgroundTaskCancellationLatch()
+        let workerStartGate = BackgroundTaskWorkerStartGate()
+
+        // Install expiration before launching the worker. The cancellation
+        // latch remembers an expiration that beats worker creation, while the
+        // scheduling gate closes immediately on the system callback's thread.
+        installExpirationHandler {
+            // One atomic transition both rejects later scheduling and forces
+            // the worker's eventual completion result to failure.
+            lifecycleState.expire()
+            cancellationLatch.expire()
         }
 
         let backgroundTask = Task { [weak self] in
+            // `Task` starts eagerly. Do not inspect auth or touch the sync
+            // engine until expiration can cancel this exact worker.
+            await workerStartGate.waitUntilOpen()
             guard let self = self else {
-                latch.complete(success: false)
-                return
+                return false
             }
-            let success: Bool
             if self.legacyDeltaSyncEnabled {
-                success = await self.performDeltaSync(isProcessingTask: budget == .processing)
-            } else {
-                success = await self.performAuthoritativeSync(budget: budget)
+                return await self.performDeltaSync(isProcessingTask: budget == .processing)
             }
-            latch.complete(success: success)
+            return await self.performAuthoritativeSync(
+                budget: budget,
+                schedulingGate: schedulingGate
+            )
         }
-
-        task.expirationHandler = {
+        cancellationLatch.install {
             backgroundTask.cancel()
-            latch.complete(success: false)
+        }
+        workerStartGate.open()
+
+        // Completion is owned by a separate waiter so it runs only after the
+        // cancelled worker (including its durable-sign-out sweep and sync
+        // engine cleanup) has actually returned.
+        Task {
+            let success = await backgroundTask.value
+            latch.complete(success: success)
         }
     }
 
     /// Executes the authoritative model-v3 sync and preserves structured task
     /// cancellation so a `BGTask` expiration reaches the exact underlying run.
     func performAuthoritativeSync(
-        budget: BackgroundMailboxSyncBudget = .processing
+        budget: BackgroundMailboxSyncBudget = .processing,
+        schedulingGate: BackgroundTaskSchedulingGate? = nil
     ) async -> Bool {
-        guard !Task.isCancelled else { return false }
+        if Task.isCancelled {
+            // Handlers re-arm their ordinary cadence before launching the
+            // worker. Expiration can cancel that worker before it starts, but
+            // a definitively signed-out stale delivery must still sweep the
+            // request the handler just submitted.
+            await cancelPendingRequestsIfDurablySignedOut()
+            return false
+        }
         guard await authoritativeSyncReadiness() else {
             // Bootstrap failure is a real failure, not a verdict on the mailbox,
             // so it takes the same bounded backoff as any other failed run. An
-            // expired task is different: it must not queue more work.
-            if !Task.isCancelled {
-                scheduleFailureBackoffRetry()
-            }
+            // expired or definitively signed-out task must not queue more work.
+            await scheduleReadinessFailureRetryIfRunnable(schedulingGate: schedulingGate)
             return false
         }
+        if Task.isCancelled {
+            // Readiness can finish after expiration. As at entry, a stale
+            // signed-out delivery must still remove the cadence its handler
+            // re-armed before launching this worker.
+            await cancelPendingRequestsIfDurablySignedOut()
+            return false
+        }
+        let canAccessMailbox = await MainActor.run { () -> Bool in
+            let isDurablySignedOut = authoritativeSyncIsDurablySignedOut()
+            guard authoritativeSyncIsAuthenticated(), !isDurablySignedOut else {
+                // A stale request delivered after logout is a successful no-op.
+                // Devices that signed out before #171 are otherwise stuck in a
+                // perpetual re-arm chain because handlers re-arm at entry.
+                // Only a definitive verdict may self-heal the old request: a
+                // transient restore failure must preserve a live cadence.
+                if isDurablySignedOut {
+                    taskScheduler.cancelPendingTaskRequests()
+                }
+                return false
+            }
+            return true
+        }
         guard !Task.isCancelled else { return false }
-        guard await MainActor.run(body: authoritativeSyncIsAuthenticated) else {
-            // A stale request delivered after logout is a successful no-op. The
-            // bootstrap has already completed any interrupted account cleanup.
+        guard canAccessMailbox else {
             return true
         }
 
         BackgroundSyncStateManager.clearContinuationState(in: defaults)
         let executor = await MainActor.run { authoritativeSyncExecutorProvider() }
+        guard !Task.isCancelled else { return false }
         let result = await executor.performIncrementalSyncForBackground(budget: budget)
         // The system asked an expired task to stop: the handlers already queued
         // the next ordinary cycle before this run started, so schedule nothing.
@@ -317,22 +425,22 @@ final class BackgroundSyncManager {
                 // its earliestBeginDate another hour out, so frequent refresh
                 // slices would starve the very task this escalation exists
                 // to arm.
-                await scheduleProcessingTaskIfNotPending()
+                await scheduleProcessingTaskIfNotPending(schedulingGate: schedulingGate)
             }
-            scheduleCatchUpRetry()
+            await scheduleCatchUpRetryIfRunnable(schedulingGate: schedulingGate)
             return false
         case .blocked(let activeKind):
             guard Self.shouldScheduleRetryWhenBlocked(by: activeKind) else {
                 return true
             }
-            scheduleCatchUpRetry()
+            await scheduleCatchUpRetryIfRunnable(schedulingGate: schedulingGate)
             return false
         case .failed:
             // Without this the run reported failure and scheduled nothing, so a
             // transient failure waited out the ordinary 15-minute refresh cadence
             // instead of the bounded exponential backoff every other failure
             // path uses.
-            scheduleFailureBackoffRetry()
+            await scheduleFailureBackoffRetryIfRunnable(schedulingGate: schedulingGate)
             return false
         }
     }
@@ -768,10 +876,76 @@ final class BackgroundSyncManager {
         }
     }
 
+    /// Schedules a bootstrap-failure retry unless expiration or a definitive
+    /// sign-out won while readiness was suspended. A transient restore failure
+    /// remains retryable even though it has no published authenticated session.
+    @MainActor
+    private func scheduleReadinessFailureRetryIfRunnable(
+        schedulingGate: BackgroundTaskSchedulingGate?
+    ) {
+        if cancelPendingRequestsIfDurablySignedOut() {
+            return
+        }
+        guard !Task.isCancelled else { return }
+        // A transient restore/bootstrap failure remains retryable even without
+        // a currently published authenticated session.
+        submitIfSchedulingActive(schedulingGate) {
+            scheduleFailureBackoffRetry()
+        }
+    }
+
+    /// Serializes the post-executor auth/cancellation verdict with its submit
+    /// against sign-out's MainActor-isolated gate drop and cancellation sweep.
+    @MainActor
+    private func scheduleFailureBackoffRetryIfRunnable(
+        schedulingGate: BackgroundTaskSchedulingGate?
+    ) {
+        guard !Task.isCancelled, canScheduleAuthoritativeSync() else { return }
+        submitIfSchedulingActive(schedulingGate) {
+            scheduleFailureBackoffRetry()
+        }
+    }
+
     private func scheduleCatchUpRetry() {
         // Catch-up is progress, not failure, so bypass the exponential-backoff
         // retry counter and reschedule on a short fixed delay instead.
         taskScheduler.scheduleRetryAfterBackoff(Self.catchUpRetryDelay)
+    }
+
+    /// See `scheduleFailureBackoffRetryIfRunnable(schedulingGate:)`.
+    @MainActor
+    private func scheduleCatchUpRetryIfRunnable(
+        schedulingGate: BackgroundTaskSchedulingGate?
+    ) {
+        guard !Task.isCancelled, canScheduleAuthoritativeSync() else { return }
+        submitIfSchedulingActive(schedulingGate) {
+            scheduleCatchUpRetry()
+        }
+    }
+
+    @MainActor
+    private func canScheduleAuthoritativeSync() -> Bool {
+        authoritativeSyncIsAuthenticated() && !authoritativeSyncIsDurablySignedOut()
+    }
+
+    @MainActor
+    @discardableResult
+    private func cancelPendingRequestsIfDurablySignedOut() -> Bool {
+        guard authoritativeSyncIsDurablySignedOut() else { return false }
+        taskScheduler.cancelPendingTaskRequests()
+        return true
+    }
+
+    @MainActor
+    private func submitIfSchedulingActive(
+        _ schedulingGate: BackgroundTaskSchedulingGate?,
+        submission: () -> Void
+    ) {
+        if let schedulingGate {
+            schedulingGate.submitIfActive(submission)
+        } else {
+            submission()
+        }
     }
 
     private func finalizeBackgroundSync(

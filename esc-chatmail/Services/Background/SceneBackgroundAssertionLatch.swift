@@ -16,14 +16,24 @@ import UIKit
 final class SceneBackgroundAssertionLatch {
     private var taskId = UIBackgroundTaskIdentifier.invalid
 
-    func begin(name: String) {
+    func begin(
+        name: String,
+        onExpiration: @escaping @MainActor @Sendable () -> Void = {}
+    ) {
         // Exactly-once discipline both ways: a second begin() would overwrite
         // taskId and leak the first assertion.
         guard taskId == .invalid else { return }
         taskId = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
             MainActor.assumeIsolated {
+                onExpiration()
                 self?.end()
             }
+        }
+        // No assertion means there will be no UIKit expiration callback to
+        // release work suspended in the pending-request bridge. Model a denied
+        // grant as immediate expiration so the manager pre-cancels that arm.
+        if taskId == .invalid {
+            onExpiration()
         }
     }
 
