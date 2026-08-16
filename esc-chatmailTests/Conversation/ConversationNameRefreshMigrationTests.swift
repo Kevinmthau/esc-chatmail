@@ -68,7 +68,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         try context.save()
 
         let viewModel = makeViewModel()
-        viewModel.onAppear(conversations: [bob, alice], in: context)
+        viewModel.onAppear(in: context)
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [bob.objectID, alice.objectID])
 

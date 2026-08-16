@@ -50,7 +50,7 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
                 .build(in: context)
             try context.save()
             conversationID = conversation.objectID
-            viewModel.onAppear(conversations: [conversation], in: context)
+            viewModel.onAppear(in: context)
         }
 
         XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.inboxUnreadCount, 0)
@@ -101,7 +101,7 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
             aliceID = alice.objectID
             bobID = bob.objectID
             carolID = carol.objectID
-            viewModel.onAppear(conversations: [alice, bob, carol], in: context)
+            viewModel.onAppear(in: context)
         }
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [aliceID, bobID])
@@ -134,7 +134,7 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
             try context.save()
             aliceID = alice.objectID
             bobID = bob.objectID
-            viewModel.onAppear(conversations: [alice, bob], in: context)
+            viewModel.onAppear(in: context)
         }
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [aliceID, bobID])

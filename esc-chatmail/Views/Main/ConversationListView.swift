@@ -20,26 +20,6 @@ struct ConversationListView: View {
         )
     }
 
-    /// One-shot fetch that seeds the view model on appear. Deliberately not a
-    /// live @FetchRequest: the view model's objectsDidChange pipeline owns
-    /// live updates, and an always-on FRC re-diffed the full result set and
-    /// invalidated this view's body on every merged sync save — duplicate
-    /// work in parallel with the VM.
-    private static func activeConversationsRequest() -> NSFetchRequest<Conversation> {
-        let request = NSFetchRequest<Conversation>(entityName: "Conversation")
-        request.sortDescriptors = [
-            NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
-            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
-        ]
-        // Show only active (non-archived) conversations
-        // archivedAt == nil means the conversation is active
-        request.predicate = NSPredicate(format: "archivedAt == nil")
-        request.fetchBatchSize = 20
-        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
-        request.includesPendingChanges = true
-        return request
-    }
-
     var body: some View {
         conversationList
             .safeAreaInset(edge: .bottom) {
@@ -134,8 +114,7 @@ struct ConversationListView: View {
         }
         .onAppear {
             AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
-            let conversations = (try? viewContext.fetch(Self.activeConversationsRequest())) ?? []
-            viewModel.onAppear(conversations: conversations, in: viewContext)
+            viewModel.onAppear(in: viewContext)
             // Lookups never prompt on their own, so this is the one deliberate
             // Contacts permission request (no-op after first launch/answer).
             ContactsAuthorizationCoordinator.shared.requestAccessOnFirstAuthenticatedLaunchIfNeeded()
