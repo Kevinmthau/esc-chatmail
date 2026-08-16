@@ -9,12 +9,13 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var authSession: AuthSession
+    @EnvironmentObject private var dependencies: Dependencies
     
     var body: some View {
         Group {
             if authSession.canAccessMailbox {
                 NavigationStack {
-                    ConversationListView()
+                    ConversationListView(deps: dependencies)
                 }
             } else {
                 SignInView()
@@ -25,5 +26,6 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
-        .environmentObject(AuthSession.shared)
+        .environmentObject(Dependencies.shared)
+        .environmentObject(Dependencies.shared.authSession)
 }

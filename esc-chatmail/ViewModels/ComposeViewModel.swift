@@ -36,8 +36,7 @@ final class ComposeViewModel: ObservableObject {
     @Published var subject = ""
     @Published var body = ""
     @Published var isSending = false
-    @Published var error: Error?
-    @Published var showError = false
+    @Published var errorAlert: ComposeErrorAlert?
     @Published var skippedForwardAttachmentCount = 0
     @Published private(set) var forwardedPreviewHTML: String?
     private(set) var lastSentConversationReference: ConversationReference?
@@ -281,7 +280,7 @@ final class ComposeViewModel: ObservableObject {
         guard canSend else { return false }
 
         isSending = true
-        error = nil
+        errorAlert = nil
 
         let result: OutboundMessageResult?
         do {
@@ -296,8 +295,7 @@ final class ComposeViewModel: ObservableObject {
             })
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)
-            self.error = error
-            showError = true
+            errorAlert = ComposeErrorAlert(message: error.localizedDescription)
             isSending = false
             return false
         }
@@ -365,4 +363,9 @@ final class ComposeViewModel: ObservableObject {
 
         return .participantHash(identity.participantHash)
     }
+}
+
+struct ComposeErrorAlert: Identifiable {
+    let id = UUID()
+    let message: String
 }

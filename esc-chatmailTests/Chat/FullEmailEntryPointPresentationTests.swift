@@ -1,4 +1,5 @@
 import CoreGraphics
+import SwiftUI
 import XCTest
 @testable import esc_chatmail
 
@@ -18,6 +19,15 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
 
         XCTAssertFalse(labels.contains("_selectedMessage"))
         XCTAssertFalse(labels.contains("_showingWebView"))
+    }
+
+    func testConversationListViewRendersWithInjectedDependencies() {
+        let deps = makeDependencies()
+        let host = UIHostingController(rootView: ConversationListView(deps: deps))
+
+        host.loadViewIfNeeded()
+
+        XCTAssertNotNil(host.view)
     }
 
     func testChatViewUsesDestinationBasedSheetPresentation() {

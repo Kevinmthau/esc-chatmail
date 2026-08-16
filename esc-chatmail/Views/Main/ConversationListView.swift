@@ -2,13 +2,17 @@ import SwiftUI
 import CoreData
 
 struct ConversationListView: View {
-    @Environment(\.managedObjectContext) private var viewContext
-    @EnvironmentObject private var deps: Dependencies
+    @ObservedObject private var authSession: AuthSession
     @StateObject private var viewModel: ConversationListViewModel
+    private let deps: Dependencies
+    private let viewContext: NSManagedObjectContext
 
     @MainActor
     init(deps: Dependencies? = nil) {
         let resolvedDeps = deps ?? Dependencies.shared
+        self.deps = resolvedDeps
+        self.viewContext = resolvedDeps.viewContext
+        _authSession = ObservedObject(wrappedValue: resolvedDeps.authSession)
         _viewModel = StateObject(
             wrappedValue: ConversationListViewModel(
                 dependencies: resolvedDeps.makeConversationListDependencies()
@@ -41,12 +45,17 @@ struct ConversationListView: View {
             .safeAreaInset(edge: .bottom) {
                 bottomBar
             }
+            .environment(\.managedObjectContext, viewContext)
+            .environmentObject(deps)
+            .environmentObject(authSession)
     }
 
     // MARK: - Conversation List
 
     @State private var selectedConversation: Conversation?
     @State private var pendingConversationReference: ConversationReference?
+    @State private var showingComposer = false
+    @State private var showingSettings = false
     @FocusState private var isSearchFieldFocused: Bool
 
     private var conversationList: some View {
@@ -110,7 +119,7 @@ struct ConversationListView: View {
         }
         .toolbar { toolbarContent }
         .refreshable { await viewModel.performSync() }
-        .sheet(isPresented: $viewModel.showingComposer, onDismiss: handleComposerDismiss) {
+        .sheet(isPresented: $showingComposer, onDismiss: handleComposerDismiss) {
             ComposeView(
                 mode: .newMessage,
                 presentationStyle: .iMessage,
@@ -120,8 +129,8 @@ struct ConversationListView: View {
                 }
             )
         }
-        .sheet(isPresented: $viewModel.showingSettings) {
-            NavigationStack { SettingsView() }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
         }
         .onAppear {
             AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
@@ -133,7 +142,7 @@ struct ConversationListView: View {
         }
         .onDisappear {
             isSearchFieldFocused = false
-            viewModel.onDisappear(preservePreviewRepair: deps.authSession.canAccessMailbox)
+            viewModel.onDisappear(preservePreviewRepair: authSession.canAccessMailbox)
         }
     }
 
@@ -142,7 +151,7 @@ struct ConversationListView: View {
             snapshot: item.snapshot,
             conversationObjectID: item.id,
             conversationContext: viewContext,
-            currentUserEmail: deps.authSession.userEmail ?? "",
+            currentUserEmail: authSession.userEmail ?? "",
             participantLoader: deps.participantLoader
         )
         .onAppear {
@@ -175,7 +184,7 @@ struct ConversationListView: View {
             } else {
                 Button(action: {
                     isSearchFieldFocused = false
-                    viewModel.showingSettings = true
+                    showingSettings = true
                 }) {
                     Image(systemName: "gear")
                 }
@@ -320,7 +329,7 @@ struct ConversationListView: View {
     private var composeButton: some View {
         Button(action: {
             isSearchFieldFocused = false
-            viewModel.showingComposer = true
+            showingComposer = true
         }) {
             circleButton(icon: "square.and.pencil")
         }
