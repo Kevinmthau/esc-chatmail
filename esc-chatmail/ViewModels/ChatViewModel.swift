@@ -67,7 +67,6 @@ final class ChatComposerState: ObservableObject {
 final class ChatViewModel: ObservableObject {
     // MARK: - Published State
 
-    @Published var forwardComposeContext: ComposeForwardModeContext?
     @Published var destination: ChatDestination?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
@@ -325,7 +324,6 @@ final class ChatViewModel: ObservableObject {
             let context = try composeForwardModeContextBuilder.build(
                 input: makeForwardModeInput(message)
             )
-            forwardComposeContext = context
             destination = .forwardCompose(context)
         } catch {
             Log.error("Failed to prepare forward compose context", category: .message, error: error)
@@ -360,9 +358,6 @@ final class ChatViewModel: ObservableObject {
     func dismissDestination() {
         if case .emailReader = destination {
             Log.info("Dismissed full message view", category: .ui)
-        }
-        if case .forwardCompose = destination {
-            forwardComposeContext = nil
         }
         destination = nil
     }

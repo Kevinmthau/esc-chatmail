@@ -158,10 +158,12 @@ struct ComposeView: View {
             }
         }
         .interactiveDismissDisabled(viewModel.isSending)
-        .alert("Error", isPresented: $viewModel.showError) {
-            Button("OK") { }
-        } message: {
-            Text(viewModel.error?.localizedDescription ?? "Failed to send message")
+        .alert(item: $viewModel.errorAlert) { alert in
+            Alert(
+                title: Text("Error"),
+                message: Text(alert.message),
+                dismissButton: .default(Text("OK"))
+            )
         }
         .sheet(isPresented: $showingContactPicker) {
             ContactPickerView(
@@ -179,12 +181,11 @@ struct ComposeView: View {
             // Setup mode-specific data (forward text, reply recipients, etc.)
             viewModel.setupForMode()
             viewModel.updateForwardedPreviewHTML(isDarkMode: isDarkMode)
-
-            // Auto-focus recipient field after a brief delay
-            Task { @MainActor in
-                guard await Task.sleepUnlessCancelled(nanoseconds: 100_000_000) else { return } // 0.1 seconds
-                focusedField = .recipient
-            }
+        }
+        .task {
+            // Auto-focus recipient field after a brief, cancellable delay.
+            guard await Task.sleepUnlessCancelled(nanoseconds: 100_000_000) else { return } // 0.1 seconds
+            focusedField = .recipient
         }
         .onChange(of: isDarkMode) { _, newValue in
             viewModel.updateForwardedPreviewHTML(isDarkMode: newValue)

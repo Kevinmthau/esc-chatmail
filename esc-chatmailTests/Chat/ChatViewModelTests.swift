@@ -771,27 +771,26 @@ final class ChatViewModelTests: XCTestCase {
 
         viewModel.setMessageToForward(message)
 
-        XCTAssertEqual(viewModel.forwardComposeContext?.id, "message-forward")
-        XCTAssertEqual(viewModel.forwardComposeContext?.initialSubject, "Fwd: Forward Me")
-        XCTAssertTrue(viewModel.forwardComposeContext?.forwardedPlainTextBody.contains("Original forward body") == true)
-        XCTAssertTrue(viewModel.forwardComposeContext?.forwardedHTMLBody?.contains("Forwarded HTML body") == true)
-        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.count, 1)
-        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
-        XCTAssertEqual(
-            viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.first?.localURL,
-            inlinePath
-        )
-        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachments.count, 1)
-        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachments.first?.filename, "report.pdf")
-        XCTAssertTrue(
-            [firstRegularPath, secondRegularPath].contains(
-                viewModel.forwardComposeContext?.forwardedRegularAttachments.first?.localURL ?? ""
-            )
-        )
         guard case .forwardCompose(let context) = viewModel.destination else {
             return XCTFail("Expected forward compose destination")
         }
         XCTAssertEqual(context.id, "message-forward")
+        XCTAssertEqual(context.initialSubject, "Fwd: Forward Me")
+        XCTAssertTrue(context.forwardedPlainTextBody.contains("Original forward body"))
+        XCTAssertTrue(context.forwardedHTMLBody?.contains("Forwarded HTML body") == true)
+        XCTAssertEqual(context.forwardedInlineAttachmentInfos.count, 1)
+        XCTAssertEqual(context.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
+        XCTAssertEqual(
+            context.forwardedInlineAttachmentInfos.first?.localURL,
+            inlinePath
+        )
+        XCTAssertEqual(context.forwardedRegularAttachments.count, 1)
+        XCTAssertEqual(context.forwardedRegularAttachments.first?.filename, "report.pdf")
+        XCTAssertTrue(
+            [firstRegularPath, secondRegularPath].contains(
+                context.forwardedRegularAttachments.first?.localURL ?? ""
+            )
+        )
     }
 
     func testSetMessageToForward_rejectsUnreadableInlineAttachmentWithVisibleError() {
@@ -829,7 +828,6 @@ final class ChatViewModelTests: XCTestCase {
 
         viewModel.setMessageToForward(message)
 
-        XCTAssertNil(viewModel.forwardComposeContext)
         XCTAssertNil(viewModel.destination)
         XCTAssertEqual(viewModel.sendErrorAlert?.title, "Couldn’t Forward Message")
         XCTAssertEqual(

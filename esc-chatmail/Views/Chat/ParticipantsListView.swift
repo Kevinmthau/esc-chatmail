@@ -14,6 +14,7 @@ struct ParticipantsListView: View {
 
     /// Cached list of other participants to avoid recomputation on every render.
     @State private var cachedOtherParticipants: [ParticipantListItem] = []
+    @State private var contactRefreshGeneration = 0
 
     @MainActor
     init(
@@ -34,7 +35,7 @@ struct ParticipantsListView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             List {
                 ForEach(cachedOtherParticipants) { participant in
                     ParticipantRow(
@@ -63,17 +64,16 @@ struct ParticipantsListView: View {
                     }
                 }
             }
-            .onAppear {
-                Task {
-                    await updateOtherParticipants()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
-                Task {
+            .task(id: contactRefreshGeneration) {
+                if contactRefreshGeneration > 0 {
                     await invalidateContactsCache()
                     await clearPersonCache()
-                    await updateOtherParticipants()
+                    guard !Task.isCancelled else { return }
                 }
+                await updateOtherParticipants()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
+                contactRefreshGeneration &+= 1
             }
         }
     }
@@ -107,6 +107,7 @@ struct ParticipantsListView: View {
         }
 
         let resolvedParticipants = await participantLoader.resolveParticipants(for: otherEmails)
+        guard !Task.isCancelled else { return }
 
         cachedOtherParticipants = resolvedParticipants.compactMap { participant in
             guard let person = personsByNormalizedEmail[EmailNormalizer.normalize(participant.email)] else {

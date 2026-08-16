@@ -317,6 +317,31 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.isSending)
     }
 
+    func testSendFailurePublishesSingleAlertValue() async {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockOutboundMessageCoordinator()
+        coordinator.errorToThrow = TestSendError.failed
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let viewModel = ComposeViewModel(
+            mode: .newMessage,
+            dependencies: deps.makeComposeDependencies()
+        )
+        viewModel.addRecipient(email: "friend@example.com")
+        viewModel.body = "Hello"
+
+        let didSend = await viewModel.send()
+
+        XCTAssertFalse(didSend)
+        XCTAssertFalse(viewModel.isSending)
+        XCTAssertEqual(viewModel.errorAlert?.message, TestSendError.failed.localizedDescription)
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         file: StaticString = #filePath,
@@ -337,6 +362,7 @@ private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating 
     private let coreDataStack: TestCoreDataStack
     private(set) var lastRequest: OutboundMessageRequest?
     var suspendsSend = false
+    var errorToThrow: Error?
     private var sendContinuation: CheckedContinuation<Void, Never>?
 
     init() {
@@ -349,6 +375,9 @@ private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating 
     ) async throws -> OutboundMessageResult? {
         let request = try await requestBuilder()
         lastRequest = request
+        if let errorToThrow {
+            throw errorToThrow
+        }
         if suspendsSend {
             await withCheckedContinuation { continuation in
                 sendContinuation = continuation
@@ -369,5 +398,13 @@ private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating 
     func resumeSend() {
         sendContinuation?.resume()
         sendContinuation = nil
+    }
+}
+
+private enum TestSendError: LocalizedError {
+    case failed
+
+    var errorDescription: String? {
+        "Test send failed"
     }
 }

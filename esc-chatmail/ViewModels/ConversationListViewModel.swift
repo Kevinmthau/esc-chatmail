@@ -38,8 +38,6 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Published State (Presentation)
 
-    @Published var showingComposer = false
-    @Published var showingSettings = false
     @Published private(set) var filteredConversationItems: [ConversationListItem] = []
 
     // MARK: - Dependencies

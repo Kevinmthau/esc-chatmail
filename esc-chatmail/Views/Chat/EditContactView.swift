@@ -7,11 +7,9 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
 
     private weak var presentedNavController: UINavigationController?
     private var emailToInvalidate: String?
-    private var isObservingContactStoreDidChange = false
 
     func presentContact(identifier: String) {
         emailToInvalidate = nil
-        removeContactStoreDidChangeObserver()
 
         Task { @MainActor [weak self] in
             guard let self = self else { return }
@@ -36,7 +34,6 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
 
     func addEmailToContact(existingContact: CNContact, emailToAdd: String) {
         emailToInvalidate = emailToAdd
-        removeContactStoreDidChangeObserver()
 
         Task { @MainActor [weak self] in
             guard let self = self else { return }
@@ -264,7 +261,6 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                 await PersonCache.shared.invalidateEntry(for: email)
             }
         }
-        removeContactStoreDidChangeObserver()
         presentedNavController?.dismiss(animated: true)
     }
 
@@ -284,33 +280,6 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                 await PersonCache.shared.invalidateEntry(for: email)
             }
         }
-        removeContactStoreDidChangeObserver()
         presentedNavController?.dismiss(animated: true)
-    }
-
-    @objc private func contactStoreDidChange(_ notification: Notification) {
-        guard let email = emailToInvalidate else { return }
-        removeContactStoreDidChangeObserver()
-        Task {
-            await ContactsResolver.shared.invalidateCache(for: email)
-            await PersonCache.shared.invalidateEntry(for: email)
-        }
-    }
-
-    private func startObservingContactStoreDidChange() {
-        guard !isObservingContactStoreDidChange else { return }
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(contactStoreDidChange(_:)),
-            name: .CNContactStoreDidChange,
-            object: nil
-        )
-        isObservingContactStoreDidChange = true
-    }
-
-    private func removeContactStoreDidChangeObserver() {
-        guard isObservingContactStoreDidChange else { return }
-        NotificationCenter.default.removeObserver(self, name: .CNContactStoreDidChange, object: nil)
-        isObservingContactStoreDidChange = false
     }
 }
