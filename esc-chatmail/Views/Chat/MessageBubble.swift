@@ -240,19 +240,6 @@ struct MessageBubble: View {
             hidingInlineReferencedInHTML: showHTMLPreview,
             hidingCalendarInviteAttachments: hidingCalendarInviteAttachments
         )
-        #if DEBUG
-        let _ = {
-            if message.hasAttachments {
-                let attachmentDetails = message.attachments
-                    .map { "[\($0.filename), cid:\($0.contentId ?? "nil")]" }
-                    .joined(separator: ", ")
-                Log.warning(
-                    "UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachments.count) displayable=\(displayable.count) showHTMLPreview=\(showHTMLPreview) attachments=\(attachmentDetails)",
-                    category: .ui
-                )
-            }
-        }()
-        #endif
         if !displayable.isEmpty {
             if style.showAttachmentGrid {
                 AttachmentGridView(attachments: displayable)

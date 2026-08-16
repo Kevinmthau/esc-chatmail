@@ -126,11 +126,10 @@ final class VirtualScrollState: ObservableObject {
 
     @Published var visibleMessages: [ChatMessageRowModel] = []
     @Published var totalMessageCount = 0
-    @Published var scrollPosition: Int = 0
-    @Published var isLoadingMore = false
+    var scrollPosition: Int = 0
+    var isLoadingMore = false
     @Published private(set) var initialLoadPhase: InitialLoadPhase = .loading
     @Published private(set) var initialLoadFailureReason: String?
-    @Published var placeholderIndices: Set<Int> = []
     @Published private(set) var latestWindowLayoutID = UUID()
 
     var isInitialLoadComplete: Bool {
@@ -557,7 +556,6 @@ final class VirtualScrollState: ObservableObject {
         scrollPosition = loadedWindow.range.lowerBound
         setMessageWindow(window)
         visibleMessages = loadedWindow.messages
-        placeholderIndices.removeAll()
         isLoadingMore = false
         needsDatasetReconciliationAfterCurrentLoad = false
         initialLoadFailureReason = nil
@@ -586,7 +584,6 @@ final class VirtualScrollState: ObservableObject {
         if let reportedTotalCount = failure.reportedTotalCount {
             totalMessageCount = reportedTotalCount
         }
-        placeholderIndices.removeAll()
         isLoadingMore = false
         initialLoadFailureReason = failure.userFacingReason
         initialLoadPhase = .failed
@@ -890,9 +887,6 @@ final class VirtualScrollState: ObservableObject {
         guard loadGeneration == windowLoadGeneration else { return nil }
         isLoadingMore = true
 
-        // Show placeholders while loading
-        placeholderIndices = Set(startIndex..<endIndex)
-
         let page = await loadPage(
             startIndex..<endIndex,
             preferPendingConversationMessages: preferPendingConversationMessages
@@ -1066,7 +1060,6 @@ final class VirtualScrollState: ObservableObject {
         totalMessageCount = page.totalCount
         setMessageWindow(window)
         visibleMessages = messages
-        placeholderIndices.removeAll()
         isLoadingMore = false
         updateAvailabilityPhaseAfterWindowLoad(page: page, messages: messages)
         needsDatasetReconciliationAfterCurrentLoad = false
@@ -1334,7 +1327,6 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func finishWindowLoadFailure(operation: String, description: String) {
-        placeholderIndices.removeAll()
         isLoadingMore = false
         if visibleMessages.isEmpty && initialLoadPhase == .loading {
             initialLoadFailureReason = "Messages couldn’t be loaded. Please try again."
@@ -1389,7 +1381,6 @@ final class VirtualScrollState: ObservableObject {
 
     private func finishCancelledWindowLoad(generation: UInt) {
         guard generation == windowLoadGeneration else { return }
-        placeholderIndices.removeAll()
         isLoadingMore = false
         currentWindowLoadIntent = nil
     }
@@ -1399,7 +1390,6 @@ final class VirtualScrollState: ObservableObject {
         finishInitialLoadSignpost(outcome: "cancelled")
         windowLoadGeneration &+= 1
         taskManager.cancelAll()
-        placeholderIndices.removeAll()
         isLoadingMore = false
         needsDatasetReconciliationAfterCurrentLoad = false
         needsUnclassifiedRefreshCountReconciliation = false

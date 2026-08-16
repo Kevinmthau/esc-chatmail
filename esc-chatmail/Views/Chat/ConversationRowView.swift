@@ -91,6 +91,7 @@ struct ConversationRowView: View {
     }
 
     var body: some View {
+        let participantLoadKey = needsParticipantLoad ? participantInfoKey : nil
         let rowContent = HStack(spacing: 12) {
             // Unread indicator with fixed width container
             ZStack {
@@ -151,19 +152,14 @@ struct ConversationRowView: View {
         .frame(height: 88)
         .padding(.horizontal, 12)
 
-        if needsParticipantLoad {
-            rowContent.task(id: participantInfoKey) {
-                await loadContactInfo(for: participantInfoKey)
+        rowContent
+            .task(id: participantLoadKey) {
+                guard let participantLoadKey else { return }
+                await loadContactInfo(for: participantLoadKey)
             }
             .onReceive(NotificationCenter.default.publisher(for: .personDisplayInfoDidChange).receive(on: DispatchQueue.main)) { notification in
                 refreshParticipantInfoIfNeeded(for: notification)
             }
-        } else {
-            rowContent
-                .onReceive(NotificationCenter.default.publisher(for: .personDisplayInfoDidChange).receive(on: DispatchQueue.main)) { notification in
-                    refreshParticipantInfoIfNeeded(for: notification)
-                }
-        }
     }
 
     private var participantInfoKey: String {

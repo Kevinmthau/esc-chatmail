@@ -30,7 +30,7 @@ struct MessageContentView: View {
     @ViewBuilder
     private var htmlPreviewContent: some View {
         // Keep shared document cards visible even when the message routes through HTML preview mode.
-        if sharedDocumentLinks.isEmpty {
+        VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 10) {
             EmailContentSection(
                 message: message,
                 onOpenFullMessage: openOriginalEmail(source:),
@@ -38,15 +38,8 @@ struct MessageContentView: View {
                 fullEmailOpener: fullEmailOpener,
                 htmlSourceSignaturer: htmlSourceSignaturer
             )
-        } else {
-            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 10) {
-                EmailContentSection(
-                    message: message,
-                    onOpenFullMessage: openOriginalEmail(source:),
-                    originalEmailSourceWarmer: originalEmailSourceWarmer,
-                    fullEmailOpener: fullEmailOpener,
-                    htmlSourceSignaturer: htmlSourceSignaturer
-                )
+
+            if !sharedDocumentLinks.isEmpty {
                 sharedDocumentCards
             }
         }
