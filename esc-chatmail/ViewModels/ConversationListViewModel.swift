@@ -230,25 +230,6 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Filtering (Delegate to Service)
 
-    func refreshConversations<C: Sequence>(_ conversations: C) where C.Element == Conversation {
-        if !canCurrentFilterMatchConversations {
-            let window = Array(conversations.lazy.prefix(loadedConversationLimit))
-            hasLoadedAllConversationWindow = true
-            listStore.replaceAll(with: window) { _ in false }
-            publishVisibleItems()
-            return
-        }
-
-        let window = windowProvider.window(
-            from: conversations,
-            limit: loadedConversationLimit,
-            matchesVisibility: matchesVisibleConversation(_:)
-        )
-        hasLoadedAllConversationWindow = window.count < loadedConversationLimit
-        listStore.replaceAll(with: window, matchesVisibility: matchesVisibleConversation(_:))
-        publishVisibleItems()
-    }
-
     func applyConversationChanges(
         updatedConversations: [Conversation] = [],
         deletedIDs: Set<NSManagedObjectID> = []
@@ -496,11 +477,10 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     private func reloadConversationWindowFromStore() {
-        guard observedConversationContext != nil else {
-            listStore.recomputeVisibleItems(matchesVisibility: matchesVisibleItem(_:))
-            publishVisibleItems()
-            return
-        }
+        // A filter/contacts-cache/search callback can fire before onAppear(in:)
+        // registers a context; the first onAppear reload picks that state up
+        // (observedConversationContext is weak, so no assert).
+        guard observedConversationContext != nil else { return }
 
         let window = windowProvider.fetchWindow(
             in: conversationContext,
@@ -511,7 +491,7 @@ final class ConversationListViewModel: ObservableObject {
             matchesVisibility: matchesVisibleConversation(_:)
         )
         hasLoadedAllConversationWindow = window.count < loadedConversationLimit
-        listStore.replaceAll(with: window, matchesVisibility: matchesVisibleConversation(_:))
+        listStore.replaceAll(with: window)
         publishVisibleItems()
         prefetchPersonData(from: filteredConversationItems)
     }
@@ -558,31 +538,6 @@ final class ConversationListViewModel: ObservableObject {
 
     private func matchesVisibleConversation(_ conversation: Conversation) -> Bool {
         filterService.matches(conversation, searchText: searchService.debouncedSearchText)
-    }
-
-    private func matchesVisibleItem(_ item: ConversationListItem) -> Bool {
-        let searchText = searchService.debouncedSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !searchText.isEmpty {
-            let lowercasedQuery = searchText.lowercased()
-            let matchesSearch = item.snapshot.displayNameHint?.lowercased().contains(lowercasedQuery) == true ||
-                item.snapshot.snippet?.lowercased().contains(lowercasedQuery) == true
-            guard matchesSearch else { return false }
-        }
-
-        switch filterService.currentFilter {
-        case .all:
-            return true
-        case .unread:
-            return item.snapshot.inboxUnreadCount > 0
-        case .contacts:
-            return item.snapshot.participantEmails.contains { email in
-                filterService.contactEmailsCache.contains(EmailNormalizer.normalize(email))
-            }
-        case .other:
-            return !item.snapshot.participantEmails.contains { email in
-                filterService.contactEmailsCache.contains(EmailNormalizer.normalize(email))
-            }
-        }
     }
 
     private func startObservingConversationChanges(in context: NSManagedObjectContext) {

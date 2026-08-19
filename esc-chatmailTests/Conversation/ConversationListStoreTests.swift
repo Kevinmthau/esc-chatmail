@@ -23,20 +23,20 @@ final class ConversationListStoreTests: XCTestCase {
     }
 
     // Revert-check: ConversationListStore.replaceAll — it must keep the
-    // caller's order verbatim (fetchWindow already sorted it) and apply the
-    // visibility filter to the incoming window.
-    func testReplaceAll_mixedVisibilityWindow_preservesGivenOrderAndDropsNonMatchingRows() throws {
+    // caller's order verbatim and keep every handed-over row: fetchWindow
+    // already filtered and sorted the window, so the store neither re-sorts
+    // nor drops rows.
+    func testReplaceAll_prefilteredWindow_preservesGivenOrderVerbatim() throws {
         let alice = makeConversation(name: "Alice", date: 300)
         let bob = makeConversation(name: "Bob", date: 200)
         let carol = makeConversation(name: "Carol", date: 100)
         try stack.saveViewContext()
 
         var store = ConversationListStore()
-        // Deliberately not sort order: the store must not re-sort the window.
-        store.replaceAll(with: [bob, alice, carol]) { $0.objectID != carol.objectID }
+        // Deliberately not sort order: the store must trust the caller's order.
+        store.replaceAll(with: [bob, alice, carol])
 
-        XCTAssertEqual(visibleIDs(of: store), [bob.objectID, alice.objectID])
-        XCTAssertNil(store.itemsByID[carol.objectID])
+        XCTAssertEqual(visibleIDs(of: store), [bob.objectID, alice.objectID, carol.objectID])
         assertStoreIndexesAligned(store)
     }
 
@@ -50,7 +50,7 @@ final class ConversationListStoreTests: XCTestCase {
         try stack.saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol]) { _ in true }
+        store.replaceAll(with: [alice, bob, carol])
 
         bob.lastMessageDate = Date(timeIntervalSince1970: 400)
         var removed = applyUpdate(&store, updated: [bob])
@@ -74,7 +74,7 @@ final class ConversationListStoreTests: XCTestCase {
         try stack.saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol]) { _ in true }
+        store.replaceAll(with: [alice, bob, carol])
         let initialItems = store.visibleItems
 
         bob.snippet = "updated beta"
@@ -100,7 +100,7 @@ final class ConversationListStoreTests: XCTestCase {
         try stack.saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob]) { _ in true }
+        store.replaceAll(with: [alice, bob])
 
         bob.archivedAt = Date(timeIntervalSince1970: 500)
         let removed = applyUpdate(&store, updated: [bob])
@@ -120,7 +120,7 @@ final class ConversationListStoreTests: XCTestCase {
         try stack.saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol]) { _ in true }
+        store.replaceAll(with: [alice, bob, carol])
 
         let removed = applyUpdate(&store, deleted: [carol.objectID])
 
@@ -146,7 +146,7 @@ final class ConversationListStoreTests: XCTestCase {
         let matchesUnread: (Conversation) -> Bool = { $0.inboxUnreadCount > 0 }
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob], matchesVisibility: matchesUnread)
+        store.replaceAll(with: [alice, bob])
 
         bob.inboxUnreadCount = 0
         let removed = applyUpdate(&store, updated: [bob], matchesVisibility: matchesUnread)
@@ -168,7 +168,7 @@ final class ConversationListStoreTests: XCTestCase {
         try stack.saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol, dave]) { _ in true }
+        store.replaceAll(with: [alice, bob, carol, dave])
 
         let trimmed = store.trimVisibleItems(to: 2)
 
@@ -231,7 +231,7 @@ final class ConversationListStoreTests: XCTestCase {
         try stack.saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol, dave, erin]) { _ in true }
+        store.replaceAll(with: [alice, bob, carol, dave, erin])
         assertStoreIndexesAligned(store)
 
         // Move one row, archive one, delete one, insert a new one.

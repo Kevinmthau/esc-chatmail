@@ -44,14 +44,6 @@ struct ConversationWindowProvider {
         self.contactFilterCandidateMultiplier = 5
     }
 
-    func window<C: Sequence>(
-        from conversations: C,
-        limit: Int,
-        matchesVisibility: (Conversation) -> Bool
-    ) -> [Conversation] where C.Element == Conversation {
-        Array(conversations.lazy.filter(matchesVisibility).prefix(limit))
-    }
-
     func fetchWindow(
         in context: NSManagedObjectContext,
         limit: Int,
@@ -210,22 +202,17 @@ struct ConversationListStore {
     private(set) var visibleIDs: [NSManagedObjectID] = []
     private(set) var visibleItems: [ConversationListItem] = []
 
-    var isEmpty: Bool {
-        orderedIDs.isEmpty && itemsByID.isEmpty
-    }
-
-    mutating func replaceAll(
-        with conversations: [Conversation],
-        matchesVisibility: (Conversation) -> Bool
-    ) {
+    /// Replaces the store contents with an already-filtered, already-sorted
+    /// window in the caller's order. The only caller passes the result of
+    /// `fetchWindow`, which applied the visibility filter and sort, so the
+    /// store deliberately does not re-filter or re-sort here.
+    mutating func replaceAll(with conversations: [Conversation]) {
         itemsByID.removeAll(keepingCapacity: true)
         orderedIDs.removeAll(keepingCapacity: true)
         visibleIDs.removeAll(keepingCapacity: true)
         visibleItems.removeAll(keepingCapacity: true)
 
         for conversation in conversations {
-            guard matchesVisibility(conversation) else { continue }
-
             let item = ConversationListItem(conversation: conversation)
             itemsByID[item.id] = item
             orderedIDs.append(item.id)
@@ -262,19 +249,6 @@ struct ConversationListStore {
         }
 
         return removedIDs
-    }
-
-    mutating func recomputeVisibleItems(
-        matchesVisibility: (ConversationListItem) -> Bool
-    ) {
-        visibleIDs.removeAll(keepingCapacity: true)
-        visibleItems.removeAll(keepingCapacity: true)
-
-        for objectID in orderedIDs {
-            guard let item = itemsByID[objectID], matchesVisibility(item) else { continue }
-            visibleIDs.append(objectID)
-            visibleItems.append(item)
-        }
     }
 
     mutating func removeAll() {
