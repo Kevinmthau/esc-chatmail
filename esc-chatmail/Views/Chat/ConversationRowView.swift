@@ -67,12 +67,27 @@ struct ConversationRowView: View {
     let snapshot: ConversationSnapshot
 
     private let currentUserEmail: String
+    /// `currentUserEmail` normalized once at init so per-body key builds and
+    /// self-participant filtering don't re-run `EmailNormalizer.normalize`.
+    private let normalizedCurrentUserEmail: String
     private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext
 
-    @State private var uncachedParticipantInfo: ParticipantLoader.ParticipantInfo?
-    @State private var uncachedParticipantInfoKey: String?
+    /// An uncached participant load result together with the `participantInfoKey` it was
+    /// loaded for, stored as one value so the key/info pair cannot drift across write
+    /// sites (`loadContactInfo` sets both together; the refresh path clears both).
+    private struct UncachedParticipantLoad {
+        let key: String
+        let info: ParticipantLoader.ParticipantInfo
+    }
+
+    @State private var uncachedLoad: UncachedParticipantLoad?
+    /// Bumped by `refreshParticipantInfoIfNeeded` so `participantInfoKey` changes after a
+    /// `.personDisplayInfoDidChange` notification even when every snapshot field is
+    /// unchanged — the key change re-triggers `.task(id:)` and reloads participant info
+    /// with the contact's updated display data. Deliberate; introduced in 2b3bf9b
+    /// ("Fix stale sender display names").
     @State private var participantRefreshToken = 0
 
     @MainActor
@@ -85,13 +100,56 @@ struct ConversationRowView: View {
     ) {
         self.snapshot = snapshot
         self.currentUserEmail = currentUserEmail
+        self.normalizedCurrentUserEmail = EmailNormalizer.normalize(currentUserEmail)
         self.participantLoader = participantLoader
         self.conversationObjectID = conversationObjectID
         self.conversationContext = conversationContext
     }
 
     var body: some View {
-        let participantLoadKey = needsParticipantLoad ? participantInfoKey : nil
+        // Bind participant data once per body evaluation. The previous per-call-site
+        // computed properties repeated the rollup-cache lookups and key builds for every
+        // consumer (~9 lookups and 5 key builds per render); this resolution performs at
+        // most one full lookup, one base lookup on a full miss, and one key build.
+        let loadsParticipantInfo = Self.shouldLoadParticipantInfo(
+            conversationType: snapshot.conversationType
+        )
+        let infoKey = participantInfoKey
+        let cachedFull = loadsParticipantInfo ? cachedParticipantInfo(includePhotos: true) : nil
+        // resolvedParticipantInfo's first branch returns the full entry on a hit, so the
+        // base entry is consulted only on a full miss — an eager base lookup would defeat
+        // the rollup cache's fast path.
+        let info = loadsParticipantInfo
+            ? Self.resolvedParticipantInfo(
+                cachedFull: cachedFull,
+                cachedBase: cachedFull == nil ? cachedParticipantInfo(includePhotos: false) : nil,
+                uncached: uncachedParticipantInfo(for: infoKey)
+            )
+            : nil
+        let fallbackName = fallbackDisplayName
+        let displayName = Self.resolvedDisplayName(
+            conversationType: snapshot.conversationType,
+            storedDisplayName: fallbackName,
+            participantInfo: info
+        )
+        let participantNames = Self.resolvedAvatarDisplayNames(
+            conversationType: snapshot.conversationType,
+            participantInfo: info
+        )
+        let avatarPhotos = Self.resolvedAvatarPhotos(
+            conversationType: snapshot.conversationType,
+            participantInfo: info
+        )
+        let showsGroupAvatar = Self.resolvedShowsGroupAvatar(
+            snapshotShowsGroupAvatar: snapshot.showsGroupAvatar,
+            conversationType: snapshot.conversationType,
+            participantInfo: info
+        )
+        let participantLoadKey = needsParticipantLoad(
+            loadsParticipantInfo: loadsParticipantInfo,
+            cachedFull: cachedFull,
+            infoKey: infoKey
+        ) ? infoKey : nil
         let rowContent = HStack(spacing: 12) {
             // Unread indicator with fixed width container
             ZStack {
@@ -108,7 +166,7 @@ struct ConversationRowView: View {
                 alignedAvatarPhotos: avatarPhotos,
                 participants: participantNames,
                 showsGroupAvatar: showsGroupAvatar,
-                fallbackDisplayText: fallbackDisplayName
+                fallbackDisplayText: fallbackName
             )
                 .frame(width: 44, height: 44)
 
@@ -168,83 +226,33 @@ struct ConversationRowView: View {
             snapshot.participantHash ?? "",
             snapshot.displayNameHint ?? "",
             snapshot.participantDisplayNameFingerprint,
-            EmailNormalizer.normalize(currentUserEmail),
+            normalizedCurrentUserEmail,
             String(participantRefreshToken)
         ].joined(separator: "|")
     }
 
-    private var cachedBaseParticipantInfo: ParticipantLoader.ParticipantInfo? {
+    /// Single rollup-cache accessor for this row; `includePhotos` selects between the
+    /// base and full cache entries so the two lookups cannot drift in their other
+    /// arguments.
+    private func cachedParticipantInfo(includePhotos: Bool) -> ParticipantLoader.ParticipantInfo? {
         participantLoader.cachedParticipantInfo(
             conversationObjectID: conversationObjectID,
             participantHash: snapshot.participantHash,
             currentUserEmail: currentUserEmail,
             maxParticipants: 4,
             fallbackDisplayName: snapshot.displayNameHint,
-            includePhotos: false
+            includePhotos: includePhotos
         )
     }
 
-    private var cachedFullParticipantInfo: ParticipantLoader.ParticipantInfo? {
-        participantLoader.cachedParticipantInfo(
-            conversationObjectID: conversationObjectID,
-            participantHash: snapshot.participantHash,
-            currentUserEmail: currentUserEmail,
-            maxParticipants: 4,
-            fallbackDisplayName: snapshot.displayNameHint,
-            includePhotos: true
-        )
-    }
-
-    private var effectiveParticipantInfo: ParticipantLoader.ParticipantInfo? {
-        guard Self.shouldLoadParticipantInfo(
-            conversationType: snapshot.conversationType
-        ) else {
+    /// The stored uncached load, but only when it was produced for the given key —
+    /// a stale load for an outdated key must not be displayed.
+    private func uncachedParticipantInfo(for participantInfoKey: String) -> ParticipantLoader.ParticipantInfo? {
+        guard let uncachedLoad, uncachedLoad.key == participantInfoKey else {
             return nil
         }
 
-        return Self.resolvedParticipantInfo(
-            cachedFull: cachedFullParticipantInfo,
-            cachedBase: cachedBaseParticipantInfo,
-            uncached: currentUncachedParticipantInfo
-        )
-    }
-
-    private var currentUncachedParticipantInfo: ParticipantLoader.ParticipantInfo? {
-        guard uncachedParticipantInfoKey == participantInfoKey else {
-            return nil
-        }
-
-        return uncachedParticipantInfo
-    }
-
-    private var displayName: String {
-        Self.resolvedDisplayName(
-            conversationType: snapshot.conversationType,
-            storedDisplayName: fallbackDisplayName,
-            participantInfo: effectiveParticipantInfo
-        )
-    }
-
-    private var participantNames: [String] {
-        Self.resolvedAvatarDisplayNames(
-            conversationType: snapshot.conversationType,
-            participantInfo: effectiveParticipantInfo
-        )
-    }
-
-    private var avatarPhotos: [ProfilePhoto?] {
-        Self.resolvedAvatarPhotos(
-            conversationType: snapshot.conversationType,
-            participantInfo: effectiveParticipantInfo
-        )
-    }
-
-    private var showsGroupAvatar: Bool {
-        Self.resolvedShowsGroupAvatar(
-            snapshotShowsGroupAvatar: snapshot.showsGroupAvatar,
-            conversationType: snapshot.conversationType,
-            participantInfo: effectiveParticipantInfo
-        )
+        return uncachedLoad.info
     }
 
     private var fallbackDisplayName: String {
@@ -255,24 +263,30 @@ struct ConversationRowView: View {
     }
 
     private var nonSelfParticipantEmails: [String] {
-        let normalizedCurrentUserEmail = EmailNormalizer.normalize(currentUserEmail)
-        return snapshot.participantEmails.filter { email in
-            EmailNormalizer.normalize(email) != normalizedCurrentUserEmail
+        // Snapshot emails are already normalized (ConversationSnapshot.participantEmails(from:)
+        // stores EmailNormalizer.normalize output, which is idempotent), so compare them
+        // against the once-normalized current-user email without re-normalizing each one.
+        snapshot.participantEmails.filter { email in
+            email != normalizedCurrentUserEmail
         }
     }
 
-    private var needsParticipantLoad: Bool {
-        guard Self.shouldLoadParticipantInfo(
-            conversationType: snapshot.conversationType
-        ) else {
+    /// Whether the async participant load should run, given the participant data already
+    /// resolved by this body evaluation (so the check adds no extra cache lookups).
+    private func needsParticipantLoad(
+        loadsParticipantInfo: Bool,
+        cachedFull: ParticipantLoader.ParticipantInfo?,
+        infoKey: String
+    ) -> Bool {
+        guard loadsParticipantInfo else {
             return false
         }
 
         if snapshot.participantHash?.isEmpty == false {
-            return cachedFullParticipantInfo == nil
+            return cachedFull == nil
         }
 
-        return currentUncachedParticipantInfo == nil
+        return uncachedParticipantInfo(for: infoKey) == nil
     }
 
     static func resolvedParticipantInfo(
@@ -375,8 +389,7 @@ struct ConversationRowView: View {
 
         guard participantInfoKey == self.participantInfoKey else { return }
 
-        uncachedParticipantInfo = info
-        uncachedParticipantInfoKey = participantInfoKey
+        uncachedLoad = UncachedParticipantLoad(key: participantInfoKey, info: info)
     }
 
     private func refreshParticipantInfoIfNeeded(for notification: Notification) {
@@ -391,8 +404,7 @@ struct ConversationRowView: View {
             return
         }
 
-        uncachedParticipantInfo = nil
-        uncachedParticipantInfoKey = nil
+        uncachedLoad = nil
         participantRefreshToken &+= 1
     }
 
