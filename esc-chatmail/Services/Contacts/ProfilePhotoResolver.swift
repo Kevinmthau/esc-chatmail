@@ -83,11 +83,8 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
         let normalizedEmail = EmailNormalizer.normalize(email)
 
         // Check memory cache first
-        if let cached = cache.object(forKey: normalizedEmail as NSString) {
-            if !cached.isExpired {
-                return cached.photo
-            }
-            cache.removeObject(forKey: normalizedEmail as NSString)
+        if let cached = unexpiredCachedPhoto(forNormalizedEmail: normalizedEmail) {
+            return cached.photo
         }
 
         // Include the account generation in the key. If a close is draining
@@ -157,15 +154,31 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
         cache.removeAllObjects()
     }
 
-    /// Prefetch photos for multiple emails without blocking
-    /// Uses batch contact lookup for efficiency, then caches results
+    /// Prefetch photos for multiple emails without blocking.
+    /// Uses batch contact lookup for efficiency, then caches results.
+    /// Emails the memory cache already resolves are skipped up front, so
+    /// recurring callers (chat-list reloads, sync batches) do not re-run the
+    /// Contacts enumeration or rewrite avatars for warm entries.
     func prefetchPhotos(for emails: [String]) async {
         guard !emails.isEmpty else { return }
         guard let generation = beginAccountOperation() else { return }
         defer { finishAccountOperation(generation) }
 
+        // The same gate resolvePhoto(for:) applies: an unexpired memory-cache
+        // entry — photo or negative — answers without any lookup, so
+        // prefetching it would only repeat the batch lookup and avatar write.
+        let uncachedEmails = emails.filter { email in
+            unexpiredCachedPhoto(forNormalizedEmail: EmailNormalizer.normalize(email)) == nil
+        }
+        guard !uncachedEmails.isEmpty else { return }
+
+        // The caller may already be superseded (the chat list replaces its
+        // detached prefetch task on every reload); the Contacts enumeration
+        // is the expensive part, so never start it for a cancelled task.
+        guard !Task.isCancelled else { return }
+
         // First, batch lookup from Contacts for efficiency
-        let contactPhotos = await contactsResolver.resolveAvatarDataBatch(for: emails)
+        let contactPhotos = await contactsResolver.resolveAvatarDataBatch(for: uncachedEmails)
         guard isCurrentAccountGeneration(generation) else { return }
 
         // Save found photos to cache and storage
@@ -189,7 +202,7 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
 
         // For emails not found in contacts, check cache individually
         let foundEmails = Set(contactPhotos.keys)
-        let remainingEmails = emails
+        let remainingEmails = uncachedEmails
             .map { EmailNormalizer.normalize($0) }
             .filter { !foundEmails.contains($0) }
 
@@ -204,6 +217,20 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
     }
 
     // MARK: - Private Methods
+
+    /// Memory-cache read shared by `resolvePhoto(for:)` and the
+    /// `prefetchPhotos(for:)` gate: returns the unexpired cached entry
+    /// (photo or negative) for an already-normalized email, evicting an
+    /// expired entry so both callers agree the email needs re-resolving.
+    private func unexpiredCachedPhoto(forNormalizedEmail normalizedEmail: String) -> CachedPhoto? {
+        if let cached = cache.object(forKey: normalizedEmail as NSString) {
+            if !cached.isExpired {
+                return cached
+            }
+            cache.removeObject(forKey: normalizedEmail as NSString)
+        }
+        return nil
+    }
 
     private func fetchPhoto(
         for email: String,
