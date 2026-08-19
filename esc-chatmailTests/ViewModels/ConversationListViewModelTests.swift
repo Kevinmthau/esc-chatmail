@@ -113,10 +113,13 @@ final class ConversationListViewModelTests: XCTestCase {
 
         let viewModel = ConversationListViewModel()
         viewModel.refreshConversations([alice, bob])
+        viewModel.toggleSelection(for: bob.objectID)
 
         bob.archivedAt = Date(timeIntervalSince1970: 500)
         viewModel.applyConversationChanges(updatedConversations: [bob])
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID])
+        // An archived row leaves the selection with the window.
+        XCTAssertTrue(viewModel.selectedConversationIDs.isEmpty)
 
         bob.archivedAt = nil
         bob.lastMessageDate = Date(timeIntervalSince1970: 400)
@@ -133,12 +136,15 @@ final class ConversationListViewModelTests: XCTestCase {
         let viewModel = ConversationListViewModel()
         viewModel.refreshConversations([alice, bob, carol])
         let initialItems = viewModel.filteredConversationItems
+        viewModel.toggleSelection(for: bob.objectID)
 
         viewModel.applyConversationChanges(deletedIDs: [bob.objectID])
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, carol.objectID])
         XCTAssertEqual(viewModel.filteredConversationItems[0], initialItems[0])
         XCTAssertEqual(viewModel.filteredConversationItems[1], initialItems[2])
+        // A deleted row leaves the selection with the window.
+        XCTAssertTrue(viewModel.selectedConversationIDs.isEmpty)
     }
 
     func testOnAppearFetchesBoundedInitialWindowFromStoreAndExpandsNearEnd() throws {
@@ -541,7 +547,9 @@ final class ConversationListViewModelTests: XCTestCase {
     // Revert-check: applyConversationChanges must clear hasLoadedAllConversationWindow
     // after trimVisibleItems. Without that reset the short initial window latches
     // "all loaded" and loadMoreIfNeeded bails at its first guard, leaving the list
-    // stuck at 2 rows even though the store now holds 3.
+    // stuck at 2 rows even though the store now holds 3. The selection assertion
+    // additionally pins that a trimmed row leaves the selection
+    // (publishVisibleItems → ConversationSelectionService.retainSelection(within:)).
     func testApplyConversationChanges_trimAfterShortInitialWindow_reopensPaging() throws {
         // pageSize 1 → initial limit 2; one saved row makes the initial window short.
         let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
@@ -560,6 +568,7 @@ final class ConversationListViewModelTests: XCTestCase {
 
         viewModel.onAppear(in: context)
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [carol.objectID])
+        viewModel.toggleSelection(for: carol.objectID)
 
         // Two newer live inserts on the observed context (pending, not saved, so
         // their objectIDs stay stable for the assertions below): objectsDidChange
@@ -569,6 +578,8 @@ final class ConversationListViewModelTests: XCTestCase {
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
         context.processPendingChanges()
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+        // The trimmed row leaves the selection with the window.
+        XCTAssertTrue(viewModel.selectedConversationIDs.isEmpty)
 
         // Pre-fix this stopped at [alice, bob]: the flag still claimed the whole
         // window was loaded, so the trimmed row was unreachable until a re-appear.
@@ -578,6 +589,39 @@ final class ConversationListViewModelTests: XCTestCase {
             filteredConversationIDs(in: viewModel),
             [alice.objectID, bob.objectID, carol.objectID]
         )
+    }
+
+    // Revert-check: publishVisibleItems must call
+    // ConversationSelectionService.retainSelection(within:). A row that stops
+    // matching the filter leaves the store through upsertConversation, which
+    // reports nothing to applyConversationChanges — only the publish-time
+    // reconciliation drops it from the selection.
+    func testApplyConversationChanges_selectedRowLeavesUnreadFilter_dropsItFromSelection() throws {
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        alice.inboxUnreadCount = 1
+        bob.inboxUnreadCount = 1
+        try context.save()
+
+        let viewModel = ConversationListViewModel()
+        viewModel.onAppear(in: context)
+        viewModel.currentFilter = .unread
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+
+        viewModel.toggleSelection(for: alice.objectID)
+        viewModel.toggleSelection(for: bob.objectID)
+        XCTAssertEqual(viewModel.selectedConversationIDs, [alice.objectID, bob.objectID])
+
+        // A remote mark-read lands on the observed context: objectsDidChange
+        // drives applyConversationChanges, whose upsert hides Bob from the
+        // unread window. Pre-fix Bob stayed selected ("2 Selected" with one
+        // checkmark) and the batch archive/spam actions acted on the hidden row.
+        bob.inboxUnreadCount = 0
+        context.processPendingChanges()
+
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID])
+        XCTAssertEqual(viewModel.selectedConversationIDs, [alice.objectID])
+        XCTAssertEqual(viewModel.selectedConversationIDs.count, 1)
     }
 
     func testPersonDisplayNameChangeRefreshesAffectedConversationItem() async throws {

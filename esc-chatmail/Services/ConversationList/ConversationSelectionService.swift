@@ -53,6 +53,21 @@ final class ConversationSelectionService: ObservableObject {
         }
     }
 
+    /// Drops every selected identifier that is not among `visibleIDs`.
+    ///
+    /// Invariant: the selection is always a subset of the rows the list
+    /// currently shows. The "N Selected" title, the Select All / Deselect All
+    /// label (`selectedCount == visible.count`) and the batch archive / spam
+    /// actions all assume it, so a row that leaves the window for any reason
+    /// (filter or search mismatch, trim, archive, delete, invalidate-all)
+    /// must leave the selection with it. The `isSubset` guard keeps the
+    /// `@Published` set untouched on the common publish where nothing left,
+    /// so observers are not re-notified on every list publish.
+    func retainSelection(within visibleIDs: Set<NSManagedObjectID>) {
+        guard !selectedConversationIDs.isSubset(of: visibleIDs) else { return }
+        selectedConversationIDs.formIntersection(visibleIDs)
+    }
+
     /// Cancels selection mode and clears all selections
     func cancelSelection() {
         isSelecting = false

@@ -255,20 +255,18 @@ final class ConversationListViewModel: ObservableObject {
     ) {
         guard !updatedConversations.isEmpty || !deletedIDs.isEmpty else { return }
 
-        let removedIDs = listStore.applyChanges(
+        // The removed-ID set is not needed here: rows leaving the window drop
+        // out of the selection in publishVisibleItems, which also sees the
+        // rows upsertConversation hides without reporting them.
+        _ = listStore.applyChanges(
             updatedConversations: updatedConversations,
             deletedIDs: deletedIDs,
             isSourceConversation: isSourceConversation(_:),
             matchesVisibility: matchesVisibleConversation(_:)
         )
 
-        if !removedIDs.isEmpty {
-            selectionService.selectedConversationIDs.subtract(removedIDs)
-        }
-
         let trimmedIDs = listStore.trimVisibleItems(to: loadedConversationLimit)
         if !trimmedIDs.isEmpty {
-            selectionService.selectedConversationIDs.subtract(trimmedIDs)
             // A non-empty trim proves the store holds rows beyond the window, so
             // paging must reopen even when a short initial fetch latched "all loaded".
             hasLoadedAllConversationWindow = false
@@ -470,6 +468,10 @@ final class ConversationListViewModel: ObservableObject {
 
     private func publishVisibleItems() {
         let visibleItems = listStore.visibleItems
+        // Single owner of selection ⊆ visible rows: every publish path (live
+        // changes, trims, reloads, backfill, invalidate-all) funnels through
+        // here, so no individual path has to know which rows it dropped.
+        selectionService.retainSelection(within: Set(visibleItems.map(\.id)))
         guard visibleItems != filteredConversationItems else { return }
         filteredConversationItems = visibleItems
     }
@@ -635,7 +637,6 @@ final class ConversationListViewModel: ObservableObject {
     private func handleConversationContextChange(_ notification: Notification) {
         guard notification.userInfo?[NSInvalidatedAllObjectsKey] == nil else {
             listStore.removeAll()
-            selectionService.selectedConversationIDs.removeAll()
             publishVisibleItems()
             return
         }
