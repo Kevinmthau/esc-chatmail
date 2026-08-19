@@ -68,11 +68,11 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Initialization
 
     /// Primary initializer using the narrowed conversation-list bundle.
+    /// The composed services come exclusively from the bundle's factories, so
+    /// a caller that wants a specific service instance supplies a bundle whose
+    /// factory returns it (tests use `ConversationListDependencies.forTesting`).
     init(
         dependencies: ConversationListDependencies? = nil,
-        searchService: ConversationSearchService? = nil,
-        selectionService: ConversationSelectionService? = nil,
-        filterService: ConversationFilterService? = nil,
         windowProvider: ConversationWindowProvider = ConversationWindowProvider()
     ) {
         let resolvedDependencies = dependencies ?? Dependencies.shared.makeConversationListDependencies()
@@ -85,9 +85,9 @@ final class ConversationListViewModel: ObservableObject {
         self.loadedConversationLimit = windowProvider.initialLimit
 
         // Initialize composed services
-        let resolvedSearchService = searchService ?? resolvedDependencies.makeConversationSearchService()
-        let resolvedSelectionService = selectionService ?? resolvedDependencies.makeConversationSelectionService()
-        let resolvedFilterService = filterService ?? resolvedDependencies.makeConversationFilterService()
+        let resolvedSearchService = resolvedDependencies.makeConversationSearchService()
+        let resolvedSelectionService = resolvedDependencies.makeConversationSelectionService()
+        let resolvedFilterService = resolvedDependencies.makeConversationFilterService()
         self.searchService = resolvedSearchService
         self.selectionService = resolvedSelectionService
         self.filterService = resolvedFilterService

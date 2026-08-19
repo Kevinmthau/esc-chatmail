@@ -37,16 +37,20 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         super.tearDown()
     }
 
+    // Revert-check: ConversationListViewModel.handleSiblingContextSave — automerge is off, so the didSaveObjectIDs subscription is the only path that can refresh this deallocated row.
     func testBackgroundSaveUpdatesUnreadForUnregisteredConversation() async throws {
         let viewModel = makeViewModel()
         var conversationID: NSManagedObjectID!
 
         try autoreleasepool {
+            // createdAt: see makeConversation — shields message-less fixtures
+            // from the launch repair's stranded-shell sweep.
             let conversation = ConversationBuilder()
                 .withDisplayName("Alice")
                 .withSnippet("old snippet")
                 .visible()
                 .withLastMessageDate(Date(timeIntervalSince1970: 300))
+                .withCreatedAt(Date())
                 .build(in: context)
             try context.save()
             conversationID = conversation.objectID
@@ -78,6 +82,7 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "new mail")
     }
 
+    // Revert-check: ConversationListViewModel.handleSiblingContextSave — Carol is outside the loaded window, so only the didSaveObjectIDs pipeline can bring her save into the list.
     func testBackgroundSaveBringsOutsideWindowConversationIntoWindow() async throws {
         let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
@@ -123,6 +128,7 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.inboxUnreadCount, 1)
     }
 
+    // Revert-check: ConversationListViewModel.handleSiblingContextSave — a background delete of an unregistered row reaches the list only through the didSaveObjectIDs pipeline's deleted-ID set.
     func testBackgroundDeleteRemovesRowForUnregisteredConversation() async throws {
         let viewModel = makeViewModel()
         var aliceID: NSManagedObjectID!
@@ -190,20 +196,26 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         windowProvider: ConversationWindowProvider = ConversationWindowProvider()
     ) -> ConversationListViewModel {
         ConversationListViewModel(
-            filterService: ConversationFilterService(
-                contactsService: ContactsService(),
+            dependencies: .forTesting(
+                stack: stack,
                 contactEmailLoader: { _ in [] }
             ),
             windowProvider: windowProvider
         )
     }
 
+    /// createdAt keeps these message-less fixtures inside the stranded-shell
+    /// grace period: with test-owned storage the launch repair scheduled by
+    /// onAppear(in:) sweeps THIS suite's store, and without createdAt it
+    /// would archive every saved conversation that has a lastMessageDate but
+    /// no Message rows mid-test.
     private func makeConversation(name: String, snippet: String, date: TimeInterval) -> Conversation {
         ConversationBuilder()
             .withDisplayName(name)
             .withSnippet(snippet)
             .visible()
             .withLastMessageDate(Date(timeIntervalSince1970: date))
+            .withCreatedAt(Date())
             .build(in: context)
     }
 

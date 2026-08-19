@@ -40,8 +40,11 @@ final class PerformanceRegressionTests: XCTestCase {
         )
         let windowProvider = ConversationWindowProvider()
         let viewModel = ConversationListViewModel(
-            searchService: searchService,
-            filterService: filterService,
+            dependencies: .forTesting(
+                stack: stack,
+                searchService: searchService,
+                filterService: filterService
+            ),
             windowProvider: windowProvider
         )
         let options = makePerformanceOptions(iterationCount: 3)
@@ -82,8 +85,11 @@ final class PerformanceRegressionTests: XCTestCase {
         )
         let windowProvider = ConversationWindowProvider()
         let viewModel = ConversationListViewModel(
-            searchService: searchService,
-            filterService: filterService,
+            dependencies: .forTesting(
+                stack: stack,
+                searchService: searchService,
+                filterService: filterService
+            ),
             windowProvider: windowProvider
         )
         let options = makePerformanceOptions(iterationCount: 5)
