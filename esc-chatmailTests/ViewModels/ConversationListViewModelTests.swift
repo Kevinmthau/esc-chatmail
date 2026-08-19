@@ -538,6 +538,48 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [carol.objectID])
     }
 
+    // Revert-check: applyConversationChanges must clear hasLoadedAllConversationWindow
+    // after trimVisibleItems. Without that reset the short initial window latches
+    // "all loaded" and loadMoreIfNeeded bails at its first guard, leaving the list
+    // stuck at 2 rows even though the store now holds 3.
+    func testApplyConversationChanges_trimAfterShortInitialWindow_reopensPaging() throws {
+        // pageSize 1 → initial limit 2; one saved row makes the initial window short.
+        let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
+        try context.save()
+
+        let viewModel = ConversationListViewModel(
+            windowProvider: ConversationWindowProvider(
+                configuration: VirtualScrollConfiguration(
+                    visibleItemCount: 1,
+                    bufferSize: 0,
+                    pageSize: 1,
+                    preloadThreshold: 1
+                )
+            )
+        )
+
+        viewModel.onAppear(in: context)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [carol.objectID])
+
+        // Two newer live inserts on the observed context (pending, not saved, so
+        // their objectIDs stay stable for the assertions below): objectsDidChange
+        // drives applyConversationChanges, which upserts both and trims the
+        // window back to the limit, dropping Carol off the tail.
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        context.processPendingChanges()
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+
+        // Pre-fix this stopped at [alice, bob]: the flag still claimed the whole
+        // window was loaded, so the trimmed row was unreachable until a re-appear.
+        let lastVisibleItem = try XCTUnwrap(viewModel.filteredConversationItems.last)
+        viewModel.loadMoreIfNeeded(currentItem: lastVisibleItem)
+        XCTAssertEqual(
+            filteredConversationIDs(in: viewModel),
+            [alice.objectID, bob.objectID, carol.objectID]
+        )
+    }
+
     func testPersonDisplayNameChangeRefreshesAffectedConversationItem() async throws {
         let conversation = makeConversation(name: "Info", snippet: "alpha", date: 300)
         let person = PersonBuilder()

@@ -269,6 +269,9 @@ final class ConversationListViewModel: ObservableObject {
         let trimmedIDs = listStore.trimVisibleItems(to: loadedConversationLimit)
         if !trimmedIDs.isEmpty {
             selectionService.selectedConversationIDs.subtract(trimmedIDs)
+            // A non-empty trim proves the store holds rows beyond the window, so
+            // paging must reopen even when a short initial fetch latched "all loaded".
+            hasLoadedAllConversationWindow = false
         }
 
         if backfillConversationWindowIfNeeded() {
