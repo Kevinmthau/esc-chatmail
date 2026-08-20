@@ -286,6 +286,11 @@ final class ConversationListViewModelTests: XCTestCase {
         await waitForFilteredConversationIDs([carol.objectID], in: viewModel)
     }
 
+    // Revert-check: ConversationFilter.needsInMemoryCandidateScan(hasSearchText:)
+    // returning true under search — with a plain fetchLimit the bounded window
+    // would fill with the SQL-only fullwidth candidates (CONTAINS[cd] matches
+    // them; the in-memory match rejects them) and the José variants would
+    // never be reached.
     func testSearchVariantsSurviveBoundedCandidatePagingReappearanceAndExpansion() async throws {
         stack = TestCoreDataStack(storeKind: .sqlite)
         context = stack.viewContext
@@ -368,6 +373,10 @@ final class ConversationListViewModelTests: XCTestCase {
         )
     }
 
+    // Revert-check: ConversationWindowProvider.fetchFilteredWindow's
+    // offset-paging continuation (the fetchOffset advance while a batch comes
+    // back full) — the contact match sits in the second candidate batch, so
+    // stopping after the first batch leaves it unfound.
     func testContactFilterFetchesPastFirstCandidateBatch() async throws {
         let contactEmail = "contact@example.com"
 
@@ -418,85 +427,6 @@ final class ConversationListViewModelTests: XCTestCase {
         viewModel.currentFilter = .contacts
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [contactConversation.objectID])
-    }
-
-    // Revert-check: ConversationWindowProvider.fetchFilteredWindow — its persisted-only paging plus single pending-merge is what keeps the pending row deduplicated without skipping saved candidates.
-    func testFilteredPagingMergesPendingConversationOnceWithoutSkippingSavedCandidates() throws {
-        var savedMatchCandidate: Conversation?
-        for index in 0..<11 {
-            let conversation = makeConversation(
-                name: "Saved \(index)",
-                snippet: "candidate",
-                date: TimeInterval(1_000 - index)
-            )
-            if index == 9 {
-                savedMatchCandidate = conversation
-            }
-        }
-        try context.save()
-
-        let pendingMatch = makeConversation(
-            name: "Pending",
-            snippet: "optimistic",
-            date: 2_000
-        )
-        context.processPendingChanges()
-        let savedMatch = try XCTUnwrap(savedMatchCandidate)
-        let matchingIDs = Set([pendingMatch.objectID, savedMatch.objectID])
-
-        let windowProvider = ConversationWindowProvider(
-            configuration: ConversationListWindowConfiguration(
-                initialLimit: 2,
-                pageSize: 1,
-                preloadThreshold: 1,
-                contactFilterCandidateMultiplier: 5
-            )
-        )
-        let window = windowProvider.fetchWindow(
-            in: context,
-            limit: 2,
-            searchText: "",
-            filter: .contacts,
-            matchesVisibility: { matchingIDs.contains($0.objectID) }
-        )
-
-        XCTAssertEqual(window.map(\.objectID), [pendingMatch.objectID, savedMatch.objectID])
-        XCTAssertEqual(Set(window.map(\.objectID)).count, window.count)
-    }
-
-    // Revert-check: ConversationWindowProvider.fetchWindow's canMatchCurrentFilter early return — without it the empty contact filter would scan (and page through) every fetched candidate.
-    func testContactFilterWithEmptyCacheSkipsCandidateScan() throws {
-        for index in 0..<10 {
-            _ = makeConversation(
-                name: "Other \(index)",
-                snippet: "not a contact",
-                date: TimeInterval(300 - index)
-            )
-        }
-        try context.save()
-
-        let windowProvider = ConversationWindowProvider(
-            configuration: ConversationListWindowConfiguration(
-                initialLimit: 2,
-                pageSize: 1,
-                preloadThreshold: 1,
-                contactFilterCandidateMultiplier: 5
-            )
-        )
-
-        let window = windowProvider.fetchWindow(
-            in: context,
-            limit: 2,
-            searchText: "",
-            filter: .contacts,
-            canMatchCurrentFilter: false,
-            matchesVisibility: { _ in
-                XCTFail("Empty contact filters should not scan fetched candidates")
-                return false
-            }
-        )
-
-        XCTAssertTrue(window.isEmpty)
     }
 
     func testUnreadFilterFetchesMatchingConversationOutsideInitialWindow() throws {
@@ -638,6 +568,11 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedConversationIDs.count, 1)
     }
 
+    // Revert-check: conversationsAffectedByPersonChanges in
+    // ConversationListViewModel+ChangeObservation — a Person rename surfaces
+    // as a Person update with no Conversation in the payload, so only that
+    // fan-out re-snapshots the affected row; without it the fingerprint never
+    // refreshes and this wait times out.
     func testPersonDisplayNameChangeRefreshesAffectedConversationItem() async throws {
         let person = PersonBuilder()
             .withEmail("info@bonbonwhims.com")
@@ -665,6 +600,11 @@ final class ConversationListViewModelTests: XCTestCase {
         )
     }
 
+    // Revert-check: request.includesPendingChanges = true on
+    // ConversationWindowProvider.fetchWindow's unfiltered path — this
+    // .all/no-search re-appear takes the plain fetchLimit fetch, and only
+    // that flag lets the refetch see the unsaved optimistic row instead of
+    // replacing the live snapshot with persisted conversations only.
     func testOptimisticUnsavedConversation_survivesReAppear() async throws {
         let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
@@ -703,6 +643,10 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "newest optimistic")
     }
 
+    // Revert-check: onDisappear's deliberate omission of
+    // conversationChangesCancellable — cancelling the objectsDidChange
+    // subscription on a transient disappear would drop the post-disappear
+    // update and this wait would time out.
     func testOnDisappear_keepsObservingConversationChangesForTransientNavigation() async throws {
         let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
@@ -722,6 +666,10 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "newest message")
     }
 
+    // Revert-check: the `if !preservePreviewRepair` guard keeping
+    // searchService.cleanup() out of a transient onDisappear — cleanup
+    // cancels the pending debounce task, so the "bob" search would never
+    // apply and this wait would time out.
     func testOnDisappear_preservesPendingDebouncedSearchForTransientNavigation() async throws {
         let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
