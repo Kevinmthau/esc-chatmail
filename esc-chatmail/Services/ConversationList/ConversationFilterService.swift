@@ -78,14 +78,6 @@ final class ConversationFilterService: ObservableObject {
 
     // MARK: - Filtering
 
-    /// Filters conversations based on search text and current filter
-    func filteredConversations(
-        from conversations: [Conversation],
-        searchText: String
-    ) -> [Conversation] {
-        conversations.filter { matches($0, searchText: searchText) }
-    }
-
     /// Returns true when the conversation should be visible for the current filter state.
     func matches(_ conversation: Conversation, searchText: String) -> Bool {
         matchesSearch(conversation, searchText: searchText) &&
@@ -93,7 +85,7 @@ final class ConversationFilterService: ObservableObject {
     }
 
     /// Checks if a conversation includes a participant from the user's contacts
-    func isConversationWithContact(_ conversation: Conversation) -> Bool {
+    private func isConversationWithContact(_ conversation: Conversation) -> Bool {
         guard let participants = conversation.participants else { return false }
 
         for participant in participants {

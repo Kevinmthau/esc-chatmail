@@ -53,7 +53,7 @@ final class PerformanceRegressionTests: XCTestCase {
             let request = Self.makeConversationFetchRequest()
             let fetched = try! context.fetch(request)
             let snapshots = fetched.map(ConversationSnapshot.init(from:))
-            let newsletterSubset = filterService.filteredConversations(from: fetched, searchText: "weekly")
+            let newsletterSubset = fetched.filter { filterService.matches($0, searchText: "weekly") }
 
             MainActor.assumeIsolated {
                 // Repeated onAppear(in:) re-runs the production window fetch

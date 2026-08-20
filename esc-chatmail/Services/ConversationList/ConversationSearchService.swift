@@ -34,13 +34,6 @@ final class ConversationSearchService: ObservableObject {
 
     // MARK: - Public API
 
-    /// Clears the search text
-    func clearSearch() {
-        searchText = ""
-        debouncedSearchText = ""
-        searchDebounceTask?.cancel()
-    }
-
     /// Called when the view disappears to clean up resources
     func cleanup() {
         searchDebounceTask?.cancel()

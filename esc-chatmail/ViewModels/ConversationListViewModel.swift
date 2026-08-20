@@ -132,15 +132,6 @@ final class ConversationListViewModel: ObservableObject {
         set { selectionService.selectedConversationIDs = newValue }
     }
 
-    var filteredConversations: [Conversation] {
-        filteredConversationItems.compactMap { conversation(withID: $0.id) }
-    }
-
-    /// Cached contact emails for filtering
-    var contactEmailsCache: Set<String> {
-        filterService.contactEmailsCache
-    }
-
     // MARK: - Sync Operations
 
     func performSync() async {
@@ -149,24 +140,12 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Selection Operations (Delegate to Service)
 
-    func toggleSelection(for conversation: Conversation) {
-        selectionService.toggleSelection(for: conversation)
-    }
-
     func toggleSelection(for objectID: NSManagedObjectID) {
         selectionService.toggleSelection(for: objectID)
     }
 
-    func selectAll(from conversations: [Conversation]) {
-        selectionService.selectAll(from: conversations)
-    }
-
     func selectAllVisibleConversations() {
         selectionService.selectAll(conversationIDs: filteredConversationItems.map(\.id))
-    }
-
-    func cancelSelection() {
-        selectionService.cancelSelection()
     }
 
     func toggleSelectionMode() {
@@ -174,10 +153,6 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     // MARK: - Conversation Actions
-
-    func archiveConversation(_ conversation: Conversation) {
-        archiveConversation(withID: conversation.objectID)
-    }
 
     func archiveConversation(withID objectID: NSManagedObjectID) {
         guard let conversation = conversation(withID: objectID) else {
@@ -189,10 +164,6 @@ final class ConversationListViewModel: ObservableObject {
             guard let self = self else { return }
             await messageActions.archiveConversation(conversation: conversation)
         }
-    }
-
-    func toggleConversationReadState(_ conversation: Conversation) {
-        toggleConversationReadState(withID: conversation.objectID)
     }
 
     func toggleConversationReadState(withID objectID: NSManagedObjectID) {
@@ -251,10 +222,6 @@ final class ConversationListViewModel: ObservableObject {
         publishVisibleItems()
     }
 
-    func isConversationWithContact(_ conversation: Conversation) -> Bool {
-        filterService.isConversationWithContact(conversation)
-    }
-
     // MARK: - Data Loading
 
     /// Prefetches display names and avatars for rows newly entering the
@@ -286,7 +253,7 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
-    func loadContactsCache(requestAccessIfNeeded: Bool = false) {
+    private func loadContactsCache(requestAccessIfNeeded: Bool = false) {
         filterService.loadContactsCache(requestAccessIfNeeded: requestAccessIfNeeded)
     }
 
