@@ -4,6 +4,10 @@ import Contacts
 
 @MainActor
 final class ConversationFilterServiceTests: XCTestCase {
+    // Revert-check: finishContactsLoad's pendingContactsCacheInvalidation
+    // branch (fed by handleContactStoreDidChange's mid-load latch) — without
+    // it the stale first result would publish into contactEmailsCache and no
+    // follow-up load would run, failing the loadCalls == 2 assertion.
     func testContactStoreChangeDuringLoad_discardsStaleResultAndRunsFollowUpRefresh() async {
         let notificationCenter = NotificationCenter()
         let firstLoadCanFinish = AsyncGate()
@@ -57,6 +61,11 @@ final class ConversationFilterServiceTests: XCTestCase {
         XCTAssertEqual(loadCalls, 2)
     }
 
+    // Revert-check: handleContactStoreDidChange's mid-load
+    // pendingContactsCacheInvalidation latch — repeated notifications during
+    // one load set the same Bool, so finishContactsLoad runs exactly one
+    // follow-up refresh; a per-notification reload would trip the
+    // loadCalls-limiting XCTFail in the loader.
     func testRepeatedContactStoreChangesDuringLoad_coalesceIntoSingleFollowUpRefresh() async {
         let notificationCenter = NotificationCenter()
         let firstLoadCanFinish = AsyncGate()

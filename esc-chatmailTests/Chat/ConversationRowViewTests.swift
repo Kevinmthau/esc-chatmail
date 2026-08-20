@@ -3,6 +3,11 @@ import XCTest
 
 @MainActor
 final class ConversationRowViewTests: XCTestCase {
+    // Revert-check: ConversationRowPolicy.resolvedParticipantInfo's
+    // cachedBase + uncached photo merge — reverting it to returning
+    // cachedBase whenever present (the behavior "Preserve uncached
+    // conversation row avatars" fixed) drops the freshly loaded photos this
+    // test asserts on while keeping the cached display name.
     func testResolvedParticipantInfoUsesUncachedPhotosWhenCachedRollupCannotRetainThem() {
         let cachedBase = makeParticipantInfo(
             displayNames: ["Address Book Friend"],
