@@ -214,14 +214,3 @@ final class ConversationFilterService: ObservableObject {
         }.value
     }
 }
-
-private extension ConversationFilter {
-    var requiresContactCache: Bool {
-        switch self {
-        case .contacts, .other:
-            return true
-        case .all, .unread:
-            return false
-        }
-    }
-}

@@ -380,12 +380,9 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     private var canCurrentFilterMatchConversations: Bool {
-        switch filterService.currentFilter {
-        case .all, .unread, .other:
-            return true
-        case .contacts:
-            return !filterService.contactEmailsCache.isEmpty
-        }
+        filterService.currentFilter.canMatchAnything(
+            hasContactEmails: !filterService.contactEmailsCache.isEmpty
+        )
     }
 
     private func isSourceConversation(_ conversation: Conversation) -> Bool {
