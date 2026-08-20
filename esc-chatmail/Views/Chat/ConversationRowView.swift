@@ -51,7 +51,7 @@ struct ConversationRowView: View {
         // computed properties repeated the rollup-cache lookups and key builds for every
         // consumer (~9 lookups and 5 key builds per render); this resolution performs at
         // most one full lookup, one base lookup on a full miss, and one key build.
-        let loadsParticipantInfo = Self.shouldLoadParticipantInfo(
+        let loadsParticipantInfo = ConversationRowPolicy.shouldLoadParticipantInfo(
             conversationType: snapshot.conversationType
         )
         let infoKey = participantInfoKey
@@ -60,27 +60,27 @@ struct ConversationRowView: View {
         // base entry is consulted only on a full miss — an eager base lookup would defeat
         // the rollup cache's fast path.
         let info = loadsParticipantInfo
-            ? Self.resolvedParticipantInfo(
+            ? ConversationRowPolicy.resolvedParticipantInfo(
                 cachedFull: cachedFull,
                 cachedBase: cachedFull == nil ? cachedParticipantInfo(includePhotos: false) : nil,
                 uncached: uncachedParticipantInfo(for: infoKey)
             )
             : nil
         let fallbackName = fallbackDisplayName
-        let displayName = Self.resolvedDisplayName(
+        let displayName = ConversationRowPolicy.resolvedDisplayName(
             conversationType: snapshot.conversationType,
             storedDisplayName: fallbackName,
             participantInfo: info
         )
-        let participantNames = Self.resolvedAvatarDisplayNames(
+        let participantNames = ConversationRowPolicy.resolvedAvatarDisplayNames(
             conversationType: snapshot.conversationType,
             participantInfo: info
         )
-        let avatarPhotos = Self.resolvedAvatarPhotos(
+        let avatarPhotos = ConversationRowPolicy.resolvedAvatarPhotos(
             conversationType: snapshot.conversationType,
             participantInfo: info
         )
-        let showsGroupAvatar = Self.resolvedShowsGroupAvatar(
+        let showsGroupAvatar = ConversationRowPolicy.resolvedShowsGroupAvatar(
             snapshotShowsGroupAvatar: snapshot.showsGroupAvatar,
             conversationType: snapshot.conversationType,
             participantInfo: info
@@ -229,90 +229,8 @@ struct ConversationRowView: View {
         return uncachedParticipantInfo(for: infoKey) == nil
     }
 
-    static func resolvedParticipantInfo(
-        cachedFull: ParticipantLoader.ParticipantInfo?,
-        cachedBase: ParticipantLoader.ParticipantInfo?,
-        uncached: ParticipantLoader.ParticipantInfo?
-    ) -> ParticipantLoader.ParticipantInfo? {
-        if let cachedFull {
-            return cachedFull
-        }
-
-        guard let cachedBase else {
-            return uncached
-        }
-
-        guard let uncached, !uncached.photos.isEmpty else {
-            return cachedBase
-        }
-
-        return ParticipantLoader.ParticipantInfo(
-            emails: cachedBase.emails,
-            displayNames: cachedBase.displayNames,
-            photos: uncached.photos,
-            formattedDisplayName: cachedBase.formattedDisplayName,
-            totalUniqueParticipants: cachedBase.totalUniqueParticipants,
-            avatarDisplayNames: cachedBase.avatarDisplayNames,
-            avatarPhotos: uncached.avatarPhotos
-        )
-    }
-
-    static func resolvedShowsGroupAvatar(
-        snapshotShowsGroupAvatar: Bool,
-        conversationType: ConversationType,
-        participantInfo: ParticipantLoader.ParticipantInfo?
-    ) -> Bool {
-        if conversationType == .list {
-            return true
-        }
-
-        if let participantInfo {
-            return participantInfo.totalUniqueParticipants > 1
-        }
-
-        return snapshotShowsGroupAvatar
-    }
-
-    static func shouldLoadParticipantInfo(
-        conversationType: ConversationType
-    ) -> Bool {
-        conversationType != .list
-    }
-
-    static func resolvedAvatarDisplayNames(
-        conversationType: ConversationType,
-        participantInfo: ParticipantLoader.ParticipantInfo?
-    ) -> [String] {
-        guard shouldLoadParticipantInfo(conversationType: conversationType) else {
-            return []
-        }
-        return participantInfo?.avatarDisplayNames ?? []
-    }
-
-    static func resolvedAvatarPhotos(
-        conversationType: ConversationType,
-        participantInfo: ParticipantLoader.ParticipantInfo?
-    ) -> [ProfilePhoto?] {
-        guard shouldLoadParticipantInfo(conversationType: conversationType) else {
-            return []
-        }
-        return participantInfo?.avatarPhotos ?? []
-    }
-
-    static func resolvedDisplayName(
-        conversationType: ConversationType,
-        storedDisplayName: String,
-        participantInfo: ParticipantLoader.ParticipantInfo?
-    ) -> String {
-        if conversationType == .list {
-            return storedDisplayName
-        }
-
-        return participantInfo?.formattedDisplayName ?? storedDisplayName
-    }
-
     private func loadContactInfo(for participantInfoKey: String) async {
-        guard Self.shouldLoadParticipantInfo(
+        guard ConversationRowPolicy.shouldLoadParticipantInfo(
             conversationType: snapshot.conversationType
         ) else {
             return
@@ -333,7 +251,7 @@ struct ConversationRowView: View {
     }
 
     private func refreshParticipantInfoIfNeeded(for notification: Notification) {
-        guard Self.shouldLoadParticipantInfo(
+        guard ConversationRowPolicy.shouldLoadParticipantInfo(
             conversationType: snapshot.conversationType
         ) else {
             return
