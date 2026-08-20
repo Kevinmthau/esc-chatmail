@@ -7,11 +7,11 @@ struct ConversationWindowProvider {
     let preloadThreshold: Int
     let contactFilterCandidateMultiplier: Int
 
-    init(configuration: VirtualScrollConfiguration = .default) {
-        self.initialLimit = configuration.pageSize * 2
+    init(configuration: ConversationListWindowConfiguration = .default) {
+        self.initialLimit = configuration.initialLimit
         self.pageSize = configuration.pageSize
         self.preloadThreshold = configuration.preloadThreshold
-        self.contactFilterCandidateMultiplier = 5
+        self.contactFilterCandidateMultiplier = configuration.contactFilterCandidateMultiplier
     }
 
     func fetchWindow(
