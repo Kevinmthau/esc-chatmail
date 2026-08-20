@@ -5,6 +5,14 @@ import Combine
 
 /// ViewModel for ConversationListView - manages list state and operations
 /// Composes specialized services for search, selection, and filtering
+///
+/// The type is split across multiple files for organization:
+/// - `ConversationListViewModel.swift` (this file) - stored state,
+///   initialization, service delegation, launch-repair forwarders, lifecycle,
+///   window paging, and visibility predicates
+/// - `ConversationListViewModel+ChangeObservation.swift` - Core Data
+///   change-observation pipeline (subscriptions, change handlers, relevance
+///   guards, notification-payload helpers)
 @MainActor
 final class ConversationListViewModel: ObservableObject {
     /// Alias for `ConversationLaunchRepairCoordinator`'s key, kept so existing
@@ -33,23 +41,38 @@ final class ConversationListViewModel: ObservableObject {
 
     private let storage: StorageDependencies
     private let launchRepairCoordinator: ConversationLaunchRepairCoordinator
+
+    // MARK: - List & Observation State
+
     private var cancellables = Set<AnyCancellable>()
-    private var conversationChangesCancellable: AnyCancellable?
-    private var conversationSavesCancellable: AnyCancellable?
+    /// Subscription to the observed context's objectsDidChange stream. Stored
+    /// here because extensions cannot hold storage; internal (not private) so
+    /// the `+ChangeObservation` facet, its only user, can manage it.
+    var conversationChangesCancellable: AnyCancellable?
+    /// Subscription to sibling contexts' didSaveObjectIDs stream. Stored here
+    /// because extensions cannot hold storage; internal (not private) so the
+    /// `+ChangeObservation` facet, its only user, can manage it.
+    var conversationSavesCancellable: AnyCancellable?
     private let taskManager = ViewModelTaskManager()
-    private var listStore = ConversationListStore()
+    /// Internal (not private) so the `+ChangeObservation` facet can clear it
+    /// on wholesale invalidation and feed it live changes.
+    var listStore = ConversationListStore()
     private let windowProvider: ConversationWindowProvider
     private var loadedConversationLimit: Int
     private var hasLoadedAllConversationWindow = false
     /// Emails already handed to the person/avatar prefetchers for the current
     /// window generation. Reset when the query changes or the store is
     /// invalidated wholesale, so a genuinely fresh window prefetches again.
-    private var prefetchedPersonEmails: Set<String> = []
-    private weak var observedConversationContext: NSManagedObjectContext?
+    /// Internal (not private) so the `+ChangeObservation` facet can perform
+    /// that wholesale-invalidation reset.
+    var prefetchedPersonEmails: Set<String> = []
+    /// Internal (not private) so the `+ChangeObservation` facet, which owns
+    /// the subscriptions, can register the observed context and read it back.
+    weak var observedConversationContext: NSManagedObjectContext?
 
     // MARK: - Initialization
 
-    /// Primary initializer using the narrowed conversation-list bundle.
+    /// Initializes the view model from the narrowed conversation-list bundle.
     /// The composed services come exclusively from the bundle's factories, so
     /// a caller that wants a specific service instance supplies a bundle whose
     /// factory returns it (tests use `ConversationListDependencies.forTesting`).
@@ -173,7 +196,7 @@ final class ConversationListViewModel: ObservableObject {
         selectionService.reportSpamSelectedConversations()
     }
 
-    // MARK: - Filtering (Delegate to Service)
+    // MARK: - List Store Updates
 
     func applyConversationChanges(
         updatedConversations: [Conversation] = [],
@@ -205,7 +228,7 @@ final class ConversationListViewModel: ObservableObject {
         publishVisibleItems()
     }
 
-    // MARK: - Data Loading
+    // MARK: - Prefetching & Contacts
 
     /// Prefetches display names and avatars for rows newly entering the
     /// window. Submits only the policy's delta — emails not yet handed to
@@ -240,6 +263,8 @@ final class ConversationListViewModel: ObservableObject {
         filterService.loadContactsCache(requestAccessIfNeeded: requestAccessIfNeeded)
     }
 
+    // MARK: - Launch Repairs
+
     /// Forwarder: the launch passes live in
     /// `ConversationLaunchRepairCoordinator`; kept so existing call sites and
     /// tests keep driving them through the view model.
@@ -253,6 +278,8 @@ final class ConversationListViewModel: ObservableObject {
     func repairMissingConversationPreviews() {
         launchRepairCoordinator.repairMissingConversationPreviews()
     }
+
+    // MARK: - Lifecycle
 
     /// Called when view appears - performs initial setup
     func onAppear(in context: NSManagedObjectContext) {
@@ -294,6 +321,8 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Filter & Search Reactions
+
     private func bindFiltering() {
         searchService.onDebouncedSearchTextChange = { [weak self] in
             self?.recomputeFilteredConversations()
@@ -313,7 +342,12 @@ final class ConversationListViewModel: ObservableObject {
         reloadConversationWindowFromStore()
     }
 
-    private func publishVisibleItems() {
+    // MARK: - Window Paging
+
+    /// Internal (not private) so the `+ChangeObservation` facet's
+    /// invalidate-all path publishes through the same funnel as every other
+    /// path.
+    func publishVisibleItems() {
         let visibleItems = listStore.visibleItems
         // Single owner of selection ⊆ visible rows: every publish path (live
         // changes, trims, reloads, backfill, invalidate-all) funnels through
@@ -379,6 +413,8 @@ final class ConversationListViewModel: ObservableObject {
         return true
     }
 
+    // MARK: - Visibility Predicates
+
     private var canCurrentFilterMatchConversations: Bool {
         filterService.currentFilter.canMatchAnything(
             hasContactEmails: !filterService.contactEmailsCache.isEmpty
@@ -391,224 +427,5 @@ final class ConversationListViewModel: ObservableObject {
 
     private func matchesVisibleConversation(_ conversation: Conversation) -> Bool {
         filterService.matches(conversation, searchText: searchService.debouncedSearchText)
-    }
-
-    private func startObservingConversationChanges(in context: NSManagedObjectContext) {
-        guard observedConversationContext !== context
-                || conversationChangesCancellable == nil
-                || conversationSavesCancellable == nil else {
-            return
-        }
-
-        conversationChangesCancellable?.cancel()
-        conversationSavesCancellable?.cancel()
-        observedConversationContext = context
-        conversationChangesCancellable = NotificationCenter.default.publisher(
-            for: .NSManagedObjectContextObjectsDidChange,
-            object: context
-        )
-        .sink { [weak self] notification in
-            self?.handleConversationContextChange(notification)
-        }
-
-        // Registration-independent delivery for sibling-context saves. The
-        // automerge into the observed context only *refreshes* objects still
-        // registered there, and this list holds objectIDs + value snapshots,
-        // never the managed objects — so a background rollup save for a
-        // conversation whose object has deallocated (or that sits outside the
-        // loaded window) can produce no Conversation in objectsDidChange,
-        // leaving the row stale until relaunch. didSaveObjectIDs is posted by
-        // every saving context and carries only thread-safe NSManagedObjectIDs.
-        let coordinator = context.persistentStoreCoordinator
-        conversationSavesCancellable = NotificationCenter.default.publisher(
-            for: NSManagedObjectContext.didSaveObjectIDsNotification
-        )
-        .filter { [weak context] notification in
-            // Runs on the saving context's thread; objectID entity checks only,
-            // nothing faults. The coordinator check scopes delivery to our
-            // store, and the identity check skips the observed context's own
-            // saves, which already flowed through objectsDidChange.
-            guard let context,
-                  let sourceContext = notification.object as? NSManagedObjectContext,
-                  sourceContext !== context,
-                  sourceContext.persistentStoreCoordinator === coordinator else {
-                return false
-            }
-            return Self.isRelevantConversationSave(notification.userInfo)
-        }
-        .receive(on: DispatchQueue.main)
-        .sink { [weak self] notification in
-            self?.handleSiblingContextSave(notification)
-        }
-    }
-
-    private func handleConversationContextChange(_ notification: Notification) {
-        guard notification.userInfo?[NSInvalidatedAllObjectsKey] == nil else {
-            listStore.removeAll()
-            // The wholesale invalidation empties the window; whatever fills it
-            // next is a fresh window generation and must prefetch again.
-            prefetchedPersonEmails.removeAll()
-            publishVisibleItems()
-            return
-        }
-
-        // objectsDidChange fires for every merged sync save; most merges carry
-        // only Message/Attachment/Label churn the list doesn't render, yet the
-        // passes below re-scan every changed set. Bail out early unless the
-        // change can actually affect the list.
-        guard Self.isRelevantConversationListChange(notification.userInfo) else {
-            return
-        }
-
-        let inserted = conversationObjects(forKey: NSInsertedObjectsKey, in: notification)
-        let updated = conversationObjects(forKey: NSUpdatedObjectsKey, in: notification)
-        let refreshed = conversationObjects(forKey: NSRefreshedObjectsKey, in: notification)
-        let personAffected = conversationsAffectedByPersonChanges(in: notification)
-        let invalidatedIDs = conversationObjectIDs(forKey: NSInvalidatedObjectsKey, in: notification)
-        let deletedIDs = conversationObjectIDs(forKey: NSDeletedObjectsKey, in: notification)
-        let updatedConversations = uniqueConversations(from: inserted + updated + refreshed + personAffected)
-        let removedIDs = deletedIDs.union(invalidatedIDs)
-
-        applyConversationChanges(updatedConversations: updatedConversations, deletedIDs: removedIDs)
-    }
-
-    /// Single-pass early-return relevance scan for objectsDidChange payloads:
-    /// relevant when any Conversation appears in {inserted, updated,
-    /// refreshed, deleted, invalidated} or any Person in {updated, refreshed}
-    /// (display-name enrichment). The refreshed set is mandatory — merged
-    /// background rollup updates surface as Conversation *refreshes*, so
-    /// omitting it would break live list updates. Type checks only; nothing
-    /// here faults an object.
-    nonisolated static func isRelevantConversationListChange(_ userInfo: [AnyHashable: Any]?) -> Bool {
-        guard let userInfo else { return false }
-
-        let keys = [
-            NSInsertedObjectsKey,
-            NSUpdatedObjectsKey,
-            NSRefreshedObjectsKey,
-            NSDeletedObjectsKey,
-            NSInvalidatedObjectsKey
-        ]
-        let personKeys: Set<String> = [NSUpdatedObjectsKey, NSRefreshedObjectsKey]
-
-        for key in keys {
-            guard let objects = userInfo[key] as? Set<NSManagedObject> else { continue }
-            let includesPersons = personKeys.contains(key)
-            for object in objects {
-                if object is Conversation {
-                    return true
-                }
-                if includesPersons, object is Person {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
-    /// Save-notification analog of `isRelevantConversationListChange`:
-    /// relevant when any inserted/updated/deleted objectID is a Conversation.
-    /// Most saves carry only Message/Attachment/Label churn; this gate runs on
-    /// the saving context's thread so those never cost a main-queue hop.
-    /// ObjectID entity checks only; nothing here faults an object.
-    nonisolated static func isRelevantConversationSave(_ userInfo: [AnyHashable: Any]?) -> Bool {
-        guard let userInfo else { return false }
-
-        for key in [NSInsertedObjectIDsKey, NSUpdatedObjectIDsKey, NSDeletedObjectIDsKey] {
-            guard let objectIDs = userInfo[key] as? Set<NSManagedObjectID> else { continue }
-            if objectIDs.contains(where: { $0.entity.name == "Conversation" }) {
-                return true
-            }
-        }
-        return false
-    }
-
-    /// Applies a sibling context's saved Conversation changes to the list.
-    ///
-    /// Runs on the main queue. On the production viewContext (a main-queue
-    /// context) the `performAndWait` executes inline — identical to a direct
-    /// call. On a private-queue observed context (test stacks) it serializes
-    /// this pipeline with the automerge's merge blocks and the
-    /// objectsDidChange sink that fires inside them, so neither the context
-    /// nor the list store is ever touched from two threads at once.
-    /// Whichever pipeline lands first, `existingObject(with:)` reads the
-    /// saved row (faulted fresh from the store or refreshed by the merge),
-    /// and a duplicate pass rebuilds identical snapshots that
-    /// `publishVisibleItems`'s equality guard suppresses.
-    private func handleSiblingContextSave(_ notification: Notification) {
-        guard let context = observedConversationContext else { return }
-
-        let insertedIDs = conversationSaveObjectIDs(forKey: NSInsertedObjectIDsKey, in: notification)
-        let updatedIDs = conversationSaveObjectIDs(forKey: NSUpdatedObjectIDsKey, in: notification)
-        let deletedIDs = conversationSaveObjectIDs(forKey: NSDeletedObjectIDsKey, in: notification)
-
-        context.performAndWait {
-            // existingObject throws for rows a later save already deleted;
-            // dropping them is correct — the delete's own notification
-            // removes the row.
-            let updatedConversations = insertedIDs.union(updatedIDs).compactMap { objectID in
-                try? context.existingObject(with: objectID) as? Conversation
-            }
-
-            // performAndWait executes on the calling thread — main, per the
-            // .receive(on:) above — while holding the context's queue, so
-            // this is main-actor work serialized against merge blocks and
-            // the objectsDidChange sink that fires inside them.
-            MainActor.assumeIsolated {
-                applyConversationChanges(
-                    updatedConversations: updatedConversations,
-                    deletedIDs: deletedIDs
-                )
-            }
-        }
-    }
-
-    private func conversationSaveObjectIDs(forKey key: String, in notification: Notification) -> Set<NSManagedObjectID> {
-        let objectIDs = notification.userInfo?[key] as? Set<NSManagedObjectID> ?? []
-        return Set(objectIDs.filter { $0.entity.name == "Conversation" })
-    }
-
-    private func conversationObjects(forKey key: String, in notification: Notification) -> [Conversation] {
-        let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
-        return objects.compactMap { $0 as? Conversation }
-    }
-
-    private func conversationObjectIDs(forKey key: String, in notification: Notification) -> Set<NSManagedObjectID> {
-        let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
-        return Set(objects.compactMap { object in
-            guard object is Conversation else { return nil }
-            return object.objectID
-        })
-    }
-
-    private func conversationsAffectedByPersonChanges(in notification: Notification) -> [Conversation] {
-        contextObjects(
-            forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
-            in: notification
-        )
-        .compactMap { $0 as? Person }
-        .flatMap { person in
-            person.conversationParticipations?.compactMap(\.conversation) ?? []
-        }
-    }
-
-    private func contextObjects(
-        forKeys keys: [String],
-        in notification: Notification
-    ) -> Set<NSManagedObject> {
-        keys.reduce(into: Set<NSManagedObject>()) { result, key in
-            let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
-            result.formUnion(objects)
-        }
-    }
-
-    private func uniqueConversations(from conversations: [Conversation]) -> [Conversation] {
-        var uniqueByID: [NSManagedObjectID: Conversation] = [:]
-
-        for conversation in conversations {
-            uniqueByID[conversation.objectID] = conversation
-        }
-
-        return Array(uniqueByID.values)
     }
 }
