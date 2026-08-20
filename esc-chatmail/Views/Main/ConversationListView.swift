@@ -6,12 +6,20 @@ struct ConversationListView: View {
     @StateObject private var viewModel: ConversationListViewModel
     private let deps: Dependencies
     private let viewContext: NSManagedObjectContext
+    /// Built once at init instead of inside `navigationDestination`: the bundle
+    /// holds only stable service references, stateless service instances, and
+    /// factory closures — nothing per-conversation — so rebuilding it on every
+    /// destination body evaluation only churned fresh service instances.
+    /// `ContentView` recreates this view across sign-out/sign-in, so the bundle
+    /// never outlives the account it was built for.
+    private let chatDependencies: ChatDependencies
 
     @MainActor
     init(deps: Dependencies? = nil) {
         let resolvedDeps = deps ?? Dependencies.shared
         self.deps = resolvedDeps
         self.viewContext = resolvedDeps.viewContext
+        self.chatDependencies = resolvedDeps.makeChatDependencies()
         _authSession = ObservedObject(wrappedValue: resolvedDeps.authSession)
         _viewModel = StateObject(
             wrappedValue: ConversationListViewModel(
@@ -41,44 +49,55 @@ struct ConversationListView: View {
     private var conversationList: some View {
         List {
             ForEach(Array(viewModel.filteredConversationItems.enumerated()), id: \.element.id) { index, item in
-                if viewModel.isSelecting {
-                    HStack(spacing: 0) {
+                // One structural path for both selection modes: an if/else here
+                // would make the arms `_ConditionalContent`, so toggling Select
+                // tore down and rebuilt every visible row subtree (row @State
+                // reset, `.task(id:)` re-fired, avatar loaders recreated) —
+                // the same identity swap PR #182 removed inside the row view.
+                // Mode differences live inside stable modifiers instead: the
+                // checkbox is a conditional sibling, the tap gesture routes by
+                // mode, and the swipe-action content empties while selecting
+                // (empty content yields no swipe actions).
+                HStack(spacing: 0) {
+                    if viewModel.isSelecting {
                         selectionButton(for: item.id)
-                        conversationRow(for: item)
-                            .contentShape(Rectangle())
-                            .onTapGesture { viewModel.toggleSelection(for: item.id) }
                     }
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
-                } else {
                     conversationRow(for: item)
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            isSearchFieldFocused = false
-                            selectedConversation = resolveConversation(with: item.id)
-                        }
-                        .listRowInsets(EdgeInsets())
-                        .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                viewModel.archiveConversation(withID: item.id)
-                            } label: {
-                                SwiftUI.Label("Archive", systemImage: "archivebox")
+                            if viewModel.isSelecting {
+                                viewModel.toggleSelection(for: item.id)
+                            } else {
+                                isSearchFieldFocused = false
+                                selectedConversation = resolveConversation(with: item.id)
                             }
-                            .tint(.blue)
                         }
-                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                            Button {
-                                viewModel.toggleConversationReadState(withID: item.id)
-                            } label: {
-                                if item.snapshot.inboxUnreadCount > 0 {
-                                    SwiftUI.Label("Read", systemImage: "envelope.open")
-                                } else {
-                                    SwiftUI.Label("Unread", systemImage: "envelope.badge")
-                                }
+                }
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    if !viewModel.isSelecting {
+                        Button(role: .destructive) {
+                            viewModel.archiveConversation(withID: item.id)
+                        } label: {
+                            SwiftUI.Label("Archive", systemImage: "archivebox")
+                        }
+                        .tint(.blue)
+                    }
+                }
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    if !viewModel.isSelecting {
+                        Button {
+                            viewModel.toggleConversationReadState(withID: item.id)
+                        } label: {
+                            if item.snapshot.inboxUnreadCount > 0 {
+                                SwiftUI.Label("Read", systemImage: "envelope.open")
+                            } else {
+                                SwiftUI.Label("Unread", systemImage: "envelope.badge")
                             }
-                            .tint(.blue)
                         }
+                        .tint(.blue)
+                    }
                 }
             }
         }
@@ -87,7 +106,6 @@ struct ConversationListView: View {
         .scrollDismissesKeyboard(.immediately)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
-            let chatDependencies = deps.makeChatDependencies()
             ChatView(
                 conversation: conversation,
                 chatDependencies: chatDependencies,
@@ -193,52 +211,54 @@ struct ConversationListView: View {
 
     private var selectionActionBar: some View {
         HStack(spacing: 20) {
-            archiveButton
-            spamButton
+            actionCapsuleButton(title: "Archive", systemImage: "archivebox") {
+                viewModel.archiveSelectedConversations()
+            }
+            actionCapsuleButton(title: "Spam", systemImage: "exclamationmark.triangle") {
+                viewModel.reportSpamSelectedConversations()
+            }
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 14)
     }
 
-    private var archiveButton: some View {
-        Button(action: { viewModel.archiveSelectedConversations() }) {
+    /// Capsule-shaped action-bar button; the archive and spam buttons were
+    /// byte-for-byte twins apart from icon, title, and action.
+    private func actionCapsuleButton(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
             HStack(spacing: 10) {
-                Image(systemName: "archivebox")
+                Image(systemName: systemImage)
                     .font(.system(size: 20, weight: .medium))
-                Text("Archive")
+                Text(title)
                     .font(.system(size: 17, weight: .medium))
             }
             .foregroundColor(.primary)
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
-            .background(glassBackground)
+            .background(glassSurface(Capsule(), material: .thinMaterial))
         }
     }
 
-    private var spamButton: some View {
-        Button(action: { viewModel.reportSpamSelectedConversations() }) {
-            HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 20, weight: .medium))
-                Text("Spam")
-                    .font(.system(size: 17, weight: .medium))
-            }
-            .foregroundColor(.primary)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-            .background(glassBackground)
-        }
-    }
-
-    private var glassBackground: some View {
+    /// Shared "glass" chrome for the bottom-bar surfaces: a 0.95-opacity
+    /// system-background fill, a 0.5pt gray hairline stroke, and a soft drop
+    /// shadow. Only the selection action bar passes `material:` (layering
+    /// `.thinMaterial` over the fill); the search bar and circle buttons are
+    /// deliberately material-free, matching the pre-refactor styling.
+    private func glassSurface<S: InsettableShape>(_ shape: S, material: Material? = nil) -> some View {
         ZStack {
-            Color(UIColor.systemBackground).opacity(0.95)
-            Capsule()
-                .fill(.thinMaterial)
+            shape
+                .fill(Color(UIColor.systemBackground).opacity(0.95))
+            if let material {
+                shape
+                    .fill(material)
+            }
         }
-        .clipShape(Capsule())
         .overlay(
-            Capsule()
+            shape
                 .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 2)
@@ -294,15 +314,7 @@ struct ConversationListView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .background(
-            Capsule()
-                .fill(Color(UIColor.systemBackground).opacity(0.95))
-                .overlay(
-                    Capsule()
-                        .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
-                )
-                .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 2)
-        )
+        .background(glassSurface(Capsule()))
     }
 
     private var composeButton: some View {
@@ -348,13 +360,7 @@ struct ConversationListView: View {
 
     private func circleButton(icon: String) -> some View {
         ZStack {
-            Circle()
-                .fill(Color(UIColor.systemBackground).opacity(0.95))
-                .overlay(
-                    Circle()
-                        .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
-                )
-                .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 2)
+            glassSurface(Circle())
 
             Image(systemName: icon)
                 .font(.system(size: 22, weight: .regular))
