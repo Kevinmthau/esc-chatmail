@@ -459,10 +459,10 @@ final class ConversationListViewModel: ObservableObject {
 
     func loadMoreIfNeeded(currentItem item: ConversationListItem) {
         guard !hasLoadedAllConversationWindow else { return }
-        guard let index = filteredConversationItems.firstIndex(where: { $0.id == item.id }) else { return }
-        guard filteredConversationItems.distance(from: index, to: filteredConversationItems.endIndex) <= windowProvider.preloadThreshold else {
-            return
-        }
+        // Page only when the appearing row sits within preloadThreshold of the
+        // window's end; a row that is no longer in the window pages nothing.
+        let pagingTriggerItems = filteredConversationItems.suffix(windowProvider.preloadThreshold)
+        guard pagingTriggerItems.contains(where: { $0.id == item.id }) else { return }
 
         loadedConversationLimit += windowProvider.pageSize
         reloadConversationWindowFromStore()
