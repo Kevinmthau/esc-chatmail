@@ -20,7 +20,7 @@ final class ConversationListViewModelTests: XCTestCase {
         super.tearDown()
     }
 
-    func testRefreshConversations_recomputesWhenDebouncedSearchUpdates() async throws {
+    func testOnAppear_recomputesWhenDebouncedSearchUpdates() async throws {
         let alice = ConversationBuilder()
             .withDisplayName("Alice")
             .withSnippet("hello")
@@ -39,7 +39,7 @@ final class ConversationListViewModelTests: XCTestCase {
             searchService: ConversationSearchService(debounceInterval: 10_000_000)
         )
 
-        viewModel.refreshConversations([alice, bob])
+        viewModel.onAppear(in: context)
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
 
         viewModel.searchText = "bob"
@@ -58,7 +58,7 @@ final class ConversationListViewModelTests: XCTestCase {
         try context.save()
 
         let viewModel = ConversationListViewModel()
-        viewModel.refreshConversations([alice, bob, carol])
+        viewModel.onAppear(in: context)
         let initialItems = viewModel.filteredConversationItems
 
         bob.snippet = "updated beta"
@@ -80,7 +80,7 @@ final class ConversationListViewModelTests: XCTestCase {
         try context.save()
 
         let viewModel = ConversationListViewModel()
-        viewModel.refreshConversations([alice, bob, carol])
+        viewModel.onAppear(in: context)
 
         bob.lastMessageDate = Date(timeIntervalSince1970: 400)
         bob.snippet = "newest message"
@@ -95,7 +95,7 @@ final class ConversationListViewModelTests: XCTestCase {
         try context.save()
 
         let viewModel = ConversationListViewModel()
-        viewModel.refreshConversations([alice, bob])
+        viewModel.onAppear(in: context)
 
         bob.pinned = true
         viewModel.applyConversationChanges(updatedConversations: [bob])
@@ -112,7 +112,7 @@ final class ConversationListViewModelTests: XCTestCase {
         try context.save()
 
         let viewModel = ConversationListViewModel()
-        viewModel.refreshConversations([alice, bob])
+        viewModel.onAppear(in: context)
         viewModel.toggleSelection(for: bob.objectID)
 
         bob.archivedAt = Date(timeIntervalSince1970: 500)
@@ -134,7 +134,7 @@ final class ConversationListViewModelTests: XCTestCase {
         try context.save()
 
         let viewModel = ConversationListViewModel()
-        viewModel.refreshConversations([alice, bob, carol])
+        viewModel.onAppear(in: context)
         let initialItems = viewModel.filteredConversationItems
         viewModel.toggleSelection(for: bob.objectID)
 

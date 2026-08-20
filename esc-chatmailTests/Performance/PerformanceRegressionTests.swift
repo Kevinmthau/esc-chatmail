@@ -22,13 +22,22 @@ final class PerformanceRegressionTests: XCTestCase {
         super.tearDown()
     }
 
-    /// Protects the cold-ish inbox path: fetch active conversations, materialize row snapshots,
-    /// and recompute the visible list model on a realistically large seeded dataset.
+    /// Protects the inbox-open path: fetch active conversations, materialize row snapshots,
+    /// and publish the bounded visible list model on a realistically large seeded dataset.
+    /// The first iteration runs cold; later iterations re-fetch against registered objects.
+    /// Deliberately no per-iteration `context.reset()`: once onAppear(in:) subscribes the
+    /// view model to the context's objectsDidChange, resetting that context segfaulted
+    /// inside -[NSManagedObjectContext reset] while it tore down registered objects.
     func testPerformance_conversationListOpen_fetchSnapshotAndRefresh_largeInboxDataset() throws {
         let context = try XCTUnwrap(context)
         let conversations = try PerformanceFixtureFactory.seedConversationList(in: context)
         let searchService = ConversationSearchService(debounceInterval: 60_000_000_000)
-        let filterService = ConversationFilterService(contactsService: ContactsService())
+        // The inert contactEmailLoader keeps the deferred contacts-cache load
+        // from touching the real Contacts store or refetching mid-measure.
+        let filterService = ConversationFilterService(
+            contactsService: ContactsService(),
+            contactEmailLoader: { _ in [] }
+        )
         let windowProvider = ConversationWindowProvider()
         let viewModel = ConversationListViewModel(
             searchService: searchService,
@@ -38,15 +47,15 @@ final class PerformanceRegressionTests: XCTestCase {
         let options = makePerformanceOptions(iterationCount: 3)
 
         measure(metrics: [XCTClockMetric(), XCTCPUMetric()], options: options) {
-            context.performAndWait { context.reset() }
-
             let request = Self.makeConversationFetchRequest()
             let fetched = try! context.fetch(request)
             let snapshots = fetched.map(ConversationSnapshot.init(from:))
             let newsletterSubset = filterService.filteredConversations(from: fetched, searchText: "weekly")
 
             MainActor.assumeIsolated {
-                viewModel.refreshConversations(fetched)
+                // Repeated onAppear(in:) re-runs the production window fetch
+                // (reloadConversationWindowFromStore) on every iteration.
+                viewModel.onAppear(in: context)
                 XCTAssertEqual(viewModel.filteredConversationItems.count, windowProvider.initialLimit)
             }
 
@@ -63,11 +72,14 @@ final class PerformanceRegressionTests: XCTestCase {
             in: context,
             conversationCount: 220
         )
-        let request = Self.makeConversationFetchRequest()
-        let fetched = try context.fetch(request)
         let changedObjectIDs = Array(seededConversations.prefix(8)).map(\.objectID)
         let searchService = ConversationSearchService(debounceInterval: 60_000_000_000)
-        let filterService = ConversationFilterService(contactsService: ContactsService())
+        // The inert contactEmailLoader keeps the deferred contacts-cache load
+        // from touching the real Contacts store or refetching mid-measure.
+        let filterService = ConversationFilterService(
+            contactsService: ContactsService(),
+            contactEmailLoader: { _ in [] }
+        )
         let windowProvider = ConversationWindowProvider()
         let viewModel = ConversationListViewModel(
             searchService: searchService,
@@ -76,7 +88,7 @@ final class PerformanceRegressionTests: XCTestCase {
         )
         let options = makePerformanceOptions(iterationCount: 5)
 
-        viewModel.refreshConversations(fetched)
+        viewModel.onAppear(in: context)
         XCTAssertEqual(viewModel.filteredConversationItems.count, windowProvider.initialLimit)
 
         var iteration = 0
