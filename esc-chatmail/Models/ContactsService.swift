@@ -86,6 +86,48 @@ final class ContactsService: ObservableObject {
         }
     }
     
+    /// Enumerates the entire contact store and returns every email address,
+    /// normalized via `EmailNormalizer.normalize`, for contact-based
+    /// conversation filtering.
+    ///
+    /// Fetches only `CNContactEmailAddressesKey` — deliberately not the
+    /// service's `keysToFetch`, whose thumbnail image data would make a
+    /// full-store enumeration far more expensive.
+    ///
+    /// - Parameter requestAccessIfNeeded: When true and authorization is still
+    ///   `.notDetermined`, prompts for Contacts access before enumerating.
+    /// - Returns: The normalized email set, or nil when read access is
+    ///   unavailable (denied, restricted, or never requested) or the
+    ///   enumeration fails.
+    func allContactEmails(requestAccessIfNeeded: Bool) async -> Set<String>? {
+        if !hasReadAccess {
+            guard requestAccessIfNeeded, authorizationStatus == .notDetermined else { return nil }
+            let granted = await requestAccess()
+            if !granted { return nil }
+        }
+
+        // Move blocking CNContactStore operations to background thread
+        // enumerateContacts is synchronous and will block the calling thread
+        return await Task.detached(priority: .userInitiated) { [contactStore] in
+            let request = CNContactFetchRequest(
+                keysToFetch: [CNContactEmailAddressesKey as CNKeyDescriptor]
+            )
+
+            do {
+                var emails: Set<String> = []
+                try contactStore.enumerateContacts(with: request) { contact, _ in
+                    for emailAddress in contact.emailAddresses {
+                        emails.insert(EmailNormalizer.normalize(emailAddress.value as String))
+                    }
+                }
+                return emails
+            } catch {
+                Log.error("Failed to load contact emails", category: .general, error: error)
+                return nil
+            }
+        }.value
+    }
+
     func searchContacts(query: String) async -> [ContactMatch] {
         guard hasReadAccess else { return [] }
         guard !query.isEmpty else { return [] }

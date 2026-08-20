@@ -35,7 +35,6 @@ final class PerformanceRegressionTests: XCTestCase {
         // The inert contactEmailLoader keeps the deferred contacts-cache load
         // from touching the real Contacts store or refetching mid-measure.
         let filterService = ConversationFilterService(
-            contactsService: ContactsService(),
             contactEmailLoader: { _ in [] }
         )
         let windowProvider = ConversationWindowProvider()
@@ -80,7 +79,6 @@ final class PerformanceRegressionTests: XCTestCase {
         // The inert contactEmailLoader keeps the deferred contacts-cache load
         // from touching the real Contacts store or refetching mid-measure.
         let filterService = ConversationFilterService(
-            contactsService: ContactsService(),
             contactEmailLoader: { _ in [] }
         )
         let windowProvider = ConversationWindowProvider()

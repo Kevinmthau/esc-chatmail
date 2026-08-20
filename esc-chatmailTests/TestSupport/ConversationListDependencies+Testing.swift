@@ -56,7 +56,6 @@ extension ConversationListDependencies {
             coreDataStack: Dependencies.shared.coreDataStack
         )
         let resolvedFilterService = filterService ?? ConversationFilterService(
-            contactsService: ContactsService(),
             contactEmailLoader: contactEmailLoader ?? { _ in [] }
         )
         let resolvedConversationManager = conversationManager
