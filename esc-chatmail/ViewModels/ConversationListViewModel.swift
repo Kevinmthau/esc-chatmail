@@ -56,6 +56,10 @@ final class ConversationListViewModel: ObservableObject {
     private let windowProvider: ConversationWindowProvider
     private var loadedConversationLimit: Int
     private var hasLoadedAllConversationWindow = false
+    /// Emails already handed to the person/avatar prefetchers for the current
+    /// window generation. Reset when the query changes or the store is
+    /// invalidated wholesale, so a genuinely fresh window prefetches again.
+    private var prefetchedPersonEmails: Set<String> = []
     private var isConversationPreviewRepairRunning = false
     private var hasCompletedConversationPreviewRepair = false
     private var hasObservedSyncCompletionThisLaunch = false
@@ -266,20 +270,32 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Data Loading
 
-    func prefetchPersonData(from items: [ConversationListItem]) {
+    /// Prefetches display names and avatars for rows newly entering the
+    /// window. Submits only the policy's delta — emails not yet handed to
+    /// the prefetchers this window generation — and skips the detached task
+    /// entirely when the delta is empty, so reloads that add no rows
+    /// (pop-back, backfill re-appears) do nothing.
+    private func prefetchPersonData(from newItems: [ConversationListItem]) {
         let personCache = storage.personCache
         let profilePhotoResolver = storage.profilePhotoResolver
 
         let config = VirtualScrollConfiguration.default
         let prefetchCount = config.visibleItemCount + config.bufferSize  // 30
-        let allEmails = items.prefix(prefetchCount).flatMap(\.snapshot.participantEmails)
-        let uniqueEmails = Array(Set(allEmails))
+        let emails = ConversationListPrefetchPolicy.emailsToPrefetch(
+            newItems: newItems,
+            alreadySubmitted: prefetchedPersonEmails,
+            limit: prefetchCount
+        )
+        guard !emails.isEmpty else { return }
+        prefetchedPersonEmails.formUnion(emails)
 
         taskManager.runDetached("prefetchPersonData") {
-            await personCache.prefetch(emails: uniqueEmails)
+            await personCache.prefetch(emails: emails)
 
-            // Also prefetch profile photos to avoid thundering herd on first load
-            await profilePhotoResolver.prefetchPhotos(for: uniqueEmails)
+            // Also prefetch profile photos to avoid thundering herd on first
+            // load; submitting only the delta of newly visible rows keeps
+            // later reloads from re-herding Contacts for rows already warmed.
+            await profilePhotoResolver.prefetchPhotos(for: emails)
         }
     }
 
@@ -444,6 +460,9 @@ final class ConversationListViewModel: ObservableObject {
     private func recomputeFilteredConversations() {
         hasLoadedAllConversationWindow = false
         loadedConversationLimit = windowProvider.initialLimit
+        // A different query rebuilds the window from scratch: forget the
+        // prefetch ledger so the new window's rows warm again.
+        prefetchedPersonEmails.removeAll()
         reloadConversationWindowFromStore()
     }
 
@@ -491,9 +510,14 @@ final class ConversationListViewModel: ObservableObject {
             matchesVisibility: matchesVisibleConversation(_:)
         )
         hasLoadedAllConversationWindow = window.count < loadedConversationLimit
+        // Captured before replaceAll so the prefetch below targets only the
+        // rows entering the window on this reload (paging's appended tail, a
+        // live insert) instead of re-submitting the whole window every time.
+        let previouslyVisibleIDs = Set(listStore.visibleItems.map(\.id))
         listStore.replaceAll(with: window)
         publishVisibleItems()
-        prefetchPersonData(from: filteredConversationItems)
+        let newlyVisibleItems = listStore.visibleItems.filter { !previouslyVisibleIDs.contains($0.id) }
+        prefetchPersonData(from: newlyVisibleItems)
     }
 
     @discardableResult
@@ -592,6 +616,9 @@ final class ConversationListViewModel: ObservableObject {
     private func handleConversationContextChange(_ notification: Notification) {
         guard notification.userInfo?[NSInvalidatedAllObjectsKey] == nil else {
             listStore.removeAll()
+            // The wholesale invalidation empties the window; whatever fills it
+            // next is a fresh window generation and must prefetch again.
+            prefetchedPersonEmails.removeAll()
             publishVisibleItems()
             return
         }
