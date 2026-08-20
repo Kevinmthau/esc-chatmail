@@ -22,14 +22,19 @@ final class ConversationSearchService: ObservableObject {
 
     private var searchDebounceTask: Task<Void, Never>?
     private let debounceInterval: UInt64
+    private let clock: any SyncClock
     var onDebouncedSearchTextChange: (() -> Void)?
 
     // MARK: - Initialization
 
     /// Creates a new search service
-    /// - Parameter debounceInterval: Debounce interval in nanoseconds (default: 150ms)
-    init(debounceInterval: UInt64 = 150_000_000) {
+    /// - Parameters:
+    ///   - debounceInterval: Debounce interval in nanoseconds (default: 150ms)
+    ///   - clock: Sleep source for the debounce delay. Inject `FakeSyncClock`
+    ///     in tests to drive the debounce deterministically.
+    init(debounceInterval: UInt64 = 150_000_000, clock: any SyncClock = SystemSyncClock()) {
         self.debounceInterval = debounceInterval
+        self.clock = clock
     }
 
     // MARK: - Public API
@@ -51,16 +56,21 @@ final class ConversationSearchService: ObservableObject {
         }
 
         let pendingQuery = searchText
+        let clock = clock
         let debounceInterval = debounceInterval
 
-        searchDebounceTask = Task.detached { [weak self] in
-            guard await Task.sleepUnlessCancelled(nanoseconds: debounceInterval) else { return }
-
-            await MainActor.run { [weak self] in
-                guard let self = self else { return }
-                guard self.searchText == pendingQuery else { return }
-                self.debouncedSearchText = pendingQuery
+        searchDebounceTask = Task { [weak self] in
+            do {
+                try await clock.sleep(nanoseconds: debounceInterval)
+            } catch {
+                // Cancellation must bail explicitly here: a cancelled sleep
+                // that fell through would skip the debounce delay and publish
+                // a superseded query anyway (#119 lineage).
+                return
             }
+
+            guard let self, self.searchText == pendingQuery else { return }
+            self.debouncedSearchText = pendingQuery
         }
     }
 }
