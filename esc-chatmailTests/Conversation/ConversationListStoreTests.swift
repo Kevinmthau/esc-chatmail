@@ -214,6 +214,82 @@ final class ConversationListStoreTests: XCTestCase {
         assertVisibleItemsSorted(store)
     }
 
+    // Revert-check: ConversationListItem.SortKey's Comparable `<` — F7 made
+    // it the single owner of the chat-list order, with both remaining Swift
+    // comparators (ConversationWindowProvider's private Conversation sort and
+    // ConversationListStore.sortsBefore) delegating to it. Sorting
+    // Conversations via SortKey(conversation:) must agree with sorting the
+    // corresponding ConversationListItems, and both must produce the
+    // canonical (pinned desc, lastMessageDate desc, nil dates last,
+    // conversation-UUID asc tie-break) order.
+    func testSortKeyComparable_mixedPinnedDatesAndUUIDs_matchesListItemOrdering() throws {
+        // Pinned with the oldest date and the highest UUID: pinned must still
+        // outrank every date and UUID consideration.
+        let pinnedOld = ConversationBuilder()
+            .withId(try XCTUnwrap(UUID(uuidString: "FFFFFFFF-0000-0000-0000-000000000001")))
+            .withDisplayName("PinnedOld")
+            .withSnippet("snippet")
+            .visible()
+            .setPinned()
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .build(in: context)
+        let newest = makeConversation(name: "Newest", date: 500)
+        let tieLow = makeConversation(
+            name: "TieLow",
+            date: 300,
+            id: try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000001"))
+        )
+        let tieMid = makeConversation(
+            name: "TieMid",
+            date: 300,
+            id: try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000002"))
+        )
+        let tieHigh = makeConversation(
+            name: "TieHigh",
+            date: 300,
+            id: try XCTUnwrap(UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"))
+        )
+        // Builder leaves lastMessageDate nil unless set: nil sorts as
+        // .distantPast (after every dated row), tie-broken by UUID ascending.
+        let nilDateLow = ConversationBuilder()
+            .withId(try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-00000000000A")))
+            .withDisplayName("NilDateLow")
+            .withSnippet("snippet")
+            .visible()
+            .build(in: context)
+        let nilDateHigh = ConversationBuilder()
+            .withId(try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-00000000000B")))
+            .withDisplayName("NilDateHigh")
+            .withSnippet("snippet")
+            .visible()
+            .build(in: context)
+        try stack.saveViewContext()
+
+        // Fixed scrambled input order; both sorts must agree on the result.
+        let conversations = [tieMid, nilDateHigh, newest, pinnedOld, tieHigh, nilDateLow, tieLow]
+
+        let sortedByKey = conversations.sorted {
+            ConversationListItem.SortKey(conversation: $0) < ConversationListItem.SortKey(conversation: $1)
+        }
+        let sortedItems = conversations
+            .map(ConversationListItem.init(conversation:))
+            .sorted(by: ConversationListStore.sortsBefore(_:_:))
+
+        XCTAssertEqual(sortedItems.map(\.id), sortedByKey.map(\.objectID))
+        XCTAssertEqual(
+            sortedByKey.map(\.objectID),
+            [
+                pinnedOld.objectID,
+                newest.objectID,
+                tieLow.objectID,
+                tieMid.objectID,
+                tieHigh.objectID,
+                nilDateLow.objectID,
+                nilDateHigh.objectID
+            ]
+        )
+    }
+
     // Revert-check: ConversationListStore.sortsBefore's sorted insertion in
     // upsertConversation (plus trimVisibleItems' prefix trim) — after any mix
     // of upserts, archivals, deletions, and trims, visibleItems must stay
