@@ -28,7 +28,6 @@ final class ConversationFilterService: ObservableObject {
 
     // MARK: - Dependencies
 
-    private let contactsService: ContactsService
     private let notificationCenter: NotificationCenter
     private let contactEmailLoader: ContactEmailLoader
 
@@ -43,19 +42,15 @@ final class ConversationFilterService: ObservableObject {
 
     // MARK: - Initialization
 
+    /// Designated initializer: the service depends only on a loader closure,
+    /// so tests inject one directly without building a throwaway
+    /// `ContactsService`.
     init(
-        contactsService: ContactsService,
-        notificationCenter: NotificationCenter = .default,
-        contactEmailLoader: ContactEmailLoader? = nil
+        contactEmailLoader: @escaping ContactEmailLoader,
+        notificationCenter: NotificationCenter = .default
     ) {
-        self.contactsService = contactsService
         self.notificationCenter = notificationCenter
-        self.contactEmailLoader = contactEmailLoader ?? {
-            await Self.loadContactEmails(
-                contactsService: contactsService,
-                requestAccessIfNeeded: $0
-            )
-        }
+        self.contactEmailLoader = contactEmailLoader
 
         // Keep contact-based filtering fresh when the user edits contacts (in-app or via system UI).
         contactStoreDidChangeObserver = notificationCenter.addObserver(
@@ -68,6 +63,21 @@ final class ConversationFilterService: ObservableObject {
                 self.handleContactStoreDidChange()
             }
         }
+    }
+
+    /// Production convenience: sources the contact-email cache from
+    /// `ContactsService.allContactEmails`, which owns the Contacts-domain
+    /// access check and store enumeration.
+    convenience init(
+        contactsService: ContactsService,
+        notificationCenter: NotificationCenter = .default
+    ) {
+        self.init(
+            contactEmailLoader: {
+                await contactsService.allContactEmails(requestAccessIfNeeded: $0)
+            },
+            notificationCenter: notificationCenter
+        )
     }
 
     deinit {
@@ -102,7 +112,11 @@ final class ConversationFilterService: ObservableObject {
 
     /// Loads all contact emails into cache for filtering
     func loadContactsCache(requestAccessIfNeeded: Bool = false) {
-        guard !isLoadingContactsCache else { return }
+        // Skip when the cache is already loaded and this call would not request
+        // access: every list onAppear re-enumerated the whole address book for
+        // an identical result. CNContactStoreDidChange already resets
+        // hasLoadedContactsCache, so contact edits still trigger a reload.
+        guard !isLoadingContactsCache, !(hasLoadedContactsCache && !requestAccessIfNeeded) else { return }
 
         isLoadingContactsCache = true
         contactsLoadTask = Task { [weak self] in
@@ -175,42 +189,5 @@ final class ConversationFilterService: ObservableObject {
 
         contactEmailsCache = loadedEmails
         hasLoadedContactsCache = true
-    }
-
-    private static func loadContactEmails(
-        contactsService: ContactsService,
-        requestAccessIfNeeded: Bool
-    ) async -> Set<String>? {
-        let authStatus = await MainActor.run { contactsService.authorizationStatus }
-        let hasAccess: Bool = {
-            if authStatus == .authorized { return true }
-            if #available(iOS 18.0, *), authStatus == .limited { return true }
-            return false
-        }()
-
-        if !hasAccess {
-            guard requestAccessIfNeeded, authStatus == .notDetermined else { return nil }
-            let granted = await contactsService.requestAccess()
-            if !granted { return nil }
-        }
-
-        return await Task.detached(priority: .userInitiated) {
-            let contactStore = CNContactStore()
-            let keysToFetch = [CNContactEmailAddressesKey as CNKeyDescriptor]
-            let request = CNContactFetchRequest(keysToFetch: keysToFetch)
-
-            do {
-                var emails: Set<String> = []
-                try contactStore.enumerateContacts(with: request) { contact, _ in
-                    for emailAddress in contact.emailAddresses {
-                        emails.insert(EmailNormalizer.normalize(emailAddress.value as String))
-                    }
-                }
-                return emails
-            } catch {
-                Log.error("Failed to load contacts", category: .general, error: error)
-                return nil
-            }
-        }.value
     }
 }

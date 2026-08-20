@@ -395,7 +395,6 @@ final class ConversationListViewModelTests: XCTestCase {
         try context.save()
 
         let filterService = ConversationFilterService(
-            contactsService: ContactsService(),
             contactEmailLoader: { _ in [EmailNormalizer.normalize(contactEmail)] }
         )
         filterService.loadContactsCache()
