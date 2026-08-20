@@ -35,7 +35,9 @@ extension ConversationListDependencies {
     ///   - searchService: Optional service override returned by the bundle's
     ///     search factory (e.g. to shorten the debounce interval).
     ///   - selectionService: Optional service override returned by the
-    ///     bundle's selection factory.
+    ///     bundle's selection factory. The default service resolves its batch
+    ///     actions on `stack`'s view context; its `MessageActions` still
+    ///     comes from `Dependencies.shared` (no test seam yet).
     ///   - filterService: Optional service override returned by the bundle's
     ///     filter factory; takes precedence over `contactEmailLoader`.
     @MainActor
@@ -53,7 +55,7 @@ extension ConversationListDependencies {
         let resolvedSearchService = searchService ?? ConversationSearchService()
         let resolvedSelectionService = selectionService ?? ConversationSelectionService(
             messageActions: Dependencies.shared.makeMessageActions(),
-            coreDataStack: Dependencies.shared.coreDataStack
+            viewContext: stack.viewContext
         )
         let resolvedFilterService = filterService ?? ConversationFilterService(
             contactEmailLoader: contactEmailLoader ?? { _ in [] }

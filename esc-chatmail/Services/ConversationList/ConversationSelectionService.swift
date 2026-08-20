@@ -13,14 +13,19 @@ final class ConversationSelectionService: ObservableObject {
     // MARK: - Dependencies
 
     private let messageActions: MessageActions
-    private let coreDataStack: CoreDataStack
+    private let viewContext: NSManagedObjectContext
     private let taskManager = ViewModelTaskManager()
 
     // MARK: - Initialization
 
-    init(messageActions: MessageActions, coreDataStack: CoreDataStack) {
+    /// - Parameters:
+    ///   - messageActions: Executor for the batch archive / spam operations.
+    ///   - viewContext: Context the batch actions resolve the selected object
+    ///     identifiers on — the only piece of the Core Data stack this
+    ///     service uses.
+    init(messageActions: MessageActions, viewContext: NSManagedObjectContext) {
         self.messageActions = messageActions
-        self.coreDataStack = coreDataStack
+        self.viewContext = viewContext
     }
 
     // MARK: - Selection Operations
@@ -35,8 +40,15 @@ final class ConversationSelectionService: ObservableObject {
     }
 
     /// Selects or deselects all conversations in the list by identifier.
+    ///
+    /// Toggles on set equality — the honest form of the toggle. It relies on
+    /// `retainSelection(within:)`'s invariant that the selection is always a
+    /// subset of the visible rows, so "selection equals the visible set" is
+    /// exactly "everything visible is already selected". Count equality would
+    /// also treat a stale selection of the same size as fully selected and
+    /// clear it instead of selecting the visible rows.
     func selectAll(conversationIDs: [NSManagedObjectID]) {
-        if selectedConversationIDs.count == conversationIDs.count {
+        if selectedConversationIDs == Set(conversationIDs) {
             selectedConversationIDs.removeAll()
         } else {
             selectedConversationIDs = Set(conversationIDs)
@@ -71,49 +83,63 @@ final class ConversationSelectionService: ObservableObject {
 
     /// Archives all selected conversations in a single batch operation
     func archiveSelectedConversations() {
-        let context = coreDataStack.viewContext
-        let conversationsToArchive = selectedConversationIDs.compactMap { objectID in
-            try? context.existingObject(with: objectID) as? Conversation
-        }
-
-        guard !conversationsToArchive.isEmpty else {
-            Log.debug("No conversations to archive", category: .message)
-            return
-        }
-
-        Log.info("Batch archive: \(conversationsToArchive.count) conversations", category: .message)
-
-        // Clear selection immediately for instant UI feedback
-        selectedConversationIDs.removeAll()
-        isSelecting = false
-
-        // Single batch operation instead of sequential loop
-        taskManager.run("archive") { [messageActions] in
-            await messageActions.archiveConversations(conversations: conversationsToArchive)
+        performBatchAction(
+            taskKey: "archive",
+            emptyLogMessage: "No conversations to archive",
+            batchLogPrefix: "Batch archive"
+        ) { [messageActions] conversations in
+            await messageActions.archiveConversations(conversations: conversations)
         }
     }
 
     /// Reports all selected conversations as spam in a single batch operation
     func reportSpamSelectedConversations() {
-        let context = coreDataStack.viewContext
-        let conversationsToReport = selectedConversationIDs.compactMap { objectID in
-            try? context.existingObject(with: objectID) as? Conversation
+        performBatchAction(
+            taskKey: "reportSpam",
+            emptyLogMessage: "No conversations to report as spam",
+            batchLogPrefix: "Batch spam report"
+        ) { [messageActions] conversations in
+            await messageActions.reportSpamConversations(conversations: conversations)
+        }
+    }
+
+    /// Shared template for the batch actions: resolves the selected
+    /// identifiers on the view context, clears the selection, then dispatches
+    /// one batch `MessageActions` call. Resolution must precede the clear —
+    /// the dispatched operation acts on the conversations that were selected
+    /// at call time, not on the (already cleared) live set.
+    ///
+    /// - Parameters:
+    ///   - taskKey: `ViewModelTaskManager` key; a repeat invocation cancels
+    ///     the previous task of the same kind.
+    ///   - emptyLogMessage: Debug log emitted when nothing is selected.
+    ///   - batchLogPrefix: Prefix of the info log announcing the batch size.
+    ///   - action: The batch `MessageActions` call, given the resolved
+    ///     conversations.
+    private func performBatchAction(
+        taskKey: String,
+        emptyLogMessage: String,
+        batchLogPrefix: String,
+        _ action: @escaping ([Conversation]) async -> Void
+    ) {
+        let conversations = selectedConversationIDs.compactMap { objectID in
+            try? viewContext.existingObject(with: objectID) as? Conversation
         }
 
-        guard !conversationsToReport.isEmpty else {
-            Log.debug("No conversations to report as spam", category: .message)
+        guard !conversations.isEmpty else {
+            Log.debug(emptyLogMessage, category: .message)
             return
         }
 
-        Log.info("Batch spam report: \(conversationsToReport.count) conversations", category: .message)
+        Log.info("\(batchLogPrefix): \(conversations.count) conversations", category: .message)
 
         // Clear selection immediately for instant UI feedback
         selectedConversationIDs.removeAll()
         isSelecting = false
 
         // Single batch operation instead of sequential loop
-        taskManager.run("reportSpam") { [messageActions] in
-            await messageActions.reportSpamConversations(conversations: conversationsToReport)
+        taskManager.run(taskKey) {
+            await action(conversations)
         }
     }
 

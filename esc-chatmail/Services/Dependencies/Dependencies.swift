@@ -177,7 +177,7 @@ final class Dependencies: ObservableObject {
     func makeConversationSelectionService() -> ConversationSelectionService {
         ConversationSelectionService(
             messageActions: makeMessageActions(),
-            coreDataStack: coreDataStack
+            viewContext: viewContext
         )
     }
 
