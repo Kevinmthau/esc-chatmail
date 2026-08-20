@@ -24,11 +24,14 @@ enum ConversationFilter: String, CaseIterable {
 /// Composes specialized services for search, selection, and filtering
 @MainActor
 final class ConversationListViewModel: ObservableObject {
-    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV6"
-    /// Completion marker only — the preview repair re-runs every launch and no
-    /// longer skips when this flag is already set.
-    static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV2"
-    private static let repairMissingConversationPreviewsTaskKey = "repairMissingConversationPreviews"
+    /// Alias for `ConversationLaunchRepairCoordinator`'s key, kept so existing
+    /// call sites and tests keep addressing the flag through the view model.
+    static let conversationNameRefreshMigrationKey =
+        ConversationLaunchRepairCoordinator.conversationNameRefreshMigrationKey
+    /// Alias for `ConversationLaunchRepairCoordinator`'s key, kept so existing
+    /// call sites and tests keep addressing the flag through the view model.
+    static let conversationPreviewRepairMigrationKey =
+        ConversationLaunchRepairCoordinator.conversationPreviewRepairMigrationKey
 
     // MARK: - Composed Services
 
@@ -43,11 +46,10 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Dependencies
 
     let messageActions: MessageActions
-    let syncEngine: SyncEngine
     let foregroundSyncCoordinator: ForegroundSyncCoordinator
-    let conversationManager: ConversationManager
 
     private let storage: StorageDependencies
+    private let launchRepairCoordinator: ConversationLaunchRepairCoordinator
     private var cancellables = Set<AnyCancellable>()
     private var conversationChangesCancellable: AnyCancellable?
     private var conversationSavesCancellable: AnyCancellable?
@@ -60,9 +62,6 @@ final class ConversationListViewModel: ObservableObject {
     /// window generation. Reset when the query changes or the store is
     /// invalidated wholesale, so a genuinely fresh window prefetches again.
     private var prefetchedPersonEmails: Set<String> = []
-    private var isConversationPreviewRepairRunning = false
-    private var hasCompletedConversationPreviewRepair = false
-    private var hasObservedSyncCompletionThisLaunch = false
     private weak var observedConversationContext: NSManagedObjectContext?
 
     // MARK: - Initialization
@@ -77,10 +76,17 @@ final class ConversationListViewModel: ObservableObject {
     ) {
         let resolvedDependencies = dependencies ?? Dependencies.shared.makeConversationListDependencies()
         self.storage = resolvedDependencies.storage
-        self.syncEngine = resolvedDependencies.syncEngine
         self.foregroundSyncCoordinator = resolvedDependencies.foregroundSyncCoordinator
         self.messageActions = resolvedDependencies.messaging.makeMessageActions()
-        self.conversationManager = resolvedDependencies.conversationManager
+        // Constructed (not injected) here so its `.syncCompleted` re-arm
+        // subscription exists from view-model init — the coordinator's own
+        // requirement that a sync finishing before first appear still re-arms.
+        self.launchRepairCoordinator = ConversationLaunchRepairCoordinator(
+            storage: resolvedDependencies.storage,
+            conversationManager: resolvedDependencies.conversationManager,
+            syncWaiter: resolvedDependencies.syncWaiter,
+            notificationCenter: resolvedDependencies.notificationCenter
+        )
         self.windowProvider = windowProvider
         self.loadedConversationLimit = windowProvider.initialLimit
 
@@ -98,25 +104,6 @@ final class ConversationListViewModel: ObservableObject {
         forwardChanges(from: resolvedFilterService, storing: &cancellables)
 
         bindFiltering()
-        bindSyncCompletionRepairRearm()
-    }
-
-    /// Re-arms the launch preview repair when a sync run finishes before the
-    /// repair has completed: the launch pass can legitimately drain an empty
-    /// store before the first sync registers (fresh install), so the first
-    /// completed sync gets a fresh sweep. Once the repair completes it stays
-    /// done for the launch — incremental syncs post this notification on every
-    /// run, and re-sweeping each time would repeat the archive/repair fetches
-    /// forever; per-page rollups already keep synced pages presentable.
-    private func bindSyncCompletionRepairRearm() {
-        NotificationCenter.default.publisher(for: .syncCompleted)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self else { return }
-                self.hasObservedSyncCompletionThisLaunch = true
-                self.repairMissingConversationPreviews()
-            }
-            .store(in: &cancellables)
     }
 
     // MARK: - Convenience Accessors (View Compatibility)
@@ -303,109 +290,18 @@ final class ConversationListViewModel: ObservableObject {
         filterService.loadContactsCache(requestAccessIfNeeded: requestAccessIfNeeded)
     }
 
+    /// Forwarder: the launch passes live in
+    /// `ConversationLaunchRepairCoordinator`; kept so existing call sites and
+    /// tests keep driving them through the view model.
     func refreshConversationNames() {
-        // V6: refresh stored conversation display names only. Rollup metadata stays sync-owned.
-        let hasRefreshedKey = Self.conversationNameRefreshMigrationKey
-        let migrationFlags = storage.migrationFlags
-        guard !migrationFlags.bool(forKey: hasRefreshedKey) else { return }
-        // An empty store means the initial sync has not landed yet (fresh
-        // install), not that every name is refreshed — leave the flag unset so
-        // the migration still runs once conversations exist.
-        guard storeHasConversations() else { return }
-
-        taskManager.run("refreshNames") { [weak self] in
-            guard let self = self else { return }
-            let context = storage.makeBackgroundContext()
-            await conversationManager.updateAllConversationDisplayNames(in: context)
-            guard storage.saveIfNeeded(context) else { return }
-            migrationFlags.set(true, forKey: hasRefreshedKey)
-            Log.info("Refreshed conversation display names (V6)", category: .conversation)
-        }
+        launchRepairCoordinator.refreshConversationNames()
     }
 
+    /// Forwarder: the launch passes live in
+    /// `ConversationLaunchRepairCoordinator`; kept so existing call sites and
+    /// tests keep driving them through the view model.
     func repairMissingConversationPreviews() {
-        // Runs once per launch, not once per install: interrupted syncs can
-        // re-create both broken states (missing previews and stranded
-        // message-less shells) at any time, so a one-shot migration flag
-        // leaves later breakage visible forever.
-        guard !isConversationPreviewRepairRunning,
-              !hasCompletedConversationPreviewRepair else { return }
-        isConversationPreviewRepairRunning = true
-
-        let hasRepairedKey = Self.conversationPreviewRepairMigrationKey
-        let migrationFlags = storage.migrationFlags
-
-        taskManager.run(Self.repairMissingConversationPreviewsTaskKey, priority: .background) { [weak self] in
-            guard let self = self else { return }
-            var didCompleteRepair = false
-            defer {
-                isConversationPreviewRepairRunning = false
-                if didCompleteRepair {
-                    hasCompletedConversationPreviewRepair = true
-                }
-            }
-
-            // A running sync may have saved a conversation shell whose first
-            // message has not persisted yet; sweeping shells mid-sync could
-            // archive a row that is about to receive its message.
-            await syncEngine.waitForCurrentSyncToComplete()
-            guard !Task.isCancelled else { return }
-
-            // Sampled before the sweep: an empty drain on an empty store must
-            // not count as completion (see the didDrain gate below).
-            let storeHadConversations = storeHasConversations()
-
-            let context = storage.makeBackgroundContext()
-            // Store-trump on purpose (opposite of the app-wide object-trump
-            // default): if live sync saves fresher rollups while this pass
-            // holds stale in-memory values, the store version must win; the
-            // sync-completion re-arm re-sweeps anything still broken.
-            context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
-
-            let archivedCount = await conversationManager.archiveMessagelessConversations(in: context)
-            if archivedCount > 0 {
-                guard storage.saveIfNeeded(context) else {
-                    Log.error(
-                        "Failed to save \(archivedCount) archived message-less conversations; skipping preview repair",
-                        category: .conversation
-                    )
-                    return
-                }
-                Log.info("Archived \(archivedCount) stranded message-less conversations", category: .conversation)
-            }
-
-            var totalRepairedCount = 0
-            while !Task.isCancelled {
-                let result = await conversationManager.repairMissingConversationPreviews(in: context)
-                if result.repairedCount > 0 {
-                    guard storage.saveIfNeeded(context) else { return }
-                    totalRepairedCount += result.repairedCount
-                }
-
-                if result.didDrain {
-                    if totalRepairedCount > 0 {
-                        Log.info("Repaired missing conversation previews: \(totalRepairedCount)", category: .conversation)
-                    }
-                    // Draining an empty store says nothing about repair health:
-                    // on a fresh install this pass can beat the first sync run's
-                    // registration. Stay armed so the sync-completion re-arm
-                    // sweeps the store once data actually exists.
-                    guard storeHadConversations || hasObservedSyncCompletionThisLaunch else { return }
-                    migrationFlags.set(true, forKey: hasRepairedKey)
-                    didCompleteRepair = true
-                    return
-                }
-
-                guard result.repairedCount > 0 else {
-                    if totalRepairedCount > 0 {
-                        Log.info("Repaired missing conversation previews: \(totalRepairedCount)", category: .conversation)
-                    }
-                    return
-                }
-
-                await Task.yield()
-            }
-        }
+        launchRepairCoordinator.repairMissingConversationPreviews()
     }
 
     /// Called when view appears - performs initial setup
@@ -417,8 +313,7 @@ final class ConversationListViewModel: ObservableObject {
         // deferredSetup, so a sheet or push in its 0.5s window used to kill
         // these before they ever ran. Both own per-launch guards and start on
         // background-priority awaits, so they cost the initial render nothing.
-        refreshConversationNames()
-        repairMissingConversationPreviews()
+        launchRepairCoordinator.runLaunchRepairsIfNeeded()
 
         // Defer non-critical work to avoid blocking initial render
         taskManager.runDetached("deferredSetup") { [weak self] in
@@ -437,13 +332,15 @@ final class ConversationListViewModel: ObservableObject {
         // caused by sheets and navigation pushes so optimistic send updates are not missed.
         selectionService.cancelTasks()
         filterService.cancelTasks()
-        if preservePreviewRepair {
-            // Let the launch repair finish across transient navigation; it owns its
-            // own per-launch guard and clears that guard if it exits incomplete.
-            taskManager.cancelAll(except: [Self.repairMissingConversationPreviewsTaskKey])
-        } else {
+        // Let the launch repair finish across transient navigation; it owns its
+        // own per-launch guard and clears that guard if it exits incomplete.
+        // The repair tasks live in the coordinator's own task manager, so the
+        // view model's cancelAll never touches them — preserving the repair
+        // means simply not cancelling the coordinator.
+        taskManager.cancelAll()
+        if !preservePreviewRepair {
             searchService.cleanup()
-            taskManager.cancelAll()
+            launchRepairCoordinator.cancel()
         }
     }
 
@@ -538,21 +435,6 @@ final class ConversationListViewModel: ObservableObject {
             return true
         case .contacts:
             return !filterService.contactEmailsCache.isEmpty
-        }
-    }
-
-    /// Whether any conversations exist in the persistent store. Gates the
-    /// launch-time name refresh and preview repair so neither treats a
-    /// fresh install's empty store as successful completion.
-    private func storeHasConversations() -> Bool {
-        let request = Conversation.fetchRequest()
-        request.includesPendingChanges = false
-
-        do {
-            return try storage.viewContext.count(for: request) > 0
-        } catch {
-            Log.error("Failed to count conversations for launch repair passes", category: .conversation, error: error)
-            return false
         }
     }
 
