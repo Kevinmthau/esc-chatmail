@@ -155,6 +155,111 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         await waitForFilteredConversationIDs([aliceID], in: viewModel)
     }
 
+    // Revert-check: ConversationListViewModel.handleSiblingContextSave — with automerge off, only the didSaveObjectIDs pipeline can update the two live rows and drop the row a second save deleted before delivery.
+    // HONEST SCOPE: this test pins the deleted-row/live-row contract of the delivery, not the batch-fetch implementation — the per-ID existingObject(with:) loop the batch fetch replaced dropped deleted rows the same way, so a clean revert to that loop also passes. The batch fetch's crash hazard is pinned by testBackgroundSave_rowDeletedWhileFirstSaveDeliveryRuns_doesNotCrashSnapshotBuild below.
+    func testBackgroundSave_rowDeletedBySecondSaveBeforeDelivery_updatesLiveRowsAndDropsDeleted() async throws {
+        let viewModel = makeViewModel()
+        var aliceID: NSManagedObjectID!
+        var bobID: NSManagedObjectID!
+        var carolID: NSManagedObjectID!
+
+        try autoreleasepool {
+            let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+            let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+            let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
+            try context.save()
+            aliceID = alice.objectID
+            bobID = bob.objectID
+            carolID = carol.objectID
+            viewModel.onAppear(in: context)
+        }
+
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [aliceID, bobID, carolID])
+
+        // performAndWait blocks this (main) thread, so the main queue cannot
+        // run either .receive(on: .main) delivery until BOTH saves committed —
+        // deterministically pinning the window where Carol's row is already
+        // gone from the store when the first save's notification is handled.
+        let backgroundContext = stack.newBackgroundContext()
+        try backgroundContext.performAndWait {
+            let alice = try XCTUnwrap(
+                backgroundContext.existingObject(with: aliceID) as? Conversation
+            )
+            let bob = try XCTUnwrap(
+                backgroundContext.existingObject(with: bobID) as? Conversation
+            )
+            let carol = try XCTUnwrap(
+                backgroundContext.existingObject(with: carolID) as? Conversation
+            )
+            alice.inboxUnreadCount = 2
+            alice.snippet = "alpha updated"
+            bob.inboxUnreadCount = 1
+            bob.snippet = "beta updated"
+            carol.snippet = "gamma updated"
+            try backgroundContext.save()
+
+            backgroundContext.delete(carol)
+            try backgroundContext.save()
+        }
+
+        await waitForFilteredConversationIDs([aliceID, bobID], in: viewModel)
+        XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "alpha updated")
+        XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.inboxUnreadCount, 2)
+        XCTAssertEqual(viewModel.filteredConversationItems.last?.snapshot.snippet, "beta updated")
+        XCTAssertEqual(viewModel.filteredConversationItems.last?.snapshot.inboxUnreadCount, 1)
+    }
+
+    // Revert-check: `returnsObjectsAsFaults = false` on the batch "self IN %@" NSFetchRequest in ConversationListViewModel.handleSiblingContextSave. Returned-as-faults rows leave a window between the fetch and the snapshot build's fault fire; a sibling delete landing in it tombstones the row (shouldDeleteInaccessibleFaults defaults on) and ConversationListItem.init traps bridging the nil `id` UUID.
+    // HONEST SCOPE: the tombstone window is a race between this delivery and the second save, so a revert crashes this test's process on most runs, not provably all — the window cannot be held open deterministically from outside handleSiblingContextSave. Fetch-time materialization is the only way to close it, which is exactly what a revert removes. A clean revert to the old per-ID existingObject(with:) loop (which also materialized immediately) passes.
+    func testBackgroundSave_rowDeletedWhileFirstSaveDeliveryRuns_doesNotCrashSnapshotBuild() async throws {
+        let viewModel = makeViewModel()
+        var aliceID: NSManagedObjectID!
+        var bobID: NSManagedObjectID!
+        var carolID: NSManagedObjectID!
+
+        try autoreleasepool {
+            let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+            let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+            let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
+            try context.save()
+            aliceID = alice.objectID
+            bobID = bob.objectID
+            carolID = carol.objectID
+            viewModel.onAppear(in: context)
+        }
+
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [aliceID, bobID, carolID])
+
+        // `perform` (not performAndWait) leaves the main queue free, so the
+        // first save's delivery starts while the background queue races ahead
+        // to the delete — landing it in the fetch-to-snapshot window that
+        // used to tombstone Carol mid-build. Whichever side wins, the list
+        // must converge to the two live rows without crashing.
+        let backgroundContext = stack.newBackgroundContext()
+        try await backgroundContext.perform {
+            let alice = try XCTUnwrap(
+                backgroundContext.existingObject(with: aliceID) as? Conversation
+            )
+            let bob = try XCTUnwrap(
+                backgroundContext.existingObject(with: bobID) as? Conversation
+            )
+            let carol = try XCTUnwrap(
+                backgroundContext.existingObject(with: carolID) as? Conversation
+            )
+            alice.snippet = "alpha updated"
+            bob.snippet = "beta updated"
+            carol.snippet = "gamma updated"
+            try backgroundContext.save()
+
+            backgroundContext.delete(carol)
+            try backgroundContext.save()
+        }
+
+        await waitForFilteredConversationIDs([aliceID, bobID], in: viewModel)
+        XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "alpha updated")
+        XCTAssertEqual(viewModel.filteredConversationItems.last?.snapshot.snippet, "beta updated")
+    }
+
     // MARK: - didSaveObjectIDs relevance guard
 
     func testSaveRelevanceGuard_messageOnlyObjectIDs_areIrrelevant() throws {
