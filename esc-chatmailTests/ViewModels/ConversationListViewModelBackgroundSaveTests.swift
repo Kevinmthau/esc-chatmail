@@ -86,11 +86,11 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
     func testBackgroundSaveBringsOutsideWindowConversationIntoWindow() async throws {
         let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )

@@ -159,11 +159,11 @@ final class ConversationListViewModelTests: XCTestCase {
 
         let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )
@@ -214,11 +214,11 @@ final class ConversationListViewModelTests: XCTestCase {
 
         let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )
@@ -270,11 +270,11 @@ final class ConversationListViewModelTests: XCTestCase {
         let viewModel = makeViewModel(
             searchService: ConversationSearchService(debounceInterval: 10_000_000),
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )
@@ -322,11 +322,11 @@ final class ConversationListViewModelTests: XCTestCase {
         let viewModel = makeViewModel(
             searchService: ConversationSearchService(debounceInterval: 10_000_000),
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )
@@ -406,11 +406,11 @@ final class ConversationListViewModelTests: XCTestCase {
         let viewModel = makeViewModel(
             filterService: filterService,
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )
@@ -446,11 +446,11 @@ final class ConversationListViewModelTests: XCTestCase {
         let matchingIDs = Set([pendingMatch.objectID, savedMatch.objectID])
 
         let windowProvider = ConversationWindowProvider(
-            configuration: VirtualScrollConfiguration(
-                visibleItemCount: 1,
-                bufferSize: 0,
+            configuration: ConversationListWindowConfiguration(
+                initialLimit: 2,
                 pageSize: 1,
-                preloadThreshold: 1
+                preloadThreshold: 1,
+                contactFilterCandidateMultiplier: 5
             )
         )
         let window = windowProvider.fetchWindow(
@@ -477,11 +477,11 @@ final class ConversationListViewModelTests: XCTestCase {
         try context.save()
 
         let windowProvider = ConversationWindowProvider(
-            configuration: VirtualScrollConfiguration(
-                visibleItemCount: 1,
-                bufferSize: 0,
+            configuration: ConversationListWindowConfiguration(
+                initialLimit: 2,
                 pageSize: 1,
-                preloadThreshold: 1
+                preloadThreshold: 1,
+                contactFilterCandidateMultiplier: 5
             )
         )
 
@@ -515,11 +515,11 @@ final class ConversationListViewModelTests: XCTestCase {
 
         let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )
@@ -540,11 +540,11 @@ final class ConversationListViewModelTests: XCTestCase {
 
         let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )
@@ -566,17 +566,17 @@ final class ConversationListViewModelTests: XCTestCase {
     // additionally pins that a trimmed row leaves the selection
     // (publishVisibleItems → ConversationSelectionService.retainSelection(within:)).
     func testApplyConversationChanges_trimAfterShortInitialWindow_reopensPaging() throws {
-        // pageSize 1 → initial limit 2; one saved row makes the initial window short.
+        // Initial limit 2; one saved row makes the initial window short.
         let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
         try context.save()
 
         let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
-                configuration: VirtualScrollConfiguration(
-                    visibleItemCount: 1,
-                    bufferSize: 0,
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
                     pageSize: 1,
-                    preloadThreshold: 1
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
                 )
             )
         )
