@@ -2,12 +2,16 @@ import Foundation
 import CoreData
 
 struct ConversationListItem: Identifiable, Equatable {
-    let id: NSManagedObjectID
     let snapshot: ConversationSnapshot
     private let stableID: UUID
 
+    /// The row's `Identifiable` identity — reads `snapshot.objectID` instead of
+    /// storing a duplicate copy of the same `NSManagedObjectID`.
+    var id: NSManagedObjectID {
+        snapshot.objectID
+    }
+
     init(conversation: Conversation) {
-        self.id = conversation.objectID
         self.snapshot = ConversationSnapshot(from: conversation)
         self.stableID = conversation.id
     }
