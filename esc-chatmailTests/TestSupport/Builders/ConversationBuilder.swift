@@ -29,6 +29,7 @@ final class ConversationBuilder {
     private var inboxUnreadCount: Int32 = 0
     private var type: String = "personal"
     private var listId: String?
+    private var participants: [(person: Person, role: ParticipantRole)] = []
 
     // MARK: - Fluent Setters
 
@@ -142,6 +143,14 @@ final class ConversationBuilder {
         return self
     }
 
+    /// Attaches a `ConversationParticipant` row linking the given person to
+    /// the built conversation. The person must belong to the same context the
+    /// conversation is built in.
+    func withParticipant(_ person: Person, role: ParticipantRole = .normal) -> Self {
+        participants.append((person: person, role: role))
+        return self
+    }
+
     // MARK: - Build
 
     /// Builds the Conversation entity in the given context.
@@ -166,6 +175,14 @@ final class ConversationBuilder {
         conversation.inboxUnreadCount = inboxUnreadCount
         conversation.type = type
         conversation.listId = listId
+
+        for entry in participants {
+            let participant = context.insertTestObject(ConversationParticipant.self)
+            participant.id = UUID()
+            participant.participantRole = entry.role
+            participant.person = entry.person
+            participant.conversation = conversation
+        }
 
         return conversation
     }

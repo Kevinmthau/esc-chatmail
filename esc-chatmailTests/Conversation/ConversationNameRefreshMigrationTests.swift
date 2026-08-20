@@ -41,16 +41,15 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withLastMessageDate(aliceDate)
             .withUnreadCount(7)
             .visible()
+            .withParticipant(makePerson(email: "alice@example.com"))
             .build(in: context)
         let bob = ConversationBuilder()
             .withDisplayName("bob")
             .withSnippet("Bob preview")
             .withLastMessageDate(bobDate)
             .visible()
+            .withParticipant(makePerson(email: "bob@example.com"))
             .build(in: context)
-
-        addConversationParticipant(email: "alice@example.com", to: alice)
-        addConversationParticipant(email: "bob@example.com", to: bob)
 
         _ = MessageBuilder()
             .withSnippet("Newest Alice message")
@@ -108,8 +107,8 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let conversation = ConversationBuilder()
             .withDisplayName("Unknown Contact")
             .visible()
+            .withParticipant(makePerson(email: "alice@example.com"))
             .build(in: context)
-        addConversationParticipant(email: "alice@example.com", to: conversation)
         try context.save()
 
         let viewModel = makeViewModel()
@@ -145,8 +144,8 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let conversation = ConversationBuilder()
             .withDisplayName("Unknown Contact")
             .visible()
+            .withParticipant(makePerson(email: "alice@example.com"))
             .build(in: context)
-        addConversationParticipant(email: "alice@example.com", to: conversation)
         try context.save()
 
         viewModel.refreshConversationNames()
@@ -160,6 +159,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertEqual(refreshed.displayName, "alice@example.com")
     }
 
+    // Revert-check: ConversationListViewModel.repairMissingConversationPreviews' `storeHadConversations || hasObservedSyncCompletionThisLaunch` guard on the didDrain branch — without it an empty-store drain marks the repair complete.
     func testRepairMissingConversationPreviews_emptyStoreDrainDoesNotMarkComplete() async throws {
         // On a fresh install the repair can drain before the first sync run
         // registers; that empty drain must not count as completion.
@@ -176,6 +176,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         )
     }
 
+    // Revert-check: ConversationListViewModel.bindSyncCompletionRepairRearm plus the didDrain gate's hasObservedSyncCompletionThisLaunch arm — dropping either leaves the first completed sync unswept.
     func testRepairMissingConversationPreviews_rearmsOnSyncCompletedNotification() async throws {
         // First pass drains an empty store and stays armed.
         let viewModel = makeViewModel()
@@ -415,10 +416,10 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withLastMessageDate(lastMessageDate)
             .withUnreadCount(3)
             .visible()
+            .withParticipant(makePerson(email: "alice@example.com"))
             .build(in: context)
         conversation.latestInboxDate = latestInboxDate
         conversation.pinned = true
-        addConversationParticipant(email: "alice@example.com", to: conversation)
         try context.save()
 
         let manager = makeConversationManager()
@@ -452,8 +453,8 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withLastMessageDate(initialDate)
             .withUnreadCount(1)
             .visible()
+            .withParticipant(makePerson(email: "friend@example.com"))
             .build(in: context)
-        addConversationParticipant(email: "friend@example.com", to: conversation)
         try context.save()
 
         let updater = ConversationRollupUpdater()
@@ -493,40 +494,14 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
     }
 
     private func makeViewModel(currentUserEmail: String = "me@example.com") -> ConversationListViewModel {
-        let stack = self.stack!
-        let searchService = ConversationSearchService(debounceInterval: 10_000_000)
-        let selectionService = ConversationSelectionService(
-            messageActions: Dependencies.shared.makeMessageActions(),
-            coreDataStack: Dependencies.shared.coreDataStack
-        )
-        let filterService = ConversationFilterService(
-            contactsService: ContactsService(),
-            contactEmailLoader: { _ in [] }
-        )
-
-        let dependencies = ConversationListDependencies(
-            storage: StorageDependencies(
-                viewContext: context,
-                makeBackgroundContext: { stack.newBackgroundContext() },
-                saveIfNeeded: { stack.saveIfNeeded(context: $0) },
+        ConversationListViewModel(
+            dependencies: .forTesting(
+                stack: stack,
                 migrationFlags: migrationFlags,
-                personCache: Dependencies.shared.personCache,
-                profilePhotoResolver: Dependencies.shared.profilePhotoResolver
-            ),
-            messaging: Dependencies.shared.makeMessagingDependencies(),
-            syncEngine: Dependencies.shared.syncEngine,
-            foregroundSyncCoordinator: Dependencies.shared.foregroundSyncCoordinator,
-            conversationManager: makeConversationManager(currentUserEmail: currentUserEmail),
-            makeConversationSearchService: { searchService },
-            makeConversationSelectionService: { selectionService },
-            makeConversationFilterService: { filterService }
-        )
-
-        return ConversationListViewModel(
-            dependencies: dependencies,
-            searchService: searchService,
-            selectionService: selectionService,
-            filterService: filterService
+                contactEmailLoader: { _ in [] },
+                conversationManager: makeConversationManager(currentUserEmail: currentUserEmail),
+                searchService: ConversationSearchService(debounceInterval: 10_000_000)
+            )
         )
     }
 
@@ -536,20 +511,11 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         ConversationManager(currentUserEmail: { currentUserEmail })
     }
 
-    private func addConversationParticipant(
-        email: String,
-        displayName: String? = nil,
-        to conversation: Conversation
-    ) {
-        let person = PersonBuilder()
+    private func makePerson(email: String, displayName: String? = nil) -> Person {
+        PersonBuilder()
             .withEmail(email)
             .withDisplayName(displayName)
             .build(in: context)
-        let participant = context.insertTestObject(ConversationParticipant.self)
-        participant.id = UUID()
-        participant.role = ParticipantRole.normal.rawValue
-        participant.person = person
-        participant.conversation = conversation
     }
 
     private func filteredConversationIDs(

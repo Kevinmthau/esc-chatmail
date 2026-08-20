@@ -23,12 +23,18 @@ enum PerformanceFixtureFactory {
         var conversations: [Conversation] = []
 
         for index in 0..<conversationCount {
+            // createdAt shields these message-less rows from the launch
+            // repair's stranded-shell sweep: the conversation-list perf tests
+            // now run the view model against this seeded store (test-owned
+            // dependencies), and without createdAt the sweep would archive
+            // every row mid-measure (old lastMessageDate, zero messages).
             let builder = ConversationBuilder()
                 .withKeyHash("perf-conversation-\(index)")
                 .withParticipantHash("perf-participants-\(index)")
                 .withDisplayName(displayName(forConversationAt: index))
                 .withSnippet(snippet(forConversationAt: index))
                 .withLastMessageDate(baseDate.addingTimeInterval(TimeInterval(-index * 180)))
+                .withCreatedAt(Date())
                 .withUnreadCount(index.isMultiple(of: 6) ? 2 : 0)
                 .visible()
 

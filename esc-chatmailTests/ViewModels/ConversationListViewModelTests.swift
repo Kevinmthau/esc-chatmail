@@ -21,21 +21,25 @@ final class ConversationListViewModelTests: XCTestCase {
     }
 
     func testOnAppear_recomputesWhenDebouncedSearchUpdates() async throws {
+        // createdAt: see makeConversation — shields message-less fixtures
+        // from the launch repair's stranded-shell sweep.
         let alice = ConversationBuilder()
             .withDisplayName("Alice")
             .withSnippet("hello")
             .visible()
             .withLastMessageDate(Date(timeIntervalSince1970: 300))
+            .withCreatedAt(Date())
             .build(in: context)
         let bob = ConversationBuilder()
             .withDisplayName("Bob")
             .withSnippet("project update")
             .visible()
             .withLastMessageDate(Date(timeIntervalSince1970: 200))
+            .withCreatedAt(Date())
             .build(in: context)
         try context.save()
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             searchService: ConversationSearchService(debounceInterval: 10_000_000)
         )
 
@@ -57,7 +61,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
         let initialItems = viewModel.filteredConversationItems
 
@@ -79,7 +83,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
 
         bob.lastMessageDate = Date(timeIntervalSince1970: 400)
@@ -94,7 +98,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
 
         bob.pinned = true
@@ -111,7 +115,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
         viewModel.toggleSelection(for: bob.objectID)
 
@@ -133,7 +137,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
         let initialItems = viewModel.filteredConversationItems
         viewModel.toggleSelection(for: bob.objectID)
@@ -153,7 +157,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
         try context.save()
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
                 configuration: VirtualScrollConfiguration(
                     visibleItemCount: 1,
@@ -183,27 +187,32 @@ final class ConversationListViewModelTests: XCTestCase {
         let lastSavedID = try XCTUnwrap(UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"))
         let sharedDate = Date(timeIntervalSince1970: 300)
 
+        // createdAt: see makeConversation — shields message-less fixtures
+        // from the launch repair's stranded-shell sweep.
         let lastSaved = ConversationBuilder()
             .withId(lastSavedID)
             .withDisplayName("Last")
             .withLastMessageDate(sharedDate)
+            .withCreatedAt(Date())
             .visible()
             .build(in: context)
         let firstSaved = ConversationBuilder()
             .withId(firstSavedID)
             .withDisplayName("First")
             .withLastMessageDate(sharedDate)
+            .withCreatedAt(Date())
             .visible()
             .build(in: context)
         let secondSaved = ConversationBuilder()
             .withId(secondSavedID)
             .withDisplayName("Second")
             .withLastMessageDate(sharedDate)
+            .withCreatedAt(Date())
             .visible()
             .build(in: context)
         try context.save()
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
                 configuration: VirtualScrollConfiguration(
                     visibleItemCount: 1,
@@ -258,7 +267,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let carol = makeConversation(name: "Carol", snippet: "needle", date: 100)
         try context.save()
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             searchService: ConversationSearchService(debounceInterval: 10_000_000),
             windowProvider: ConversationWindowProvider(
                 configuration: VirtualScrollConfiguration(
@@ -310,7 +319,7 @@ final class ConversationListViewModelTests: XCTestCase {
             ["ＪＯＳＥ Compatibility 0", "ＪＯＳＥ Compatibility 1"]
         )
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             searchService: ConversationSearchService(debounceInterval: 10_000_000),
             windowProvider: ConversationWindowProvider(
                 configuration: VirtualScrollConfiguration(
@@ -363,22 +372,26 @@ final class ConversationListViewModelTests: XCTestCase {
         let contactEmail = "contact@example.com"
 
         for index in 0..<10 {
-            let conversation = makeConversation(
-                name: "Other \(index)",
-                snippet: "not a contact",
-                date: TimeInterval(300 - index)
-            )
             let person = PersonBuilder()
                 .withEmail("other\(index)@example.com")
                 .build(in: context)
-            addConversationParticipant(person: person, to: conversation)
+            _ = makeConversation(
+                name: "Other \(index)",
+                snippet: "not a contact",
+                date: TimeInterval(300 - index),
+                participant: person
+            )
         }
 
-        let contactConversation = makeConversation(name: "Contact", snippet: "older match", date: 100)
         let contactPerson = PersonBuilder()
             .withEmail(contactEmail)
             .build(in: context)
-        addConversationParticipant(person: contactPerson, to: contactConversation)
+        let contactConversation = makeConversation(
+            name: "Contact",
+            snippet: "older match",
+            date: 100,
+            participant: contactPerson
+        )
         try context.save()
 
         let filterService = ConversationFilterService(
@@ -390,7 +403,7 @@ final class ConversationListViewModelTests: XCTestCase {
             filterService.contactEmailsCache.contains(EmailNormalizer.normalize(contactEmail))
         }
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             filterService: filterService,
             windowProvider: ConversationWindowProvider(
                 configuration: VirtualScrollConfiguration(
@@ -408,6 +421,7 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [contactConversation.objectID])
     }
 
+    // Revert-check: ConversationWindowProvider.fetchFilteredWindow — its persisted-only paging plus single pending-merge is what keeps the pending row deduplicated without skipping saved candidates.
     func testFilteredPagingMergesPendingConversationOnceWithoutSkippingSavedCandidates() throws {
         var savedMatchCandidate: Conversation?
         for index in 0..<11 {
@@ -451,6 +465,7 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(Set(window.map(\.objectID)).count, window.count)
     }
 
+    // Revert-check: ConversationWindowProvider.fetchWindow's canMatchCurrentFilter early return — without it the empty contact filter would scan (and page through) every fetched candidate.
     func testContactFilterWithEmptyCacheSkipsCandidateScan() throws {
         for index in 0..<10 {
             _ = makeConversation(
@@ -498,7 +513,7 @@ final class ConversationListViewModelTests: XCTestCase {
         unreadConversation.inboxUnreadCount = 2
         try context.save()
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
                 configuration: VirtualScrollConfiguration(
                     visibleItemCount: 1,
@@ -523,7 +538,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
         try context.save()
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
                 configuration: VirtualScrollConfiguration(
                     visibleItemCount: 1,
@@ -555,7 +570,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
         try context.save()
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             windowProvider: ConversationWindowProvider(
                 configuration: VirtualScrollConfiguration(
                     visibleItemCount: 1,
@@ -603,7 +618,7 @@ final class ConversationListViewModelTests: XCTestCase {
         bob.inboxUnreadCount = 1
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
         viewModel.currentFilter = .unread
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
@@ -625,15 +640,14 @@ final class ConversationListViewModelTests: XCTestCase {
     }
 
     func testPersonDisplayNameChangeRefreshesAffectedConversationItem() async throws {
-        let conversation = makeConversation(name: "Info", snippet: "alpha", date: 300)
         let person = PersonBuilder()
             .withEmail("info@bonbonwhims.com")
             .withDisplayName("Info")
             .build(in: context)
-        addConversationParticipant(person: person, to: conversation)
+        let conversation = makeConversation(name: "Info", snippet: "alpha", date: 300, participant: person)
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
         let initialItem = try XCTUnwrap(viewModel.filteredConversationItems.first)
 
@@ -657,7 +671,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
 
@@ -695,7 +709,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
         try context.save()
 
-        let viewModel = ConversationListViewModel()
+        let viewModel = makeViewModel()
         viewModel.onAppear(in: context)
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
 
@@ -714,7 +728,7 @@ final class ConversationListViewModelTests: XCTestCase {
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
         try context.save()
 
-        let viewModel = ConversationListViewModel(
+        let viewModel = makeViewModel(
             searchService: ConversationSearchService(debounceInterval: 50_000_000)
         )
         viewModel.onAppear(in: context)
@@ -750,21 +764,46 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(filteredConversationIDs(in: viewModel), expectedIDs, file: file, line: line)
     }
 
-    private func makeConversation(name: String, snippet: String, date: TimeInterval) -> Conversation {
-        ConversationBuilder()
+    /// Builds the view model against this suite's stack via
+    /// `ConversationListDependencies.forTesting`, so storage, migration
+    /// flags, and the contact loader never fall back to `Dependencies.shared`
+    /// / `CoreDataStack.shared` / `UserDefaults.standard`.
+    private func makeViewModel(
+        searchService: ConversationSearchService? = nil,
+        filterService: ConversationFilterService? = nil,
+        windowProvider: ConversationWindowProvider = ConversationWindowProvider()
+    ) -> ConversationListViewModel {
+        ConversationListViewModel(
+            dependencies: .forTesting(
+                stack: stack,
+                searchService: searchService,
+                filterService: filterService
+            ),
+            windowProvider: windowProvider
+        )
+    }
+
+    /// createdAt keeps these message-less fixtures inside the stranded-shell
+    /// grace period: with test-owned storage the launch repair scheduled by
+    /// onAppear(in:) sweeps THIS suite's store, and without createdAt it
+    /// would archive every saved conversation that has a lastMessageDate but
+    /// no Message rows mid-test.
+    private func makeConversation(
+        name: String,
+        snippet: String,
+        date: TimeInterval,
+        participant: Person? = nil
+    ) -> Conversation {
+        let builder = ConversationBuilder()
             .withDisplayName(name)
             .withSnippet(snippet)
             .visible()
             .withLastMessageDate(Date(timeIntervalSince1970: date))
-            .build(in: context)
-    }
-
-    private func addConversationParticipant(person: Person, to conversation: Conversation) {
-        let participant = context.insertTestObject(ConversationParticipant.self)
-        participant.id = UUID()
-        participant.participantRole = .normal
-        participant.person = person
-        participant.conversation = conversation
+            .withCreatedAt(Date())
+        if let participant {
+            _ = builder.withParticipant(participant)
+        }
+        return builder.build(in: context)
     }
 
     private func waitUntil(
