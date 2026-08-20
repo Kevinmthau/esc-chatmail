@@ -42,13 +42,9 @@ struct ConversationWindowProvider {
         request.includesPendingChanges = true
 
         let hasSearchText = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let shouldFetchPastInvisibleCandidates: Bool
-        switch filter {
-        case .all, .unread:
-            shouldFetchPastInvisibleCandidates = hasSearchText
-        case .contacts, .other:
-            shouldFetchPastInvisibleCandidates = true
-        }
+        // Why some fetches must page past SQL-invisible candidates is
+        // documented on ConversationFilter.needsInMemoryCandidateScan(hasSearchText:).
+        let shouldFetchPastInvisibleCandidates = filter.needsInMemoryCandidateScan(hasSearchText: hasSearchText)
 
         do {
             if shouldFetchPastInvisibleCandidates {
@@ -145,8 +141,8 @@ struct ConversationWindowProvider {
     private func predicate(searchText: String, filter: ConversationFilter) -> NSPredicate {
         var predicates = [NSPredicate(format: "archivedAt == nil")]
 
-        if filter == .unread {
-            predicates.append(NSPredicate(format: "inboxUnreadCount > 0"))
+        if let filterPredicate = filter.storePredicate {
+            predicates.append(filterPredicate)
         }
 
         let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
