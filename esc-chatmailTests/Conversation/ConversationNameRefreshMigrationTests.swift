@@ -159,7 +159,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertEqual(refreshed.displayName, "alice@example.com")
     }
 
-    // Revert-check: ConversationListViewModel.repairMissingConversationPreviews' `storeHadConversations || hasObservedSyncCompletionThisLaunch` guard on the didDrain branch — without it an empty-store drain marks the repair complete.
+    // Revert-check: ConversationLaunchRepairCoordinator.repairMissingConversationPreviews' `storeHadConversations || hasObservedSyncCompletionThisLaunch` guard on the didDrain branch (driven through the view model forwarder) — without it an empty-store drain marks the repair complete.
     func testRepairMissingConversationPreviews_emptyStoreDrainDoesNotMarkComplete() async throws {
         // On a fresh install the repair can drain before the first sync run
         // registers; that empty drain must not count as completion.
@@ -176,7 +176,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         )
     }
 
-    // Revert-check: ConversationListViewModel.bindSyncCompletionRepairRearm plus the didDrain gate's hasObservedSyncCompletionThisLaunch arm — dropping either leaves the first completed sync unswept.
+    // Revert-check: ConversationLaunchRepairCoordinator.bindSyncCompletionRepairRearm plus the didDrain gate's hasObservedSyncCompletionThisLaunch arm (driven through the view model forwarder) — dropping either leaves the first completed sync unswept.
     func testRepairMissingConversationPreviews_rearmsOnSyncCompletedNotification() async throws {
         // First pass drains an empty store and stays armed.
         let viewModel = makeViewModel()
@@ -542,9 +542,10 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         return conversation
     }
 
-    // The preview repair runs at .background priority and first awaits the
-    // shared SyncEngine going idle, so on a loaded CI runner the first poll
-    // success can take several seconds; the deadline is generous because a
+    // The preview repair runs at .background priority (and historically
+    // awaited the shared SyncEngine going idle; forTesting now injects an
+    // immediate waiter), so on a loaded CI runner the first poll success can
+    // take several seconds; the deadline is generous because a
     // green run exits at the first successful poll anyway. 15s still timed
     // out on a CI run whose test phase ran ~2x slower than baseline, so the
     // deadline sits far above any observed stall while staying under CI's

@@ -11,10 +11,9 @@ extension ConversationListDependencies {
     /// `repairMissingConversationPreviews`) run against the given
     /// `TestCoreDataStack`'s store instead of the shared on-disk store.
     ///
-    /// Not yet isolated: `syncEngine`, `foregroundSyncCoordinator`,
-    /// `messaging`, `personCache`, and `profilePhotoResolver` still come from
-    /// `Dependencies.shared` because no test seam exists for them yet — the
-    /// launch-repair coordinator extraction adds the sync-idle wait seam.
+    /// Not yet isolated: `foregroundSyncCoordinator`, `messaging`,
+    /// `personCache`, and `profilePhotoResolver` still come from
+    /// `Dependencies.shared` because no test seam exists for them yet.
     ///
     /// - Parameters:
     ///   - stack: The suite's `TestCoreDataStack`; supplies the view context,
@@ -27,6 +26,12 @@ extension ConversationListDependencies {
     ///     real Contacts store. Ignored when `filterService` is supplied.
     ///   - conversationManager: Override for the launch passes' manager.
     ///     Defaults to a fresh manager with a fixed test user email.
+    ///   - syncWaiter: Sync-idle wait awaited by the launch preview repair.
+    ///     Defaults to a `MockForegroundSyncEngine` that returns immediately,
+    ///     so tests never await the shared `SyncEngine`.
+    ///   - notificationCenter: Source of `.syncCompleted` for the launch
+    ///     repair's re-arm. Defaults to `.default`, matching the existing
+    ///     suites that post the notification on the default center.
     ///   - searchService: Optional service override returned by the bundle's
     ///     search factory (e.g. to shorten the debounce interval).
     ///   - selectionService: Optional service override returned by the
@@ -39,6 +44,8 @@ extension ConversationListDependencies {
         migrationFlags: MigrationFlagStore = InMemoryMigrationFlagStore(),
         contactEmailLoader: ConversationFilterService.ContactEmailLoader? = nil,
         conversationManager: ConversationManager? = nil,
+        syncWaiter: (any ForegroundSyncPerforming)? = nil,
+        notificationCenter: NotificationCenter = .default,
         searchService: ConversationSearchService? = nil,
         selectionService: ConversationSelectionService? = nil,
         filterService: ConversationFilterService? = nil
@@ -54,6 +61,7 @@ extension ConversationListDependencies {
         )
         let resolvedConversationManager = conversationManager
             ?? ConversationManager(currentUserEmail: { "me@example.com" })
+        let resolvedSyncWaiter = syncWaiter ?? MockForegroundSyncEngine()
 
         return ConversationListDependencies(
             storage: StorageDependencies(
@@ -65,9 +73,10 @@ extension ConversationListDependencies {
                 profilePhotoResolver: Dependencies.shared.profilePhotoResolver
             ),
             messaging: Dependencies.shared.makeMessagingDependencies(),
-            syncEngine: Dependencies.shared.syncEngine,
+            syncWaiter: resolvedSyncWaiter,
             foregroundSyncCoordinator: Dependencies.shared.foregroundSyncCoordinator,
             conversationManager: resolvedConversationManager,
+            notificationCenter: notificationCenter,
             makeConversationSearchService: { resolvedSearchService },
             makeConversationSelectionService: { resolvedSelectionService },
             makeConversationFilterService: { resolvedFilterService }
