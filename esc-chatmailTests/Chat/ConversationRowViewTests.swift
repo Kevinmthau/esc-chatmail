@@ -17,7 +17,7 @@ final class ConversationRowViewTests: XCTestCase {
             formattedDisplayName: "Stale Name"
         )
 
-        let resolved = ConversationRowView.resolvedParticipantInfo(
+        let resolved = ConversationRowPolicy.resolvedParticipantInfo(
             cachedFull: nil,
             cachedBase: cachedBase,
             uncached: uncached
@@ -47,7 +47,7 @@ final class ConversationRowViewTests: XCTestCase {
             formattedDisplayName: "Uncached Friend"
         )
 
-        let resolved = ConversationRowView.resolvedParticipantInfo(
+        let resolved = ConversationRowPolicy.resolvedParticipantInfo(
             cachedFull: cachedFull,
             cachedBase: nil,
             uncached: uncached
@@ -69,7 +69,7 @@ final class ConversationRowViewTests: XCTestCase {
             totalUniqueParticipants: 1
         )
 
-        let showsGroupAvatar = ConversationRowView.resolvedShowsGroupAvatar(
+        let showsGroupAvatar = ConversationRowPolicy.resolvedShowsGroupAvatar(
             snapshotShowsGroupAvatar: true,
             conversationType: .group,
             participantInfo: participantInfo
@@ -86,7 +86,7 @@ final class ConversationRowViewTests: XCTestCase {
             totalUniqueParticipants: 1
         )
 
-        let showsGroupAvatar = ConversationRowView.resolvedShowsGroupAvatar(
+        let showsGroupAvatar = ConversationRowPolicy.resolvedShowsGroupAvatar(
             snapshotShowsGroupAvatar: true,
             conversationType: .list,
             participantInfo: participantInfo
@@ -102,7 +102,7 @@ final class ConversationRowViewTests: XCTestCase {
             formattedDisplayName: "First Sender"
         )
 
-        let displayName = ConversationRowView.resolvedDisplayName(
+        let displayName = ConversationRowPolicy.resolvedDisplayName(
             conversationType: .list,
             storedDisplayName: "Swift Evolution",
             participantInfo: participantInfo
@@ -121,22 +121,22 @@ final class ConversationRowViewTests: XCTestCase {
         )
 
         XCTAssertFalse(
-            ConversationRowView.shouldLoadParticipantInfo(conversationType: .list)
+            ConversationRowPolicy.shouldLoadParticipantInfo(conversationType: .list)
         )
         XCTAssertTrue(
-            ConversationRowView.resolvedAvatarDisplayNames(
+            ConversationRowPolicy.resolvedAvatarDisplayNames(
                 conversationType: .list,
                 participantInfo: participantInfo
             ).isEmpty
         )
         XCTAssertTrue(
-            ConversationRowView.resolvedAvatarPhotos(
+            ConversationRowPolicy.resolvedAvatarPhotos(
                 conversationType: .list,
                 participantInfo: participantInfo
             ).isEmpty
         )
         XCTAssertEqual(
-            ConversationRowView.resolvedDisplayName(
+            ConversationRowPolicy.resolvedDisplayName(
                 conversationType: .list,
                 storedDisplayName: "Swift Evolution",
                 participantInfo: participantInfo
