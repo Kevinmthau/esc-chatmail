@@ -1,10 +1,6 @@
 import Foundation
 import CoreData
 
-private func uuidSortsBefore(_ lhs: UUID, _ rhs: UUID) -> Bool {
-    (lhs as NSUUID).compare(rhs) == .orderedAscending
-}
-
 struct ConversationListItem: Identifiable, Equatable {
     let id: NSManagedObjectID
     let snapshot: ConversationSnapshot
@@ -24,10 +20,54 @@ struct ConversationListItem: Identifiable, Equatable {
         )
     }
 
-    fileprivate struct SortKey: Equatable {
+    /// CANONICAL chat-list ordering — the single owner of the
+    /// (pinned desc, lastMessageDate desc, conversation-UUID asc) order.
+    /// Every Swift comparator on the list delegates to `<`; do not duplicate
+    /// the comparison. The `NSSortDescriptor`s in
+    /// `ConversationWindowProvider.fetchWindow` are this key's SQL mirror
+    /// (SQLite cannot call a Swift comparator) and must stay in exact
+    /// agreement with it.
+    struct SortKey: Equatable, Comparable {
         let pinned: Bool
         let lastMessageDate: Date?
         let stableID: UUID
+
+        init(pinned: Bool, lastMessageDate: Date?, stableID: UUID) {
+            self.pinned = pinned
+            self.lastMessageDate = lastMessageDate
+            self.stableID = stableID
+        }
+
+        /// Builds the key straight from a managed `Conversation` — the
+        /// counterpart of `ConversationListItem.sortKey` for rows that have
+        /// no list item yet (`ConversationWindowProvider`'s pending/persisted
+        /// merge sort).
+        init(conversation: Conversation) {
+            self.init(
+                pinned: conversation.pinned,
+                lastMessageDate: conversation.lastMessageDate,
+                stableID: conversation.id
+            )
+        }
+
+        /// "Sorts before" as `<`: pinned rows first, then later
+        /// `lastMessageDate` first (nil as `.distantPast`), then conversation
+        /// UUID ascending via `NSUUID` comparison — the equal-timestamp UUID
+        /// tie-break keeps row identity stable across expansion, live insert,
+        /// and reappearance.
+        static func < (lhs: SortKey, rhs: SortKey) -> Bool {
+            if lhs.pinned != rhs.pinned {
+                return lhs.pinned && !rhs.pinned
+            }
+
+            let lhsDate = lhs.lastMessageDate ?? .distantPast
+            let rhsDate = rhs.lastMessageDate ?? .distantPast
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+
+            return (lhs.stableID as NSUUID).compare(rhs.stableID) == .orderedAscending
+        }
     }
 }
 
@@ -56,6 +96,11 @@ struct ConversationWindowProvider {
         guard canMatchCurrentFilter else { return [] }
 
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+        // SQL mirror of ConversationListItem.SortKey's `<` — the CANONICAL
+        // chat-list order. SQLite cannot call the Swift comparator, so these
+        // descriptors must stay in exact agreement with it: pinned desc,
+        // lastMessageDate desc (nil/NULL last on both sides), conversation
+        // UUID asc.
         request.sortDescriptors = [
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
             NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false),
@@ -160,18 +205,11 @@ struct ConversationWindowProvider {
         )
     }
 
+    /// Delegates to `ConversationListItem.SortKey` (the CANONICAL chat-list
+    /// order) so the pending/persisted merge sorts pending rows exactly where
+    /// a refetch would put them.
     private func sortsBefore(_ lhs: Conversation, _ rhs: Conversation) -> Bool {
-        if lhs.pinned != rhs.pinned {
-            return lhs.pinned && !rhs.pinned
-        }
-
-        let lhsDate = lhs.lastMessageDate ?? .distantPast
-        let rhsDate = rhs.lastMessageDate ?? .distantPast
-        if lhsDate != rhsDate {
-            return lhsDate > rhsDate
-        }
-
-        return uuidSortsBefore(lhs.id, rhs.id)
+        ConversationListItem.SortKey(conversation: lhs) < ConversationListItem.SortKey(conversation: rhs)
     }
 
     private func predicate(searchText: String, filter: ConversationFilter) -> NSPredicate {
@@ -332,25 +370,14 @@ struct ConversationListStore {
         return existed
     }
 
-    /// THE list-item comparator: pinned first, then lastMessageDate
-    /// descending, then conversation UUID ascending — matching
-    /// `ConversationWindowProvider`'s NSSortDescriptor order so live upserts
-    /// land where a refetch would put them (the equal-timestamp UUID
-    /// tie-break keeps row identity stable across expansion, live insert,
-    /// and reappearance). Internal so tests can assert `visibleItems` stays
-    /// sorted by it.
+    /// THE list-item comparator, delegating to `ConversationListItem.SortKey`
+    /// (the CANONICAL chat-list order, mirrored by
+    /// `ConversationWindowProvider`'s NSSortDescriptors) so live upserts land
+    /// where a refetch would put them — the equal-timestamp UUID tie-break
+    /// keeps row identity stable across expansion, live insert, and
+    /// reappearance. Internal so tests can assert `visibleItems` stays sorted
+    /// by it.
     static func sortsBefore(_ lhs: ConversationListItem, _ rhs: ConversationListItem) -> Bool {
-        if lhs.snapshot.pinned != rhs.snapshot.pinned {
-            return lhs.snapshot.pinned && !rhs.snapshot.pinned
-        }
-
-        let lhsDate = lhs.snapshot.lastMessageDate ?? .distantPast
-        let rhsDate = rhs.snapshot.lastMessageDate ?? .distantPast
-
-        if lhsDate != rhsDate {
-            return lhsDate > rhsDate
-        }
-
-        return uuidSortsBefore(lhs.sortKey.stableID, rhs.sortKey.stableID)
+        lhs.sortKey < rhs.sortKey
     }
 }
