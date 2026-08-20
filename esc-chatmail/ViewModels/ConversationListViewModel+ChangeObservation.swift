@@ -157,8 +157,8 @@ extension ConversationListViewModel {
     /// this pipeline with the automerge's merge blocks and the
     /// objectsDidChange sink that fires inside them, so neither the context
     /// nor the list store is ever touched from two threads at once.
-    /// Whichever pipeline lands first, `existingObject(with:)` reads the
-    /// saved row (faulted fresh from the store or refreshed by the merge),
+    /// Whichever pipeline lands first, the batch fetch reads the saved
+    /// rows (materialized fresh from the store or refreshed by the merge),
     /// and a duplicate pass rebuilds identical snapshots that
     /// `publishVisibleItems`'s equality guard suppresses.
     private func handleSiblingContextSave(_ notification: Notification) {
@@ -169,11 +169,34 @@ extension ConversationListViewModel {
         let deletedIDs = conversationSaveObjectIDs(forKey: NSDeletedObjectIDsKey, in: notification)
 
         context.performAndWait {
-            // existingObject throws for rows a later save already deleted;
-            // dropping them is correct — the delete's own notification
+            // One batch fetch instead of a per-ID existingObject(with:) loop:
+            // prefetching pulls the participants → person chain the snapshot
+            // build walks in the same round trip, rather than firing one
+            // to-many fault per row on the main queue. Rows a later save
+            // already deleted simply do not return — the same drop
+            // existingObject's throw produced; the delete's own notification
             // removes the row.
-            let updatedConversations = insertedIDs.union(updatedIDs).compactMap { objectID in
-                try? context.existingObject(with: objectID) as? Conversation
+            let changedIDs = insertedIDs.union(updatedIDs)
+            var updatedConversations: [Conversation] = []
+            if !changedIDs.isEmpty {
+                let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+                request.predicate = NSPredicate(format: "self IN %@", Array(changedIDs))
+                request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
+                request.includesPendingChanges = true
+                // Materialize at fetch time, like existingObject did. Returned
+                // faults would leave a window before the snapshot build fires
+                // them, and a sibling delete landing in that window tombstones
+                // the row (shouldDeleteInaccessibleFaults defaults on) — the
+                // snapshot build then crashes reading its nil `id` UUID.
+                request.returnsObjectsAsFaults = false
+                // shouldRefreshRefetchedObjects stays default — forcing a
+                // refresh here would fight the automerge's registered-object
+                // merge ("whichever pipeline lands first" above).
+                do {
+                    updatedConversations = try context.fetch(request)
+                } catch {
+                    Log.error("Failed to fetch sibling-save conversations", category: .conversation, error: error)
+                }
             }
 
             // performAndWait executes on the calling thread — main, per the
