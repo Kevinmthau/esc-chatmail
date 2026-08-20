@@ -172,6 +172,37 @@ final class ConversationRowViewTests: XCTestCase {
         XCTAssertTrue(snapshot.showsGroupAvatar)
     }
 
+    // Revert-check: ConversationSnapshot.participantFields(from:) — merging its two
+    // per-person rules (dropping the hide-my-email exclusion from participantEmails,
+    // or adding it to the fingerprint) fails this test.
+    // HONEST SCOPE: a full revert to the pre-F15 two-walk helpers preserved the same
+    // asymmetry and would pass; this pins the asymmetry itself, not the single walk.
+    func testConversationSnapshot_hideMyEmailParticipant_excludedFromEmailsButKeptInFingerprint() {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let friend = PersonBuilder()
+            .withEmail("Friend@Example.com")
+            .withDisplayName("Friend")
+            .build(in: context)
+        let relay = PersonBuilder()
+            .withEmail("relay@privaterelay.appleid.com")
+            .withDisplayName("Hide My Email")
+            .build(in: context)
+        let conversation = ConversationBuilder()
+            .visible()
+            .withParticipant(friend)
+            .withParticipant(relay)
+            .build(in: context)
+
+        let snapshot = ConversationSnapshot(from: conversation)
+
+        XCTAssertEqual(snapshot.participantEmails, ["friend@example.com"])
+        XCTAssertEqual(
+            snapshot.participantDisplayNameFingerprint,
+            "friend@example.com=Friend|relay@privaterelay.appleid.com=Hide My Email"
+        )
+    }
+
     private func makeParticipantInfo(
         displayNames: [String],
         photos: [ProfilePhoto],

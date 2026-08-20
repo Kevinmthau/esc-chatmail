@@ -3,6 +3,12 @@ import CoreData
 import Combine
 
 struct ConversationRowView: View {
+    /// Maximum participants shown in the row's avatar stack and name rollup.
+    /// This value is a `ParticipantRollupCache` key component — it must agree
+    /// with the `maxParticipants: 4` literals in `ChatViewModel`, or the two
+    /// surfaces silently fork the rollup cache.
+    private let maxDisplayedParticipants = 4
+
     /// Use snapshot to avoid re-renders from unrelated Conversation property changes
     let snapshot: ConversationSnapshot
 
@@ -179,7 +185,7 @@ struct ConversationRowView: View {
             conversationObjectID: conversationObjectID,
             participantHash: snapshot.participantHash,
             currentUserEmail: currentUserEmail,
-            maxParticipants: 4,
+            maxParticipants: maxDisplayedParticipants,
             fallbackDisplayName: snapshot.displayNameHint,
             includePhotos: includePhotos
         )
@@ -203,7 +209,7 @@ struct ConversationRowView: View {
     }
 
     private var nonSelfParticipantEmails: [String] {
-        // Snapshot emails are already normalized (ConversationSnapshot.participantEmails(from:)
+        // Snapshot emails are already normalized (ConversationSnapshot.participantFields(from:)
         // stores EmailNormalizer.normalize output, which is idempotent), so compare them
         // against the once-normalized current-user email without re-normalizing each one.
         snapshot.participantEmails.filter { email in
@@ -240,7 +246,7 @@ struct ConversationRowView: View {
             from: conversationObjectID,
             in: conversationContext,
             currentUserEmail: currentUserEmail,
-            maxParticipants: 4,
+            maxParticipants: maxDisplayedParticipants,
             participantHash: snapshot.participantHash,
             fallbackDisplayName: snapshot.displayNameHint
         )

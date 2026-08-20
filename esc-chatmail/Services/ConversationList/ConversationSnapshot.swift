@@ -14,8 +14,14 @@ struct ConversationSnapshot: Equatable {
     let participantHash: String?
     let participantEmails: [String]
     let participantDisplayNameFingerprint: String
-    let showsGroupAvatar: Bool
     let conversationType: ConversationType
+
+    /// Derived, not stored: always `conversationType != .oneToOne`, so the
+    /// synthesized `Equatable` correctly ignores it (`conversationType` itself
+    /// is compared).
+    var showsGroupAvatar: Bool {
+        conversationType != .oneToOne
+    }
 
     init(from conversation: Conversation) {
         let conversationType = conversation.conversationType
@@ -26,37 +32,43 @@ struct ConversationSnapshot: Equatable {
         self.lastMessageDate = conversation.lastMessageDate
         self.displayNameHint = conversation.displayName
         self.participantHash = conversation.participantHash
-        self.participantEmails = conversationType == .list
-            ? []
-            : Self.participantEmails(from: conversation)
-        self.participantDisplayNameFingerprint = conversationType == .list
-            ? ""
-            : Self.participantDisplayNameFingerprint(from: conversation)
-        self.showsGroupAvatar = conversationType != .oneToOne
+        let participantFields = conversationType == .list
+            ? (emails: [], fingerprint: "")
+            : Self.participantFields(from: conversation)
+        self.participantEmails = participantFields.emails
+        self.participantDisplayNameFingerprint = participantFields.fingerprint
         self.conversationType = conversationType
     }
 
-    private static func participantEmails(from conversation: Conversation) -> [String] {
-        let emails = conversation.participants?
-            .compactMap { participant -> String? in
-                guard let person = participant.person else { return nil }
-                guard !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else { return nil }
-                let normalizedEmail = EmailNormalizer.normalize(person.email)
-                return normalizedEmail.isEmpty ? nil : normalizedEmail
-            } ?? []
+    /// One walk over `conversation.participants` building both
+    /// participant-derived fields. The hide-my-email asymmetry is DELIBERATE —
+    /// do not "clean up" by merging the two rules: `emails` EXCLUDES persons
+    /// whose display name is a Hide My Email relay label (they are routing
+    /// aliases, not real participants, so they must not feed the fallback
+    /// display name), while `fingerprint` INCLUDES them (their display data
+    /// still renders in participant rollups, so a change to it must still be
+    /// detected as a fingerprint change).
+    private static func participantFields(
+        from conversation: Conversation
+    ) -> (emails: [String], fingerprint: String) {
+        var emails = Set<String>()
+        var fingerprintEntries = Set<String>()
 
-        return Array(Set(emails)).sorted()
-    }
+        for participant in conversation.participants ?? [] {
+            guard let person = participant.person else { continue }
+            let normalizedEmail = EmailNormalizer.normalize(person.email)
+            guard !normalizedEmail.isEmpty else { continue }
 
-    private static func participantDisplayNameFingerprint(from conversation: Conversation) -> String {
-        let entries = conversation.participants?
-            .compactMap { participant -> String? in
-                guard let person = participant.person else { return nil }
-                let normalizedEmail = EmailNormalizer.normalize(person.email)
-                guard !normalizedEmail.isEmpty else { return nil }
-                return "\(normalizedEmail)=\(person.displayName ?? "")"
-            } ?? []
+            fingerprintEntries.insert("\(normalizedEmail)=\(person.displayName ?? "")")
 
-        return Array(Set(entries)).sorted().joined(separator: "|")
+            if !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
+                emails.insert(normalizedEmail)
+            }
+        }
+
+        return (
+            emails: emails.sorted(),
+            fingerprint: fingerprintEntries.sorted().joined(separator: "|")
+        )
     }
 }
