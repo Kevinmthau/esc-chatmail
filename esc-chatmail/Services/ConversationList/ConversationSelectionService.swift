@@ -25,11 +25,6 @@ final class ConversationSelectionService: ObservableObject {
 
     // MARK: - Selection Operations
 
-    /// Toggles selection state for a conversation
-    func toggleSelection(for conversation: Conversation) {
-        toggleSelection(for: conversation.objectID)
-    }
-
     /// Toggles selection state for a conversation by object identifier.
     func toggleSelection(for objectID: NSManagedObjectID) {
         if selectedConversationIDs.contains(objectID) {
@@ -37,11 +32,6 @@ final class ConversationSelectionService: ObservableObject {
         } else {
             selectedConversationIDs.insert(objectID)
         }
-    }
-
-    /// Selects or deselects all conversations in the list
-    func selectAll(from conversations: [Conversation]) {
-        selectAll(conversationIDs: conversations.map(\.objectID))
     }
 
     /// Selects or deselects all conversations in the list by identifier.
@@ -57,7 +47,8 @@ final class ConversationSelectionService: ObservableObject {
     ///
     /// Invariant: the selection is always a subset of the rows the list
     /// currently shows. The "N Selected" title, the Select All / Deselect All
-    /// label (`selectedCount == visible.count`) and the batch archive / spam
+    /// label (the view compares `selectedConversationIDs.count` against the
+    /// visible `filteredConversationItems.count`) and the batch archive / spam
     /// actions all assume it, so a row that leaves the window for any reason
     /// (filter or search mismatch, trim, archive, delete, invalidate-all)
     /// must leave the selection with it. The `isSubset` guard keeps the
@@ -68,33 +59,12 @@ final class ConversationSelectionService: ObservableObject {
         selectedConversationIDs.formIntersection(visibleIDs)
     }
 
-    /// Cancels selection mode and clears all selections
-    func cancelSelection() {
-        isSelecting = false
-        selectedConversationIDs.removeAll()
-    }
-
     /// Toggles selection mode on/off
     func toggleSelectionMode() {
         isSelecting.toggle()
         if !isSelecting {
             selectedConversationIDs.removeAll()
         }
-    }
-
-    /// Returns the number of selected conversations
-    var selectedCount: Int {
-        selectedConversationIDs.count
-    }
-
-    /// Checks if a conversation is selected
-    func isSelected(_ conversation: Conversation) -> Bool {
-        selectedConversationIDs.contains(conversation.objectID)
-    }
-
-    /// Checks if a conversation identifier is selected
-    func isSelected(_ objectID: NSManagedObjectID) -> Bool {
-        selectedConversationIDs.contains(objectID)
     }
 
     // MARK: - Batch Operations
