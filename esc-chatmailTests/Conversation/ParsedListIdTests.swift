@@ -87,16 +87,33 @@ final class ParsedListIdTests: XCTestCase {
     }
 
     func testParse_longBase64AlphabetHumanWordPhraseIsPreserved() {
-        // Revert-check: the digit/separator byte scan in
-        // ParsedListId.isBase64EncodedNumericIdentifier — "Newsletters" pads
-        // to valid base64 and decodes to eight bytes, passing every length
-        // gate, so only the scan (its first non-digit, non-separator byte)
-        // keeps this brand word from being discarded as machine metadata.
+        // HONEST SCOPE: "Newsletters" pads to valid base64 and decodes to
+        // eight bytes, passing every length gate, but its decode carries only
+        // one digit byte — so the byte scan rejects it first and the digit
+        // threshold would too, and no single gate's removal flips it. It
+        // documents that a long brand word survives the decode rule; the
+        // scan-only pin is the "MTIzNDU2N3g=" test below.
         let parsed = ParsedListId.parse("Newsletters <newsletters.example.com>")
 
         XCTAssertEqual(
             parsed,
             ParsedListId(id: "newsletters.example.com", title: "Newsletters")
+        )
+    }
+
+    func testParse_base64OfDigitHeavyTokenWithForeignByteIsPreserved() {
+        // Revert-check: the digit/separator byte scan in
+        // ParsedListId.isBase64EncodedNumericIdentifier — "MTIzNDU2N3g="
+        // decodes to "1234567x" (eight bytes, seven digits), so the digit
+        // threshold alone would flag it; only the scan's rejection of the
+        // trailing non-digit, non-separator byte keeps a decode that is not
+        // purely digit-runs-and-separators from being treated as an encoded
+        // numeric identifier.
+        let parsed = ParsedListId.parse("MTIzNDU2N3g= <mtizndu2n3g=.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "mtizndu2n3g=.example.com", title: "MTIzNDU2N3g=")
         )
     }
 
