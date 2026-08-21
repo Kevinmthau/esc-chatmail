@@ -794,6 +794,57 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "Time Out")
     }
 
+    func testRepairIdentifierDerivedListConversationTitles_upgradesMachineTitleAndKeepsHumanTitle() async throws {
+        // Revert-check:
+        // ConversationRollupUpdater.repairIdentifierDerivedListConversationTitles —
+        // the per-launch list pass must heal a title stored under an older
+        // ParsedListId heuristic with no migration flag involved, and its
+        // candidate filter must leave human-titled list conversations alone.
+        let machine = ConversationBuilder()
+            .asList()
+            .withListId("mtaymjywmtutmjm1odc3lta=.list-id.email-newsletters.timeout.com")
+            .withDisplayName("MTAyMjYwMTUtMjM1ODc3LTA=")
+            .build(in: context)
+        addConversationParticipant(
+            email: "news@email-newsletters.timeout.com",
+            displayName: nil,
+            to: machine
+        )
+        MessageBuilder()
+            .withId("list-title-repair-machine")
+            .withSender(email: "news@email-newsletters.timeout.com", name: "Time Out")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(machine)
+            .build(in: context)
+
+        let human = ConversationBuilder()
+            .asList()
+            .withListId("friends-of-bob.example.com")
+            .withDisplayName("Friends of Bob")
+            .build(in: context)
+        addConversationParticipant(
+            email: "bob@example.com",
+            displayName: nil,
+            to: human
+        )
+        MessageBuilder()
+            .withId("list-title-repair-human")
+            .withSender(email: "bob@example.com", name: "Bob")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(human)
+            .build(in: context)
+        try context.save()
+
+        let repairedCount = await updater.repairIdentifierDerivedListConversationTitles(
+            in: context,
+            myEmail: "me@example.com"
+        )
+
+        XCTAssertEqual(repairedCount, 1)
+        XCTAssertEqual(machine.displayName, "Time Out")
+        XCTAssertEqual(human.displayName, "Friends of Bob")
+    }
+
     func testUpdateDisplayNameOnly_listMailchimpIdentifierPhraseDoesNotChurnAcrossMultipleSenders() throws {
         let machineTitle = "d90192af1525703adec3d3919mc list"
         let conversation = ConversationBuilder()

@@ -386,6 +386,79 @@ struct ConversationRollupUpdater: Sendable {
         }
     }
 
+    /// Re-derives titles for list conversations whose stored display name is
+    /// identifier-derived. Runs every launch rather than as a one-shot
+    /// migration: a `ParsedListId` heuristic improvement then heals titles
+    /// stored under the old heuristic at the next launch, with no
+    /// `hasRefreshedConversationNames` key bump — the Brevo `mailin.fr` fix
+    /// shipped without one, so its stale tokens stayed on screen until each
+    /// list's next arrival happened to re-run rollups.
+    ///
+    /// Two-phase on purpose: the candidate scan reads attributes only (no
+    /// relationship faults), and the message/participant walk inside
+    /// `updateDisplayNameOnly` runs just for the conversations whose stored
+    /// title the current heuristic recognizes as machine metadata — typically
+    /// zero, so the steady-state launch cost is one small fetch.
+    /// - Returns: The number of conversations whose stored title changed.
+    @MainActor
+    func repairIdentifierDerivedListConversationTitles(
+        in context: NSManagedObjectContext,
+        myEmail: String
+    ) async -> Int {
+        await context.perform {
+            let scanRequest = Conversation.fetchRequest()
+            scanRequest.predicate = ConversationPredicates.hasListId
+            scanRequest.returnsObjectsAsFaults = false
+            scanRequest.fetchBatchSize = 100
+
+            let listConversations: [Conversation]
+            do {
+                listConversations = try context.fetch(scanRequest)
+            } catch {
+                Log.error("Failed to fetch list conversations for title repair", category: .conversation, error: error)
+                return 0
+            }
+
+            let candidateIDs = listConversations
+                .filter { conversation in
+                    ParsedListId.isIdentifierDerivedDisplayTitle(
+                        conversation.displayName,
+                        listId: conversation.listId
+                    )
+                }
+                .map(\.objectID)
+            guard !candidateIDs.isEmpty else { return 0 }
+
+            // Refetch just the candidates with relationships prefetched so
+            // the sender walk does not fire per-object faults.
+            let repairRequest = Conversation.fetchRequest()
+            repairRequest.predicate = NSPredicate(format: "SELF IN %@", candidateIDs)
+            repairRequest.relationshipKeyPathsForPrefetching = [
+                "messages",
+                "participants",
+                "participants.person"
+            ]
+
+            let candidates: [Conversation]
+            do {
+                candidates = try context.fetch(repairRequest)
+            } catch {
+                Log.error("Failed to fetch list-title repair candidates", category: .conversation, error: error)
+                return 0
+            }
+
+            var repairedCount = 0
+            for conversation in candidates {
+                let titleBefore = conversation.displayName
+                self.updateDisplayNameOnly(for: conversation, myEmail: myEmail)
+                if conversation.displayName != titleBefore {
+                    repairedCount += 1
+                }
+            }
+            return repairedCount
+        }
+    }
+
     // MARK: - Private Helper Methods
 
     private func logRollupSnapshot(

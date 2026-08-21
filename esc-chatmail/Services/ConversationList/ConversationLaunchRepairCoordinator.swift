@@ -3,9 +3,9 @@ import CoreData
 import Combine
 
 /// Owns the once-per-launch conversation-store maintenance passes that used
-/// to live in `ConversationListViewModel`: the V7 display-name refresh and
-/// the missing-preview repair (including the stranded message-less shell
-/// sweep). Extracted so the passes stop dragging the sync engine and the
+/// to live in `ConversationListViewModel`: the V6 display-name refresh, the
+/// per-launch list-title repair, and the missing-preview repair (including
+/// the stranded message-less shell sweep). Extracted so the passes stop dragging the sync engine and the
 /// conversation manager into the list view model, and so tests can drive
 /// them with an injectable sync-idle wait and notification center instead
 /// of the shared `SyncEngine`.
@@ -15,10 +15,12 @@ import Combine
 /// must still re-arm the repair.
 @MainActor
 final class ConversationLaunchRepairCoordinator {
-    /// V7: re-derives names stored while `ParsedListId` still missed Brevo's
-    /// custom-domain base64 tokens, so those list chats stop waiting on their
-    /// next arrival to upgrade to the newsletter's From name.
-    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV7"
+    /// Deliberately still V6: healing list titles stored under an older
+    /// `ParsedListId` heuristic is owned by the per-launch
+    /// `repairListConversationTitles` pass, so heuristic improvements must
+    /// NOT ship with a bump here — a bump re-derives every conversation's
+    /// name on every device for a list-only fix.
+    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV6"
     /// Completion marker only — the preview repair re-runs every launch and no
     /// longer skips when this flag is already set.
     static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV2"
@@ -34,6 +36,9 @@ final class ConversationLaunchRepairCoordinator {
     private var isConversationPreviewRepairRunning = false
     private var hasCompletedConversationPreviewRepair = false
     private var hasObservedSyncCompletionThisLaunch = false
+
+    private var isListConversationTitleRepairRunning = false
+    private var hasCompletedListConversationTitleRepair = false
 
     /// - Parameters:
     ///   - storage: Supplies the view context (store-existence checks),
@@ -62,6 +67,7 @@ final class ConversationLaunchRepairCoordinator {
     /// owns its own per-launch guard, so repeat calls are cheap no-ops.
     func runLaunchRepairsIfNeeded() {
         refreshConversationNames()
+        repairListConversationTitles()
         repairMissingConversationPreviews()
     }
 
@@ -90,7 +96,7 @@ final class ConversationLaunchRepairCoordinator {
     }
 
     func refreshConversationNames() {
-        // V7: refresh stored conversation display names only. Rollup metadata stays sync-owned.
+        // V6: refresh stored conversation display names only. Rollup metadata stays sync-owned.
         let hasRefreshedKey = Self.conversationNameRefreshMigrationKey
         let migrationFlags = storage.migrationFlags
         guard !migrationFlags.bool(forKey: hasRefreshedKey) else { return }
@@ -105,7 +111,42 @@ final class ConversationLaunchRepairCoordinator {
             await conversationManager.updateAllConversationDisplayNames(in: context)
             guard storage.saveIfNeeded(context) else { return }
             migrationFlags.set(true, forKey: hasRefreshedKey)
-            Log.info("Refreshed conversation display names (V7)", category: .conversation)
+            Log.info("Refreshed conversation display names (V6)", category: .conversation)
+        }
+    }
+
+    /// Re-derives identifier-derived list conversation titles once per launch
+    /// (no one-shot migration flag): a `ParsedListId` heuristic improvement
+    /// then heals titles stored under the old heuristic at the next launch,
+    /// instead of waiting for each list's next arrival to re-run rollups or
+    /// for a name-refresh key bump. The candidate scan is attribute-only over
+    /// list conversations, so a clean store costs one small fetch per launch.
+    func repairListConversationTitles() {
+        guard !isListConversationTitleRepairRunning,
+              !hasCompletedListConversationTitleRepair else { return }
+        isListConversationTitleRepairRunning = true
+
+        taskManager.run("repairListConversationTitles", priority: .background) { [weak self] in
+            guard let self = self else { return }
+            defer { isListConversationTitleRepairRunning = false }
+
+            // Mirror the preview repair: a running sync may be mid-save on
+            // these rows; let it finish before rewriting titles.
+            await syncWaiter.waitForCurrentSyncToComplete()
+            guard !Task.isCancelled else { return }
+
+            let context = storage.makeBackgroundContext()
+            let repairedCount = await conversationManager.repairIdentifierDerivedListConversationTitles(in: context)
+            if repairedCount > 0 {
+                // A failed save leaves the pass incomplete so a later
+                // runLaunchRepairsIfNeeded() can retry it this launch.
+                guard storage.saveIfNeeded(context) else { return }
+                Log.info(
+                    "Repaired \(repairedCount) identifier-derived list conversation titles",
+                    category: .conversation
+                )
+            }
+            hasCompletedListConversationTitleRepair = true
         }
     }
 

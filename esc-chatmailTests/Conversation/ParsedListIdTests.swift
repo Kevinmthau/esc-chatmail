@@ -60,8 +60,11 @@ final class ParsedListIdTests: XCTestCase {
     }
 
     func testParse_base64AlphabetHumanWordPhraseIsPreserved() {
-        // A brand word that happens to be decodable-length base64 must survive
-        // the decode rule: its decoded bytes are not digits-and-separators.
+        // HONEST SCOPE: this cannot pin a single gate — at eight base64 chars
+        // "Espresso" decodes to six bytes, under the minimum decoded length,
+        // and those bytes would fail the digit-shape scan anyway. It documents
+        // the verdict for short brand words; the load-bearing per-gate pins
+        // are the "Newsletters" and "MS0yLTMtNC01" tests below.
         let parsed = ParsedListId.parse("Espresso <espresso.example.com>")
 
         XCTAssertEqual(
@@ -71,15 +74,43 @@ final class ParsedListIdTests: XCTestCase {
     }
 
     func testParse_allDigitHumanPhraseEqualToLeadingLabelIsPreserved() {
-        // Revert-check: the decoded-shape gate in
-        // ParsedListId.isBase64EncodedNumericIdentifier — "20242025" is valid
-        // base64 but decodes to non-digit bytes, so a season-style numeric
-        // title is not mistaken for an encoded machine identifier.
+        // HONEST SCOPE: like "Espresso" above, "20242025" is rejected by the
+        // decoded-length gate before the digit-shape scan runs (and would fail
+        // the scan too), so no single gate's removal flips it. It documents
+        // that a season-style numeric title survives the decode rule.
         let parsed = ParsedListId.parse("20242025 <20242025.example.com>")
 
         XCTAssertEqual(
             parsed,
             ParsedListId(id: "20242025.example.com", title: "20242025")
+        )
+    }
+
+    func testParse_longBase64AlphabetHumanWordPhraseIsPreserved() {
+        // Revert-check: the digit/separator byte scan in
+        // ParsedListId.isBase64EncodedNumericIdentifier — "Newsletters" pads
+        // to valid base64 and decodes to eight bytes, passing every length
+        // gate, so only the scan (its first non-digit, non-separator byte)
+        // keeps this brand word from being discarded as machine metadata.
+        let parsed = ParsedListId.parse("Newsletters <newsletters.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "newsletters.example.com", title: "Newsletters")
+        )
+    }
+
+    func testParse_base64OfDigitSparseTokenPhraseIsPreserved() {
+        // Revert-check: the digitCount >= 6 threshold in
+        // ParsedListId.isBase64EncodedNumericIdentifier — "MS0yLTMtNC01"
+        // decodes to "1-2-3-4-5" (nine bytes, all digits-and-dashes, five
+        // digits), so only the threshold keeps a digit-sparse decode from
+        // being flagged as an encoded numeric identifier.
+        let parsed = ParsedListId.parse("MS0yLTMtNC01 <ms0yltmtnc01.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "ms0yltmtnc01.example.com", title: "MS0yLTMtNC01")
         )
     }
 

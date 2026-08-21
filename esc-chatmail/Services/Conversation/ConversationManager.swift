@@ -121,6 +121,17 @@ final class ConversationManager: Sendable {
         )
     }
 
+    /// Re-derives identifier-derived list conversation titles without touching rollup fields.
+    @MainActor
+    func repairIdentifierDerivedListConversationTitles(
+        in context: NSManagedObjectContext
+    ) async -> Int {
+        await rollupUpdater.repairIdentifierDerivedListConversationTitles(
+            in: context,
+            myEmail: currentUserEmail()
+        )
+    }
+
     /// Updates rollups for ALL conversations - expensive O(n*m) operation.
     @MainActor
     func updateAllConversationRollups(in context: NSManagedObjectContext) async {

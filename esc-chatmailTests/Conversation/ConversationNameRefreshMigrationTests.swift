@@ -4,7 +4,7 @@ import CoreData
 
 @MainActor
 final class ConversationNameRefreshMigrationTests: XCTestCase {
-    private static let legacyConversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV6"
+    private static let legacyConversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
     private static let legacyConversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV1"
 
     private var stack: TestCoreDataStack!
@@ -99,7 +99,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertNil(refreshedBob.archivedAt)
     }
 
-    func testRefreshConversationNames_runsWhenLegacyV6MigrationCompleted() async throws {
+    func testRefreshConversationNames_runsWhenLegacyV5MigrationCompleted() async throws {
         migrationFlags.set(
             true,
             forKey: Self.legacyConversationNameRefreshMigrationKey
@@ -157,6 +157,39 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         }
         let refreshed = try fetchConversation(conversation.objectID)
         XCTAssertEqual(refreshed.displayName, "alice@example.com")
+    }
+
+    // Revert-check: ConversationLaunchRepairCoordinator.repairListConversationTitles (driven through the view model forwarder) — the per-launch pass, not the one-shot name refresh, owns healing list titles stored under an older ParsedListId heuristic, so it must rewrite the token even though the refresh flag was consumed long ago.
+    func testRepairListConversationTitles_healsMachineTitleWhenNameRefreshFlagAlreadyConsumed() async throws {
+        migrationFlags.set(
+            true,
+            forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
+        )
+
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("mtaymjywmtutmjm1odc3lta=.list-id.email-newsletters.timeout.com")
+            .withDisplayName("MTAyMjYwMTUtMjM1ODc3LTA=")
+            .visible()
+            .withParticipant(makePerson(email: "news@email-newsletters.timeout.com"))
+            .build(in: context)
+        MessageBuilder()
+            .withId("list-title-repair-launch-pass")
+            .withSender(email: "news@email-newsletters.timeout.com", name: "Time Out")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let viewModel = makeViewModel()
+        viewModel.repairListConversationTitles()
+
+        await waitUntil {
+            (try? self.fetchConversation(conversation.objectID).displayName) == "Time Out"
+        }
+
+        let repaired = try fetchConversation(conversation.objectID)
+        XCTAssertEqual(repaired.displayName, "Time Out")
     }
 
     // Revert-check: ConversationLaunchRepairCoordinator.repairMissingConversationPreviews' `storeHadConversations || hasObservedSyncCompletionThisLaunch` guard on the didDrain branch (driven through the view model forwarder) — without it an empty-store drain marks the repair complete.

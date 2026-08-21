@@ -279,6 +279,13 @@ final class ConversationListViewModel: ObservableObject {
         launchRepairCoordinator.repairMissingConversationPreviews()
     }
 
+    /// Forwarder: the launch passes live in
+    /// `ConversationLaunchRepairCoordinator`; kept so existing call sites and
+    /// tests keep driving them through the view model.
+    func repairListConversationTitles() {
+        launchRepairCoordinator.repairListConversationTitles()
+    }
+
     // MARK: - Lifecycle
 
     /// Called when view appears - performs initial setup
