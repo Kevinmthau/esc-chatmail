@@ -63,7 +63,7 @@ final class ConversationLaunchRepairCoordinator {
         bindSyncCompletionRepairRearm()
     }
 
-    /// Runs both launch passes. Called from the list's `onAppear`; each pass
+    /// Runs the launch passes. Called from the list's `onAppear`; each pass
     /// owns its own per-launch guard, so repeat calls are cheap no-ops.
     func runLaunchRepairsIfNeeded() {
         refreshConversationNames()
@@ -136,6 +136,13 @@ final class ConversationLaunchRepairCoordinator {
             guard !Task.isCancelled else { return }
 
             let context = storage.makeBackgroundContext()
+            // Store-trump on purpose, mirroring the preview repair (opposite
+            // of the app-wide object-trump default): a sync run starting
+            // after the wait can persist a fresher sender-derived title while
+            // this pass holds pre-sync rows, and a stale title written here
+            // would be permanent — a healed human title is never a repair
+            // candidate again, and this pass has no sync-completion re-arm.
+            context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
             let repairedCount = await conversationManager.repairIdentifierDerivedListConversationTitles(in: context)
             if repairedCount > 0 {
                 // A failed save leaves the pass incomplete so a later
