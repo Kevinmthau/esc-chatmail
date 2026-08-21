@@ -3,7 +3,7 @@ import CoreData
 import Combine
 
 /// Owns the once-per-launch conversation-store maintenance passes that used
-/// to live in `ConversationListViewModel`: the V6 display-name refresh and
+/// to live in `ConversationListViewModel`: the V7 display-name refresh and
 /// the missing-preview repair (including the stranded message-less shell
 /// sweep). Extracted so the passes stop dragging the sync engine and the
 /// conversation manager into the list view model, and so tests can drive
@@ -15,7 +15,10 @@ import Combine
 /// must still re-arm the repair.
 @MainActor
 final class ConversationLaunchRepairCoordinator {
-    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV6"
+    /// V7: re-derives names stored while `ParsedListId` still missed Brevo's
+    /// custom-domain base64 tokens, so those list chats stop waiting on their
+    /// next arrival to upgrade to the newsletter's From name.
+    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV7"
     /// Completion marker only — the preview repair re-runs every launch and no
     /// longer skips when this flag is already set.
     static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV2"
@@ -87,7 +90,7 @@ final class ConversationLaunchRepairCoordinator {
     }
 
     func refreshConversationNames() {
-        // V6: refresh stored conversation display names only. Rollup metadata stays sync-owned.
+        // V7: refresh stored conversation display names only. Rollup metadata stays sync-owned.
         let hasRefreshedKey = Self.conversationNameRefreshMigrationKey
         let migrationFlags = storage.migrationFlags
         guard !migrationFlags.bool(forKey: hasRefreshedKey) else { return }
@@ -102,7 +105,7 @@ final class ConversationLaunchRepairCoordinator {
             await conversationManager.updateAllConversationDisplayNames(in: context)
             guard storage.saveIfNeeded(context) else { return }
             migrationFlags.set(true, forKey: hasRefreshedKey)
-            Log.info("Refreshed conversation display names (V6)", category: .conversation)
+            Log.info("Refreshed conversation display names (V7)", category: .conversation)
         }
     }
 

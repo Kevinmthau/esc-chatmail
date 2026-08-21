@@ -764,6 +764,36 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "Subdial")
     }
 
+    func testUpdateDisplayNameOnly_listBrevoCustomDomainBase64TitleUpgradesToSingleSenderName() throws {
+        // Revert-check: ParsedListId.isBase64EncodedNumericIdentifier — a
+        // stored custom-domain Brevo token title (base64 of
+        // "10226015-235877-0", too digit-sparse for the literal-digit
+        // profiles and outside the provider suffix allowlist) must read as
+        // identifier-derived so the single-sender upgrade replaces it with
+        // the newsletter's From name.
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("mtaymjywmtutmjm1odc3lta=.list-id.email-newsletters.timeout.com")
+            .withDisplayName("MTAyMjYwMTUtMjM1ODc3LTA=")
+            .build(in: context)
+        addConversationParticipant(
+            email: "news@email-newsletters.timeout.com",
+            displayName: nil,
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("brevo-custom-domain-list-single-sender")
+            .withSender(email: "news@email-newsletters.timeout.com", name: "Time Out")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Time Out")
+    }
+
     func testUpdateDisplayNameOnly_listMailchimpIdentifierPhraseDoesNotChurnAcrossMultipleSenders() throws {
         let machineTitle = "d90192af1525703adec3d3919mc list"
         let conversation = ConversationBuilder()

@@ -4,7 +4,7 @@ import CoreData
 
 @MainActor
 final class ConversationNameRefreshMigrationTests: XCTestCase {
-    private static let legacyConversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
+    private static let legacyConversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV6"
     private static let legacyConversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV1"
 
     private var stack: TestCoreDataStack!
@@ -99,7 +99,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertNil(refreshedBob.archivedAt)
     }
 
-    func testRefreshConversationNames_runsWhenLegacyV5MigrationCompleted() async throws {
+    func testRefreshConversationNames_runsWhenLegacyV6MigrationCompleted() async throws {
         migrationFlags.set(
             true,
             forKey: Self.legacyConversationNameRefreshMigrationKey

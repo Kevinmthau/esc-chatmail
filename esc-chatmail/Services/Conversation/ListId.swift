@@ -71,7 +71,9 @@ struct ParsedListId: Equatable, Sendable {
     /// from an opaque List-Id component plus a known generic suffix
     /// (Mailchimp's "<token>mc list"), and a bare token that restates an
     /// identifier label on its own (Brevo emits
-    /// "ODI2OTI3Ny04MTYyNi0z <ODI2OTI3Ny04MTYyNi0z.list-id.mailin.fr>").
+    /// "ODI2OTI3Ny04MTYyNi0z <ODI2OTI3Ny04MTYyNi0z.list-id.mailin.fr>", and
+    /// on custom sending domains "MTAyMjYwMTUtMjM1ODc3LTA=
+    /// <MTAyMjYwMTUtMjM1ODc3LTA=.list-id.email-newsletters.timeout.com>").
     static func isIdentifierDerivedDisplayTitle(_ rawTitle: String?, listId: String?) -> Bool {
         guard let title = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
               let listId = listId?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -112,7 +114,9 @@ struct ParsedListId: Equatable, Sendable {
                     in: labels
                 )
                 return titleIsBareToken
-                    && (labelIsOpaqueIdentifier || labelMatchesKnownProvider)
+                    && (labelIsOpaqueIdentifier
+                        || labelMatchesKnownProvider
+                        || isBase64EncodedNumericIdentifier(title))
             }
             return labelIsOpaqueIdentifier
                 && providerGenericTitleSuffixKeys.contains(suffixKey)
@@ -132,6 +136,37 @@ struct ParsedListId: Equatable, Sendable {
 
     private static func alphanumericKey(_ value: String) -> String {
         value.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    /// Recognizes a token that is standard base64 for a numeric machine
+    /// identifier. Brevo restates its list token in the phrase position on
+    /// custom sending domains too ("MTAyMjYwMTUtMjM1ODc3LTA=" is base64 of
+    /// "10226015-235877-0"), where no provider suffix can vouch for it and
+    /// the encoded form can carry too few literal digits for the opaqueness
+    /// profiles — base64 of ASCII digits yields mostly letters at most
+    /// alignments. Decoding sidesteps that alignment lottery: the decoded
+    /// bytes must read as digits broken only by separator punctuation, a
+    /// shape no human brand word decodes to.
+    private static func isBase64EncodedNumericIdentifier(_ token: String) -> Bool {
+        guard token.count >= 8 else { return false }
+        var padded = token
+        let remainder = token.count % 4
+        if remainder != 0 {
+            padded += String(repeating: "=", count: 4 - remainder)
+        }
+        guard let decoded = Data(base64Encoded: padded), decoded.count >= 8 else {
+            return false
+        }
+
+        var digitCount = 0
+        for byte in decoded {
+            if byte >= UInt8(ascii: "0"), byte <= UInt8(ascii: "9") {
+                digitCount += 1
+            } else if !base64NumericIdentifierSeparatorBytes.contains(byte) {
+                return false
+            }
+        }
+        return digitCount >= 6
     }
 
     private static func isOpaqueIdentifierKey(_ value: String) -> Bool {
@@ -168,5 +203,8 @@ struct ParsedListId: Equatable, Sendable {
     private static let providerGenericTitleSuffixKeys: Set<String> = ["mclist"]
     /// Brevo restates its account token before this exact List-Id suffix.
     private static let providerIdentifierSuffixes: Set<String> = ["list-id.mailin.fr"]
+    /// Separator bytes tolerated between the digit runs of a decoded numeric
+    /// identifier (Brevo joins its id components with "-").
+    private static let base64NumericIdentifierSeparatorBytes = Set("-_.".utf8)
     private static let hexadecimalCharacters = Set("0123456789abcdef")
 }

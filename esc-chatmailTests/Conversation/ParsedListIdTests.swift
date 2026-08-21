@@ -45,6 +45,44 @@ final class ParsedListIdTests: XCTestCase {
         XCTAssertNil(parsed?.title)
     }
 
+    func testParse_brevoCustomDomainBase64TokenPhraseIsNotUsedAsDisplayTitle() {
+        // Revert-check: ParsedListId.isBase64EncodedNumericIdentifier. On a
+        // custom sending domain no provider suffix vouches for the token, and
+        // this base64 alignment ("10226015-235877-0" encodes with only two
+        // literal digits) stays under both literal-digit opaqueness profiles,
+        // so only decoding can mark it as machine metadata.
+        let parsed = ParsedListId.parse(
+            "MTAyMjYwMTUtMjM1ODc3LTA= <MTAyMjYwMTUtMjM1ODc3LTA=.list-id.email-newsletters.timeout.com>"
+        )
+
+        XCTAssertEqual(parsed?.id, "mtaymjywmtutmjm1odc3lta=.list-id.email-newsletters.timeout.com")
+        XCTAssertNil(parsed?.title)
+    }
+
+    func testParse_base64AlphabetHumanWordPhraseIsPreserved() {
+        // A brand word that happens to be decodable-length base64 must survive
+        // the decode rule: its decoded bytes are not digits-and-separators.
+        let parsed = ParsedListId.parse("Espresso <espresso.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "espresso.example.com", title: "Espresso")
+        )
+    }
+
+    func testParse_allDigitHumanPhraseEqualToLeadingLabelIsPreserved() {
+        // Revert-check: the decoded-shape gate in
+        // ParsedListId.isBase64EncodedNumericIdentifier — "20242025" is valid
+        // base64 but decodes to non-digit bytes, so a season-style numeric
+        // title is not mistaken for an encoded machine identifier.
+        let parsed = ParsedListId.parse("20242025 <20242025.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "20242025.example.com", title: "20242025")
+        )
+    }
+
     func testParse_bareTokenPhraseInKnownProviderShapeIsNotUsedAsDisplayTitle() {
         // Revert-check: Brevo's exact provider suffix allowlist. This token is
         // short and digit-light, so only the verified provider shape marks it
