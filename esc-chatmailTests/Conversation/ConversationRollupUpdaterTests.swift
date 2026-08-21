@@ -764,6 +764,110 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "Subdial")
     }
 
+    func testUpdateDisplayNameOnly_listBrevoCustomDomainBase64TitleUpgradesToSingleSenderName() throws {
+        // Revert-check: ParsedListId.isBase64EncodedNumericIdentifier — a
+        // stored custom-domain Brevo token title (base64 of
+        // "10226015-235877-0", too digit-sparse for the literal-digit
+        // profiles and outside the provider suffix allowlist) must read as
+        // identifier-derived so the single-sender upgrade replaces it with
+        // the newsletter's From name.
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("mtaymjywmtutmjm1odc3lta=.list-id.email-newsletters.timeout.com")
+            .withDisplayName("MTAyMjYwMTUtMjM1ODc3LTA=")
+            .build(in: context)
+        addConversationParticipant(
+            email: "news@email-newsletters.timeout.com",
+            displayName: nil,
+            to: conversation
+        )
+        MessageBuilder()
+            .withId("brevo-custom-domain-list-single-sender")
+            .withSender(email: "news@email-newsletters.timeout.com", name: "Time Out")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Time Out")
+    }
+
+    func testRepairIdentifierDerivedListConversationTitles_upgradesMachineTitleAndKeepsHumanTitle() async throws {
+        // Revert-check:
+        // ConversationRollupUpdater.repairIdentifierDerivedListConversationTitles —
+        // the per-launch list pass must heal a title stored under an older
+        // ParsedListId heuristic with no migration flag involved, and its
+        // candidate filter must leave human-titled list conversations alone.
+        let machine = ConversationBuilder()
+            .asList()
+            .withListId("mtaymjywmtutmjm1odc3lta=.list-id.email-newsletters.timeout.com")
+            .withDisplayName("MTAyMjYwMTUtMjM1ODc3LTA=")
+            .build(in: context)
+        addConversationParticipant(
+            email: "news@email-newsletters.timeout.com",
+            displayName: nil,
+            to: machine
+        )
+        MessageBuilder()
+            .withId("list-title-repair-machine")
+            .withSender(email: "news@email-newsletters.timeout.com", name: "Time Out")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(machine)
+            .build(in: context)
+
+        let human = ConversationBuilder()
+            .asList()
+            .withListId("friends-of-bob.example.com")
+            .withDisplayName("Friends of Bob")
+            .build(in: context)
+        addConversationParticipant(
+            email: "bob@example.com",
+            displayName: nil,
+            to: human
+        )
+        MessageBuilder()
+            .withId("list-title-repair-human")
+            .withSender(email: "bob@example.com", name: "Bob")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(human)
+            .build(in: context)
+        try context.save()
+
+        let repairedCount = await updater.repairIdentifierDerivedListConversationTitles(
+            in: context,
+            myEmail: "me@example.com"
+        )
+
+        XCTAssertEqual(repairedCount, 1)
+        XCTAssertEqual(machine.displayName, "Time Out")
+        XCTAssertEqual(human.displayName, "Friends of Bob")
+    }
+
+    func testRepairIdentifierDerivedListConversationTitles_fetchFailureReturnsNilNotZero() async throws {
+        // Revert-check: the `return nil` in
+        // ConversationRollupUpdater.repairIdentifierDerivedListConversationTitles'
+        // fetch catch blocks — reverting either to `return 0` makes a failed
+        // candidate scan indistinguishable from a clean no-candidate scan, the
+        // nil assertion below fails, and the launch coordinator would latch its
+        // per-launch completion guard on a transient read failure.
+        let failingContext = try FailingReadStore.makeFailingContext()
+
+        let repairedCount = await updater.repairIdentifierDerivedListConversationTitles(
+            in: failingContext,
+            myEmail: "me@example.com"
+        )
+
+        XCTAssertNil(repairedCount)
+        // Positive control: the store rejected a fetch, so nil came from the
+        // read-failure path rather than from the repair never scanning at all.
+        let store = try XCTUnwrap(
+            failingContext.persistentStoreCoordinator?.persistentStores.first as? FailingReadStore
+        )
+        XCTAssertTrue(store.requestTypes.contains(.fetchRequestType))
+    }
+
     func testUpdateDisplayNameOnly_listMailchimpIdentifierPhraseDoesNotChurnAcrossMultipleSenders() throws {
         let machineTitle = "d90192af1525703adec3d3919mc list"
         let conversation = ConversationBuilder()

@@ -45,6 +45,92 @@ final class ParsedListIdTests: XCTestCase {
         XCTAssertNil(parsed?.title)
     }
 
+    func testParse_brevoCustomDomainBase64TokenPhraseIsNotUsedAsDisplayTitle() {
+        // Revert-check: ParsedListId.isBase64EncodedNumericIdentifier. On a
+        // custom sending domain no provider suffix vouches for the token, and
+        // this base64 alignment ("10226015-235877-0" encodes with only two
+        // literal digits) stays under both literal-digit opaqueness profiles,
+        // so only decoding can mark it as machine metadata.
+        let parsed = ParsedListId.parse(
+            "MTAyMjYwMTUtMjM1ODc3LTA= <MTAyMjYwMTUtMjM1ODc3LTA=.list-id.email-newsletters.timeout.com>"
+        )
+
+        XCTAssertEqual(parsed?.id, "mtaymjywmtutmjm1odc3lta=.list-id.email-newsletters.timeout.com")
+        XCTAssertNil(parsed?.title)
+    }
+
+    func testParse_base64AlphabetHumanWordPhraseIsPreserved() {
+        // HONEST SCOPE: this cannot pin a single gate — at eight base64 chars
+        // "Espresso" decodes to six bytes, under the minimum decoded length,
+        // and those bytes would fail the digit-shape scan anyway. It documents
+        // the verdict for short brand words; the load-bearing per-gate pins
+        // are the "Newsletters" and "MS0yLTMtNC01" tests below.
+        let parsed = ParsedListId.parse("Espresso <espresso.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "espresso.example.com", title: "Espresso")
+        )
+    }
+
+    func testParse_allDigitHumanPhraseEqualToLeadingLabelIsPreserved() {
+        // HONEST SCOPE: like "Espresso" above, "20242025" is rejected by the
+        // decoded-length gate before the digit-shape scan runs (and would fail
+        // the scan too), so no single gate's removal flips it. It documents
+        // that a season-style numeric title survives the decode rule.
+        let parsed = ParsedListId.parse("20242025 <20242025.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "20242025.example.com", title: "20242025")
+        )
+    }
+
+    func testParse_longBase64AlphabetHumanWordPhraseIsPreserved() {
+        // HONEST SCOPE: "Newsletters" pads to valid base64 and decodes to
+        // eight bytes, passing every length gate, but its decode carries only
+        // one digit byte — so the byte scan rejects it first and the digit
+        // threshold would too, and no single gate's removal flips it. It
+        // documents that a long brand word survives the decode rule; the
+        // scan-only pin is the "MTIzNDU2N3g=" test below.
+        let parsed = ParsedListId.parse("Newsletters <newsletters.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "newsletters.example.com", title: "Newsletters")
+        )
+    }
+
+    func testParse_base64OfDigitHeavyTokenWithForeignByteIsPreserved() {
+        // Revert-check: the digit/separator byte scan in
+        // ParsedListId.isBase64EncodedNumericIdentifier — "MTIzNDU2N3g="
+        // decodes to "1234567x" (eight bytes, seven digits), so the digit
+        // threshold alone would flag it; only the scan's rejection of the
+        // trailing non-digit, non-separator byte keeps a decode that is not
+        // purely digit-runs-and-separators from being treated as an encoded
+        // numeric identifier.
+        let parsed = ParsedListId.parse("MTIzNDU2N3g= <mtizndu2n3g=.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "mtizndu2n3g=.example.com", title: "MTIzNDU2N3g=")
+        )
+    }
+
+    func testParse_base64OfDigitSparseTokenPhraseIsPreserved() {
+        // Revert-check: the digitCount >= 6 threshold in
+        // ParsedListId.isBase64EncodedNumericIdentifier — "MS0yLTMtNC01"
+        // decodes to "1-2-3-4-5" (nine bytes, all digits-and-dashes, five
+        // digits), so only the threshold keeps a digit-sparse decode from
+        // being flagged as an encoded numeric identifier.
+        let parsed = ParsedListId.parse("MS0yLTMtNC01 <ms0yltmtnc01.example.com>")
+
+        XCTAssertEqual(
+            parsed,
+            ParsedListId(id: "ms0yltmtnc01.example.com", title: "MS0yLTMtNC01")
+        )
+    }
+
     func testParse_bareTokenPhraseInKnownProviderShapeIsNotUsedAsDisplayTitle() {
         // Revert-check: Brevo's exact provider suffix allowlist. This token is
         // short and digit-light, so only the verified provider shape marks it

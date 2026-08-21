@@ -153,6 +153,32 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         withExtendedLifetime(coordinator) {}
     }
 
+    // Revert-check: the guard-let on repairIdentifierDerivedListConversationTitles' nil return in ConversationLaunchRepairCoordinator.repairListConversationTitles — reverted to treating a failed scan as a zero-candidate scan, the first run latches hasCompletedListConversationTitleRepair and the re-run poll below never observes a second sync wait.
+    func testRepairListConversationTitles_fetchFailureDoesNotLatchCompletionAndStaysArmed() async throws {
+        let failingContext = try FailingReadStore.makeFailingContext()
+        let coordinator = makeCoordinator(makeBackgroundContext: { failingContext })
+
+        coordinator.repairListConversationTitles()
+
+        // Same observation trick as the empty-drain test above: once a repeat
+        // call starts a second run (a second sync wait), the first run has
+        // provably exited with both the running guard and the completion
+        // latch clear — a failed scan that (wrongly) latched completion would
+        // refuse every repeat call and time this wait out.
+        await waitUntil {
+            coordinator.repairListConversationTitles()
+            return self.syncWaiter.waitForCurrentSyncToCompleteCalls >= 2
+        }
+
+        // Positive control: the failing store rejected at least one fetch, so
+        // the runs above exercised the scan-failure path rather than never
+        // reaching the store.
+        let store = try XCTUnwrap(
+            failingContext.persistentStoreCoordinator?.persistentStores.first as? FailingReadStore
+        )
+        XCTAssertTrue(store.requestTypes.contains(.fetchRequestType))
+    }
+
     // Revert-check: the repair task's defer clearing isConversationPreviewRepairRunning in ConversationLaunchRepairCoordinator.repairMissingConversationPreviews — without it a cancelled run leaves the running guard latched and the re-run poll below never starts a second sweep.
     func testCancel_whileAwaitingSyncWaiter_leavesRepairRerunnable() async throws {
         let date = Date(timeIntervalSince1970: 1_700_000_000)
@@ -205,12 +231,14 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         }
     }
 
-    private func makeCoordinator() -> ConversationLaunchRepairCoordinator {
+    private func makeCoordinator(
+        makeBackgroundContext: (() -> NSManagedObjectContext)? = nil
+    ) -> ConversationLaunchRepairCoordinator {
         let stack: TestCoreDataStack = self.stack
         return ConversationLaunchRepairCoordinator(
             storage: StorageDependencies(
                 viewContext: stack.viewContext,
-                makeBackgroundContext: { stack.newBackgroundContext() },
+                makeBackgroundContext: makeBackgroundContext ?? { stack.newBackgroundContext() },
                 saveIfNeeded: { stack.saveIfNeeded(context: $0) },
                 migrationFlags: migrationFlags,
                 personCache: Dependencies.shared.personCache,

@@ -274,6 +274,10 @@ enum ConversationPredicates {
 
     static let empty = NSPredicate(format: "messages.@count == 0 AND participants.@count == 0")
     static let emptyMessages = NSPredicate(format: "messages.@count == 0")
+    /// List conversations, exactly. `listId` is set if and only if the row was
+    /// created for a List-Id identity; rows predating the attribute have nil
+    /// and are useless to title repair anyway (the heuristic needs the id).
+    static let hasListId = NSPredicate(format: "listId != nil")
 }
 
 /// Type-safe predicates for Person entity
