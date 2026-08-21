@@ -399,13 +399,16 @@ struct ConversationRollupUpdater: Sendable {
     /// `updateDisplayNameOnly` runs just for the conversations whose stored
     /// title the current heuristic recognizes as machine metadata — typically
     /// zero, so the steady-state launch cost is one small fetch.
-    /// - Returns: The number of conversations whose stored title changed.
+    /// - Returns: The number of conversations whose stored title changed, or
+    ///   nil when a fetch failed — the caller must not treat a failed scan as
+    ///   "no candidates" (it would latch its per-launch completion guard and
+    ///   skip the repair for the rest of the process).
     @MainActor
     func repairIdentifierDerivedListConversationTitles(
         in context: NSManagedObjectContext,
         myEmail: String
-    ) async -> Int {
-        await context.perform {
+    ) async -> Int? {
+        await context.perform { () -> Int? in
             let scanRequest = Conversation.fetchRequest()
             scanRequest.predicate = ConversationPredicates.hasListId
             scanRequest.returnsObjectsAsFaults = false
@@ -416,7 +419,7 @@ struct ConversationRollupUpdater: Sendable {
                 listConversations = try context.fetch(scanRequest)
             } catch {
                 Log.error("Failed to fetch list conversations for title repair", category: .conversation, error: error)
-                return 0
+                return nil
             }
 
             let candidateIDs = listConversations
@@ -444,7 +447,7 @@ struct ConversationRollupUpdater: Sendable {
                 candidates = try context.fetch(repairRequest)
             } catch {
                 Log.error("Failed to fetch list-title repair candidates", category: .conversation, error: error)
-                return 0
+                return nil
             }
 
             var repairedCount = 0

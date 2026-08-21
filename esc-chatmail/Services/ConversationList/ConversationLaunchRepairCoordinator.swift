@@ -143,7 +143,14 @@ final class ConversationLaunchRepairCoordinator {
             // would be permanent — a healed human title is never a repair
             // candidate again, and this pass has no sync-completion re-arm.
             context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
-            let repairedCount = await conversationManager.repairIdentifierDerivedListConversationTitles(in: context)
+            guard let repairedCount = await conversationManager.repairIdentifierDerivedListConversationTitles(in: context) else {
+                // nil = the candidate scan's fetch failed, which is not "no
+                // candidates": latching completion here would skip the repair
+                // for the rest of the process. Leave the pass incomplete so a
+                // later runLaunchRepairsIfNeeded() retries it this launch,
+                // mirroring the failed-save path below.
+                return
+            }
             if repairedCount > 0 {
                 // A failed save leaves the pass incomplete so a later
                 // runLaunchRepairsIfNeeded() can retry it this launch.

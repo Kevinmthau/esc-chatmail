@@ -121,11 +121,13 @@ final class ConversationManager: Sendable {
         )
     }
 
-    /// Re-derives identifier-derived list conversation titles without touching rollup fields.
+    /// Re-derives identifier-derived list conversation titles without touching
+    /// rollup fields. Returns nil when the candidate scan failed (see
+    /// `ConversationRollupUpdater.repairIdentifierDerivedListConversationTitles`).
     @MainActor
     func repairIdentifierDerivedListConversationTitles(
         in context: NSManagedObjectContext
-    ) async -> Int {
+    ) async -> Int? {
         await rollupUpdater.repairIdentifierDerivedListConversationTitles(
             in: context,
             myEmail: currentUserEmail()

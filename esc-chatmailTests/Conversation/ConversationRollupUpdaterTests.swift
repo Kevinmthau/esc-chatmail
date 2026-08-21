@@ -845,6 +845,29 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(human.displayName, "Friends of Bob")
     }
 
+    func testRepairIdentifierDerivedListConversationTitles_fetchFailureReturnsNilNotZero() async throws {
+        // Revert-check: the `return nil` in
+        // ConversationRollupUpdater.repairIdentifierDerivedListConversationTitles'
+        // fetch catch blocks — reverting either to `return 0` makes a failed
+        // candidate scan indistinguishable from a clean no-candidate scan, the
+        // nil assertion below fails, and the launch coordinator would latch its
+        // per-launch completion guard on a transient read failure.
+        let failingContext = try FailingReadStore.makeFailingContext()
+
+        let repairedCount = await updater.repairIdentifierDerivedListConversationTitles(
+            in: failingContext,
+            myEmail: "me@example.com"
+        )
+
+        XCTAssertNil(repairedCount)
+        // Positive control: the store rejected a fetch, so nil came from the
+        // read-failure path rather than from the repair never scanning at all.
+        let store = try XCTUnwrap(
+            failingContext.persistentStoreCoordinator?.persistentStores.first as? FailingReadStore
+        )
+        XCTAssertTrue(store.requestTypes.contains(.fetchRequestType))
+    }
+
     func testUpdateDisplayNameOnly_listMailchimpIdentifierPhraseDoesNotChurnAcrossMultipleSenders() throws {
         let machineTitle = "d90192af1525703adec3d3919mc list"
         let conversation = ConversationBuilder()
