@@ -83,6 +83,36 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertEqual(contentRequest.attachmentSnapshots.count, 1)
     }
 
+    func testMap_suppressesQuoteOnlyFallbackForOutgoingAttachmentOnlyMessage() throws {
+        let quoteOnlySnippet = "On Aug 24, 2026 at 5:47 PM, Kelsey Conroy wrote: Yes, I can&#39;t view the PDF though."
+        let message = MessageBuilder()
+            .withId("row-model-attachment-only-reply")
+            .withSnippet(quoteOnlySnippet)
+            .withAttachments()
+            .fromMe()
+            .build(in: viewContext)
+        message.cleanedSnippet = quoteOnlySnippet
+
+        let row = ChatMessageRowModelMapper.map(message)
+
+        XCTAssertNil(row.chatPreviewText)
+        XCTAssertNil(row.fallbackPreviewText)
+    }
+
+    func testMap_preservesAuthoredFallbackForOutgoingMessageWithAttachments() throws {
+        let message = MessageBuilder()
+            .withId("row-model-attachment-reply-with-text")
+            .withSnippet("Here are the two PDFs.")
+            .withAttachments()
+            .fromMe()
+            .build(in: viewContext)
+        message.cleanedSnippet = "Here are the two PDFs."
+
+        let row = ChatMessageRowModelMapper.map(message)
+
+        XCTAssertEqual(row.fallbackPreviewText, "Here are the two PDFs.")
+    }
+
     func testMap_preservesOutgoingForwardedAffordances() throws {
         let conversation = ConversationBuilder()
             .visible()

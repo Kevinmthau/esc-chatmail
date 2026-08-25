@@ -199,6 +199,7 @@ struct ChatMessageRowModel: Equatable {
     let snippet: String?
     let cleanedSnippet: String?
     let chatPreviewText: String?
+    let fallbackPreviewText: String?
     let bodyText: String?
     let bodyStorageURI: String?
     let senderName: String?
@@ -233,10 +234,6 @@ struct ChatMessageRowModel: Equatable {
 
     var objectID: NSManagedObjectID {
         messageObjectID
-    }
-
-    var fallbackPreviewText: String? {
-        cleanedSnippet ?? snippet
     }
 
     func makeSenderRequest() -> MessageBubbleSenderRequest? {
@@ -313,6 +310,13 @@ enum ChatMessageRowModelMapper {
             }
             return person
         }
+        let fallbackPreviewText = resolvedFallbackPreviewText(
+            cleanedSnippet: message.cleanedSnippet,
+            snippet: message.snippet,
+            chatPreviewText: message.chatPreviewTextValue,
+            isFromMe: message.isFromMe,
+            hasAttachments: message.hasAttachments
+        )
 
         return ChatMessageRowModel(
             id: message.id,
@@ -325,6 +329,7 @@ enum ChatMessageRowModelMapper {
             snippet: message.snippet,
             cleanedSnippet: message.cleanedSnippet,
             chatPreviewText: message.chatPreviewTextValue,
+            fallbackPreviewText: fallbackPreviewText,
             bodyText: message.bodyTextValue,
             bodyStorageURI: message.bodyStorageURI,
             senderName: message.senderName,
@@ -359,6 +364,27 @@ enum ChatMessageRowModelMapper {
                 senderAvatarURL: effectiveSenderPerson?.avatarURL
             )
         )
+    }
+
+    private static func resolvedFallbackPreviewText(
+        cleanedSnippet: String?,
+        snippet: String?,
+        chatPreviewText: String?,
+        isFromMe: Bool,
+        hasAttachments: Bool
+    ) -> String? {
+        let fallback = cleanedSnippet ?? snippet
+        guard isFromMe,
+              hasAttachments,
+              MessagePreviewText.nonEmpty(chatPreviewText) == nil else {
+            return fallback
+        }
+
+        // Gmail can flatten a quote-only reply into a one-line snippet. The
+        // canonical body has already been quote-stripped for chat display, so
+        // clean this legacy fallback too instead of reviving quoted history as
+        // an authored message bubble beside attachment-only sends.
+        return MessagePreviewText.compactListText(fallback)
     }
 
     @MainActor
