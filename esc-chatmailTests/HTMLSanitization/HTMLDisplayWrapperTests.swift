@@ -1,4 +1,5 @@
 import XCTest
+import WebKit
 @testable import esc_chatmail
 
 final class HTMLDisplayWrapperTests: XCTestCase {
@@ -56,6 +57,107 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(darkResult.contains("background-color: #1c1c1e"))
         XCTAssertTrue(darkResult.contains("color: #ffffff"))
         XCTAssertFalse(lightResult.contains(appleMailFallbackFontStack))
+    }
+
+    func testWrapHTMLForDisplay_partialHTML_imageHeightPolicyIsPurposeAware() {
+        let html = #"<img src="https://www.ticketsource.com/images/blank.png" width="594" height="12" alt="blank">"#
+        let originalResponsiveImageSelector = #"img:not(:where([src*="/images/blank.png" i][alt="blank" i][width][height]))"#
+
+        let original = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+        let preview = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .preview)
+
+        XCTAssertTrue(original.contains(#"width="594" height="12""#))
+        XCTAssertTrue(original.contains("max-width: 100%;"))
+        XCTAssertTrue(original.contains(originalResponsiveImageSelector))
+        XCTAssertTrue(original.contains("height: auto;"))
+        XCTAssertFalse(preview.contains(originalResponsiveImageSelector))
+        XCTAssertTrue(preview.contains("height: auto;"))
+    }
+
+    @MainActor
+    func testWrapHTMLForDisplay_stringOnlyOriginalPreservesSpacerAndScalesOrdinaryImageInWebKit() async throws {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head></head>
+        <body>
+            <div style="width: 300px;">
+                <img
+                    id="ticket-source-spacer"
+                    src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==#/images/blank.png"
+                    width="594"
+                    height="12"
+                    alt="blank"
+                >
+                <img
+                    id="ordinary-image"
+                    src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MDAiIGhlaWdodD0iMzAwIj48L3N2Zz4="
+                    width="600"
+                    height="300"
+                    alt="Ordinary image"
+                >
+            </div>
+        </body>
+        </html>
+        """
+        let wrapped = sut.wrapHTMLForDisplay(
+            html,
+            isDarkMode: false,
+            displayPurpose: .original,
+            headSerialization: .stringOnly
+        )
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 800))
+
+        webView.loadHTMLString(wrapped, baseURL: URL(string: "about:blank"))
+
+        var renderedSizes: (
+            spacerWidth: CGFloat,
+            spacerHeight: CGFloat,
+            ordinaryWidth: CGFloat,
+            ordinaryHeight: CGFloat
+        )?
+        for _ in 0..<100 where renderedSizes == nil {
+            let result = try? await webView.evaluateJavaScript(
+                """
+                (function() {
+                    const spacer = document.getElementById('ticket-source-spacer');
+                    const ordinary = document.getElementById('ordinary-image');
+                    if (!spacer || !ordinary || !spacer.complete || !ordinary.complete ||
+                        spacer.naturalWidth !== 1 || ordinary.naturalWidth <= 0) {
+                        return null;
+                    }
+                    const spacerRect = spacer.getBoundingClientRect();
+                    const ordinaryRect = ordinary.getBoundingClientRect();
+                    return {
+                        spacerWidth: spacerRect.width,
+                        spacerHeight: spacerRect.height,
+                        ordinaryWidth: ordinaryRect.width,
+                        ordinaryHeight: ordinaryRect.height
+                    };
+                })();
+                """
+            )
+            if let values = result as? [String: Any],
+               let spacerWidth = values["spacerWidth"] as? NSNumber,
+               let spacerHeight = values["spacerHeight"] as? NSNumber,
+               let ordinaryWidth = values["ordinaryWidth"] as? NSNumber,
+               let ordinaryHeight = values["ordinaryHeight"] as? NSNumber {
+                renderedSizes = (
+                    spacerWidth: CGFloat(spacerWidth.doubleValue),
+                    spacerHeight: CGFloat(spacerHeight.doubleValue),
+                    ordinaryWidth: CGFloat(ordinaryWidth.doubleValue),
+                    ordinaryHeight: CGFloat(ordinaryHeight.doubleValue)
+                )
+            } else {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+
+        let sizes = try XCTUnwrap(renderedSizes, "Timed out waiting for the images to render")
+        XCTAssertEqual(sizes.spacerWidth, 300, accuracy: 0.5)
+        XCTAssertEqual(sizes.spacerHeight, 12, accuracy: 0.5)
+        XCTAssertEqual(sizes.ordinaryWidth, 300, accuracy: 0.5)
+        XCTAssertEqual(sizes.ordinaryHeight, 150, accuracy: 0.5)
     }
 
     func testWrapHTMLForDisplay_darkPreviewAppliesFallbackTextCSSOnlyForPreview() {
