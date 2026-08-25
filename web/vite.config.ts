@@ -18,8 +18,8 @@ export default defineConfig({
       // updates wait for the user's go-ahead (ReloadPrompt toast).
       registerType: 'prompt',
       manifest: {
-        name: 'Inbox Chat',
-        short_name: 'Inbox Chat',
+        name: 'MushMail',
+        short_name: 'MushMail',
         description: 'A chat-style Gmail client',
         id: '/',
         start_url: '/',

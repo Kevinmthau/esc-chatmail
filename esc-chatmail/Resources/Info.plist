@@ -13,7 +13,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Inbox Chat</string>
+	<string>MushMail</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -104,11 +104,11 @@
 		</dict>
 	</dict>
 	<key>NSContactsUsageDescription</key>
-	<string>Inbox Chat uses your contacts to show names and photos.</string>
+	<string>MushMail uses your contacts to show names and photos.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright 2025. All rights reserved.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Inbox Chat needs access to your photos to attach images to messages.</string>
+	<string>MushMail needs access to your photos to attach images to messages.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

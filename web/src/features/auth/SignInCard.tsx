@@ -47,7 +47,7 @@ export function SignInCard() {
           <path d="m3 7 9 6 9-6" />
         </svg>
       </div>
-      <h1 className="mt-4 text-2xl font-semibold">Inbox Chat</h1>
+      <h1 className="mt-4 text-2xl font-semibold">MushMail</h1>
       <p className="text-fg-muted mt-1 text-sm">A chat-style Gmail client</p>
 
       <form className="mt-6 text-left" onSubmit={(event) => void submit(event)}>
@@ -76,7 +76,7 @@ export function SignInCard() {
       {error !== null && (
         <p role="alert" className="text-danger mt-4 text-sm">
           {error === 'scope_denied'
-            ? 'Gmail access was not granted. Inbox Chat needs the Gmail permission to show and send your mail — try again and allow Gmail access on the consent screen.'
+            ? 'Gmail access was not granted. MushMail needs the Gmail permission to show and send your mail — try again and allow Gmail access on the consent screen.'
             : 'Sign-in did not complete. Please try again.'}
         </p>
       )}

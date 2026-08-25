@@ -127,7 +127,7 @@ struct ChatView: View {
             case .limitedAccessNeedsPermission(let contactName):
                 Alert(
                     title: Text("Allow Access to Contact"),
-                    message: Text("ESC Chatmail has limited Contacts access. To edit \(contactName), allow access to it in the next sheet."),
+                    message: Text("MushMail has limited Contacts access. To edit \(contactName), allow access to it in the next sheet."),
                     primaryButton: .default(Text("Continue")) {
                         viewModel.contactManager.presentContactAccessPickerForSelectedContact()
                     },

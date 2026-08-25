@@ -1,6 +1,6 @@
-# Inbox Chat — Web
+# MushMail — Web
 
-A web-native version of the esc-chatmail iOS app: a chat-style Gmail client that
+A web-native version of the MushMail iOS app: a chat-style Gmail client that
 renders email as iMessage-like conversations. Client-only PWA — the browser
 talks to the Gmail REST API directly; all mail data stays on-device in
 IndexedDB. There is no backend.

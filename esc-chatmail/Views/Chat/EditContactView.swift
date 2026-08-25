@@ -121,7 +121,7 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
 
                 switch status {
                 case .denied:
-                    message = "ESC Chatmail doesn’t have permission to edit contacts. Allow Contacts access in Settings, then try again."
+                    message = "MushMail doesn’t have permission to edit contacts. Allow Contacts access in Settings, then try again."
                     showSettingsButton = true
                 case .restricted:
                     message = "Contacts access is restricted on this device."
@@ -130,7 +130,7 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                     showSettingsButton = true
                 default:
                     if #available(iOS 18.0, *), status == .limited {
-                        message = "ESC Chatmail has limited Contacts access and can only edit contacts you’ve shared with it. Allow access to this contact (or full access) in Settings, then try again."
+                        message = "MushMail has limited Contacts access and can only edit contacts you’ve shared with it. Allow access to this contact (or full access) in Settings, then try again."
                         showSettingsButton = true
                     }
                 }

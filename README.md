@@ -1,6 +1,6 @@
-# esc-chatmail
+# MushMail
 
-`esc-chatmail` is a Gmail client for iOS that makes email feel like chat while preserving original-message fidelity where it matters.
+MushMail is a Gmail client for iOS that makes email feel like chat while preserving original-message fidelity where it matters.
 
 ## Product Overview
 

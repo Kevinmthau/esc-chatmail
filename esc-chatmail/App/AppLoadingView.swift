@@ -14,7 +14,7 @@ struct AppLoadingView: View {
                 .font(.system(size: 60))
                 .foregroundColor(.blue)
 
-            Text("ESC Chatmail")
+            Text("MushMail")
                 .font(.title)
                 .fontWeight(.bold)
 

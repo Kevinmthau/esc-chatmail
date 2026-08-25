@@ -15,7 +15,7 @@ struct SignInView: View {
                     .symbolRenderingMode(.multicolor)
                     .foregroundColor(.blue)
                 
-                Text("ESC Chatmail")
+                Text("MushMail")
                     .font(.largeTitle)
                     .fontWeight(.bold)
                 
