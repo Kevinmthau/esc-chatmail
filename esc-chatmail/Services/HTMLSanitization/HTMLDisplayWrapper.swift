@@ -139,8 +139,8 @@ struct HTMLDisplayWrapper {
             /* Only constrain images that would overflow */
             img {
                 max-width: 100%;
-                height: auto;
             }
+            \(imageHeightRuleCSS(for: displayPurpose))
             /* Allow tables to shrink but don't force width */
             table {
                 max-width: 100%;
@@ -421,9 +421,9 @@ struct HTMLDisplayWrapper {
                 /* Constrain images without breaking layout */
                 img {
                     max-width: 100%;
-                    height: auto;
                     border: 0;
                 }
+                \(imageHeightRuleCSS(for: displayPurpose))
                 /* Allow tables to shrink but preserve intentional widths */
                 table {
                     max-width: 100%;
@@ -522,6 +522,24 @@ struct HTMLDisplayWrapper {
         a {
             color: inherit;
             text-decoration: inherit;
+        }
+        """
+    }
+
+    /// Keep overflowing images proportional while preserving TicketSource's dimensioned layout
+    /// spacers. `:where` keeps the original rule at `img` specificity so authored CSS still wins.
+    private func imageHeightRuleCSS(for displayPurpose: HTMLDisplayPurpose) -> String {
+        let selector: String
+        switch displayPurpose {
+        case .preview:
+            selector = "img"
+        case .original:
+            selector = #"img:not(:where([src*="/images/blank.png" i][alt="blank" i][width][height]))"#
+        }
+
+        return """
+        \(selector) {
+            height: auto;
         }
         """
     }
