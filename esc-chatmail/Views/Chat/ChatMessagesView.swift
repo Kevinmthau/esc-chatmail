@@ -162,7 +162,18 @@ struct ChatMessagesView: View {
                 handleInitialWindowLoaded(isComplete: isComplete, proxy: proxy)
             }
             .onChange(of: coordinator.isReadyToShow) { _, isReady in
-                guard isReady else { return }
+                guard isReady else {
+                    // The empty-to-loaded restart re-hides the transcript and
+                    // re-runs the hidden anchor pass over rows the latest
+                    // window load publishes; give it the same onAppear hold
+                    // the first-open pass gets.
+                    scrollState.beginInitialAnchorHold()
+                    return
+                }
+                // The reveal (confirmed, fallback, or user takeover) ends the
+                // hold that kept pre-reveal onAppear events from mutating the
+                // virtual-scroll window mid-anchor.
+                scrollState.endInitialAnchorHold()
                 ChatViewPerformanceSignposts.contentReady(
                     conversationID: conversation.id.uuidString
                 )
@@ -361,6 +372,11 @@ struct ChatMessagesView: View {
         groupingMessages: [ChatMessageRowModel]
     ) {
         scrollState.resume()
+        if coordinator.isReadyToShow {
+            // Re-appear after a completed reveal publishes no isReadyToShow
+            // change, so release the initial-anchor hold here as well.
+            scrollState.endInitialAnchorHold()
+        }
         let messageCount = totalMessageCountForCoordinator()
         if let first = displayedMessages.first, let last = displayedMessages.last {
             Log.diagnostic(
@@ -408,6 +424,15 @@ struct ChatMessagesView: View {
 
     private func handleInitialWindowLoaded(isComplete: Bool, proxy: ScrollViewProxy) {
         guard isComplete else { return }
+        if coordinator.isReadyToShow {
+            // A re-publish of the initial window after the reveal already
+            // completed (retry from the failure overlay, resume of an
+            // interrupted load) re-arms the hold, but no isReadyToShow
+            // transition will ever release it — the coordinator refuses to
+            // restart a reveal once ready. Release it here: this onChange
+            // fires after every initial-window publish.
+            scrollState.endInitialAnchorHold()
+        }
         let visibleMessages = scrollState.visibleMessages
         viewModel.initializeReplyingTo(lastMessage: latestMessageForCoordinator())
         coordinator.handleInitialWindowLoaded(
@@ -499,6 +524,9 @@ struct ChatMessagesView: View {
         )
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: rawIsVisible,
+            // A null/empty frame means the lazy trailing anchor has not laid
+            // out yet, which must not count against the initial retry budget.
+            hasBottomAnchorGeometry: !frame.isNull && !frame.isEmpty,
             isUserScrollInteractionActive: isScrollGestureActive,
             contentMinY: geometry.contentFrame.isNull
                 ? nil

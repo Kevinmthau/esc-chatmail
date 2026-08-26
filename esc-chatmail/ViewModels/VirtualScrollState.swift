@@ -157,6 +157,18 @@ final class VirtualScrollState: ObservableObject {
     private var pendingInsertedMessageEvents: [VirtualScrollInsertedMessageEvent] = []
     private var followsLatestInsertions = true
     private var followIntentRevision: UInt = 0
+    /// While the coordinator's initial bottom-anchor pass is still positioning
+    /// the hidden transcript, row `onAppear` events describe the top-anchored
+    /// pre-reveal layout, not user scrolling. Honoring them moved
+    /// `scrollPosition` off the parked window head (the ±2 movement guard in
+    /// `markIndexVisible` only covers head..head+2, while `bufferSize` and
+    /// `preloadThreshold` reach further), which requested uncovered older
+    /// ranges and previous-page preloads that prepended rows and shifted the
+    /// viewport mid-anchor — the same cascade the head-parking in
+    /// `loadLatestWindow` guards against. Armed by `publishInitialWindow` for
+    /// end-anchored windows; the view releases it via `endInitialAnchorHold()`
+    /// once the coordinator reveals the transcript.
+    private var isInitialAnchorHoldActive = false
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
@@ -216,6 +228,10 @@ final class VirtualScrollState: ObservableObject {
     /// Notifies the scroll state that a message at the given index is now visible.
     /// Called from onAppear for each message in the LazyVStack.
     func markIndexVisible(_ index: Int) {
+        // Pre-reveal onAppear reflects the hidden top-anchored layout, not
+        // user intent; see `isInitialAnchorHoldActive`.
+        guard !isInitialAnchorHoldActive else { return }
+
         // Skip small position changes to avoid excessive updates during scroll
         // This prevents 10+ calls per scroll when each visible message fires onAppear
         guard abs(index - scrollPosition) > 2 else { return }
@@ -223,6 +239,26 @@ final class VirtualScrollState: ObservableObject {
         scrollPosition = index
         updateVisibleMessages()
         preloadIfNeeded()
+    }
+
+    /// Releases the initial-anchor hold on `markIndexVisible`; called by the
+    /// view once the coordinator publishes `isReadyToShow` (a confirmed or
+    /// fallback reveal, or a user-scroll takeover). `scrollPosition` stays
+    /// parked at the window head until a genuine post-reveal position change.
+    func endInitialAnchorHold() {
+        isInitialAnchorHoldActive = false
+    }
+
+    /// Re-arms the initial-anchor hold for a restarted hidden reveal. The
+    /// coordinator's empty-to-loaded restart re-hides the transcript and
+    /// re-runs the anchor pass over rows published by `loadLatestWindow`,
+    /// which parks `scrollPosition` at the window head but does not arm the
+    /// hold itself — only `publishInitialWindow` does — so the view arms it
+    /// when `isReadyToShow` drops back to false. No-op for beginning-anchored
+    /// windows, which reveal at the top without an anchor pass.
+    func beginInitialAnchorHold() {
+        guard initialWindowPosition == .end else { return }
+        isInitialAnchorHoldActive = true
     }
 
     var visibleRangeStartIndex: Int {
@@ -554,6 +590,10 @@ final class VirtualScrollState: ObservableObject {
 
         totalMessageCount = page.totalCount
         scrollPosition = loadedWindow.range.lowerBound
+        // End-anchored windows hold onAppear-driven position updates until the
+        // coordinator's reveal completes; see `isInitialAnchorHoldActive`.
+        isInitialAnchorHoldActive =
+            initialWindowPosition == .end && !loadedWindow.messages.isEmpty
         setMessageWindow(window)
         visibleMessages = loadedWindow.messages
         isLoadingMore = false

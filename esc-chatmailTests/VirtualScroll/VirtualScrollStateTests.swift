@@ -1768,12 +1768,123 @@ final class VirtualScrollStateTests: XCTestCase {
         }
 
         let initialRanges = await requestedRanges.snapshot()
+        // Post-reveal scrolling: the view ends the initial-anchor hold once
+        // the coordinator reveals the transcript.
+        state.endInitialAnchorHold()
         state.markIndexVisible(4)
         try? await Task.sleep(nanoseconds: 100_000_000)
 
         let rangesAfterMarkVisible = await requestedRanges.snapshot()
         XCTAssertEqual(rangesAfterMarkVisible, initialRanges)
         XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
+    }
+
+    func testInitialLoadFromEnd_holdsWindowAgainstOnAppearBeyondDeadZoneUntilAnchorHoldEnds() async throws {
+        // Revert-check: VirtualScrollState.isInitialAnchorHoldActive. The
+        // production-shaped configuration below has a markIndexVisible dead
+        // zone (±2) far smaller than bufferSize (10) / preloadThreshold (5):
+        // without the hold, the pre-reveal onAppear at window head + 3
+        // requests an uncovered older range and preloads a previous page,
+        // prepending rows that shift the hidden viewport during the
+        // coordinator's initial bottom-anchor pass.
+        let (conversation, messages) = try makeConversationWithMessages(count: 25)
+        let stack = self.stack!
+        let requestedRanges = RangeRecorder()
+
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            await requestedRanges.record(range)
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: .default,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        // .default: visibleItemCount 20, so 25 messages park the window at
+        // head index 5 with the last 20 rows visible.
+        let expectedIDs = Array(messages.suffix(20)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs && !state.isLoadingMore
+        }
+
+        let initialRanges = await requestedRanges.snapshot()
+
+        // Window head + 3 escapes the ±2 dead zone; while the initial anchor
+        // hold is active it must neither replace the window nor preload an
+        // older page.
+        state.markIndexVisible(8)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        let rangesDuringHold = await requestedRanges.snapshot()
+        XCTAssertEqual(rangesDuringHold, initialRanges)
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
+
+        // Once the coordinator reveals the transcript the hold ends and the
+        // same onAppear-shaped update resumes driving window loads.
+        state.endInitialAnchorHold()
+        state.markIndexVisible(8)
+        await waitUntilRecordedRangeCount(initialRanges.count + 1, in: requestedRanges)
+    }
+
+    func testBeginInitialAnchorHold_rearmsHoldForRestartedReveal() async throws {
+        // Revert-check: VirtualScrollState.beginInitialAnchorHold(). The
+        // coordinator's empty-to-loaded restart re-runs the hidden anchor
+        // pass over rows published by loadLatestWindow, which does not arm
+        // the hold itself; the view re-arms it when isReadyToShow drops back
+        // to false. Without the re-arm, pre-reveal onAppear during the
+        // restarted pass replays the prepend cascade.
+        let (conversation, messages) = try makeConversationWithMessages(count: 25)
+        let stack = self.stack!
+        let requestedRanges = RangeRecorder()
+
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            await requestedRanges.record(range)
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: .default,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        let expectedIDs = Array(messages.suffix(20)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs && !state.isLoadingMore
+        }
+        state.endInitialAnchorHold()
+
+        state.beginInitialAnchorHold()
+        let rangesBeforeRestartedPass = await requestedRanges.snapshot()
+        state.markIndexVisible(8)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let rangesDuringRestartedPass = await requestedRanges.snapshot()
+        XCTAssertEqual(rangesDuringRestartedPass, rangesBeforeRestartedPass)
+
+        state.endInitialAnchorHold()
+        state.markIndexVisible(8)
+        await waitUntilRecordedRangeCount(
+            rangesBeforeRestartedPass.count + 1,
+            in: requestedRanges
+        )
     }
 
     func testRowForGroupingFetchesNextRowOutsideVisibleWindow() async throws {
@@ -2022,6 +2133,9 @@ final class VirtualScrollStateTests: XCTestCase {
             state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
         }
 
+        // Post-reveal scrolling: the view ends the initial-anchor hold once
+        // the coordinator reveals the transcript.
+        state.endInitialAnchorHold()
         // Grow the window upward the way a short scroll toward history does.
         state.scrollPosition = 12
         state.markIndexVisible(9)
@@ -2106,6 +2220,9 @@ final class VirtualScrollStateTests: XCTestCase {
         // would prepend rows above the viewport.
         XCTAssertEqual(state.scrollPosition, state.visibleRangeStartIndex)
 
+        // Post-reveal scrolling: the view ends the initial-anchor hold once
+        // the coordinator reveals the transcript.
+        state.endInitialAnchorHold()
         let requestCountBeforeHeadAppears = await requestedRanges.snapshot().count
         state.markIndexVisible(state.visibleRangeStartIndex)
         try? await Task.sleep(nanoseconds: 100_000_000)
@@ -3321,6 +3438,9 @@ final class VirtualScrollStateTests: XCTestCase {
             state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
         }
 
+        // Post-reveal scrolling: the view ends the initial-anchor hold once
+        // the coordinator reveals the transcript.
+        state.endInitialAnchorHold()
         state.markIndexVisible(2)
 
         let expectedIDs = messages.map(\.objectID) + [pendingMessage.objectID]
@@ -3362,6 +3482,9 @@ final class VirtualScrollStateTests: XCTestCase {
                 !state.isLoadingMore
         }
 
+        // Post-reveal scrolling: the view ends the initial-anchor hold once
+        // the coordinator reveals the transcript.
+        state.endInitialAnchorHold()
         state.scrollPosition = 9
         state.markIndexVisible(6)
 
@@ -3475,6 +3598,9 @@ final class VirtualScrollStateTests: XCTestCase {
             state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
         }
 
+        // Post-reveal scrolling: the view ends the initial-anchor hold once
+        // the coordinator reveals the transcript.
+        state.endInitialAnchorHold()
         // Walk upward through the conversation in production-like steps.
         var position = 36
         while position >= 0 {
@@ -3534,6 +3660,9 @@ final class VirtualScrollStateTests: XCTestCase {
             state.visibleMessages.map(\.objectID) == [messages[39].objectID] && !state.isLoadingMore
         }
 
+        // Post-reveal scrolling: the view ends the initial-anchor hold once
+        // the coordinator reveals the transcript.
+        state.endInitialAnchorHold()
         state.scrollPosition = 42
         state.markIndexVisible(39)
         await waitUntil {

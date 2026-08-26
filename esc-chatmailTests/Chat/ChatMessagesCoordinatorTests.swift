@@ -334,9 +334,15 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             ]]
         )
         XCTAssertEqual(groupingRequests, [["Alice@Example.com", "bob@example.com"]])
+        // Two paced waits: the offscreen retry's geometry recheck (sleep-paced
+        // so it samples settled layout, not the first unconverged pass) and
+        // the visibility confirmation.
         XCTAssertEqual(
             sleepCalls,
-            [UInt64(UIConfig.initialScrollDelay * 1_000_000_000)]
+            [
+                UInt64(UIConfig.initialScrollDelay * 1_000_000_000),
+                UInt64(UIConfig.initialScrollDelay * 1_000_000_000)
+            ]
         )
         XCTAssertEqual(
             anchorSteps,
@@ -690,14 +696,27 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("A consecutive resize should be coalesced into the pending geometry check")
         }
 
+        // The resize swallowed during the validation window is latched, so
+        // after the first corrective pair exhausts, the latch buys one more
+        // pair instead of stranding the moved anchor target.
         await waitUntil {
-            anchorSteps.count == 2 && sleepCalls.count == 2
+            anchorSteps.count == 4 && sleepCalls.count == 4
         }
 
         XCTAssertEqual(coordinator.initialAnchorGeometryCheckID, geometryCheckID)
         XCTAssertEqual(
             anchorSteps,
             [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout retry -> bottom anchor"
+                ),
                 .init(
                     delay: 0,
                     animated: false,
@@ -727,7 +746,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("User interaction must cancel post-reveal bottom following")
         }
 
-        XCTAssertEqual(anchorSteps.count, 2)
+        XCTAssertEqual(anchorSteps.count, 4)
     }
 
     func testPostRevealBottomFollowDoesNotOverrideNonLayoutScroll() async throws {
@@ -3759,6 +3778,853 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             ),
             "group:alice@example.com"
         )
+    }
+
+    func testInitialAnchorContentGrowthResetsRetryBudgetUntilGeometrySettles() async throws {
+        // Revert-check: the growth-aware attempt reset (contentHeightIncreased /
+        // viewportHeightDecreased zeroing the retry budget) in
+        // ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate's pending
+        // branch. Without it, the offscreen events at heights 200 and 300 burn
+        // both attempts and the height-300 repeat reveals the fallback early.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        let growingHeights: [CGFloat] = [100, 200, 300]
+        for height in growingHeights {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false,
+                contentMinY: 0,
+                contentHeight: height
+            ) { step in
+                anchorSteps.append(step)
+            }
+            XCTAssertFalse(
+                coordinator.isReadyToShow,
+                "Growing content must keep resetting the retry budget"
+            )
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+
+        // Once the content stops growing, the bounded budget must still
+        // terminate: one settled offscreen repeat charges the second attempt,
+        // the next reveals the fallback.
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 300
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 300
+        ) { _ in
+            XCTFail("Exhausting the settled-geometry budget must not scroll again")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout retry -> bottom anchor"
+                )
+            ]
+        )
+
+        // Attempts-exhausted fallback must keep its original no-follow
+        // contract (see testPermanentlyOffscreenInitialAnchorStopsAfterBoundedRetriesAndReveals).
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 400
+        ) { _ in
+            XCTFail("Attempts-exhausted fallback must not arm post-reveal following")
+        }
+    }
+
+    func testInitialAnchorDoesNotChargeRetryBudgetBeforeAnchorGeometryExists() async throws {
+        // Revert-check: ChatMessagesCoordinator.hasObservedBottomAnchorGeometry.
+        // Without the never-laid-out exemption, the four null-geometry events
+        // exhaust the budget and reveal the fallback before the anchor exists.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        for _ in 0..<4 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false,
+                hasBottomAnchorGeometry: false
+            ) { step in
+                anchorSteps.append(step)
+            }
+            XCTAssertFalse(
+                coordinator.isReadyToShow,
+                "Never-laid-out anchor geometry must not consume the retry budget"
+            )
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+        XCTAssertEqual(anchorSteps.count, 4)
+
+        // The moment real anchor geometry exists, the bounded budget applies.
+        for _ in 0..<2 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false
+            ) { step in
+                anchorSteps.append(step)
+            }
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in
+            XCTFail("Exhausting laid-out-geometry retries must not scroll again")
+        }
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(anchorSteps.count, 6)
+    }
+
+    func testInitialAnchorWallClockExpiryRevealsAndArmsFollowAfterObservedGrowth() async throws {
+        // Revert-check: ChatMessagesCoordinator.initialAnchorRevealDeadline.
+        // Without the wall-clock terminator, growth events keep resetting the
+        // budget and the transcript stays hidden past the reveal time limit;
+        // without the follow arming on that path, the post-expiry growth event
+        // would not re-anchor.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        for (elapsed, height) in [(0.0, CGFloat(100)), (1.0, 200), (2.0, 300)] {
+            currentTime = 1_000 + elapsed
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false,
+                contentMinY: 0,
+                contentHeight: height
+            ) { step in
+                anchorSteps.append(step)
+            }
+            XCTAssertFalse(coordinator.isReadyToShow)
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+        XCTAssertEqual(anchorSteps.count, 3)
+
+        // Past the reveal time limit, still-growing content must reveal the
+        // transcript rather than hold the spinner forever...
+        currentTime = 1_003.2
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 400
+        ) { _ in
+            XCTFail("The wall-clock fallback reveal must not issue an initial scroll")
+        }
+        XCTAssertTrue(coordinator.isReadyToShow)
+
+        // ...and, because the geometry signal demonstrably works (it reported
+        // growth), post-reveal bottom-follow must be armed so the late growth
+        // keeps re-anchoring.
+        currentTime = 1_003.3
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 500
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 5
+        }
+        XCTAssertEqual(
+            Array(anchorSteps.suffix(2)),
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout retry -> bottom anchor"
+                )
+            ]
+        )
+
+        coordinator.handleUserScrollInteraction()
+        currentTime = 1_003.4
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 600
+        ) { _ in
+            XCTFail("User interaction must cancel the wall-clock-armed bottom follow")
+        }
+    }
+
+    func testInitialAnchorRecheckIsPacedByInjectedSleep() async throws {
+        // Revert-check: the injected sleep(initialScrollDelay) pacing the
+        // initial geometry recheck task in
+        // ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate. Reverting
+        // to a bare Task.yield() leaves sleepCalls empty.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var sleepCalls: [UInt64] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { nanoseconds in
+                sleepCalls.append(nanoseconds)
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false
+        ) { _ in }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+
+        XCTAssertEqual(
+            sleepCalls,
+            [UInt64(UIConfig.initialScrollDelay * 1_000_000_000)]
+        )
+    }
+
+    func testPostRevealBottomFollowGraceSlidesWhileContentKeepsGrowing() async throws {
+        // Revert-check: slidPostRevealFollowDeadline(extending:) and its use
+        // in ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate's
+        // .following / .checkingAfterScroll / .waitingForGrowth branches —
+        // including the visible-anchor arms. With the fixed deadline, the
+        // t=1006 growth event is silently dropped (it is past the original
+        // t=1003 expiry); with only the offscreen arms slid, it is still
+        // dropped (past the offscreen-only 1005.5), and the viewport strands
+        // above the last message.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        // Growth inside the original grace corrects and slides the deadline
+        // (offscreen arm): 1003 -> 1005.5.
+        currentTime = 1_002.5
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        // Growth while the anchor stays visible needs no scroll but must also
+        // slide (visible arm): 1005.5 -> 1006.5. Bubbles resolving in place
+        // keep the follow alive without ever going offscreen.
+        currentTime = 1_003.5
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -40,
+            contentHeight: 180
+        ) { _ in
+            XCTFail("Growth with the anchor visible must not request a scroll")
+        }
+
+        // Past what the offscreen-only slide would allow (1005.5), but inside
+        // the visible slide's 1006.5: growth must still re-anchor.
+        currentTime = 1_006
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -40,
+            contentHeight: 220
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 4
+        }
+        XCTAssertEqual(
+            Array(anchorSteps.suffix(2)),
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout retry -> bottom anchor"
+                )
+            ]
+        )
+
+        // A quiet gap longer than the grace still expires the follow: sliding
+        // extends the deadline only while growth keeps arriving.
+        currentTime = 1_012
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -40,
+            contentHeight: 260
+        ) { _ in
+            XCTFail("A quiet gap past the slid grace must expire the follow")
+        }
+        XCTAssertEqual(anchorSteps.count, 4)
+    }
+
+    func testInitialAnchorGrowthDuringRecheckWindowStillResetsRetryBudget() async throws {
+        // Revert-check: ChatMessagesCoordinator.didObserveGrowthDuringInitialRecheck.
+        // Growth events overwhelmingly land while the machine sits in
+        // .checkingAfterScroll (entered synchronously on every probe); the
+        // tracker overwrite consumes their deltas before the phase guard
+        // swallows them, so without the latch the next probe sees no growth,
+        // charges the budget, and the pass falls back early — reproducing the
+        // original open-above-the-bottom bug.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        // Probe 1 charges an attempt and enters .checkingAfterScroll; the
+        // growth event delivered synchronously afterwards lands in that
+        // checking window and is swallowed — with only its latch surviving.
+        var geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 200
+        ) { _ in
+            XCTFail("An event during the recheck window must be coalesced, not scrolled")
+        }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+
+        // Probe 2 carries no delta of its own (the swallowed event already
+        // consumed it), but the latch must reset the budget: this is still
+        // the first attempt against the newest layout.
+        geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 200
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(
+            coordinator.isReadyToShow,
+            "Latched growth must keep resetting the retry budget"
+        )
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+
+        // With the growth settled and the latch spent, the bounded budget
+        // still terminates.
+        geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 200
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 200
+        ) { _ in
+            XCTFail("Exhausting the settled-geometry budget must not scroll again")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout retry -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testPostRevealGrowthDuringValidationSpendsLatchInsteadOfStranding() async throws {
+        // Revert-check: the didObserveGrowthDuringPostRevealCheck consumption
+        // in ChatMessagesCoordinator.validatePostRevealBottomScroll's
+        // exhausted-attempts branch. Without it, growth swallowed while the
+        // second corrective scroll's validation was in flight parks the
+        // machine in .waitingForGrowth with the delta already consumed — no
+        // later event re-reports it, and the viewport strands above the last
+        // message by exactly that delta.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        // Growth starts a corrective pair; a further resize lands
+        // synchronously inside the checking window and is latched.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 200
+        ) { _ in
+            XCTFail("An event during the validation window must be coalesced, not scrolled")
+        }
+
+        // The exhausted first pair spends the latch on a second pair instead
+        // of parking in .waitingForGrowth with the target already moved.
+        await waitUntil {
+            anchorSteps.count == 4
+        }
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout retry -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout retry -> bottom anchor"
+                )
+            ]
+        )
+
+        // Once the latch is spent and nothing grows, no further scrolls.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 200
+        ) { _ in
+            XCTFail("A settled offscreen anchor must wait for growth, not scroll")
+        }
+        XCTAssertEqual(anchorSteps.count, 4)
+    }
+
+    func testPostRevealBottomFollowLifetimeCapsSliding() async throws {
+        // Revert-check: the maximumPostRevealBottomFollowLifetime clamp in
+        // ChatMessagesCoordinator.slidPostRevealFollowDeadline(extending:).
+        // Without it, a layout whose height never converges slides the
+        // deadline forever and the follow's scroll bursts never go quiet.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        // Sustained visible growth keeps sliding the deadline — but only up
+        // to the absolute lifetime (arm time 1000 + 30).
+        var height: CGFloat = 100
+        var time: TimeInterval = 1_002
+        while time <= 1_028 {
+            currentTime = time
+            height += 10
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: true,
+                contentMinY: 0,
+                contentHeight: height
+            ) { _ in
+                XCTFail("Growth with the anchor visible must not request a scroll")
+            }
+            time += 2
+        }
+
+        // Still inside the capped lifetime: growth pushing the anchor
+        // offscreen re-anchors.
+        currentTime = 1_029.5
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: height + 10
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        // Past armTime + lifetime, growth can no longer extend the follow.
+        currentTime = 1_030.5
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: height + 20
+        ) { _ in
+            XCTFail("Growth past the absolute follow lifetime must not scroll")
+        }
+        XCTAssertEqual(anchorSteps.count, 2)
+    }
+
+    func testInitialAnchorWallClockExpiryWithoutGeometryDoesNotArmFollow() async throws {
+        // Revert-check: the armsBottomFollowAfterFallback:
+        // hasObservedBottomAnchorGeometry argument at the wall-clock
+        // completeInitialReveal call in
+        // ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate. A pass
+        // whose bottom anchor never laid out has an unproven geometry
+        // signal; arming bottom-follow on it would drive forced scrolls off
+        // phantom offscreen/growth reports after the fallback reveal.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        for elapsed in [0.0, 1.0, 2.0] {
+            currentTime = 1_000 + elapsed
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false,
+                hasBottomAnchorGeometry: false
+            ) { step in
+                anchorSteps.append(step)
+            }
+            XCTAssertFalse(coordinator.isReadyToShow)
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+        XCTAssertEqual(anchorSteps.count, 3)
+
+        // The time limit reveals, but with the anchor never laid out the
+        // geometry signal is unproven — no bottom-follow.
+        currentTime = 1_003.2
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            hasBottomAnchorGeometry: false
+        ) { _ in
+            XCTFail("The wall-clock fallback reveal must not issue an initial scroll")
+        }
+        XCTAssertTrue(coordinator.isReadyToShow)
+
+        currentTime = 1_003.3
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100
+        ) { _ in
+            XCTFail("No follow may be armed after a never-laid-out fallback")
+        }
+        currentTime = 1_003.4
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 200
+        ) { _ in
+            XCTFail("Growth after a never-laid-out fallback must not scroll")
+        }
+        XCTAssertEqual(anchorSteps.count, 3)
+    }
+
+    func testWaitingForGrowthHistoryScrollCancelsBottomFollow() async throws {
+        // Revert-check: the cancelPostRevealBottomFollowForNonLayoutScroll()
+        // calls in the .waitingForGrowth and .checkingAfterScroll branches of
+        // ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate. Without
+        // them, the growth event after the history move re-anchors and fights
+        // the user's scroll position.
+        // HONEST SCOPE: the second corrective scroll's validation task races
+        // this test's next event, so the history-move event may land in either
+        // .checkingAfterScroll or .waitingForGrowth — removing only one
+        // branch's cancel can survive this test on a lucky interleaving.
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        await confirmInitialBottomAnchor(coordinator)
+
+        // Exhaust both post-reveal corrective scrolls to park the machine in
+        // .waitingForGrowth.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 140
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        // The content frame moving down means the offset moved toward older
+        // messages — a user scroll, not a layout change.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 40,
+            contentHeight: 140
+        ) { _ in
+            XCTFail("A history-ward content move must not request a scroll")
+        }
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 40,
+            contentHeight: 220
+        ) { _ in
+            XCTFail("Growth after a history-ward move must not re-anchor")
+        }
+        XCTAssertEqual(anchorSteps.count, 2)
     }
 
     private func makeConversationWithMessages(
