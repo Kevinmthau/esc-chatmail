@@ -69,9 +69,30 @@ final class VirtualScrollState: ObservableObject {
         var needsCountReconciliation = false
     }
 
-    private enum WindowLoadIntent {
+    private enum WindowLoadIntent: Equatable {
         case latest(requiredFollowIntentRevision: UInt?)
         case range(Range<Int>)
+    }
+
+    /// Lifecycle of the single in-flight load. One value instead of the
+    /// previously independent `isLoadingMore` flag and
+    /// `currentWindowLoadIntent` optional, whose illegal combination — not
+    /// loading, intent still set — silently wedged every automatic
+    /// reconciliation until the chat closed (the `finishWindowLoadFailure`
+    /// bug pinned by
+    /// `testWindowLoadFailure_doesNotWedgeAutomaticReconciliation`). The enum
+    /// makes that state unrepresentable: an intent exists only while its load
+    /// does. `windowLoadGeneration` stays a separate monotonic token because
+    /// stale completions compare captured generations after the lifecycle has
+    /// already moved on.
+    private enum WindowLoadLifecycle: Equatable {
+        /// No load in flight; automatic reconciliation may run.
+        case idle
+        /// `loadInitialMessages` is materializing the first window. There is
+        /// no window intent to replay, and reconciliation must wait.
+        case loadingInitialWindow
+        /// A window load owns the user's current scroll intent.
+        case loadingWindow(intent: WindowLoadIntent)
     }
 
     private enum InitialLoadAttemptFailure: Error {
@@ -127,7 +148,7 @@ final class VirtualScrollState: ObservableObject {
     @Published var visibleMessages: [ChatMessageRowModel] = []
     @Published var totalMessageCount = 0
     var scrollPosition: Int = 0
-    var isLoadingMore = false
+    var isLoadingMore: Bool { windowLoadLifecycle != .idle }
     @Published private(set) var initialLoadPhase: InitialLoadPhase = .loading
     @Published private(set) var initialLoadFailureReason: String?
     @Published private(set) var latestWindowLayoutID = UUID()
@@ -186,7 +207,11 @@ final class VirtualScrollState: ObservableObject {
     private var needsDatasetReconciliationAfterCurrentLoad = false
     private var needsUnclassifiedRefreshCountReconciliation = false
     private var needsPostSyncDatasetReconciliation = false
-    private var currentWindowLoadIntent: WindowLoadIntent?
+    private var windowLoadLifecycle: WindowLoadLifecycle = .idle
+    private var currentWindowLoadIntent: WindowLoadIntent? {
+        if case .loadingWindow(let intent) = windowLoadLifecycle { return intent }
+        return nil
+    }
 
     init(
         conversationId: String,
@@ -300,22 +325,22 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func canRestoreCapturedWindow(_ window: MessageWindow) -> Bool {
-        guard !isLoadingMore else { return false }
-        guard case nil = currentWindowLoadIntent else { return false }
+        guard windowLoadLifecycle == .idle else { return false }
         return isCurrentWindow(window)
     }
 
     private func canStartAutomaticReconciliation(_ window: MessageWindow) -> Bool {
         guard isCurrentWindow(window) else { return false }
-        guard isLoadingMore else {
-            guard case nil = currentWindowLoadIntent else { return false }
+        switch windowLoadLifecycle {
+        case .idle:
             return true
-        }
-
-        if case .latest(let requiredFollowIntentRevision) = currentWindowLoadIntent {
+        case .loadingInitialWindow:
+            return false
+        case .loadingWindow(.latest(let requiredFollowIntentRevision)):
             return requiredFollowIntentRevision != nil
+        case .loadingWindow(.range):
+            return false
         }
-        return false
     }
 
     private var hasPendingInsertedMessagesInConversation: Bool {
@@ -346,7 +371,7 @@ final class VirtualScrollState: ObservableObject {
         )
         initialLoadPhase = .loading
         initialLoadFailureReason = nil
-        isLoadingMore = true
+        windowLoadLifecycle = .loadingInitialWindow
         Log.diagnostic(
             .chatView,
             level: .info,
@@ -596,7 +621,7 @@ final class VirtualScrollState: ObservableObject {
             initialWindowPosition == .end && !loadedWindow.messages.isEmpty
         setMessageWindow(window)
         visibleMessages = loadedWindow.messages
-        isLoadingMore = false
+        windowLoadLifecycle = .idle
         needsDatasetReconciliationAfterCurrentLoad = false
         initialLoadFailureReason = nil
         initialLoadPhase = loadedWindow.messages.isEmpty ? .empty : .loaded
@@ -624,7 +649,7 @@ final class VirtualScrollState: ObservableObject {
         if let reportedTotalCount = failure.reportedTotalCount {
             totalMessageCount = reportedTotalCount
         }
-        isLoadingMore = false
+        windowLoadLifecycle = .idle
         initialLoadFailureReason = failure.userFacingReason
         initialLoadPhase = .failed
         finishInitialLoadSignpost(outcome: "failed")
@@ -925,7 +950,6 @@ final class VirtualScrollState: ObservableObject {
         )
         let expectedDatasetGeneration = datasetGeneration ?? messageDatasetGeneration
         guard loadGeneration == windowLoadGeneration else { return nil }
-        isLoadingMore = true
 
         let page = await loadPage(
             startIndex..<endIndex,
@@ -1100,10 +1124,9 @@ final class VirtualScrollState: ObservableObject {
         totalMessageCount = page.totalCount
         setMessageWindow(window)
         visibleMessages = messages
-        isLoadingMore = false
+        windowLoadLifecycle = .idle
         updateAvailabilityPhaseAfterWindowLoad(page: page, messages: messages)
         needsDatasetReconciliationAfterCurrentLoad = false
-        currentWindowLoadIntent = nil
         resolvePendingInsertedMessageEvents()
         scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
         schedulePostSyncDatasetReconciliationIfNeeded()
@@ -1367,7 +1390,6 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func finishWindowLoadFailure(operation: String, description: String) {
-        isLoadingMore = false
         if visibleMessages.isEmpty && initialLoadPhase == .loading {
             initialLoadFailureReason = "Messages couldn’t be loaded. Please try again."
             initialLoadPhase = .failed
@@ -1378,17 +1400,14 @@ final class VirtualScrollState: ObservableObject {
             "VirtualScroll \(operation) failed conv=\(conversationId) error=\(description); preserving current window",
             category: .ui
         )
+        // The deferred hand-off reads the failed load's intent to replay a
+        // queued .latest/.range load, so it must run before the lifecycle
+        // ends. Either way the lifecycle ends here: an intent outliving its
+        // load is the reconciliation wedge the lifecycle enum exists to make
+        // unrepresentable. Callers reach this terminal only for the current
+        // generation.
         scheduleDeferredDatasetReconciliationIfNeeded()
-        // The deferred hand-off above consumes the intent when a dataset
-        // mutation queued behind this load (it replays the failed .latest/
-        // .range intent, so the clear must come after it). Otherwise the
-        // failed load's intent must not outlive it: canRestoreCapturedWindow
-        // and canStartAutomaticReconciliation gate on a nil intent, so a
-        // stale one silently wedges every automatic reconciliation — dataset
-        // mutations, post-sync validation, refresh-count repair — until the
-        // chat is closed. Callers reach this terminal only for the current
-        // generation, mirroring the unconditional isLoadingMore reset above.
-        currentWindowLoadIntent = nil
+        windowLoadLifecycle = .idle
         scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
         schedulePostSyncDatasetReconciliationIfNeeded()
     }
@@ -1424,15 +1443,13 @@ final class VirtualScrollState: ObservableObject {
 
     private func beginWindowLoad(intent: WindowLoadIntent) -> UInt {
         windowLoadGeneration &+= 1
-        currentWindowLoadIntent = intent
-        isLoadingMore = true
+        windowLoadLifecycle = .loadingWindow(intent: intent)
         return windowLoadGeneration
     }
 
     private func finishCancelledWindowLoad(generation: UInt) {
         guard generation == windowLoadGeneration else { return }
-        isLoadingMore = false
-        currentWindowLoadIntent = nil
+        windowLoadLifecycle = .idle
     }
 
     /// Cancels all pending tasks when the scroll state is no longer needed
@@ -1440,11 +1457,10 @@ final class VirtualScrollState: ObservableObject {
         finishInitialLoadSignpost(outcome: "cancelled")
         windowLoadGeneration &+= 1
         taskManager.cancelAll()
-        isLoadingMore = false
+        windowLoadLifecycle = .idle
         needsDatasetReconciliationAfterCurrentLoad = false
         needsUnclassifiedRefreshCountReconciliation = false
         needsPostSyncDatasetReconciliation = false
-        currentWindowLoadIntent = nil
         viewContextChangesCancellable?.cancel()
         viewContextChangesCancellable = nil
         syncCompletedCancellable?.cancel()
@@ -1701,7 +1717,7 @@ final class VirtualScrollState: ObservableObject {
 
         needsDatasetReconciliationAfterCurrentLoad = false
         let loadIntent = currentWindowLoadIntent
-        currentWindowLoadIntent = nil
+        windowLoadLifecycle = .idle
         let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
         taskManager.run(datasetReconcileTaskKey) { [weak self] in
             guard let self else { return }
