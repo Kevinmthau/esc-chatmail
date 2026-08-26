@@ -1379,6 +1379,16 @@ final class VirtualScrollState: ObservableObject {
             category: .ui
         )
         scheduleDeferredDatasetReconciliationIfNeeded()
+        // The deferred hand-off above consumes the intent when a dataset
+        // mutation queued behind this load (it replays the failed .latest/
+        // .range intent, so the clear must come after it). Otherwise the
+        // failed load's intent must not outlive it: canRestoreCapturedWindow
+        // and canStartAutomaticReconciliation gate on a nil intent, so a
+        // stale one silently wedges every automatic reconciliation — dataset
+        // mutations, post-sync validation, refresh-count repair — until the
+        // chat is closed. Callers reach this terminal only for the current
+        // generation, mirroring the unconditional isLoadingMore reset above.
+        currentWindowLoadIntent = nil
         scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
         schedulePostSyncDatasetReconciliationIfNeeded()
     }

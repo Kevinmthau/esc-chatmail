@@ -900,6 +900,79 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertFalse(state.isLoadingMore)
     }
 
+    func testWindowLoadFailure_doesNotWedgeAutomaticReconciliation() async throws {
+        // Revert-check: the currentWindowLoadIntent clear in
+        // VirtualScrollState.finishWindowLoadFailure. Both automatic
+        // reconciliation gates (canRestoreCapturedWindow /
+        // canStartAutomaticReconciliation) require a nil intent once
+        // isLoadingMore is false, so a failed load that leaves its intent
+        // behind silently blocks every later dataset reconciliation — a
+        // message deleted by sync keeps rendering from its stale row until
+        // the chat is reopened.
+        let (conversation, messages) = try makeConversationWithMessages(count: 5)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let attempts = InitialLoadAttemptCounter()
+        let stack = self.stack!
+
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            let attempt = await attempts.next()
+            if attempt == 3 {
+                return VirtualScrollMessagePage(
+                    messageIDs: [],
+                    totalCount: 0,
+                    fetchErrorDescription: "Injected transient fetch failure"
+                )
+            }
+
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        let expectedIDs = Array(messages.suffix(3)).map(\.objectID)
+        await waitUntil {
+            state.initialLoadPhase == .loaded &&
+                state.visibleMessages.map(\.objectID) == expectedIDs
+        }
+
+        // A transient fetch failure ends the load with rows preserved; the
+        // failed load's intent must die with it.
+        await state.loadLatestWindow()
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
+        XCTAssertFalse(state.isLoadingMore)
+
+        // Sync now deletes a message inside the window. The dataset
+        // reconciliation this schedules must still run and republish the
+        // window without the deleted row.
+        let deletedObjectID = messages[3].objectID
+        viewContext.delete(messages[3])
+        try viewContext.save()
+
+        await waitUntil {
+            !state.visibleMessages.map(\.objectID).contains(deletedObjectID) &&
+                state.totalMessageCount == 4 &&
+                !state.isLoadingMore
+        }
+        XCTAssertEqual(state.visibleMessages.last?.objectID, messages[4].objectID)
+    }
+
     func testLatestWindowCountDriftRebasesBeforePublishing() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 5)
         let configuration = VirtualScrollConfiguration(
