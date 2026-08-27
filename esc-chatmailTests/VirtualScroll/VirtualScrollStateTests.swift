@@ -974,12 +974,13 @@ final class VirtualScrollStateTests: XCTestCase {
     }
 
     func testInitialPublish_concurrentLatestWindowLoad_keepsLifecycleOwnedByThatLoad() async throws {
-        // Revert-check: the `windowLoadLifecycle == .loadingInitialWindow`
-        // guards in publishInitialWindow / publishInitialLoadFailure
-        // (VirtualScrollState+InitialLoad). Without them the initial publish
-        // forces .idle while a window load is in flight, isLoadingMore flips
-        // false mid-load, and a merged sync save can start a competing
-        // reconciliation whose generation bump silently kills that load.
+        // Revert-check: the superseded-publish drop guard
+        // (`windowLoadLifecycle == .loadingInitialWindow`) at the top of
+        // publishInitialWindow (VirtualScrollState+InitialLoad). Without it
+        // the stale initial publish overwrites the concurrent load's
+        // transcript, forces .idle while that load is in flight (isLoadingMore
+        // flips false mid-load, opening the competing-reconciliation hazard),
+        // and arms an initial-anchor hold no view seam ever releases.
         let (conversation, messages) = try makeConversationWithMessages(count: 8)
         let configuration = VirtualScrollConfiguration(
             visibleItemCount: 4,
@@ -1026,13 +1027,18 @@ final class VirtualScrollStateTests: XCTestCase {
         let latestLoad = Task { await state.loadLatestWindow() }
         await waitUntilArrivedPageLoads(2, in: gates)
 
-        // Release only the initial load: it publishes while the latest load
-        // is still in flight, and must leave that load's lifecycle alone.
+        // Release only the initial load: its publish arrives while the latest
+        // load is still in flight and must be dropped wholesale — lifecycle,
+        // phase, rows, and hold all belong to the owning load now.
         await gates.open(1)
-        await waitUntil { state.initialLoadPhase == .loaded }
+        try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertTrue(
             state.isLoadingMore,
             "The in-flight latest-window load owns the lifecycle across the initial publish"
+        )
+        XCTAssertEqual(
+            state.initialLoadPhase, .loading,
+            "A superseded initial publish must not drive the phase"
         )
 
         await gates.open(2)
@@ -1040,6 +1046,87 @@ final class VirtualScrollStateTests: XCTestCase {
         await waitUntil {
             !state.isLoadingMore && state.isShowingLatestWindow
         }
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages.suffix(4)).map(\.objectID)
+        )
+    }
+
+    func testInitialLoadFailure_concurrentLatestWindowLoad_leavesLifecycleAndPhaseToThatLoad() async throws {
+        // Revert-check: the superseded-failure drop guard
+        // (`windowLoadLifecycle == .loadingInitialWindow`) at the top of
+        // publishInitialLoadFailure (VirtualScrollState+InitialLoad). Without
+        // it, an initial load exhausting its retries while a window load is
+        // in flight forces .idle mid-load and stamps .failed over the phase
+        // that load owns — hiding a live transcript behind the failure
+        // overlay.
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let gates = PageLoadGates()
+
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            if !range.isEmpty {
+                let call = await gates.arrive()
+                while await !gates.isOpen(call), !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+                if await gates.shouldFail(call) {
+                    return VirtualScrollMessagePage(
+                        messageIDs: [],
+                        totalCount: 0,
+                        fetchErrorDescription: "Injected initial fetch failure"
+                    )
+                }
+            }
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        await waitUntilArrivedPageLoads(1, in: gates)
+        let latestLoad = Task { await state.loadLatestWindow() }
+        await waitUntilArrivedPageLoads(2, in: gates)
+
+        // Fail the initial load's attempt and its single automatic retry
+        // (call 3) while the latest-window load (call 2) stays in flight.
+        await gates.openFailing(1)
+        await waitUntilArrivedPageLoads(3, in: gates)
+        await gates.openFailing(3)
+
+        // The dropped failure publish must leave lifecycle, phase, and
+        // failure reason to the owning load.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(
+            state.isLoadingMore,
+            "The in-flight latest-window load owns the lifecycle across the initial failure"
+        )
+        XCTAssertEqual(state.initialLoadPhase, .loading)
+        XCTAssertNil(state.initialLoadFailureReason)
+
+        await gates.open(2)
+        _ = await latestLoad.value
+        await waitUntil {
+            state.initialLoadPhase == .loaded && !state.isLoadingMore
+        }
+        XCTAssertNil(state.initialLoadFailureReason)
         XCTAssertEqual(
             state.visibleMessages.map(\.objectID),
             Array(messages.suffix(4)).map(\.objectID)
@@ -4034,15 +4121,21 @@ final class VirtualScrollStateTests: XCTestCase {
 
 private actor PageLoadGates {
     private var arrivedCalls = 0
-    private var openedThrough = 0
+    private var openCalls: Set<Int> = []
+    private var failingCalls: Set<Int> = []
 
     func arrive() -> Int {
         arrivedCalls += 1
         return arrivedCalls
     }
 
-    func isOpen(_ call: Int) -> Bool { call <= openedThrough }
-    func open(_ through: Int) { openedThrough = max(openedThrough, through) }
+    func isOpen(_ call: Int) -> Bool { openCalls.contains(call) }
+    func open(_ call: Int) { openCalls.insert(call) }
+    func openFailing(_ call: Int) {
+        failingCalls.insert(call)
+        openCalls.insert(call)
+    }
+    func shouldFail(_ call: Int) -> Bool { failingCalls.contains(call) }
     func arrivedCount() -> Int { arrivedCalls }
 }
 

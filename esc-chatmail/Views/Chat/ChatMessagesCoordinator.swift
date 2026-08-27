@@ -577,6 +577,14 @@ final class ChatMessagesCoordinator: ObservableObject {
                 }
                 return
             }
+            // The confirmation-entry event can itself carry growth (a bubble
+            // resolving in the same layout pass that landed the anchor);
+            // latch it like the sibling seams — a confirmed reveal clears
+            // the latch, and a failed confirmation needs it to keep the
+            // budget growth-aware.
+            if didObserveGrowth {
+                didObserveGrowthDuringInitialRecheck = true
+            }
             beginInitialVisibilityConfirmation(scrollAttempts: scrollAttempts)
             return
         }

@@ -15,6 +15,12 @@ extension VirtualScrollState {
         )
         initialLoadPhase = .loading
         initialLoadFailureReason = nil
+        // Claiming the lifecycle bumps the generation, like every other
+        // claim (beginWindowLoad, cleanup): an in-flight window load's
+        // generation guards then retire it quietly instead of letting its
+        // terminal force .idle over this initial load — the mirror image of
+        // the superseded-publish drop in publishInitialWindow below.
+        windowLoadGeneration &+= 1
         windowLoadLifecycle = .loadingInitialWindow
         Log.diagnostic(
             .chatView,
@@ -248,6 +254,23 @@ extension VirtualScrollState {
     }
 
     private func publishInitialWindow(_ loadedWindow: InitialWindowLoad) {
+        // A window load begun while this initial load was in flight (a reply
+        // sent under the loading overlay) owns the lifecycle and the
+        // transcript now: publishing this stale snapshot over it would
+        // overwrite newer rows, arm an initial-anchor hold no view seam
+        // would ever release, and regress the published count and phase.
+        // Drop the superseded publish wholesale; the owning load's own
+        // publish (or failure terminal) drives the phase from here.
+        guard windowLoadLifecycle == .loadingInitialWindow else {
+            finishInitialLoadSignpost(outcome: "superseded")
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll initial publish superseded by a concurrent window load conv=\(conversationId)",
+                category: .ui
+            )
+            return
+        }
         let page = loadedWindow.page
         let endIndex = loadedWindow.range.lowerBound + page.messageIDs.count
         let window = MessageWindow(
@@ -265,14 +288,7 @@ extension VirtualScrollState {
             initialWindowPosition == .end && !loadedWindow.messages.isEmpty
         setMessageWindow(window)
         visibleMessages = loadedWindow.messages
-        // A window load begun while this initial load was in flight (a reply
-        // sent under the loading overlay) owns the lifecycle now; forcing
-        // .idle here would flip isLoadingMore false mid-load and let a merged
-        // sync save start a competing reconciliation whose generation bump
-        // kills that load. Only end the lifecycle this task still owns.
-        if windowLoadLifecycle == .loadingInitialWindow {
-            windowLoadLifecycle = .idle
-        }
+        windowLoadLifecycle = .idle
         needsDatasetReconciliationAfterCurrentLoad = false
         initialLoadFailureReason = nil
         initialLoadPhase = loadedWindow.messages.isEmpty ? .empty : .loaded
@@ -297,14 +313,25 @@ extension VirtualScrollState {
     }
 
     private func publishInitialLoadFailure(_ failure: InitialLoadAttemptFailure) {
+        // See publishInitialWindow: a concurrent window load owns the
+        // lifecycle, phase, and count now. Reporting this stale failure
+        // would flip a live transcript behind the failure overlay (phase
+        // .failed over the .loaded that load published) and end a lifecycle
+        // it does not own.
+        guard windowLoadLifecycle == .loadingInitialWindow else {
+            finishInitialLoadSignpost(outcome: "superseded")
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll initial load failure superseded by a concurrent window load conv=\(conversationId) reason=\(failure.diagnosticDescription)",
+                category: .ui
+            )
+            return
+        }
         if let reportedTotalCount = failure.reportedTotalCount {
             totalMessageCount = reportedTotalCount
         }
-        // See publishInitialWindow: never end a lifecycle a concurrent window
-        // load owns.
-        if windowLoadLifecycle == .loadingInitialWindow {
-            windowLoadLifecycle = .idle
-        }
+        windowLoadLifecycle = .idle
         initialLoadFailureReason = failure.userFacingReason
         initialLoadPhase = .failed
         finishInitialLoadSignpost(outcome: "failed")
