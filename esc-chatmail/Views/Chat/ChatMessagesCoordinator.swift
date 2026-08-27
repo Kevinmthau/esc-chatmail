@@ -78,6 +78,14 @@ final class ChatMessagesCoordinator: ObservableObject {
     typealias Now = () -> TimeInterval
 
     @Published private(set) var isReadyToShow = false
+    /// True while readiness came from revealing an empty conversation — the
+    /// one ready state `handleMessageCountChange` restarts a hidden reveal
+    /// from when messages arrive. The view must not treat it as a terminal
+    /// reveal (releasing the initial-anchor hold on a re-publish against it
+    /// would strip the restarted pass of its onAppear protection).
+    var isRevealRestartableFromEmpty: Bool {
+        initialRevealState == .ready(wasEmptyConversation: true)
+    }
     @Published private(set) var contactRefreshToken = 0
     @Published private(set) var senderGroupingKeysByEmail: [String: String] = [:]
     @Published private(set) var initialAnchorGeometryCheckID = UUID()
@@ -397,7 +405,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// as a fallback after both attempts so a bad geometry signal cannot block the chat.
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
-        hasBottomAnchorGeometry: Bool = true,
+        // Deliberately no default: "offscreen" with a never-laid-out anchor
+        // frame must not charge the initial retry budget, so every caller
+        // decides this explicitly. (Tests use a defaulted overload in their
+        // own target.)
+        hasBottomAnchorGeometry: Bool,
         isUserScrollInteractionActive: Bool = false,
         contentMinY: CGFloat? = nil,
         contentHeight: CGFloat? = nil,
@@ -555,7 +567,16 @@ final class ChatMessagesCoordinator: ObservableObject {
                 completeInitialReveal(wasVisiblyConfirmed: true)
                 return
             }
-            guard phase != .confirmingVisibility else { return }
+            guard phase != .confirmingVisibility else {
+                // Growth landing mid-confirmation is swallowed here after the
+                // tracker overwrite consumed its delta; latch it, or the
+                // offscreen probes that follow (the growth pushed the anchor
+                // off) would charge the budget as if nothing grew.
+                if didObserveGrowth {
+                    didObserveGrowthDuringInitialRecheck = true
+                }
+                return
+            }
             beginInitialVisibilityConfirmation(scrollAttempts: scrollAttempts)
             return
         }
@@ -717,8 +738,12 @@ final class ChatMessagesCoordinator: ObservableObject {
                 initialRevealState = .waitingForRows
                 // The restarted reveal owns anchoring; an armed bottom follow
                 // would intercept every geometry update before the pending
-                // reveal machine could run.
+                // reveal machine could run. Every follow deactivation also
+                // clears the growth latch and its validation task, so a
+                // phantom observation cannot buy the next follow a scroll.
                 postRevealBottomFollowState = .inactive
+                didObserveGrowthDuringPostRevealCheck = false
+                taskManager.cancel(TaskKey.postRevealGeometryCheck)
                 if initialPresentationAnchor == .bottom && isInitialWindowLoaded {
                     requestLatestWindowIfNeeded(knownTotalCount: newCount)
                 }
@@ -962,6 +987,11 @@ final class ChatMessagesCoordinator: ObservableObject {
             // own follow; arming over it would intercept every geometry
             // update and keep the reveal from finishing.
             if self.isReadyToShow {
+                // Re-arming replaces any live follow cycle wholesale: a latch
+                // or validation task from the pre-send cycle must not carry a
+                // phantom growth observation into the fresh grace.
+                self.didObserveGrowthDuringPostRevealCheck = false
+                self.taskManager.cancel(TaskKey.postRevealGeometryCheck)
                 self.postRevealBottomFollowArmedAt = self.now()
                 self.postRevealBottomFollowState = .following(
                     deadline: self.postRevealBottomFollowArmedAt

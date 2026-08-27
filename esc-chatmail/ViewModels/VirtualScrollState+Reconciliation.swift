@@ -1,6 +1,5 @@
-import SwiftUI
+import Foundation
 import CoreData
-import Combine
 
 // MARK: - Dataset reconciliation and post-sync validation
 
@@ -39,8 +38,9 @@ extension VirtualScrollState {
         }
 
         needsDatasetReconciliationAfterCurrentLoad = false
+        // The failure terminal (this function's only caller) ends the
+        // lifecycle right after this hand-off captures the intent to replay.
         let loadIntent = currentWindowLoadIntent
-        windowLoadLifecycle = .idle
         let shouldFollowLatestWindow = shouldFollowLatestWindow(window)
         taskManager.run(datasetReconcileTaskKey) { [weak self] in
             guard let self else { return }

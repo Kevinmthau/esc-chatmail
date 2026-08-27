@@ -194,7 +194,7 @@ final class VirtualScrollState: ObservableObject {
     var syncCompletedCancellable: AnyCancellable?
     var cachedConversationObjectID: NSManagedObjectID?
     var pendingInsertedMessageEvents: [VirtualScrollInsertedMessageEvent] = []
-    var followsLatestInsertions = true
+    private var followsLatestInsertions = true
     var followIntentRevision: UInt = 0
     /// While the coordinator's initial bottom-anchor pass is still positioning
     /// the hidden transcript, row `onAppear` events describe the top-anchored
@@ -510,28 +510,4 @@ final class VirtualScrollState: ObservableObject {
         initialLoadSignpostInterval = nil
     }
 
-}
-
-extension VirtualScrollState.InitialWindowPosition {
-    var diagnosticName: String {
-        switch self {
-        case .beginning:
-            return "beginning"
-        case .end:
-            return "end"
-        }
-    }
-}
-
-extension ChatMessageRowModel {
-    func matchesSenderEmail(in emails: Set<String>) -> Bool {
-        [
-            senderInfoEmail,
-            effectiveSenderEmail,
-            senderEmail
-        ]
-        .compactMap { $0 }
-        .map(EmailNormalizer.normalize)
-        .contains { emails.contains($0) }
-    }
 }

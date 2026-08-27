@@ -1,4 +1,4 @@
-import SwiftUI
+import Foundation
 import CoreData
 import Combine
 
@@ -639,5 +639,18 @@ extension VirtualScrollState {
             let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
             result.formUnion(objects)
         }
+    }
+}
+
+private extension ChatMessageRowModel {
+    func matchesSenderEmail(in emails: Set<String>) -> Bool {
+        [
+            senderInfoEmail,
+            effectiveSenderEmail,
+            senderEmail
+        ]
+        .compactMap { $0 }
+        .map(EmailNormalizer.normalize)
+        .contains { emails.contains($0) }
     }
 }

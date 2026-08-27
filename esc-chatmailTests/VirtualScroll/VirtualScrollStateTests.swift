@@ -901,12 +901,12 @@ final class VirtualScrollStateTests: XCTestCase {
     }
 
     func testWindowLoadFailure_doesNotWedgeAutomaticReconciliation() async throws {
-        // Revert-check: the currentWindowLoadIntent clear in
-        // VirtualScrollState.finishWindowLoadFailure. Both automatic
+        // Revert-check: finishWindowLoadFailure's lifecycle terminal
+        // (windowLoadLifecycle = .idle). Both automatic
         // reconciliation gates (canRestoreCapturedWindow /
-        // canStartAutomaticReconciliation) require a nil intent once
-        // isLoadingMore is false, so a failed load that leaves its intent
-        // behind silently blocks every later dataset reconciliation — a
+        // canStartAutomaticReconciliation) require an .idle lifecycle, so a
+        // failed load whose lifecycle survives it (the pre-enum stale-intent
+        // wedge) silently blocks every later dataset reconciliation — a
         // message deleted by sync keeps rendering from its stale row until
         // the chat is reopened.
         let (conversation, messages) = try makeConversationWithMessages(count: 5)
@@ -971,6 +971,79 @@ final class VirtualScrollStateTests: XCTestCase {
                 !state.isLoadingMore
         }
         XCTAssertEqual(state.visibleMessages.last?.objectID, messages[4].objectID)
+    }
+
+    func testInitialPublish_concurrentLatestWindowLoad_keepsLifecycleOwnedByThatLoad() async throws {
+        // Revert-check: the `windowLoadLifecycle == .loadingInitialWindow`
+        // guards in publishInitialWindow / publishInitialLoadFailure
+        // (VirtualScrollState+InitialLoad). Without them the initial publish
+        // forces .idle while a window load is in flight, isLoadingMore flips
+        // false mid-load, and a merged sync save can start a competing
+        // reconciliation whose generation bump silently kills that load.
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let gates = PageLoadGates()
+
+        // Metadata fetches (empty ranges) pass through; each non-empty page
+        // fetch parks until its call number is opened.
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            if !range.isEmpty {
+                let call = await gates.arrive()
+                while await !gates.isOpen(call), !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            }
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        // The initial load's page fetch (call 1) is parked.
+        await waitUntilArrivedPageLoads(1, in: gates)
+        XCTAssertEqual(state.initialLoadPhase, .loading)
+
+        // A latest-window load begins while the initial load is in flight —
+        // a reply sent under the loading overlay does this via
+        // ensureVisibleMessage. Its page fetch (call 2) parks too.
+        let latestLoad = Task { await state.loadLatestWindow() }
+        await waitUntilArrivedPageLoads(2, in: gates)
+
+        // Release only the initial load: it publishes while the latest load
+        // is still in flight, and must leave that load's lifecycle alone.
+        await gates.open(1)
+        await waitUntil { state.initialLoadPhase == .loaded }
+        XCTAssertTrue(
+            state.isLoadingMore,
+            "The in-flight latest-window load owns the lifecycle across the initial publish"
+        )
+
+        await gates.open(2)
+        _ = await latestLoad.value
+        await waitUntil {
+            !state.isLoadingMore && state.isShowingLatestWindow
+        }
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages.suffix(4)).map(\.objectID)
+        )
     }
 
     func testLatestWindowCountDriftRebasesBeforePublishing() async throws {
@@ -3918,6 +3991,26 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTFail("Timed out waiting for context condition", file: file, line: line)
     }
 
+    private func waitUntilArrivedPageLoads(
+        _ expected: Int,
+        in gates: PageLoadGates,
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if await gates.arrivedCount() >= expected {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+
+        XCTFail("Timed out waiting for parked page loads", file: file, line: line)
+    }
+
     private func waitUntilRecordedRangeCount(
         _ expectedCount: Int,
         in recorder: RangeRecorder,
@@ -3937,6 +4030,20 @@ final class VirtualScrollStateTests: XCTestCase {
 
         XCTFail("Timed out waiting for recorded range count", file: file, line: line)
     }
+}
+
+private actor PageLoadGates {
+    private var arrivedCalls = 0
+    private var openedThrough = 0
+
+    func arrive() -> Int {
+        arrivedCalls += 1
+        return arrivedCalls
+    }
+
+    func isOpen(_ call: Int) -> Bool { call <= openedThrough }
+    func open(_ through: Int) { openedThrough = max(openedThrough, through) }
+    func arrivedCount() -> Int { arrivedCalls }
 }
 
 private actor RangeRecorder {

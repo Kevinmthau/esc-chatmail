@@ -1,6 +1,5 @@
-import SwiftUI
+import Foundation
 import CoreData
-import Combine
 
 // MARK: - Window loading, latest-window follow, and preload pagination
 

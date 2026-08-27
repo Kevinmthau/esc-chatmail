@@ -1,6 +1,5 @@
-import SwiftUI
+import Foundation
 import CoreData
-import Combine
 
 // MARK: - Initial window load
 
@@ -266,7 +265,14 @@ extension VirtualScrollState {
             initialWindowPosition == .end && !loadedWindow.messages.isEmpty
         setMessageWindow(window)
         visibleMessages = loadedWindow.messages
-        windowLoadLifecycle = .idle
+        // A window load begun while this initial load was in flight (a reply
+        // sent under the loading overlay) owns the lifecycle now; forcing
+        // .idle here would flip isLoadingMore false mid-load and let a merged
+        // sync save start a competing reconciliation whose generation bump
+        // kills that load. Only end the lifecycle this task still owns.
+        if windowLoadLifecycle == .loadingInitialWindow {
+            windowLoadLifecycle = .idle
+        }
         needsDatasetReconciliationAfterCurrentLoad = false
         initialLoadFailureReason = nil
         initialLoadPhase = loadedWindow.messages.isEmpty ? .empty : .loaded
@@ -294,7 +300,11 @@ extension VirtualScrollState {
         if let reportedTotalCount = failure.reportedTotalCount {
             totalMessageCount = reportedTotalCount
         }
-        windowLoadLifecycle = .idle
+        // See publishInitialWindow: never end a lifecycle a concurrent window
+        // load owns.
+        if windowLoadLifecycle == .loadingInitialWindow {
+            windowLoadLifecycle = .idle
+        }
         initialLoadFailureReason = failure.userFacingReason
         initialLoadPhase = .failed
         finishInitialLoadSignpost(outcome: "failed")
@@ -304,5 +314,16 @@ extension VirtualScrollState {
             "VirtualScroll initial load failed conv=\(conversationId) reason=\(failure.diagnosticDescription)",
             category: .ui
         )
+    }
+}
+
+private extension VirtualScrollState.InitialWindowPosition {
+    var diagnosticName: String {
+        switch self {
+        case .beginning:
+            return "beginning"
+        case .end:
+            return "end"
+        }
     }
 }

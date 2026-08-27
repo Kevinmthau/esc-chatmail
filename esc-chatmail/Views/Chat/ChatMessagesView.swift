@@ -424,13 +424,16 @@ struct ChatMessagesView: View {
 
     private func handleInitialWindowLoaded(isComplete: Bool, proxy: ScrollViewProxy) {
         guard isComplete else { return }
-        if coordinator.isReadyToShow {
-            // A re-publish of the initial window after the reveal already
-            // completed (retry from the failure overlay, resume of an
-            // interrupted load) re-arms the hold, but no isReadyToShow
-            // transition will ever release it — the coordinator refuses to
-            // restart a reveal once ready. Release it here: this onChange
-            // fires after every initial-window publish.
+        if coordinator.isReadyToShow && !coordinator.isRevealRestartableFromEmpty {
+            // A re-publish of the initial window after a terminal reveal
+            // (retry from the failure overlay, resume of an interrupted load)
+            // re-arms the hold, but no isReadyToShow transition will ever
+            // release it — the coordinator does not restart a reveal from a
+            // non-empty ready state. Release it here: this onChange fires
+            // after every initial-window publish. Empty-conversation
+            // readiness is excluded: the coordinator restarts from it when
+            // messages arrive, and that restarted hidden pass needs the hold
+            // the re-publish just armed.
             scrollState.endInitialAnchorHold()
         }
         let visibleMessages = scrollState.visibleMessages
