@@ -1449,19 +1449,125 @@ final class VirtualScrollStateTests: XCTestCase {
 
         await state.loadLatestWindow()
 
-        XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
+        // The drifted metadata count (100) made the requested window 98 rows
+        // wide, and the rebase preserves that width against the real total —
+        // clamped by the dataset, so the whole five-message conversation
+        // publishes. Width preservation is what keeps an accumulated
+        // tail-abutting window intact across a mid-load count change; see
+        // testLatestWindowCountDriftPreservesAccumulatedWindowWidth.
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), messages.map(\.objectID))
         XCTAssertEqual(state.totalMessageCount, 5)
         // Latest publishes mirror the initial-load convention: the tracked
         // position anchors at the window head so a head-row onAppear cannot
         // trigger an older-range reload.
-        XCTAssertEqual(state.scrollPosition, 2)
+        XCTAssertEqual(state.scrollPosition, 0)
         let recordedRanges = await ranges.snapshot()
         // The tail-abutting window start (2) is preserved through the drifted
         // metadata count, so the drifted request spans 2..<100 before the
-        // rebase lands back on the real 2..<5 window.
+        // rebase lands back on the real dataset.
         XCTAssertEqual(
             recordedRanges,
-            [0..<0, 2..<5, 0..<0, 2..<100, 2..<5]
+            [0..<0, 2..<5, 0..<0, 2..<100, 0..<5]
+        )
+    }
+
+    func testLatestWindowCountDriftPreservesAccumulatedWindowWidth() async throws {
+        // Revert-check: the `desiredWindowCount` / `rebasedStartIndex` pair in
+        // the latest-window count-drift rebase branch of
+        // VirtualScrollState+WindowLoading.loadWindow. Restoring
+        // `max(0, page.totalCount - configuration.visibleItemCount)` there
+        // throws away the accumulated start index loadLatestWindow threaded in
+        // as `startIndex`, collapsing this six-row tail-abutting window to the
+        // last three rows when the count drifts between the metadata and page
+        // loads. The dataset-generation retry cannot cover this: it re-runs
+        // with the same stale `endIndex` and lands back on the same rebase.
+        let (conversation, messages) = try makeConversationWithMessages(count: 15)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 0,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let ranges = RangeRecorder()
+        let drift = LatestWindowTailDriftGate(hiddenTailRowCount: 2)
+
+        // Serves a 13-message view of the 15-message store until the armed
+        // metadata probe lands; the page load that follows it sees the full
+        // store, the way a sync save committing between
+        // loadTotalMessageCount and loadPage does.
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            await ranges.record(range)
+            let hiddenTailRowCount = await drift.hiddenTailRowCount(for: range)
+            let page = await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+            guard hiddenTailRowCount > 0 else { return page }
+
+            let visibleTotalCount = max(0, page.totalCount - hiddenTailRowCount)
+            let keptIDCount = max(
+                0,
+                min(page.messageIDs.count, visibleTotalCount - range.lowerBound)
+            )
+            return VirtualScrollMessagePage(
+                messageIDs: Array(page.messageIDs.prefix(keptIDCount)),
+                totalCount: visibleTotalCount
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages[10..<13]).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs &&
+                state.totalMessageCount == 13 &&
+                !state.isLoadingMore
+        }
+
+        // Post-reveal scrolling: the view ends the initial-anchor hold once
+        // the coordinator reveals the transcript. Growing the window upward
+        // the way a short scroll toward history does gives the latest reload
+        // an accumulated tail-abutting window to preserve.
+        state.endInitialAnchorHold()
+        state.scrollPosition = 13
+        state.markIndexVisible(10)
+        let accumulatedIDs = Array(messages[7..<13]).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == accumulatedIDs && !state.isLoadingMore
+        }
+        XCTAssertEqual(state.visibleRangeStartIndex, 7)
+
+        await drift.arm()
+        await state.loadLatestWindow()
+
+        // Six accumulated rows in, six rows out: the rebase re-anchors the
+        // window on the drifted tail without collapsing it to the last
+        // visibleItemCount rows and dropping everything above the viewport.
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[9..<15]).map(\.objectID)
+        )
+        XCTAssertEqual(state.totalMessageCount, 15)
+        XCTAssertEqual(state.visibleRangeStartIndex, 9)
+        XCTAssertEqual(state.scrollPosition, 9)
+
+        let recordedRanges = await ranges.snapshot()
+        // The metadata probe still reports 13, so the load requests the
+        // accumulated 7..<13; the page then observes 15 and the rebase
+        // re-issues at the same width against the drifted tail.
+        XCTAssertEqual(
+            Array(recordedRanges.suffix(3)),
+            [0..<0, 7..<13, 9..<15]
         )
     }
 
@@ -4420,6 +4526,34 @@ private actor RangeRecorder {
 
     func snapshot() -> [Range<Int>] {
         ranges
+    }
+}
+
+/// Hides the newest rows of a real store so that, once armed, the page load
+/// following a metadata probe observes a higher total than the probe did —
+/// the sync save that commits in the middle of one latest-window load.
+private actor LatestWindowTailDriftGate {
+    private let hiddenRowCount: Int
+    private var isArmed = false
+    private var hasDrifted = false
+
+    init(hiddenTailRowCount: Int) {
+        hiddenRowCount = hiddenTailRowCount
+    }
+
+    func arm() {
+        isArmed = true
+    }
+
+    /// How many tail rows to hide from this load. The armed metadata probe
+    /// (the only empty-range load) still sees the pre-drift dataset and is
+    /// itself the drift point: every load after it sees the whole store.
+    func hiddenTailRowCount(for range: Range<Int>) -> Int {
+        guard !hasDrifted else { return 0 }
+        if isArmed, range.isEmpty {
+            hasDrifted = true
+        }
+        return hiddenRowCount
     }
 }
 
