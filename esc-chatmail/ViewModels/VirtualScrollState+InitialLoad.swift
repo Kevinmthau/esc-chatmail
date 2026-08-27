@@ -260,8 +260,14 @@ extension VirtualScrollState {
         // overwrite newer rows, arm an initial-anchor hold no view seam
         // would ever release, and regress the published count and phase.
         // Drop the superseded publish wholesale; the owning load's own
-        // publish (or failure terminal) drives the phase from here.
-        guard windowLoadLifecycle == .loadingInitialWindow else {
+        // publish (or failure terminal) drives the phase from here. One
+        // rescue: an owner that terminated without ever advancing the phase
+        // (cancelled mid-flight) must not strand the spinner — an idle
+        // lifecycle with the phase still unresolved means nobody else will
+        // publish, so this snapshot is better than nothing.
+        let ownsInitialPublish = windowLoadLifecycle == .loadingInitialWindow ||
+            (windowLoadLifecycle == .idle && !isInitialLoadComplete)
+        guard ownsInitialPublish else {
             finishInitialLoadSignpost(outcome: "superseded")
             Log.diagnostic(
                 .chatView,
@@ -317,8 +323,12 @@ extension VirtualScrollState {
         // lifecycle, phase, and count now. Reporting this stale failure
         // would flip a live transcript behind the failure overlay (phase
         // .failed over the .loaded that load published) and end a lifecycle
-        // it does not own.
-        guard windowLoadLifecycle == .loadingInitialWindow else {
+        // it does not own. Same rescue: if the owner retired without
+        // resolving the phase, report the failure rather than strand the
+        // spinner with no Try Again.
+        let ownsFailurePublish = windowLoadLifecycle == .loadingInitialWindow ||
+            (windowLoadLifecycle == .idle && !isInitialLoadComplete)
+        guard ownsFailurePublish else {
             finishInitialLoadSignpost(outcome: "superseded")
             Log.diagnostic(
                 .chatView,
