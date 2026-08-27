@@ -46,6 +46,18 @@ final class ChatMessagesCoordinator: ObservableObject {
     private static let maximumPostRevealScrollAttempts = 2
     private static let postRevealBottomFollowGracePeriod: TimeInterval = 3.0
     private static let geometryChangeTolerance: CGFloat = 0.5
+    /// Hard wall-clock bound on the hidden initial-anchor pass. The retry
+    /// budget resets whenever content legitimately grows (async bubble loads),
+    /// so an event count alone no longer terminates the pass; this deadline
+    /// does, revealing the transcript rather than holding the spinner.
+    private static let initialAnchorRevealTimeLimit: TimeInterval = 3.0
+    /// Absolute cap on how far growth can keep sliding the post-reveal
+    /// bottom-follow deadline past its arm time. Sliding exists so bubbles
+    /// that finish resizing late still re-anchor; without a cap, a layout
+    /// whose measured height never converges (an oscillating web bubble, a
+    /// retrying remote image) would keep the follow — and its corrective
+    /// scroll bursts — alive indefinitely.
+    private static let maximumPostRevealBottomFollowLifetime: TimeInterval = 30.0
 
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
@@ -66,6 +78,14 @@ final class ChatMessagesCoordinator: ObservableObject {
     typealias Now = () -> TimeInterval
 
     @Published private(set) var isReadyToShow = false
+    /// True while readiness came from revealing an empty conversation — the
+    /// one ready state `handleMessageCountChange` restarts a hidden reveal
+    /// from when messages arrive. The view must not treat it as a terminal
+    /// reveal (releasing the initial-anchor hold on a re-publish against it
+    /// would strip the restarted pass of its onAppear protection).
+    var isRevealRestartableFromEmpty: Bool {
+        initialRevealState == .ready(wasEmptyConversation: true)
+    }
     @Published private(set) var contactRefreshToken = 0
     @Published private(set) var senderGroupingKeysByEmail: [String: String] = [:]
     @Published private(set) var initialAnchorGeometryCheckID = UUID()
@@ -88,6 +108,30 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let initialPresentationAnchor: InitialPresentationAnchor
     private let taskManager = ViewModelTaskManager()
     private var initialRevealState: InitialRevealState = .waitingForRows
+    /// Wall-clock deadline for the pending initial-anchor pass; armed by
+    /// `performInitialScroll`, cleared on completion. Consulted only while
+    /// `initialRevealState` is `.pending`.
+    private var initialAnchorRevealDeadline: TimeInterval?
+    /// Whether any geometry update has carried a laid-out bottom-anchor frame
+    /// this reveal pass. Until then, "anchor offscreen" only means "the lazy
+    /// trailing anchor has not been realized", so it must not consume the
+    /// bounded retry budget — and a wall-clock fallback without it means the
+    /// geometry signal never proved itself, so no bottom-follow is armed.
+    private var hasObservedBottomAnchorGeometry = false
+    /// Growth latches: every geometry event overwrites the tracked
+    /// content/viewport values at the top of `handleBottomAnchorGeometryUpdate`
+    /// — including events the `.checkingAfterScroll` phases then swallow. The
+    /// machines spend most of a pass inside those phases (checking is entered
+    /// synchronously on each probe, the between state lasts about one frame),
+    /// so without a latch the swallowed events would permanently consume their
+    /// growth deltas and the growth-aware budget reset / deadline slide would
+    /// almost never see production growth. The latch records the swallowed
+    /// observation for the next probe (initial) or validation (post-reveal).
+    private var didObserveGrowthDuringInitialRecheck = false
+    private var didObserveGrowthDuringPostRevealCheck = false
+    /// When the current post-reveal follow was armed; bounds deadline sliding
+    /// via `maximumPostRevealBottomFollowLifetime`.
+    private var postRevealBottomFollowArmedAt: TimeInterval = 0
     private var isTrackedBottomAnchorVisible = false
     private var trackedContentMinY: CGFloat?
     private var trackedContentHeight: CGFloat?
@@ -239,6 +283,8 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleDisappear() {
         isVisible = false
         postRevealBottomFollowState = .inactive
+        didObserveGrowthDuringInitialRecheck = false
+        didObserveGrowthDuringPostRevealCheck = false
         isUserScrollTakeoverActive = false
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
@@ -359,6 +405,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// as a fallback after both attempts so a bad geometry signal cannot block the chat.
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
+        // Deliberately no default: "offscreen" with a never-laid-out anchor
+        // frame must not charge the initial retry budget, so every caller
+        // decides this explicitly. (Tests use a defaulted overload in their
+        // own target.)
+        hasBottomAnchorGeometry: Bool,
         isUserScrollInteractionActive: Bool = false,
         contentMinY: CGFloat? = nil,
         contentHeight: CGFloat? = nil,
@@ -368,6 +419,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         let previousContentMinY = trackedContentMinY
         let previousContentHeight = trackedContentHeight
         let previousViewportHeight = trackedViewportHeight
+        if hasBottomAnchorGeometry {
+            hasObservedBottomAnchorGeometry = true
+        }
         isTrackedBottomAnchorVisible = isBottomAnchorVisible
         if let contentMinY {
             trackedContentMinY = contentMinY
@@ -409,22 +463,39 @@ final class ChatMessagesCoordinator: ObservableObject {
             viewportHeightDecreased = false
         }
 
+        // A fixed grace abandoned bubbles that finished resizing more than the
+        // grace period after reveal, stranding the viewport just above the
+        // last message. Growth observed while the follow is alive therefore
+        // slides the deadline; a quiet gap longer than the grace still
+        // expires it, and user scrolling cancels it outright, so following
+        // stays bounded. Not slid in .checkingAfterScroll: the in-flight
+        // validation task matches on the exact deadline to detect staleness.
+        let didObserveGrowth = contentHeightIncreased || viewportHeightDecreased
+
         switch postRevealBottomFollowState {
         case .following(let deadline):
             guard now() < deadline else {
                 postRevealBottomFollowState = .inactive
                 return
             }
-            guard !isBottomAnchorVisible else { return }
+            let slidDeadline = didObserveGrowth
+                ? slidPostRevealFollowDeadline(extending: deadline)
+                : deadline
+            guard !isBottomAnchorVisible else {
+                if slidDeadline != deadline {
+                    postRevealBottomFollowState = .following(deadline: slidDeadline)
+                }
+                return
+            }
 
             if contentMovedTowardHistory {
                 cancelPostRevealBottomFollowForNonLayoutScroll()
                 return
             }
-            guard contentHeightIncreased || viewportHeightDecreased else { return }
+            guard didObserveGrowth else { return }
 
             requestPostRevealBottomScroll(
-                deadline: deadline,
+                deadline: slidDeadline,
                 scrollAttempts: 1,
                 scrollAction: scrollAction
             )
@@ -432,11 +503,20 @@ final class ChatMessagesCoordinator: ObservableObject {
         case .checkingAfterScroll(let deadline, _):
             guard now() < deadline else {
                 postRevealBottomFollowState = .inactive
+                didObserveGrowthDuringPostRevealCheck = false
                 taskManager.cancel(TaskKey.postRevealGeometryCheck)
                 return
             }
             if isBottomAnchorVisible {
-                postRevealBottomFollowState = .following(deadline: deadline)
+                // Leaving .checkingAfterScroll cancels its validation task,
+                // so sliding here cannot break the task's deadline-equality
+                // staleness check.
+                postRevealBottomFollowState = .following(
+                    deadline: didObserveGrowth || didObserveGrowthDuringPostRevealCheck
+                        ? slidPostRevealFollowDeadline(extending: deadline)
+                        : deadline
+                )
+                didObserveGrowthDuringPostRevealCheck = false
                 taskManager.cancel(TaskKey.postRevealGeometryCheck)
                 return
             }
@@ -444,23 +524,32 @@ final class ChatMessagesCoordinator: ObservableObject {
                 cancelPostRevealBottomFollowForNonLayoutScroll()
                 return
             }
+            // The in-flight validation matches on the exact deadline, so the
+            // slide cannot happen here; latch the growth for the validation
+            // to consume instead of discarding it with this event.
+            if didObserveGrowth {
+                didObserveGrowthDuringPostRevealCheck = true
+            }
             return
         case .waitingForGrowth(let deadline):
             guard now() < deadline else {
                 postRevealBottomFollowState = .inactive
                 return
             }
+            let slidDeadline = didObserveGrowth
+                ? slidPostRevealFollowDeadline(extending: deadline)
+                : deadline
             if isBottomAnchorVisible {
-                postRevealBottomFollowState = .following(deadline: deadline)
+                postRevealBottomFollowState = .following(deadline: slidDeadline)
                 return
             }
             if contentMovedTowardHistory {
                 cancelPostRevealBottomFollowForNonLayoutScroll()
                 return
             }
-            if contentHeightIncreased || viewportHeightDecreased {
+            if didObserveGrowth {
                 requestPostRevealBottomScroll(
-                    deadline: deadline,
+                    deadline: slidDeadline,
                     scrollAttempts: 1,
                     scrollAction: scrollAction
                 )
@@ -478,24 +567,87 @@ final class ChatMessagesCoordinator: ObservableObject {
                 completeInitialReveal(wasVisiblyConfirmed: true)
                 return
             }
-            guard phase != .confirmingVisibility else { return }
+            guard phase != .confirmingVisibility else {
+                // Growth landing mid-confirmation is swallowed here after the
+                // tracker overwrite consumed its delta; latch it, or the
+                // offscreen probes that follow (the growth pushed the anchor
+                // off) would charge the budget as if nothing grew.
+                if didObserveGrowth {
+                    didObserveGrowthDuringInitialRecheck = true
+                }
+                return
+            }
+            // The confirmation-entry event can itself carry growth (a bubble
+            // resolving in the same layout pass that landed the anchor);
+            // latch it like the sibling seams — a confirmed reveal clears
+            // the latch, and a failed confirmation needs it to keep the
+            // budget growth-aware.
+            if didObserveGrowth {
+                didObserveGrowthDuringInitialRecheck = true
+            }
             beginInitialVisibilityConfirmation(scrollAttempts: scrollAttempts)
             return
         }
 
-        guard phase != .checkingAfterScroll else { return }
-        guard scrollAttempts < Self.maximumInitialScrollAttempts else {
-            completeInitialReveal(wasVisiblyConfirmed: false)
+        guard phase != .checkingAfterScroll else {
+            // This event's tracker overwrite above already consumed its
+            // growth delta; latch the observation so the next probe still
+            // treats the pass as growing.
+            if didObserveGrowth {
+                didObserveGrowthDuringInitialRecheck = true
+            }
             return
         }
 
-        let nextAttempt = scrollAttempts + 1
+        // The bounded retry budget alone cannot terminate the pass any more
+        // (growth resets it below), so a wall-clock deadline does. Growth
+        // observed during the pass proves the geometry signal works, which is
+        // what justifies arming bottom-follow on this fallback — unlike the
+        // attempts-exhausted fallback, whose steady offscreen reports mean
+        // the signal cannot be trusted to drive further scrolls.
+        if let revealDeadline = initialAnchorRevealDeadline, now() >= revealDeadline {
+            completeInitialReveal(
+                wasVisiblyConfirmed: false,
+                armsBottomFollowAfterFallback: hasObservedBottomAnchorGeometry
+            )
+            return
+        }
+
+        // Content growth (a bubble's async placeholder-to-content swap, the
+        // reply bar inset arriving, a window publish) is exactly what the
+        // retry exists to absorb — it must not consume the budget. A broken
+        // geometry signal produces offscreen reports without height deltas,
+        // so the bounded fallback still terminates that case.
+        var chargedAttempts = scrollAttempts
+        if didObserveGrowth || didObserveGrowthDuringInitialRecheck {
+            chargedAttempts = 0
+        }
+        didObserveGrowthDuringInitialRecheck = false
+
+        // "Offscreen" before the lazy trailing anchor has ever laid out only
+        // means "not realized yet"; keep scrolling (registration can land the
+        // scroll) but leave the budget untouched until real geometry exists.
+        if hasObservedBottomAnchorGeometry {
+            guard chargedAttempts < Self.maximumInitialScrollAttempts else {
+                completeInitialReveal(wasVisiblyConfirmed: false)
+                return
+            }
+        }
+
+        let nextAttempt = hasObservedBottomAnchorGeometry
+            ? chargedAttempts + 1
+            : chargedAttempts
         initialRevealState = .pending(
             scrollAttempts: nextAttempt,
             phase: .checkingAfterScroll
         )
-        taskManager.run(TaskKey.initialGeometryCheck) { [weak self] in
-            await Task.yield()
+        taskManager.run(TaskKey.initialGeometryCheck) { [weak self, sleep] in
+            guard !Task.isCancelled else { return }
+            // Pace the re-probe like the sibling rechecks in this file: a
+            // bare Task.yield() sampled the first, possibly unconverged
+            // layout pass of a lazy scroll-to-tail and burned the budget
+            // within a couple of commits.
+            await sleep(UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             guard let self,
                   case .pending(let currentAttempts, .checkingAfterScroll) =
@@ -513,7 +665,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             BottomAnchorStep(
                 delay: 0,
                 animated: false,
-                logMessage: nextAttempt == 1
+                logMessage: nextAttempt <= 1
                     ? "ChatView initial layout scroll -> bottom anchor"
                     : "ChatView initial layout retry -> bottom anchor"
             )
@@ -534,6 +686,8 @@ final class ChatMessagesCoordinator: ObservableObject {
             wasFollowingPostRevealBottom = false
         }
         postRevealBottomFollowState = .inactive
+        didObserveGrowthDuringInitialRecheck = false
+        didObserveGrowthDuringPostRevealCheck = false
         taskManager.cancel(TaskKey.bottomAnchor)
         taskManager.cancel(TaskKey.initialBottomAnchor)
         taskManager.cancel(TaskKey.initialGeometryCheck)
@@ -553,6 +707,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
 
         initialRevealState = .ready(wasEmptyConversation: false)
+        initialAnchorRevealDeadline = nil
         isReadyToShow = true
         Log.diagnostic(
             .chatView,
@@ -591,8 +746,12 @@ final class ChatMessagesCoordinator: ObservableObject {
                 initialRevealState = .waitingForRows
                 // The restarted reveal owns anchoring; an armed bottom follow
                 // would intercept every geometry update before the pending
-                // reveal machine could run.
+                // reveal machine could run. Every follow deactivation also
+                // clears the growth latch and its validation task, so a
+                // phantom observation cannot buy the next follow a scroll.
                 postRevealBottomFollowState = .inactive
+                didObserveGrowthDuringPostRevealCheck = false
+                taskManager.cancel(TaskKey.postRevealGeometryCheck)
                 if initialPresentationAnchor == .bottom && isInitialWindowLoaded {
                     requestLatestWindowIfNeeded(knownTotalCount: newCount)
                 }
@@ -836,8 +995,15 @@ final class ChatMessagesCoordinator: ObservableObject {
             // own follow; arming over it would intercept every geometry
             // update and keep the reveal from finishing.
             if self.isReadyToShow {
+                // Re-arming replaces any live follow cycle wholesale: a latch
+                // or validation task from the pre-send cycle must not carry a
+                // phantom growth observation into the fresh grace.
+                self.didObserveGrowthDuringPostRevealCheck = false
+                self.taskManager.cancel(TaskKey.postRevealGeometryCheck)
+                self.postRevealBottomFollowArmedAt = self.now()
                 self.postRevealBottomFollowState = .following(
-                    deadline: self.now() + Self.postRevealBottomFollowGracePeriod
+                    deadline: self.postRevealBottomFollowArmedAt
+                        + Self.postRevealBottomFollowGracePeriod
                 )
             }
         }
@@ -1001,6 +1167,9 @@ final class ChatMessagesCoordinator: ObservableObject {
             scrollAttempts: 0,
             phase: .awaitingGeometry
         )
+        initialAnchorRevealDeadline = now() + Self.initialAnchorRevealTimeLimit
+        hasObservedBottomAnchorGeometry = false
+        didObserveGrowthDuringInitialRecheck = false
         initialAnchorGeometryCheckID = UUID()
         Log.diagnostic(
             .chatView,
@@ -1089,6 +1258,7 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     private func cancelPostRevealBottomFollowForNonLayoutScroll() {
         postRevealBottomFollowState = .inactive
+        didObserveGrowthDuringPostRevealCheck = false
         taskManager.cancel(TaskKey.postRevealGeometryCheck)
         Log.diagnostic(
             .chatView,
@@ -1105,13 +1275,34 @@ final class ChatMessagesCoordinator: ObservableObject {
     ) {
         guard now() < deadline else {
             postRevealBottomFollowState = .inactive
+            didObserveGrowthDuringPostRevealCheck = false
             return
         }
         guard !isTrackedBottomAnchorVisible else {
-            postRevealBottomFollowState = .following(deadline: deadline)
+            postRevealBottomFollowState = .following(
+                deadline: didObserveGrowthDuringPostRevealCheck
+                    ? slidPostRevealFollowDeadline(extending: deadline)
+                    : deadline
+            )
+            didObserveGrowthDuringPostRevealCheck = false
             return
         }
         guard scrollAttempts < Self.maximumPostRevealScrollAttempts else {
+            // Growth swallowed while this scroll's validation was in flight
+            // means the anchor target moved under it; parking in
+            // .waitingForGrowth would strand the viewport by exactly that
+            // delta, because the delta was already consumed and no later
+            // event will re-report it. Spend the latch on one more corrective
+            // cycle instead.
+            if didObserveGrowthDuringPostRevealCheck {
+                didObserveGrowthDuringPostRevealCheck = false
+                requestPostRevealBottomScroll(
+                    deadline: slidPostRevealFollowDeadline(extending: deadline),
+                    scrollAttempts: 1,
+                    scrollAction: scrollAction
+                )
+                return
+            }
             postRevealBottomFollowState = .waitingForGrowth(deadline: deadline)
             return
         }
@@ -1123,20 +1314,48 @@ final class ChatMessagesCoordinator: ObservableObject {
         )
     }
 
-    private func completeInitialReveal(wasVisiblyConfirmed: Bool) {
+    /// Extends a live post-reveal follow deadline for freshly observed
+    /// growth, clamped to an absolute lifetime from the follow's arm time so
+    /// a never-converging layout cannot keep the follow alive forever.
+    private func slidPostRevealFollowDeadline(extending deadline: TimeInterval) -> TimeInterval {
+        min(
+            max(deadline, now() + Self.postRevealBottomFollowGracePeriod),
+            postRevealBottomFollowArmedAt + Self.maximumPostRevealBottomFollowLifetime
+        )
+    }
+
+    private func completeInitialReveal(
+        wasVisiblyConfirmed: Bool,
+        armsBottomFollowAfterFallback: Bool = false
+    ) {
         guard case .pending = initialRevealState else { return }
 
         initialRevealState = .ready(wasEmptyConversation: false)
-        postRevealBottomFollowState = wasVisiblyConfirmed
-            ? .following(deadline: now() + Self.postRevealBottomFollowGracePeriod)
-            : .inactive
+        let armsBottomFollow = wasVisiblyConfirmed || armsBottomFollowAfterFallback
+        if armsBottomFollow {
+            postRevealBottomFollowArmedAt = now()
+            postRevealBottomFollowState = .following(
+                deadline: postRevealBottomFollowArmedAt + Self.postRevealBottomFollowGracePeriod
+            )
+        } else {
+            postRevealBottomFollowState = .inactive
+        }
+        initialAnchorRevealDeadline = nil
+        didObserveGrowthDuringInitialRecheck = false
+        didObserveGrowthDuringPostRevealCheck = false
         isReadyToShow = true
+        let logMessage: String
+        if wasVisiblyConfirmed {
+            logMessage = "ChatView initial anchor remained visible through stabilization"
+        } else if armsBottomFollowAfterFallback {
+            logMessage = "ChatView initial anchor time limit reached; revealing with bottom follow"
+        } else {
+            logMessage = "ChatView initial anchor attempts exhausted; revealing fallback"
+        }
         Log.diagnostic(
             .chatView,
             level: wasVisiblyConfirmed ? .info : .warning,
-            wasVisiblyConfirmed
-                ? "ChatView initial anchor remained visible through stabilization"
-                : "ChatView initial anchor attempts exhausted; revealing fallback",
+            logMessage,
             category: .ui
         )
     }
