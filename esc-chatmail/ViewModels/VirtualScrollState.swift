@@ -415,6 +415,16 @@ final class VirtualScrollState: ObservableObject {
         messages: [ChatMessageRowModel]
     ) {
         if !messages.isEmpty {
+            if initialLoadPhase == .loading && initialWindowPosition == .end {
+                // This publication is resolving the initial phase, so it is
+                // the reveal's transcript: it inherits the initial publish's
+                // duty to arm the onAppear hold. The superseded initial
+                // publish that would have armed it is dropped, and the view's
+                // true-to-false isReadyToShow seam cannot fire on a first
+                // open — without this arm, the hidden anchor pass runs over
+                // unheld rows and the pre-reveal prepend cascade returns.
+                isInitialAnchorHoldActive = true
+            }
             initialLoadFailureReason = nil
             initialLoadPhase = .loaded
         } else if page.totalCount == 0 {
