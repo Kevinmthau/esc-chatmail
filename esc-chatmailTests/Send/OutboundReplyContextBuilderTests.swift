@@ -172,6 +172,56 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         )
     }
 
+    func testBuildReplyMetadata_targetedReplyUsesOlderUsableReplyFromHint() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let account = AccountBuilder()
+            .withEmail("me@example.com")
+            .build(in: context)
+        account.sendAsAliasesArray = sendAsAliases
+
+        let olderInbound = MessageBuilder()
+            .withId("older-inbound-with-alias")
+            .withThreadId("target-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        olderInbound.deliveredToAddress = "alias@example.com"
+        olderInbound.replyFromAddress = "alias@example.com"
+
+        for index in 0..<40 {
+            _ = MessageBuilder()
+                .withId("newer-inbound-without-alias-\(index)")
+                .withThreadId("target-thread")
+                .withDate(Date(timeIntervalSince1970: TimeInterval(200 + index)))
+                .withSender(email: "friend@example.com", name: "Friend")
+                .inConversation(conversation)
+                .build(in: context)
+        }
+
+        let replyingTo = MessageBuilder()
+            .withId("newer-target-without-alias")
+            .withThreadId("target-thread")
+            .withDate(Date(timeIntervalSince1970: 1_000))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: replyingTo.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.fromEmail, "alias@example.com")
+    }
+
     func testBuildReplyMetadata_targetWithoutThreadIdDoesNotUseConversationThread() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")

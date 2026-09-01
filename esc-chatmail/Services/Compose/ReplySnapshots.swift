@@ -32,8 +32,11 @@ struct ReplyConversationSnapshot: Sendable {
         let latestListInboundMessage = isListConversation
             ? Self.latestInboundListMessage(in: conversation)
             : nil
-        let latestNonListInboundMessage = !isListConversation && replyingTo != nil
-            ? Self.latestInboundMessage(in: conversation)
+        let latestNonListReplyAddressHint = !isListConversation && replyingTo != nil
+            ? Self.latestInboundReplyAddressHint(
+                in: conversation,
+                sendAsAliases: sendAsAliases
+            )
             : nil
         let nonListMessages = isListConversation || replyingTo != nil
             ? []
@@ -44,9 +47,7 @@ struct ReplyConversationSnapshot: Sendable {
                 ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases)
             }
         } else if replyingTo != nil {
-            latestReplyAddressHint = latestNonListInboundMessage.flatMap {
-                ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases)
-            }
+            latestReplyAddressHint = latestNonListReplyAddressHint
         } else {
             latestReplyAddressHint = nonListMessages
                 .filter { !$0.isFromMe }
@@ -74,11 +75,18 @@ struct ReplyConversationSnapshot: Sendable {
         self.replyFromAddress = latestReplyAddressHint?.replyFromAddress
     }
 
-    private static func latestInboundMessage(in conversation: Conversation) -> Message? {
+    @MainActor
+    private static func latestInboundReplyAddressHint(
+        in conversation: Conversation,
+        sendAsAliases: [SendAsAlias]
+    ) -> ReplyAddressHint? {
         guard let context = conversation.managedObjectContext else {
             return Array(conversation.messages ?? [])
                 .sorted(by: messageSort)
-                .first { !$0.isFromMe }
+                .filter { !$0.isFromMe }
+                .lazy
+                .compactMap { ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases) }
+                .first
         }
 
         let request = Message.fetchRequest()
@@ -90,15 +98,31 @@ struct ReplyConversationSnapshot: Sendable {
             NSSortDescriptor(key: "internalDate", ascending: false),
             NSSortDescriptor(key: "id", ascending: false)
         ]
-        request.fetchLimit = 1
-        request.fetchBatchSize = 1
+        let pageSize = 32
+        request.fetchLimit = pageSize
+        request.fetchBatchSize = pageSize
         request.includesPendingChanges = true
         request.relationshipKeyPathsForPrefetching = [
             "participants",
             "participants.person"
         ]
 
-        return try? context.fetch(request).first
+        var fetchOffset = 0
+        while true {
+            request.fetchOffset = fetchOffset
+            guard let messages = try? context.fetch(request), !messages.isEmpty else {
+                return nil
+            }
+            if let hint = messages.lazy.compactMap({
+                ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases)
+            }).first {
+                return hint
+            }
+            guard messages.count == pageSize else {
+                return nil
+            }
+            fetchOffset += messages.count
+        }
     }
 
     private static func latestInboundListMessage(
