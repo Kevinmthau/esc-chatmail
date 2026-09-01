@@ -160,6 +160,60 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
     }
 
+    func testSend_replyCreatesOptimisticMessageBeforeResolvingQuotedHTML() async throws {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let syncPerformer = MockCoordinatorSyncPerformer()
+        let resolutionStarted = expectation(description: "quoted HTML resolution starts")
+        let resolutionGate = DispatchSemaphore(value: 0)
+        let resolver = ReplyQuotedHTMLResolver { _ in
+            resolutionStarted.fulfill()
+            resolutionGate.wait()
+            return "<html><body>Original HTML</body></html>"
+        }
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: syncPerformer,
+            replyQuotedHTMLResolver: resolver
+        )
+
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let replyingTo = MessageBuilder()
+            .withId("optimistic-before-html-message")
+            .withThreadId("optimistic-before-html-thread")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withBody("Original body")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo])
+
+        let sendTask = Task {
+            try await coordinator.send(
+                .reply(
+                    .init(
+                        context: .init(
+                            conversationObjectID: conversation.objectID,
+                            replyingToMessageObjectID: replyingTo.objectID,
+                            optimisticConversation: .existingConversation(
+                                ConversationReference(objectID: conversation.objectID)
+                            )
+                        ),
+                        body: "Reply body",
+                        attachments: []
+                    )
+                )
+            )
+        }
+
+        await fulfillment(of: [resolutionStarted], timeout: 1.0)
+        XCTAssertEqual(sendService.snapshot.createOptimisticCalls.count, 1)
+        XCTAssertEqual(sendService.snapshot.sendReplyCalls.count, 0)
+
+        resolutionGate.signal()
+        let result = try await sendTask.value
+        XCTAssertNotNil(result)
+    }
+
     func testSend_replyPassesFromIdentityToOptimisticMessage() async throws {
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
@@ -1058,7 +1112,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         sendService: MockOutboundMessageSendService,
         syncPerformer: MockCoordinatorSyncPerformer,
         authSession: AuthSession? = nil,
-        mutationTracker: MockOutboundSendMutationTracker? = nil
+        mutationTracker: MockOutboundSendMutationTracker? = nil,
+        replyQuotedHTMLResolver: ReplyQuotedHTMLResolver? = nil
     ) -> OutboundMessageCoordinator {
         let resolvedAuthSession = authSession ?? makeTestAuthSession(userEmail: "me@example.com")
         return OutboundMessageCoordinator(
@@ -1071,7 +1126,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                 replyHTMLContentLoader: HTMLContentLoader(
                     contentHandler: htmlContentHandler,
                     sanitizer: .shared
-                )
+                ),
+                replyQuotedHTMLResolver: replyQuotedHTMLResolver
             ),
             mutationTracker: mutationTracker ?? MockOutboundSendMutationTracker(),
             outboundTaskRegistry: outboundTaskRegistry

@@ -19,19 +19,38 @@ struct QuotedMessage: Sendable {
     let date: Date
     let body: String?
     let originalHTML: String?
+    let deferredOriginalHTML: DeferredReplyQuotedHTML?
 
     init(
         senderName: String?,
         senderEmail: String,
         date: Date,
         body: String?,
-        originalHTML: String? = nil
+        originalHTML: String? = nil,
+        deferredOriginalHTML: DeferredReplyQuotedHTML? = nil
     ) {
         self.senderName = senderName
         self.senderEmail = senderEmail
         self.date = date
         self.body = body
         self.originalHTML = originalHTML
+        self.deferredOriginalHTML = deferredOriginalHTML
+    }
+
+    /// Resolves stored HTML during background send preflight, after the optimistic
+    /// message has already been created. Explicit HTML supplied by callers wins.
+    func resolvingOriginalHTML() async -> QuotedMessage {
+        guard originalHTML == nil, let deferredOriginalHTML else {
+            return self
+        }
+
+        return QuotedMessage(
+            senderName: senderName,
+            senderEmail: senderEmail,
+            date: date,
+            body: body,
+            originalHTML: await deferredOriginalHTML.resolve()
+        )
     }
 }
 

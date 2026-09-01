@@ -83,7 +83,181 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(metadata.originalMessage?.senderName, "Friend")
         XCTAssertEqual(metadata.originalMessage?.senderEmail, "friend@example.com")
         XCTAssertEqual(metadata.originalMessage?.body, "Original body")
-        XCTAssertTrue(metadata.originalMessage?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
+        XCTAssertNil(metadata.originalMessage?.originalHTML)
+        let resolvedOriginal = await metadata.originalMessage?.resolvingOriginalHTML()
+        XCTAssertTrue(resolvedOriginal?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
+    }
+
+    func testBuildReplyMetadata_defersOriginalHTMLResolution() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let replyingTo = MessageBuilder()
+            .withId("deferred-html-message")
+            .withThreadId("deferred-html-thread")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withBody("Original body")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo])
+        let probe = ReplyQuotedHTMLProbe(result: "<html><body>Deferred HTML</body></html>")
+        let resolver = ReplyQuotedHTMLResolver { source in
+            probe.load(source)
+        }
+
+        let metadata = try await makeBuilder(
+            replyQuotedHTMLResolver: resolver
+        ).buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: replyingTo.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertNil(metadata.originalMessage?.originalHTML)
+        XCTAssertEqual(probe.snapshot.callCount, 0)
+
+        let resolvedOriginal = await metadata.originalMessage?.resolvingOriginalHTML()
+
+        XCTAssertEqual(probe.snapshot.callCount, 1)
+        XCTAssertEqual(probe.snapshot.messageIDs, ["deferred-html-message"])
+        XCTAssertEqual(resolvedOriginal?.originalHTML, "<html><body>Deferred HTML</body></html>")
+    }
+
+    func testBuildReplyMetadata_targetedReplyDoesNotMaterializeConversationMessages() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let replyingTo = MessageBuilder()
+            .withId("target-message")
+            .withThreadId("target-thread")
+            .withDate(Date(timeIntervalSince1970: 1_000))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+
+        for index in 0..<100 {
+            _ = MessageBuilder()
+                .withId("history-\(index)")
+                .withThreadId("target-thread")
+                .withDate(Date(timeIntervalSince1970: TimeInterval(index)))
+                .withSender(email: "friend@example.com", name: "Friend")
+                .inConversation(conversation)
+                .build(in: context)
+        }
+
+        try coreDataStack.saveViewContext()
+        let conversationID = conversation.objectID
+        let replyingToID = replyingTo.objectID
+        coreDataStack.resetViewContext()
+        let faultedConversation = try XCTUnwrap(
+            try context.existingObject(with: conversationID) as? Conversation
+        )
+        XCTAssertTrue(faultedConversation.hasFault(forRelationshipNamed: "messages"))
+
+        _ = try await makeBuilder().buildReplyMetadata(
+            .init(
+                conversationObjectID: conversationID,
+                replyingToMessageObjectID: replyingToID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversationID)
+                )
+            )
+        )
+
+        XCTAssertTrue(
+            faultedConversation.hasFault(forRelationshipNamed: "messages"),
+            "A targeted reply should use bounded message fetches instead of realizing the whole relationship"
+        )
+    }
+
+    func testBuildReplyMetadata_targetedReplyUsesOlderHintAcrossPendingPageBoundary() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let account = AccountBuilder()
+            .withEmail("me@example.com")
+            .build(in: context)
+        account.sendAsAliasesArray = sendAsAliases
+
+        let olderInbound = MessageBuilder()
+            .withId("older-inbound-with-alias")
+            .withThreadId("target-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        olderInbound.deliveredToAddress = "alias@example.com"
+        olderInbound.replyFromAddress = "alias@example.com"
+
+        for index in 0..<31 {
+            _ = MessageBuilder()
+                .withId("newer-inbound-without-alias-\(index)")
+                .withThreadId("target-thread")
+                .withDate(Date(timeIntervalSince1970: TimeInterval(200 + index)))
+                .withSender(email: "friend@example.com", name: "Friend")
+                .inConversation(conversation)
+                .build(in: context)
+        }
+        try coreDataStack.saveViewContext()
+
+        let replyingTo = MessageBuilder()
+            .withId("newer-target-without-alias")
+            .withThreadId("target-thread")
+            .withDate(Date(timeIntervalSince1970: 1_000))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [replyingTo])
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: replyingTo.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.fromEmail, "alias@example.com")
+    }
+
+    func testBuildReplyMetadata_targetWithoutThreadIdDoesNotUseConversationThread() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let replyingTo = MessageBuilder()
+            .withId("message-without-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        replyingTo.gmThreadId = ""
+        let otherMessage = MessageBuilder()
+            .withId("other-message-with-thread")
+            .withThreadId("other-thread")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo, otherMessage])
+
+        do {
+            _ = try await makeBuilder().buildReplyMetadata(
+                .init(
+                    conversationObjectID: conversation.objectID,
+                    replyingToMessageObjectID: replyingTo.objectID,
+                    optimisticConversation: .existingConversation(
+                        ConversationReference(objectID: conversation.objectID)
+                    )
+                )
+            )
+            XCTFail("Expected replyTargetUnavailable")
+        } catch {
+            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
+                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            }
+        }
     }
 
     func testBuildReplyMetadata_usesCurrentManagedObjectValuesAfterRequestCreation() async throws {
@@ -142,8 +316,10 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(metadata.originalMessage?.senderName, "After Friend")
         XCTAssertEqual(metadata.originalMessage?.senderEmail, "after@example.com")
         XCTAssertEqual(metadata.originalMessage?.body, "After body")
-        XCTAssertTrue(metadata.originalMessage?.originalHTML?.contains("After HTML") == true)
-        XCTAssertFalse(metadata.originalMessage?.originalHTML?.contains("Before HTML") == true)
+        XCTAssertNil(metadata.originalMessage?.originalHTML)
+        let resolvedOriginal = await metadata.originalMessage?.resolvingOriginalHTML()
+        XCTAssertTrue(resolvedOriginal?.originalHTML?.contains("After HTML") == true)
+        XCTAssertFalse(resolvedOriginal?.originalHTML?.contains("Before HTML") == true)
     }
 
     func testBuildReplyMetadata_withoutReplyTargetUsesLatestInboundReplyFromAlias() async throws {
@@ -697,6 +873,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     private func makeBuilder(
         userEmail: String = "me@example.com",
         userAliases: Set<String> = [],
+        replyQuotedHTMLResolver: ReplyQuotedHTMLResolver? = nil,
         loadUserAliases: (@MainActor () async -> Set<String>)? = nil
     ) -> OutboundReplyContextBuilder {
         OutboundReplyContextBuilder(
@@ -708,6 +885,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
                 contentHandler: htmlContentHandler,
                 sanitizer: .shared
             ),
+            replyQuotedHTMLResolver: replyQuotedHTMLResolver,
             loadUserAliases: loadUserAliases ?? { userAliases }
         )
     }
@@ -878,6 +1056,34 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         )
         authSession.userEmail = userEmail
         return authSession
+    }
+}
+
+private final class ReplyQuotedHTMLProbe: @unchecked Sendable {
+    struct Snapshot {
+        let callCount: Int
+        let messageIDs: [String]
+    }
+
+    private let lock = NSLock()
+    private let result: String?
+    private var messageIDs: [String] = []
+
+    init(result: String?) {
+        self.result = result
+    }
+
+    var snapshot: Snapshot {
+        lock.withLock {
+            Snapshot(callCount: messageIDs.count, messageIDs: messageIDs)
+        }
+    }
+
+    func load(_ source: ReplyQuotedHTMLSource) -> String? {
+        lock.withLock {
+            messageIDs.append(source.messageId)
+            return result
+        }
     }
 }
 
