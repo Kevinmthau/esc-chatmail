@@ -150,8 +150,7 @@ struct MessageContentView: View {
                     ForwardedMessageCard(
                         content: content,
                         subjectFallback: message.forwardedDisplaySubject,
-                        isFromMe: message.isFromMe,
-                        fullBodyText: resolvedForwardedFullBodyText(from: content)
+                        isFromMe: message.isFromMe
                     )
                 }
                 .buttonStyle(.plain)
@@ -258,27 +257,6 @@ struct MessageContentView: View {
 
     private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {
         forwardedDisplayContent ?? message.outgoingForwardedDisplayContent
-    }
-
-    /// The chat transcript shows an incoming forward's entire body; compact
-    /// styles and outgoing forwards keep the three-line preview snippet.
-    private func resolvedForwardedFullBodyText(
-        from content: ForwardedMessageDisplayContent
-    ) -> String? {
-        Self.resolvedForwardedFullBodyText(
-            fullBodyText: content.fullBodyText,
-            isFromMe: message.isFromMe,
-            textLineLimit: style.textLineLimit
-        )
-    }
-
-    static func resolvedForwardedFullBodyText(
-        fullBodyText: String?,
-        isFromMe: Bool,
-        textLineLimit: Int?
-    ) -> String? {
-        guard !isFromMe, textLineLimit == nil else { return nil }
-        return fullBodyText
     }
 
     private func resolvedLeadInText(from content: ForwardedMessageDisplayContent) -> String? {

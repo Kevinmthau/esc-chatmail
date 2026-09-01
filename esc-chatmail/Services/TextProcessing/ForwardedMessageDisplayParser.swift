@@ -8,29 +8,6 @@ struct ForwardedMessageDisplayContent: Equatable, Sendable {
     let timestampText: String?
     let recipientSummary: String?
     let previewSnippet: String?
-    /// The forwarded email's full body text, so the chat transcript can show
-    /// the entire forwarded message instead of only the preview snippet.
-    let fullBodyText: String?
-
-    init(
-        leadInText: String?,
-        senderDisplayName: String?,
-        senderEmail: String?,
-        subject: String?,
-        timestampText: String?,
-        recipientSummary: String?,
-        previewSnippet: String?,
-        fullBodyText: String? = nil
-    ) {
-        self.leadInText = leadInText
-        self.senderDisplayName = senderDisplayName
-        self.senderEmail = senderEmail
-        self.subject = subject
-        self.timestampText = timestampText
-        self.recipientSummary = recipientSummary
-        self.previewSnippet = previewSnippet
-        self.fullBodyText = fullBodyText
-    }
 
     var hasVisibleSummary: Bool {
         senderDisplayName != nil ||
@@ -127,20 +104,10 @@ enum ForwardedMessageDisplayParser {
             subject: subject,
             timestampText: timestampText,
             recipientSummary: recipientSummary,
-            previewSnippet: previewSnippet,
-            fullBodyText: cleanedFullBodyText(from: parsedForward.body)
+            previewSnippet: previewSnippet
         )
 
         return content.hasVisibleSummary ? content : nil
-    }
-
-    /// The forwarded email's body, whitespace-normalized but NOT quote- or
-    /// signature-stripped — the forward wraps someone else's complete email
-    /// and the transcript should show all of it.
-    private static func cleanedFullBodyText(from body: String) -> String? {
-        let displayText = RawEmailSourceSanitizer.extractDisplayText(from: body)
-        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: displayText)
-        return trimmed(unwrapped)
     }
 
     private static func markerRange(in text: String) -> Range<String.Index>? {
