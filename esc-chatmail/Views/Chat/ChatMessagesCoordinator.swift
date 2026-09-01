@@ -963,15 +963,13 @@ final class ChatMessagesCoordinator: ObservableObject {
             id: publicationAttemptID,
             task: publicationTask
         )
+        // Admission consumes this task even after it completes so it never
+        // mistakes a successful publication for a reason to reload latest.
         taskManager.run(
             TaskKey.optimisticReplyPublication(targetMessageID)
         ) { [weak self, publicationTask] in
             let didPublishTarget = await publicationTask.value
             guard let self else { return }
-            self.clearOptimisticReplyPublicationAttempt(
-                for: targetMessageID,
-                id: publicationAttemptID
-            )
             guard !Task.isCancelled, self.isVisible else { return }
             guard didPublishTarget else {
                 Log.diagnostic(
@@ -1029,9 +1027,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         scrollAction: @escaping BottomAnchorAction
     ) {
         let effectiveMessageCount = max(messageCount, totalMessageCount)
-        let initialPublicationTask = optimisticReplyPublicationAttempts[
+        let initialPublicationAttempt = optimisticReplyPublicationAttempts[
             targetMessageID
-        ]?.task
+        ]
         guard isVisible else {
             Log.diagnostic(
                 .chatView,
@@ -1050,6 +1048,14 @@ final class ChatMessagesCoordinator: ObservableObject {
             TaskKey.replyAdmissionStabilization(targetMessageID)
         ) { [weak self, ensureVisibleMessage, sleep] in
             guard let self else { return }
+            defer {
+                if let initialPublicationAttempt {
+                    self.clearOptimisticReplyPublicationAttempt(
+                        for: targetMessageID,
+                        id: initialPublicationAttempt.id
+                    )
+                }
+            }
             let step = BottomAnchorStep(
                 delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
                 animated: false,
@@ -1061,8 +1067,8 @@ final class ChatMessagesCoordinator: ObservableObject {
             }
 
             let didPublishTarget: Bool
-            if let initialPublicationTask,
-               await initialPublicationTask.value {
+            if let initialPublicationAttempt,
+               await initialPublicationAttempt.task.value {
                 didPublishTarget = true
             } else {
                 guard !Task.isCancelled, self.isVisible else { return }
@@ -1094,6 +1100,13 @@ final class ChatMessagesCoordinator: ObservableObject {
             scrollAction(step)
             self.armPostSendBottomFollow()
         }
+    }
+
+    func handleReplySendFailed(targetMessageID: NSManagedObjectID) {
+        optimisticReplyPublicationAttempts[targetMessageID]?.task.cancel()
+        optimisticReplyPublicationAttempts.removeValue(forKey: targetMessageID)
+        taskManager.cancel(TaskKey.optimisticReplyPublication(targetMessageID))
+        taskManager.cancel(TaskKey.replyAdmissionStabilization(targetMessageID))
     }
 
     private func clearOptimisticReplyPublicationAttempt(

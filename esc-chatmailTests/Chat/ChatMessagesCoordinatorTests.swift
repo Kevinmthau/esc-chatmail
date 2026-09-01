@@ -2480,6 +2480,88 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testReplyAdmissionAfterSuccessfulPublicationPreservesNewerUserScroll() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let admissionDelayStarted = expectation(
+            description: "Reply-admission delay started"
+        )
+        var shouldObserveAdmissionDelay = false
+        var visibilityAttempts = 0
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in
+                if shouldObserveAdmissionDelay {
+                    shouldObserveAdmissionDelay = false
+                    admissionDelayStarted.fulfill()
+                }
+            },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityAttempts += 1
+                return true
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            visibilityAttempts == 1 && anchorSteps.count == 2
+        }
+
+        coordinator.handleUserScrollInteraction()
+        shouldObserveAdmissionDelay = true
+        coordinator.handleReplySendAdmitted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [admissionDelayStarted], timeout: 1)
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(
+            visibilityAttempts,
+            1,
+            "Admission must consume the successful early publication instead of reloading latest"
+        )
+        XCTAssertEqual(
+            anchorSteps.count,
+            2,
+            "A newer user scroll must suppress admission stabilization"
+        )
+    }
+
     func testReplyAdmissionRetriesExactPublicationWhenEarlyOptimisticPublicationFails() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
