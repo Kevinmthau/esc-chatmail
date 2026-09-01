@@ -311,8 +311,11 @@ struct ChatMessagesView: View {
                 .updating($isScrollGestureActive) { _, isActive, _ in
                     isActive = true
                 }
-                .onChanged { _ in handleUserScrollInteraction() }
         )
+        .onChange(of: isScrollGestureActive) { _, isActive in
+            guard isActive else { return }
+            handleUserScrollInteraction()
+        }
         .overlayPreferenceValue(ChatScrollGeometryPreferenceKey.self) { preference in
             GeometryReader { geometryProxy in
                 let frame = preference.bottomAnchorBounds
