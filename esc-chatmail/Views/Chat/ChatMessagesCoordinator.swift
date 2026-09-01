@@ -15,8 +15,11 @@ final class ChatMessagesCoordinator: ObservableObject {
         static let initialBottomAnchor = "initialBottomAnchor"
         static let initialGeometryCheck = "initialGeometryCheck"
         static let latestWindow = "latestWindow"
-        static func postSendPublication(_ messageObjectID: NSManagedObjectID) -> String {
-            "postSendPublication.\(messageObjectID.uriRepresentation().absoluteString)"
+        static func optimisticReplyPublication(_ messageObjectID: NSManagedObjectID) -> String {
+            "optimisticReplyPublication.\(messageObjectID.uriRepresentation().absoluteString)"
+        }
+        static func replyAdmissionStabilization(_ messageObjectID: NSManagedObjectID) -> String {
+            "replyAdmissionStabilization.\(messageObjectID.uriRepresentation().absoluteString)"
         }
         static let postRevealGeometryCheck = "postRevealGeometryCheck"
         static let scrollTakeoverRelease = "scrollTakeoverRelease"
@@ -40,6 +43,11 @@ final class ChatMessagesCoordinator: ObservableObject {
         case following(deadline: TimeInterval)
         case checkingAfterScroll(deadline: TimeInterval, scrollAttempts: Int)
         case waitingForGrowth(deadline: TimeInterval)
+    }
+
+    private struct OptimisticReplyPublicationAttempt {
+        let id: UUID
+        let task: Task<Bool, Never>
     }
 
     private static let maximumInitialScrollAttempts = 2
@@ -140,6 +148,9 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var hasCapturedInitialUnreadSnapshot = false
     private var isVisible = false
     private var userScrollInteractionRevision: UInt = 0
+    private var optimisticReplyPublicationAttempts: [
+        NSManagedObjectID: OptimisticReplyPublicationAttempt
+    ] = [:]
     private var pendingAutoReadMessageIDsByEventID: [UUID: [NSManagedObjectID]] = [:]
     private var pendingAutoReadMessageIDsByLayoutID: [UUID: [NSManagedObjectID]] = [:]
     private var pendingAutoReadLayoutOrder: [UUID] = []
@@ -289,6 +300,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
         pendingAutoReadLayoutOrder.removeAll()
+        optimisticReplyPublicationAttempts.values.forEach { $0.task.cancel() }
+        optimisticReplyPublicationAttempts.removeAll()
         taskManager.cancelAll()
         cancelPrefetch()
         if !isReadyToShow {
@@ -915,7 +928,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         )
     }
 
-    func handleReplySendCompleted(
+    func handleReplyOptimisticMessagePersisted(
         targetMessageID: NSManagedObjectID,
         anchorIntent: PostSendAnchorIntent,
         messageCount: Int,
@@ -927,7 +940,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             Log.diagnostic(
                 .chatView,
                 level: .info,
-                "ChatView skipping post-send publication visible=\(isVisible) loaded=\(isInitialWindowLoaded) messages=\(messageCount) total=\(totalMessageCount)",
+                "ChatView skipping optimistic reply publication visible=\(isVisible) loaded=\(isInitialWindowLoaded) messages=\(messageCount) total=\(totalMessageCount)",
                 category: .ui
             )
             return
@@ -936,23 +949,33 @@ final class ChatMessagesCoordinator: ObservableObject {
         Log.diagnostic(
             .chatView,
             level: .info,
-            "ChatView post-send publication requested messages=\(messageCount) total=\(totalMessageCount)",
+            "ChatView optimistic reply publication requested messages=\(messageCount) total=\(totalMessageCount)",
             category: .ui
         )
-        taskManager.run(
-            TaskKey.postSendPublication(targetMessageID)
-        ) { [weak self, ensureVisibleMessage] in
+        optimisticReplyPublicationAttempts[targetMessageID]?.task.cancel()
+        let publicationAttemptID = UUID()
+        let publicationTask = Task { [ensureVisibleMessage] in
+            guard !Task.isCancelled else { return false }
             let didPublishTarget = await ensureVisibleMessage(targetMessageID)
-            guard !Task.isCancelled,
-                  let self,
-                  self.isVisible else {
-                return
-            }
+            return !Task.isCancelled && didPublishTarget
+        }
+        optimisticReplyPublicationAttempts[targetMessageID] = .init(
+            id: publicationAttemptID,
+            task: publicationTask
+        )
+        // Admission consumes this task even after it completes so it never
+        // mistakes a successful publication for a reason to reload latest.
+        taskManager.run(
+            TaskKey.optimisticReplyPublication(targetMessageID)
+        ) { [weak self, publicationTask] in
+            let didPublishTarget = await publicationTask.value
+            guard let self else { return }
+            guard !Task.isCancelled, self.isVisible else { return }
             guard didPublishTarget else {
                 Log.diagnostic(
                     .chatView,
                     level: .warning,
-                    "ChatView post-send target was not published; skipping bottom anchor",
+                    "ChatView optimistic reply was not published; skipping bottom anchor",
                     category: .ui
                 )
                 return
@@ -961,7 +984,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 Log.diagnostic(
                     .chatView,
                     level: .info,
-                    "ChatView post-send target published before initial window completed; skipping bottom anchor",
+                    "ChatView optimistic reply published before initial window completed; skipping bottom anchor",
                     category: .ui
                 )
                 return
@@ -971,7 +994,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 Log.diagnostic(
                     .chatView,
                     level: .info,
-                    "ChatView post-send target published after newer user scroll; preserving takeover",
+                    "ChatView optimistic reply published after newer user scroll; preserving takeover",
                     category: .ui
                 )
                 return
@@ -984,29 +1007,129 @@ final class ChatMessagesCoordinator: ObservableObject {
                 reloadLatestWindow: false,
                 scrollAction: scrollAction
             )
-            // The send's corrective scrolls finish well before the transcript
-            // stops changing height: bubble content re-resolves asynchronously
-            // and the sent row is rewritten when its sync echo lands. Re-arm
-            // the bottom-follow grace so late growth while the anchor is
-            // offscreen re-anchors instead of stranding the viewport above
-            // the new reply. User scrolling still cancels the follow.
-            // A restarted initial reveal (first send into an empty
-            // conversation) owns anchoring until it completes and arms its
-            // own follow; arming over it would intercept every geometry
-            // update and keep the reveal from finishing.
+            // Keep following bounded layout growth while local preflight is
+            // still running. Admission refreshes this grace period once more.
             if self.isReadyToShow {
-                // Re-arming replaces any live follow cycle wholesale: a latch
-                // or validation task from the pre-send cycle must not carry a
-                // phantom growth observation into the fresh grace.
-                self.didObserveGrowthDuringPostRevealCheck = false
-                self.taskManager.cancel(TaskKey.postRevealGeometryCheck)
-                self.postRevealBottomFollowArmedAt = self.now()
-                self.postRevealBottomFollowState = .following(
-                    deadline: self.postRevealBottomFollowArmedAt
-                        + Self.postRevealBottomFollowGracePeriod
-                )
+                self.armPostSendBottomFollow()
             }
         }
+    }
+
+    /// Reconfirms exact-row publication after local preflight reaches the
+    /// durable Gmail-admission boundary, then performs one non-animated
+    /// correction for layout or sync-echo growth that happened during preflight.
+    func handleReplySendAdmitted(
+        targetMessageID: NSManagedObjectID,
+        anchorIntent: PostSendAnchorIntent,
+        messageCount: Int,
+        totalMessageCount: Int,
+        isInitialWindowLoaded: Bool,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        let effectiveMessageCount = max(messageCount, totalMessageCount)
+        let initialPublicationAttempt = optimisticReplyPublicationAttempts[
+            targetMessageID
+        ]
+        guard isVisible else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView skipping reply-admission publication because the chat is not visible",
+                category: .ui
+            )
+            return
+        }
+
+        // Admission is the final exact-row safety net. Delay first so the
+        // optimistic path keeps priority, then join any in-flight publication
+        // before retrying. VirtualScrollState must never reconcile the same
+        // explicit row concurrently from these two send phases.
+        taskManager.run(
+            TaskKey.replyAdmissionStabilization(targetMessageID)
+        ) { [weak self, ensureVisibleMessage, sleep] in
+            guard let self else { return }
+            defer {
+                if let initialPublicationAttempt {
+                    self.clearOptimisticReplyPublicationAttempt(
+                        for: targetMessageID,
+                        id: initialPublicationAttempt.id
+                    )
+                }
+            }
+            let step = BottomAnchorStep(
+                delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
+                animated: false,
+                logMessage: "ChatView reply-admission stabilization -> bottom anchor"
+            )
+            await sleep(UInt64(step.delay * 1_000_000_000))
+            guard !Task.isCancelled, self.isVisible else {
+                return
+            }
+
+            let didPublishTarget: Bool
+            if let initialPublicationAttempt,
+               await initialPublicationAttempt.task.value {
+                didPublishTarget = true
+            } else {
+                guard !Task.isCancelled, self.isVisible else { return }
+                didPublishTarget = await ensureVisibleMessage(targetMessageID)
+            }
+            guard !Task.isCancelled, self.isVisible else { return }
+            guard didPublishTarget else {
+                Log.diagnostic(
+                    .chatView,
+                    level: .warning,
+                    "ChatView reply-admission fallback could not publish the optimistic row",
+                    category: .ui
+                )
+                return
+            }
+            guard isInitialWindowLoaded,
+                  self.isReadyToShow,
+                  effectiveMessageCount > 0,
+                  self.userScrollInteractionRevision ==
+                    anchorIntent.userScrollInteractionRevision else {
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView published reply at admission without optional stabilization",
+                    category: .ui
+                )
+                return
+            }
+            scrollAction(step)
+            self.armPostSendBottomFollow()
+        }
+    }
+
+    func handleReplySendFailed(targetMessageID: NSManagedObjectID) {
+        optimisticReplyPublicationAttempts[targetMessageID]?.task.cancel()
+        optimisticReplyPublicationAttempts.removeValue(forKey: targetMessageID)
+        taskManager.cancel(TaskKey.optimisticReplyPublication(targetMessageID))
+        taskManager.cancel(TaskKey.replyAdmissionStabilization(targetMessageID))
+    }
+
+    private func clearOptimisticReplyPublicationAttempt(
+        for messageObjectID: NSManagedObjectID,
+        id: UUID
+    ) {
+        guard optimisticReplyPublicationAttempts[messageObjectID]?.id == id else {
+            return
+        }
+        optimisticReplyPublicationAttempts.removeValue(forKey: messageObjectID)
+    }
+
+    private func armPostSendBottomFollow() {
+        // The sent row can keep changing height as bubble content resolves and
+        // the sync echo rewrites it. A fresh bounded follow corrects that late
+        // growth while a real user scroll still cancels the behavior.
+        didObserveGrowthDuringPostRevealCheck = false
+        taskManager.cancel(TaskKey.postRevealGeometryCheck)
+        postRevealBottomFollowArmedAt = now()
+        postRevealBottomFollowState = .following(
+            deadline: postRevealBottomFollowArmedAt
+                + Self.postRevealBottomFollowGracePeriod
+        )
     }
 
     func handleContactStoreDidChange(senderGroupingMessages: [ChatMessageRowModel]) {

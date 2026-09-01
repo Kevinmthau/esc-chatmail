@@ -371,7 +371,8 @@ private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating 
 
     func send(
         preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
-        reconciliationHooks: OutboundMessageReconciliationHooks
+        reconciliationHooks: OutboundMessageReconciliationHooks,
+        onOptimisticMessagePersisted: (@MainActor (OutboundMessageResult) -> Void)?
     ) async throws -> OutboundMessageResult? {
         let request = try await requestBuilder()
         lastRequest = request
@@ -386,13 +387,15 @@ private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating 
         let message = coreDataStack.viewContext.insertTestObject(Message.self)
         message.id = "optimistic-1"
         try coreDataStack.viewContext.obtainPermanentIDs(for: [message])
-        return .init(
+        let result = OutboundMessageResult(
             optimisticMessageID: message.id,
             optimisticMessageObjectID: message.objectID,
             conversationReference: ConversationReference(
                 persistentStoreURI: URL(string: "x-coredata://conversation/123")!
             )
         )
+        onOptimisticMessagePersisted?(result)
+        return result
     }
 
     func resumeSend() {

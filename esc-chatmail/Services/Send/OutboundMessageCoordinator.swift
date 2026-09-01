@@ -129,10 +129,12 @@ struct OutboundMessageReconciliationHooks: Sendable {
 
 @MainActor
 protocol OutboundMessageCoordinating: AnyObject {
-    /// Acquires account-scoped send admission before invoking `requestBuilder`.
+    /// Reports the persisted optimistic identity before awaiting local preflight,
+    /// then returns only after durable transmission admission.
     func send(
         preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
-        reconciliationHooks: OutboundMessageReconciliationHooks
+        reconciliationHooks: OutboundMessageReconciliationHooks,
+        onOptimisticMessagePersisted: (@MainActor (OutboundMessageResult) -> Void)?
     ) async throws -> OutboundMessageResult?
 }
 
@@ -143,7 +145,19 @@ extension OutboundMessageCoordinating {
     ) async throws -> OutboundMessageResult? {
         try await send(
             preparing: { request },
-            reconciliationHooks: reconciliationHooks
+            reconciliationHooks: reconciliationHooks,
+            onOptimisticMessagePersisted: nil
+        )
+    }
+
+    func send(
+        _ request: OutboundMessageRequest,
+        onOptimisticMessagePersisted: @escaping @MainActor (OutboundMessageResult) -> Void
+    ) async throws -> OutboundMessageResult? {
+        try await send(
+            preparing: { request },
+            reconciliationHooks: .none,
+            onOptimisticMessagePersisted: onOptimisticMessagePersisted
         )
     }
 
@@ -154,7 +168,11 @@ extension OutboundMessageCoordinating {
     func send(
         preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest
     ) async throws -> OutboundMessageResult? {
-        try await send(preparing: requestBuilder, reconciliationHooks: .none)
+        try await send(
+            preparing: requestBuilder,
+            reconciliationHooks: .none,
+            onOptimisticMessagePersisted: nil
+        )
     }
 }
 
@@ -225,7 +243,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
 
     func send(
         preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
-        reconciliationHooks: OutboundMessageReconciliationHooks = .none
+        reconciliationHooks: OutboundMessageReconciliationHooks = .none,
+        onOptimisticMessagePersisted: (@MainActor (OutboundMessageResult) -> Void)? = nil
     ) async throws -> OutboundMessageResult? {
         // Reserve before the first suspension point. Account teardown can then
         // close admission and await this preparation even if optimistic state
@@ -323,6 +342,11 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             )
         }
 
+        let optimisticResult = OutboundMessageResult(
+            optimisticMessageID: optimisticMessageID,
+            optimisticMessageObjectID: optimisticSendHandle.optimisticMessageObjectID,
+            conversationReference: optimisticSendHandle.conversationReference
+        )
         let sendInput = ComposeSendOrchestrator.SendInput(
             recipientEmails: preparedSend.recipientEmails,
             body: preparedSend.body,
@@ -366,17 +390,19 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             throw CancellationError()
         }
 
+        // The optimistic graph and recovery record are durable, and the
+        // registry now owns preflight cleanup. Publish the stable identity
+        // before yielding for transmission admission so chat can materialize
+        // and anchor the exact row while MIME work continues.
+        onOptimisticMessagePersisted?(optimisticResult)
+
         // The caller clears its composer only after all local preflight has
         // completed and the optimistic graph + ambiguity marker are durable at
         // final Gmail request admission. Failures before admission propagate
         // while the source composer still owns the user's content.
         try await backgroundOperation.waitForTransmissionAdmission()
 
-        return OutboundMessageResult(
-            optimisticMessageID: optimisticMessageID,
-            optimisticMessageObjectID: optimisticSendHandle.optimisticMessageObjectID,
-            conversationReference: optimisticSendHandle.conversationReference
-        )
+        return optimisticResult
     }
 
     private func checkActive(_ reservation: OutboundSendReservation) throws {

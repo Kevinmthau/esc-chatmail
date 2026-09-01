@@ -2338,7 +2338,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
-    func testHandleReplySendCompletedPublishesTargetBeforeStabilizedBottomAnchor() async throws {
+    func testPersistedOptimisticReplyPublishesTargetBeforeStabilizedBottomAnchor() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
             "second@example.com"
@@ -2386,7 +2386,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         let targetMessageID = messages.last!.objectID
         let anchorIntent = coordinator.capturePostSendAnchorIntent()
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: targetMessageID,
             anchorIntent: anchorIntent,
             messageCount: messages.count,
@@ -2424,7 +2424,390 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
-    func testHandleReplySendCompletedWaitsForExactTargetPublicationBeforeAnchoring() async throws {
+    func testReplyAdmissionAddsOneLightweightStabilizationAfterOptimisticPresentation() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 2 }
+
+        coordinator.handleReplySendAdmitted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 3 }
+
+        XCTAssertEqual(
+            anchorSteps.last,
+            .init(
+                delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
+                animated: false,
+                logMessage: "ChatView reply-admission stabilization -> bottom anchor"
+            )
+        )
+    }
+
+    func testReplyAdmissionAfterSuccessfulPublicationPreservesNewerUserScroll() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let admissionDelayStarted = expectation(
+            description: "Reply-admission delay started"
+        )
+        var shouldObserveAdmissionDelay = false
+        var visibilityAttempts = 0
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in
+                if shouldObserveAdmissionDelay {
+                    shouldObserveAdmissionDelay = false
+                    admissionDelayStarted.fulfill()
+                }
+            },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityAttempts += 1
+                return true
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            visibilityAttempts == 1 && anchorSteps.count == 2
+        }
+
+        coordinator.handleUserScrollInteraction()
+        shouldObserveAdmissionDelay = true
+        coordinator.handleReplySendAdmitted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [admissionDelayStarted], timeout: 1)
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(
+            visibilityAttempts,
+            1,
+            "Admission must consume the successful early publication instead of reloading latest"
+        )
+        XCTAssertEqual(
+            anchorSteps.count,
+            2,
+            "A newer user scroll must suppress admission stabilization"
+        )
+    }
+
+    func testReplyAdmissionRetriesExactPublicationWhenEarlyOptimisticPublicationFails() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let earlyAttemptCompleted = expectation(
+            description: "Early optimistic publication attempted"
+        )
+        var visibilityAttempts = 0
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityAttempts += 1
+                if visibilityAttempts == 1 {
+                    earlyAttemptCompleted.fulfill()
+                    return false
+                }
+                return true
+            }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [earlyAttemptCompleted], timeout: 1)
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        coordinator.handleReplySendAdmitted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { visibilityAttempts == 2 && anchorSteps.count == 1 }
+
+        XCTAssertEqual(visibilityAttempts, 2)
+        XCTAssertEqual(anchorSteps.first?.animated, false)
+        XCTAssertEqual(
+            anchorSteps.first?.logMessage,
+            "ChatView reply-admission stabilization -> bottom anchor"
+        )
+    }
+
+    func testReplyAdmissionJoinsInFlightOptimisticPublicationBeforeStabilizing() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let earlyPublicationStarted = expectation(
+            description: "Early optimistic publication started"
+        )
+        var mayPublishTarget = false
+        var observedCancellation = false
+        var visibilityAttempts = 0
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                XCTAssertEqual(messageObjectID, messages.last!.objectID)
+                visibilityAttempts += 1
+                if visibilityAttempts == 1 {
+                    earlyPublicationStarted.fulfill()
+                }
+                while !mayPublishTarget && !Task.isCancelled {
+                    await Task.yield()
+                }
+                observedCancellation = Task.isCancelled
+                return !Task.isCancelled
+            }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [earlyPublicationStarted], timeout: 1)
+
+        coordinator.handleReplySendAdmitted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(
+            visibilityAttempts,
+            1,
+            "Admission must join the in-flight publication instead of starting another"
+        )
+        XCTAssertFalse(observedCancellation)
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        mayPublishTarget = true
+        await waitUntil { anchorSteps.count == 3 }
+
+        XCTAssertFalse(observedCancellation)
+        XCTAssertEqual(visibilityAttempts, 1)
+        XCTAssertEqual(
+            anchorSteps.filter { $0.animated }.count,
+            1,
+            "The early animated anchor must survive fast admission"
+        )
+    }
+
+    func testReplyPublicationAndAdmissionPublishTargetWithRealVirtualScrollState() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com",
+            "fourth@example.com",
+            "fifth@example.com",
+            "sixth@example.com"
+        ])
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let scrollState = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { scrollState.cleanup() }
+
+        let initialMessageIDs = Array(messages.prefix(3)).map(\.objectID)
+        await waitUntil {
+            scrollState.initialLoadPhase == .loaded &&
+                scrollState.visibleMessages.map(\.objectID) == initialMessageIDs
+        }
+        scrollState.setFollowsLatestInsertions(false)
+
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { messageObjectID in
+                await scrollState.ensureVisibleMessage(messageObjectID)
+            }
+        )
+        defer { coordinator.handleDisappear() }
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        coordinator.handleAppear(
+            messageCount: scrollState.visibleMessages.count,
+            lastMessage: messages.last,
+            visibleMessages: scrollState.visibleMessages,
+            senderGroupingMessages: scrollState.visibleMessages,
+            totalMessageCount: scrollState.totalMessageCount,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = messages.last!.objectID
+        XCTAssertFalse(
+            scrollState.visibleMessages.contains { $0.objectID == targetMessageID }
+        )
+        let anchorIntent = coordinator.capturePostSendAnchorIntent()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: scrollState.visibleMessages.count,
+            totalMessageCount: scrollState.totalMessageCount,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        coordinator.handleReplySendAdmitted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: scrollState.visibleMessages.count,
+            totalMessageCount: scrollState.totalMessageCount,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil {
+            scrollState.visibleMessages.contains { $0.objectID == targetMessageID } &&
+                anchorSteps.count == 3
+        }
+
+        XCTAssertEqual(anchorSteps.filter(\.animated).count, 1)
+        XCTAssertEqual(
+            Set(anchorSteps.map(\.logMessage)),
+            Set([
+                "ChatView animated scroll -> bottom anchor",
+                "ChatView stabilization scroll after content change -> bottom anchor",
+                "ChatView reply-admission stabilization -> bottom anchor"
+            ])
+        )
+    }
+
+    func testPersistedOptimisticReplyWaitsForExactTargetPublicationBeforeAnchoring() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com"
         ])
@@ -2460,7 +2843,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in }
         await confirmInitialBottomAnchor(coordinator)
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -2527,7 +2910,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         await confirmInitialBottomAnchor(coordinator)
 
         let anchorIntent = coordinator.capturePostSendAnchorIntent()
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: anchorIntent,
             messageCount: messages.count,
@@ -2595,7 +2978,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         let anchorIntent = coordinator.capturePostSendAnchorIntent()
         for message in messages {
-            coordinator.handleReplySendCompleted(
+            coordinator.handleReplyOptimisticMessagePersisted(
                 targetMessageID: message.objectID,
                 anchorIntent: anchorIntent,
                 messageCount: messages.count,
@@ -2649,7 +3032,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in }
         await confirmInitialBottomAnchor(coordinator)
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -2665,7 +3048,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
-    func testReplySendCompletionRearmsBottomFollowForLateContentGrowth() async throws {
+    func testOptimisticReplyPublicationRearmsBottomFollowForLateContentGrowth() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
             "second@example.com"
@@ -2702,7 +3085,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("Expired initial grace must not follow late growth")
         }
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -2779,7 +3162,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("Expired initial grace must not follow late growth")
         }
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -2837,7 +3220,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("Expired initial grace must not follow late growth")
         }
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -2901,7 +3284,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("Expired initial grace must not follow late growth")
         }
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -2939,7 +3322,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         // The first send into the empty conversation: the publication task
         // completes, then the 0 -> 1 count change restarts the initial reveal.
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: 1,
@@ -2997,7 +3380,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         handleEmptyAppear(coordinator)
         XCTAssertTrue(coordinator.isReadyToShow)
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: 1,
@@ -3069,7 +3452,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("Expired initial grace must not follow late growth")
         }
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -3127,7 +3510,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("Expired initial grace must not follow late growth")
         }
 
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages[0].objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -3141,7 +3524,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         currentTime += 2.0
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages[1].objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -3235,7 +3618,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         await confirmInitialBottomAnchor(coordinator)
 
         shouldBlockAnchorDelay = true
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
@@ -3335,7 +3718,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         isRejectingPassiveLatestLoads = false
         let anchorIntent = coordinator.capturePostSendAnchorIntent()
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: anchorIntent,
             messageCount: messages.count,
@@ -3351,17 +3734,17 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertTrue(latestWindowKnownCounts.isEmpty)
     }
 
-    func testReplySendCompletionAfterDisappearDoesNotRestartAnchorWork() async throws {
+    func testOptimisticReplyPublicationAfterDisappearDoesNotRestartAnchorWork() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com"
         ])
         let rows = messages.map { ChatMessageRowModelMapper.map($0) }
         let unexpectedPostDisappearLatestLoad = expectation(
-            description: "Late send completion must not reload after disappear"
+            description: "Late optimistic publication must not reload after disappear"
         )
         unexpectedPostDisappearLatestLoad.isInverted = true
         let unexpectedPostDisappearEnsure = expectation(
-            description: "Late send completion must not publish after disappear"
+            description: "Late optimistic publication must not run after disappear"
         )
         unexpectedPostDisappearEnsure.isInverted = true
         var isRejectingPostDisappearLoads = false
@@ -3402,7 +3785,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         let anchorIntent = coordinator.capturePostSendAnchorIntent()
         isRejectingPostDisappearLoads = true
         coordinator.handleDisappear()
-        coordinator.handleReplySendCompleted(
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: anchorIntent,
             messageCount: messages.count,
@@ -4753,9 +5136,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
-    func testReplySendCompleted_staleGrowthLatchFromPreSendFollow_doesNotLeak() async throws {
+    func testOptimisticReplyPublication_staleGrowthLatchFromPreSendFollow_doesNotLeak() async throws {
         // Revert-check: the didObserveGrowthDuringPostRevealCheck clear in
-        // handleReplySendCompleted's bottom-follow re-arm. Without it, growth
+        // handleReplyOptimisticMessagePersisted's bottom-follow re-arm. Without it, growth
         // latched during a pre-send validation window buys the re-armed
         // follow an unearned corrective scroll pair after its own attempts
         // exhaust.
@@ -4770,7 +5153,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         // Sleep call 1 is the visibility confirmation; call 2 is the pre-send
         // follow's validation timer, which stays parked until released so the
         // send provably re-arms over a live validation window; calls 3+ are
-        // the post-send publication step delays and pass through. The actor
+        // the optimistic publication step delays and pass through. The actor
         // keeps the cross-executor flag reads race-free, and the parked loop
         // exits on cancellation (the re-arm cancels the parked task).
         let sleepGate = ParkedSleepGate()
@@ -4818,12 +5201,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             XCTFail("An event during the validation window must be coalesced, not scrolled")
         }
 
-        // The send completes while the validation is still parked; the
+        // The optimistic message persists while validation is still parked; the
         // re-arm must replace the follow cycle wholesale. The publication
         // steps landing proves the re-arm ran (it precedes them in the same
-        // post-send continuation): pre-send corrective scroll (1) + the
-        // send's two publication steps.
-        coordinator.handleReplySendCompleted(
+        // optimistic-publication continuation): pre-send corrective scroll
+        // (1) + the reply's two publication steps.
+        coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
             messageCount: messages.count,
