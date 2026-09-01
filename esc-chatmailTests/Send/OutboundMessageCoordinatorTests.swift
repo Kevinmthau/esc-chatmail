@@ -554,34 +554,126 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertTrue(didReturn)
     }
 
-    func testSend_preflightFailurePropagatesBeforeComposerSuccess() async {
+    func testSendPublishesDurableOptimisticResultBeforeTransmissionAdmission() async throws {
+        let preflightGate = OutboundSendTestGate()
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
-        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("preflight")
+        sendService.sendNewPreflightGate = preflightGate
         let coordinator = makeCoordinator(
             sendService: sendService,
             syncPerformer: MockCoordinatorSyncPerformer()
         )
+        var presentationEvents: [String] = []
+        var optimisticResult: OutboundMessageResult?
+        var didReturn = false
 
-        do {
-            _ = try await coordinator.send(
+        let sendTask = Task { @MainActor in
+            let result = try await coordinator.send(
                 .compose(
                     .init(
                         recipientEmails: ["to@example.com"],
-                        subject: "Preflight failure",
+                        subject: "Immediate optimistic presentation",
                         body: "Body",
                         attachments: []
                     )
-                )
+                ),
+                onOptimisticMessagePersisted: { result in
+                    optimisticResult = result
+                    presentationEvents.append("optimistic-persisted")
+                }
             )
-            XCTFail("Expected preflight failure")
-        } catch {
-            // Expected: the caller retains the source composer.
+            didReturn = true
+            presentationEvents.append("transmission-admitted")
+            return result
         }
 
-        let snapshot = sendService.snapshot
-        XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
-        XCTAssertEqual(snapshot.failedOptimisticMessageIDs.count, 1)
-        XCTAssertTrue(snapshot.sendNewCancellationObservations.isEmpty)
+        await preflightGate.waitUntilStarted()
+
+        let persistedResult = try XCTUnwrap(optimisticResult)
+        XCTAssertFalse(didReturn)
+        XCTAssertEqual(presentationEvents, ["optimistic-persisted"])
+        XCTAssertEqual(
+            persistedResult.optimisticMessageObjectID,
+            sendService.snapshot.createdOptimisticMessageObjectIDs.last
+        )
+
+        await preflightGate.release()
+        let admittedSubmission = try await sendTask.value
+        let admittedResult = try XCTUnwrap(admittedSubmission)
+
+        XCTAssertEqual(admittedResult.optimisticMessageID, persistedResult.optimisticMessageID)
+        XCTAssertEqual(
+            presentationEvents,
+            ["optimistic-persisted", "transmission-admitted"]
+        )
+    }
+
+    func testSend_preflightFailureAfterOptimisticPublicationRollsBackAndClearsPendingMutation() async throws {
+        let preflightGate = OutboundSendTestGate()
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        sendService.sendNewPreflightGate = preflightGate
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("preflight")
+        let mutationTracker = MockOutboundSendMutationTracker()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            mutationTracker: mutationTracker
+        )
+        var optimisticResult: OutboundMessageResult?
+        var callbackCount = 0
+        var sendError: Error?
+
+        let sendTask = Task { @MainActor in
+            do {
+                _ = try await coordinator.send(
+                    .compose(
+                        .init(
+                            recipientEmails: ["to@example.com"],
+                            subject: "Preflight failure",
+                            body: "Body",
+                            attachments: []
+                        )
+                    ),
+                    onOptimisticMessagePersisted: { result in
+                        optimisticResult = result
+                        callbackCount += 1
+                    }
+                )
+                XCTFail("Expected preflight failure")
+            } catch {
+                sendError = error
+            }
+        }
+
+        await preflightGate.waitUntilStarted()
+
+        let persistedResult = try XCTUnwrap(optimisticResult)
+        XCTAssertEqual(callbackCount, 1)
+        XCTAssertEqual(mutationTracker.pendingMutationIDs, [persistedResult.optimisticMessageID])
+        XCTAssertEqual(mutationTracker.pendingMutationCount, 1)
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: persistedResult.optimisticMessageID))
+        XCTAssertTrue(sendService.snapshot.rolledBackOptimisticMessageIDs.isEmpty)
+        XCTAssertTrue(sendService.snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
+
+        await preflightGate.release()
+        await sendTask.value
+
+        XCTAssertNotNil(sendError)
+        XCTAssertEqual(callbackCount, 1)
+        XCTAssertNil(sendService.fetchMessageSync(byID: persistedResult.optimisticMessageID))
+        XCTAssertEqual(
+            sendService.snapshot.rolledBackOptimisticMessageIDs,
+            [persistedResult.optimisticMessageID]
+        )
+        XCTAssertEqual(
+            sendService.snapshot.failedOptimisticMessageIDs,
+            [persistedResult.optimisticMessageID]
+        )
+        XCTAssertEqual(mutationTracker.pendingMutationCount, 0)
+        XCTAssertEqual(mutationTracker.failedMutationIDs, [persistedResult.optimisticMessageID])
+        XCTAssertTrue(sendService.snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(sendService.snapshot.sendNewCancellationObservations.isEmpty)
     }
 
     func testSend_closedAdmissionRejectsBeforeOptimisticCreation() async {
@@ -1181,6 +1273,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let sendReplyCalls: [SendReplyCall]
         let markAttachmentsAsUploadingCalls: [[LocalAttachmentReference]]
         let failedOptimisticMessageIDs: [String]
+        let rolledBackOptimisticMessageIDs: [String]
         let sendNewCancellationObservations: [Bool]
         let sendNewPreflightCancellationObservations: [Bool]
         let recordRemoteSendAdmissionCalls: [String]
@@ -1197,6 +1290,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     private var replyCalls: [SendReplyCall] = []
     private var markUploadingCalls: [[LocalAttachmentReference]] = []
     private var failedOptimisticMessageIDs: [String] = []
+    private var rolledBackOptimisticMessageIDs: [String] = []
     private var sendNewCancellationObservations: [Bool] = []
     private var sendNewPreflightCancellationObservations: [Bool] = []
     private var recordRemoteSendAdmissionCalls: [String] = []
@@ -1222,6 +1316,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                 sendReplyCalls: replyCalls,
                 markAttachmentsAsUploadingCalls: markUploadingCalls,
                 failedOptimisticMessageIDs: failedOptimisticMessageIDs,
+                rolledBackOptimisticMessageIDs: rolledBackOptimisticMessageIDs,
                 sendNewCancellationObservations: sendNewCancellationObservations,
                 sendNewPreflightCancellationObservations: sendNewPreflightCancellationObservations,
                 recordRemoteSendAdmissionCalls: recordRemoteSendAdmissionCalls,
@@ -1473,6 +1568,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     ) {
         queue.sync {
             failedOptimisticMessageIDs.append(messageID)
+            rolledBackOptimisticMessageIDs.append(messageID)
         }
         optimisticMessages[messageID] = nil
     }
