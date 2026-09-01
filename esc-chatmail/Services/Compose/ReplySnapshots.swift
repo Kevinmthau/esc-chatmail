@@ -23,17 +23,28 @@ struct ReplyConversationSnapshot: Sendable {
     }
 
     @MainActor
-    init(conversation: Conversation, sendAsAliases: [SendAsAlias] = []) {
+    init(
+        conversation: Conversation,
+        replyingTo: ReplyTargetSnapshot? = nil,
+        sendAsAliases: [SendAsAlias] = []
+    ) {
         let isListConversation = conversation.conversationType == .list
         let latestListInboundMessage = isListConversation
             ? Self.latestInboundListMessage(in: conversation)
             : nil
-        let nonListMessages = isListConversation
+        let latestNonListInboundMessage = !isListConversation && replyingTo != nil
+            ? Self.latestInboundMessage(in: conversation)
+            : nil
+        let nonListMessages = isListConversation || replyingTo != nil
             ? []
             : Array(conversation.messages ?? []).sorted(by: Self.messageSort)
         let latestReplyAddressHint: ReplyAddressHint?
         if isListConversation {
             latestReplyAddressHint = latestListInboundMessage.flatMap {
+                ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases)
+            }
+        } else if replyingTo != nil {
+            latestReplyAddressHint = latestNonListInboundMessage.flatMap {
                 ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases)
             }
         } else {
@@ -56,11 +67,38 @@ struct ReplyConversationSnapshot: Sendable {
                 .compactMap { $0.person?.email }
         }
         self.isListConversation = isListConversation
-        self.latestThreadId = (isListConversation
+        self.latestThreadId = replyingTo?.threadId ?? (isListConversation
             ? latestListInboundMessage
             : nonListMessages.first)?.gmThreadId
         self.deliveredToAddress = latestReplyAddressHint?.deliveredToAddress
         self.replyFromAddress = latestReplyAddressHint?.replyFromAddress
+    }
+
+    private static func latestInboundMessage(in conversation: Conversation) -> Message? {
+        guard let context = conversation.managedObjectContext else {
+            return Array(conversation.messages ?? [])
+                .sorted(by: messageSort)
+                .first { !$0.isFromMe }
+        }
+
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "conversation == %@ AND isFromMe == NO",
+            conversation
+        )
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
+        request.fetchLimit = 1
+        request.fetchBatchSize = 1
+        request.includesPendingChanges = true
+        request.relationshipKeyPathsForPrefetching = [
+            "participants",
+            "participants.person"
+        ]
+
+        return try? context.fetch(request).first
     }
 
     private static func latestInboundListMessage(
@@ -136,7 +174,12 @@ struct ReplyTargetSnapshot: Sendable {
     }
 
     @MainActor
-    init(message: Message, sendAsAliases: [SendAsAlias] = [], originalHTML: String? = nil) {
+    init(
+        message: Message,
+        sendAsAliases: [SendAsAlias] = [],
+        originalHTML: String? = nil,
+        deferredOriginalHTML: DeferredReplyQuotedHTML? = nil
+    ) {
         let replyAddressHint = ReplyAddressHint.from(message: message, sendAsAliases: sendAsAliases)
         self.participantEmails = ReplyParticipantSnapshot.recipientEmails(
             from: message,
@@ -157,7 +200,8 @@ struct ReplyTargetSnapshot: Sendable {
             senderEmail: message.senderEmailValue ?? "",
             date: message.internalDate,
             body: message.bodyTextValue,
-            originalHTML: originalHTML
+            originalHTML: originalHTML,
+            deferredOriginalHTML: deferredOriginalHTML
         )
     }
 

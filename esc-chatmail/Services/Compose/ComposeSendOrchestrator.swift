@@ -250,6 +250,12 @@ struct ComposeSendOrchestrator {
                                   !threadId.isEmpty else {
                                 throw GmailSendService.SendError.replyTargetUnavailable
                             }
+                            let originalMessage: QuotedMessage?
+                            if let deferredOriginalMessage = replyMetadata.originalMessage {
+                                originalMessage = await deferredOriginalMessage.resolvingOriginalHTML()
+                            } else {
+                                originalMessage = nil
+                            }
                             result = try await sendService.sendReply(
                                 to: replyMetadata.recipientEmails,
                                 fromEmail: replyMetadata.fromEmail,
@@ -259,7 +265,7 @@ struct ComposeSendOrchestrator {
                                 threadId: threadId,
                                 inReplyTo: replyMetadata.inReplyTo,
                                 references: replyMetadata.references,
-                                originalMessage: replyMetadata.originalMessage,
+                                originalMessage: originalMessage,
                                 attachmentInfos: input.attachmentInfos,
                                 messageId: MimeBuilder.messageId(
                                     forOptimisticMessageID: optimisticMessageID

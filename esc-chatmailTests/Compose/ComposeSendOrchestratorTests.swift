@@ -76,6 +76,112 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
 
+    func testExecuteInBackground_replyResolvesDeferredHTMLDuringDetachedPreflight() async {
+        let sendService = MockComposeSendService()
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let probe = ReplyResolutionProbe(result: "<html><body>Resolved HTML</body></html>")
+        let resolver = ReplyQuotedHTMLResolver { source in
+            probe.load(source)
+        }
+        let originalMessage = QuotedMessage(
+            senderName: "Friend",
+            senderEmail: "friend@example.com",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            body: "Original body",
+            deferredOriginalHTML: DeferredReplyQuotedHTML(
+                source: ReplyQuotedHTMLSource(
+                    messageId: "deferred-message",
+                    bodyStorageURI: nil,
+                    bodyText: "Original body",
+                    senderEmail: "friend@example.com",
+                    subject: "Hello"
+                ),
+                resolver: resolver
+            )
+        )
+        let metadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["to@example.com"],
+            fromEmail: "alias@example.com",
+            fromName: "Alias",
+            subject: "Re: Hello",
+            threadId: "thread-1",
+            inReplyTo: "<id-1>",
+            references: ["<id-1>"],
+            originalMessage: originalMessage
+        )
+
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer
+        ).executeInBackground(
+            input: makeInput(body: "reply body", replyMetadata: metadata),
+            attachmentReferences: [],
+            optimisticMessageID: "optimistic-deferred-html"
+        )
+        await operation.task.value
+
+        let resolutionSnapshot = probe.snapshot
+        XCTAssertEqual(resolutionSnapshot.messageIDs, ["deferred-message"])
+        XCTAssertEqual(resolutionSnapshot.mainThreadObservations, [false])
+        XCTAssertEqual(
+            sendService.snapshot.lastReplyOriginalHTML,
+            "<html><body>Resolved HTML</body></html>"
+        )
+        XCTAssertFalse(sendService.snapshot.lastReplyHadDeferredOriginalHTML)
+    }
+
+    func testExecuteInBackground_explicitReplyHTMLSkipsDeferredResolution() async {
+        let sendService = MockComposeSendService()
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let probe = ReplyResolutionProbe(result: "<html><body>Deferred HTML</body></html>")
+        let resolver = ReplyQuotedHTMLResolver { source in
+            probe.load(source)
+        }
+        let originalMessage = QuotedMessage(
+            senderName: "Friend",
+            senderEmail: "friend@example.com",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            body: "Original body",
+            originalHTML: "<html><body>Explicit HTML</body></html>",
+            deferredOriginalHTML: DeferredReplyQuotedHTML(
+                source: ReplyQuotedHTMLSource(
+                    messageId: "unused-deferred-message",
+                    bodyStorageURI: nil,
+                    bodyText: "Original body",
+                    senderEmail: "friend@example.com",
+                    subject: "Hello"
+                ),
+                resolver: resolver
+            )
+        )
+        let metadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["to@example.com"],
+            fromEmail: "alias@example.com",
+            fromName: "Alias",
+            subject: "Re: Hello",
+            threadId: "thread-1",
+            inReplyTo: "<id-1>",
+            references: ["<id-1>"],
+            originalMessage: originalMessage
+        )
+
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer
+        ).executeInBackground(
+            input: makeInput(body: "reply body", replyMetadata: metadata),
+            attachmentReferences: [],
+            optimisticMessageID: "optimistic-explicit-html"
+        )
+        await operation.task.value
+
+        XCTAssertTrue(probe.snapshot.messageIDs.isEmpty)
+        XCTAssertEqual(
+            sendService.snapshot.lastReplyOriginalHTML,
+            "<html><body>Explicit HTML</body></html>"
+        )
+    }
+
     func testExecuteInBackground_replyWithoutSubject_stillRunsSendReplyAndSync() async {
         let sendService = MockComposeSendService()
         let syncPerformer = MockIncrementalSyncPerformer()
@@ -460,6 +566,8 @@ private final class MockComposeSendService: ComposeSendServicing {
         let reconcileRemoteCommittedSendCalls: [String]
         let uploadedAttachmentReferences: [LocalAttachmentReference]
         let failedAttachmentReferences: [LocalAttachmentReference]
+        let lastReplyOriginalHTML: String?
+        let lastReplyHadDeferredOriginalHTML: Bool
     }
 
     private let queue = DispatchQueue(label: "ComposeSendOrchestratorTests.MockComposeSendService")
@@ -487,6 +595,8 @@ private final class MockComposeSendService: ComposeSendServicing {
     private var _remoteCommittedResults: [String: GmailSendService.SendResult] = [:]
     private var _uploadedAttachmentReferences: [LocalAttachmentReference] = []
     private var _failedAttachmentReferences: [LocalAttachmentReference] = []
+    private var _lastReplyOriginalHTML: String?
+    private var _lastReplyHadDeferredOriginalHTML = false
 
     var snapshot: Snapshot {
         queue.sync {
@@ -504,7 +614,9 @@ private final class MockComposeSendService: ComposeSendServicing {
                 recordRemoteCommittedSendCalls: _recordRemoteCommittedSendCalls,
                 reconcileRemoteCommittedSendCalls: _reconcileRemoteCommittedSendCalls,
                 uploadedAttachmentReferences: _uploadedAttachmentReferences,
-                failedAttachmentReferences: _failedAttachmentReferences
+                failedAttachmentReferences: _failedAttachmentReferences,
+                lastReplyOriginalHTML: _lastReplyOriginalHTML,
+                lastReplyHadDeferredOriginalHTML: _lastReplyHadDeferredOriginalHTML
             )
         }
     }
@@ -531,7 +643,11 @@ private final class MockComposeSendService: ComposeSendServicing {
         messageId: String?,
         beforeTransmission: @Sendable () async throws -> Void
     ) async throws -> GmailSendService.SendResult {
-        queue.sync { _sendReplyCalls += 1 }
+        queue.sync {
+            _sendReplyCalls += 1
+            _lastReplyOriginalHTML = originalMessage?.originalHTML
+            _lastReplyHadDeferredOriginalHTML = originalMessage?.deferredOriginalHTML != nil
+        }
 
         try await beforeTransmission()
         queue.sync { _remoteTransmissionCalls += 1 }
@@ -659,6 +775,39 @@ private final class MockComposeSendService: ComposeSendServicing {
         queue.sync {
             _retainDefinitelyUnsentCalls += 1
             _failedAttachmentReferences = fallbackAttachmentReferences
+        }
+    }
+}
+
+private final class ReplyResolutionProbe: @unchecked Sendable {
+    struct Snapshot {
+        let messageIDs: [String]
+        let mainThreadObservations: [Bool]
+    }
+
+    private let lock = NSLock()
+    private let result: String?
+    private var messageIDs: [String] = []
+    private var mainThreadObservations: [Bool] = []
+
+    init(result: String?) {
+        self.result = result
+    }
+
+    var snapshot: Snapshot {
+        lock.withLock {
+            Snapshot(
+                messageIDs: messageIDs,
+                mainThreadObservations: mainThreadObservations
+            )
+        }
+    }
+
+    func load(_ source: ReplyQuotedHTMLSource) -> String? {
+        lock.withLock {
+            messageIDs.append(source.messageId)
+            mainThreadObservations.append(Thread.isMainThread)
+            return result
         }
     }
 }
