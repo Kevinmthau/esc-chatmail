@@ -244,9 +244,12 @@ struct ComposeSendOrchestrator {
                             await admission.succeed()
                         }
 
-                        if let replyMetadata = input.replyMetadata,
-                           let threadId = replyMetadata.threadId,
-                           !threadId.isEmpty {
+                        if let replyMetadata = input.replyMetadata {
+                            guard let threadId = replyMetadata.threadId?
+                                .trimmingCharacters(in: .whitespacesAndNewlines),
+                                  !threadId.isEmpty else {
+                                throw GmailSendService.SendError.replyTargetUnavailable
+                            }
                             result = try await sendService.sendReply(
                                 to: replyMetadata.recipientEmails,
                                 fromEmail: replyMetadata.fromEmail,

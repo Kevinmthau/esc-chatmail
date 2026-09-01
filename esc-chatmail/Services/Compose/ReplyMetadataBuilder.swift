@@ -53,8 +53,13 @@ struct ReplyMetadataBuilder {
         var originalMessage: QuotedMessage?
 
         if let replyingTo = replyingTo {
+            guard let targetThreadId = replyingTo.threadId?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !targetThreadId.isEmpty else {
+                throw GmailSendService.SendError.replyTargetUnavailable
+            }
             subject = replyingTo.subject.map { MimeBuilder.prefixSubjectForReply($0) }
-            threadId = replyingTo.threadId
+            threadId = targetThreadId
             inReplyTo = replyingTo.messageId
             references = replyingTo.references
             if let messageId = replyingTo.messageId {

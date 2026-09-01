@@ -105,6 +105,38 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
 
+    func testExecuteInBackground_replyWithoutThreadIdNeverRunsSendNew() async {
+        let sendService = MockComposeSendService()
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer
+        )
+        let replyMetadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["to@example.com"],
+            fromEmail: "alias@example.com",
+            fromName: "Alias",
+            subject: "Re: Hello",
+            threadId: nil,
+            inReplyTo: "<id-1>",
+            references: ["<id-1>"],
+            originalMessage: nil
+        )
+
+        let operation = orchestrator.executeInBackground(
+            input: makeInput(body: "reply body", replyMetadata: replyMetadata),
+            attachmentReferences: [],
+            optimisticMessageID: "optimistic-missing-reply-thread"
+        )
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 0)
+        XCTAssertEqual(snapshot.sendReplyCalls, 0)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
     func testExecuteInBackground_cancellationDrainsInFlightSendAndSkipsSync() async {
         let sendService = MockComposeSendService()
         sendService.sendDelayNanoseconds = 100_000_000

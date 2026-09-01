@@ -86,6 +86,43 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertTrue(metadata.originalMessage?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
     }
 
+    func testBuildReplyMetadata_targetWithoutThreadIdDoesNotUseConversationThread() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let replyingTo = MessageBuilder()
+            .withId("message-without-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        replyingTo.gmThreadId = ""
+        let otherMessage = MessageBuilder()
+            .withId("other-message-with-thread")
+            .withThreadId("other-thread")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo, otherMessage])
+
+        do {
+            _ = try await makeBuilder().buildReplyMetadata(
+                .init(
+                    conversationObjectID: conversation.objectID,
+                    replyingToMessageObjectID: replyingTo.objectID,
+                    optimisticConversation: .existingConversation(
+                        ConversationReference(objectID: conversation.objectID)
+                    )
+                )
+            )
+            XCTFail("Expected replyTargetUnavailable")
+        } catch {
+            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
+                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            }
+        }
+    }
+
     func testBuildReplyMetadata_usesCurrentManagedObjectValuesAfterRequestCreation() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "before@example.com")
