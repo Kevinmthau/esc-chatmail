@@ -172,7 +172,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         )
     }
 
-    func testBuildReplyMetadata_targetedReplyUsesOlderUsableReplyFromHint() async throws {
+    func testBuildReplyMetadata_targetedReplyUsesOlderHintAcrossPendingPageBoundary() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let account = AccountBuilder()
@@ -190,7 +190,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         olderInbound.deliveredToAddress = "alias@example.com"
         olderInbound.replyFromAddress = "alias@example.com"
 
-        for index in 0..<40 {
+        for index in 0..<31 {
             _ = MessageBuilder()
                 .withId("newer-inbound-without-alias-\(index)")
                 .withThreadId("target-thread")
@@ -199,6 +199,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
                 .inConversation(conversation)
                 .build(in: context)
         }
+        try coreDataStack.saveViewContext()
 
         let replyingTo = MessageBuilder()
             .withId("newer-target-without-alias")
@@ -207,7 +208,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             .withSender(email: "friend@example.com", name: "Friend")
             .inConversation(conversation)
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try context.obtainPermanentIDs(for: [replyingTo])
 
         let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
             .init(

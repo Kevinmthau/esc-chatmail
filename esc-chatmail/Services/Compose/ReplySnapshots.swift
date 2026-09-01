@@ -90,10 +90,11 @@ struct ReplyConversationSnapshot: Sendable {
         }
 
         let request = Message.fetchRequest()
-        request.predicate = NSPredicate(
+        let conversationPredicate = NSPredicate(
             format: "conversation == %@ AND isFromMe == NO",
             conversation
         )
+        request.predicate = conversationPredicate
         request.sortDescriptors = [
             NSSortDescriptor(key: "internalDate", ascending: false),
             NSSortDescriptor(key: "id", ascending: false)
@@ -107,9 +108,26 @@ struct ReplyConversationSnapshot: Sendable {
             "participants.person"
         ]
 
-        var fetchOffset = 0
+        var cursor: (date: Date, id: String)?
         while true {
-            request.fetchOffset = fetchOffset
+            if let cursor {
+                request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    conversationPredicate,
+                    NSCompoundPredicate(orPredicateWithSubpredicates: [
+                        NSPredicate(
+                            format: "internalDate < %@",
+                            cursor.date as NSDate
+                        ),
+                        NSCompoundPredicate(andPredicateWithSubpredicates: [
+                            NSPredicate(
+                                format: "internalDate == %@",
+                                cursor.date as NSDate
+                            ),
+                            NSPredicate(format: "id < %@", cursor.id)
+                        ])
+                    ])
+                ])
+            }
             guard let messages = try? context.fetch(request), !messages.isEmpty else {
                 return nil
             }
@@ -118,10 +136,10 @@ struct ReplyConversationSnapshot: Sendable {
             }).first {
                 return hint
             }
-            guard messages.count == pageSize else {
+            guard messages.count == pageSize, let lastMessage = messages.last else {
                 return nil
             }
-            fetchOffset += messages.count
+            cursor = (lastMessage.internalDate, lastMessage.id)
         }
     }
 
