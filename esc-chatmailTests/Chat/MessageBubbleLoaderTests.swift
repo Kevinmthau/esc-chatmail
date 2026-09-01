@@ -965,8 +965,8 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
     }
 
-    func testLoadContent_incomingForwardedMessage_carriesFullForwardedBodyFromBodyText() async {
-        let messageId = "bubble-incoming-forwarded-full-body-\(UUID().uuidString)"
+    func testLoadContent_incomingLongForwardedMessage_returnsCompactStructuredSummary() async {
+        let messageId = "bubble-incoming-long-forward-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
@@ -1006,24 +1006,30 @@ final class MessageBubbleLoaderTests: XCTestCase {
             )
         )
 
-        let fullBodyText = result.forwardedDisplayContent?.fullBodyText ?? ""
-        XCTAssertTrue(fullBodyText.contains("Hi Olga,"), "Unexpected body: \(fullBodyText)")
+        XCTAssertEqual(result.fullTextContent, "FYI")
+        XCTAssertFalse(result.hasRichHTMLContent)
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Brynn Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Weekend plans")
+        let previewSnippet = result.forwardedDisplayContent?.previewSnippet ?? ""
         XCTAssertTrue(
-            fullBodyText.contains("whether Saturday afternoon still works"),
-            "The transcript body must carry the entire forwarded message: \(fullBodyText)"
+            previewSnippet.hasPrefix("Hi Olga, Here is the first paragraph"),
+            "Unexpected preview: \(previewSnippet)"
         )
+        XCTAssertLessThanOrEqual(previewSnippet.count, 183)
+        XCTAssertTrue(previewSnippet.hasSuffix("..."))
+        XCTAssertFalse(previewSnippet.contains("whether Saturday afternoon still works"))
     }
 
-    func testLoadContent_structuredChatPreviewForward_prefersRawBodyForFullBodyText() async {
-        let messageId = "bubble-forwarded-structured-preview-full-body-\(UUID().uuidString)"
+    func testLoadContent_structuredChatPreviewForward_keepsPreviewSnippetOverRawBodyTail() async {
+        let messageId = "bubble-forwarded-structured-preview-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
         )
 
-        // The persisted preview parses with full header fields but carries a
-        // stripped, truncated body; the raw bodyText has the complete email.
+        // The persisted preview is already the bounded transcript source. A
+        // longer raw body must not be injected into the forwarded card.
         let result = await loader.loadContent(
             from: MessageBubbleContentRequest(
                 messageID: messageId,
@@ -1066,12 +1072,10 @@ final class MessageBubbleLoaderTests: XCTestCase {
             )
         )
 
+        XCTAssertEqual(result.fullTextContent, "FYI")
         XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Brynn Example")
-        let fullBodyText = result.forwardedDisplayContent?.fullBodyText ?? ""
-        XCTAssertTrue(
-            fullBodyText.contains("complete second paragraph"),
-            "fullBodyText must come from the raw bodyText, not the truncated preview: \(fullBodyText)"
-        )
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Weekend plans")
+        XCTAssertEqual(result.forwardedDisplayContent?.previewSnippet, "Hi Olga,")
     }
 
     func testLoadContent_incomingForwardedMessageWithOutlookHeaders_returnsStructuredForwardPreview() async {

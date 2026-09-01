@@ -52,7 +52,7 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         XCTAssertTrue(result?.timestampText?.contains("9:15") == true)
     }
 
-    func testParseForward_multiParagraphBody_carriesFullBodyText() {
+    func testParseForward_multiParagraphBody_returnsBoundedPreviewSnippet() {
         let result = ForwardedMessageDisplayParser.parseForward(
             from: """
             FYI
@@ -72,14 +72,14 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         )
 
         XCTAssertEqual(result?.senderDisplayName, "Brynn Example")
-        let fullBodyText = result?.fullBodyText ?? ""
-        XCTAssertTrue(fullBodyText.contains("Hi Olga,"), "Unexpected body: \(fullBodyText)")
+        let previewSnippet = result?.previewSnippet ?? ""
         XCTAssertTrue(
-            fullBodyText.contains("whether Saturday afternoon still works for you"),
-            "The full body must not be truncated to the preview snippet: \(fullBodyText)"
+            previewSnippet.hasPrefix("Hi Olga, Here is the first paragraph"),
+            "Unexpected preview: \(previewSnippet)"
         )
-        // The snippet stays bounded for compact rows.
-        XCTAssertLessThanOrEqual(result?.previewSnippet?.count ?? 0, 200)
+        XCTAssertLessThanOrEqual(previewSnippet.count, 183)
+        XCTAssertTrue(previewSnippet.hasSuffix("..."))
+        XCTAssertFalse(previewSnippet.contains("whether Saturday afternoon still works for you"))
     }
 
     func testParseForward_incomingIPhoneStyleForward_extractsStructuredSummary() {
