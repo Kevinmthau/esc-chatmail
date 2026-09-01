@@ -105,6 +105,101 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
+    func testDiscardUnsentAttachmentsDeletesDraftObjectsAndFiles() throws {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        AttachmentPaths.setupDirectories()
+        let attachmentID = "local_\(UUID().uuidString)"
+        let originalPath = AttachmentPaths.originalPath(
+            idOrUUID: attachmentID,
+            ext: "jpg"
+        )
+        let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentID)
+        XCTAssertTrue(AttachmentPaths.saveData(Data("original".utf8), to: originalPath))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("preview".utf8), to: previewPath))
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = attachmentID
+        attachment.filename = "draft.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.localURL = originalPath
+        attachment.previewURL = previewPath
+        attachment.state = .queued
+        let composerState = ChatComposerState(attachments: [attachment])
+
+        composerState.discardUnsentAttachments()
+
+        XCTAssertTrue(composerState.attachments.isEmpty)
+        XCTAssertTrue(attachment.isDeleted)
+        XCTAssertNil(AttachmentPaths.loadData(from: originalPath))
+        XCTAssertNil(AttachmentPaths.loadData(from: previewPath))
+    }
+
+    func testDiscardUnsentAttachmentsDoesNotDeleteAttachmentAdoptedByMessage() {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let message = MessageBuilder()
+            .withId("optimistic-reply")
+            .build(in: context)
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "sent.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.state = .queued
+        attachment.message = message
+        let composerState = ChatComposerState(attachments: [attachment])
+
+        composerState.discardUnsentAttachments()
+
+        XCTAssertTrue(composerState.attachments.isEmpty)
+        XCTAssertFalse(attachment.isDeleted)
+        XCTAssertEqual(attachment.message, message)
+    }
+
+    func testAttachmentDiscardRequestedDuringSendRunsAfterSendFinishes() {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "draft.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.state = .queued
+        let composerState = ChatComposerState(attachments: [attachment])
+        XCTAssertTrue(composerState.beginSending())
+
+        composerState.requestUnsentAttachmentDiscard()
+
+        XCTAssertEqual(composerState.attachments, [attachment])
+        XCTAssertFalse(attachment.isDeleted)
+
+        composerState.finishSending()
+
+        XCTAssertTrue(composerState.attachments.isEmpty)
+        XCTAssertTrue(attachment.isDeleted)
+    }
+
+    func testAttachmentDiscardRequestedDuringSendPreservesAdoptedAttachment() {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let message = MessageBuilder()
+            .withId("optimistic-reply")
+            .build(in: context)
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "sent.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.state = .queued
+        let composerState = ChatComposerState(attachments: [attachment])
+        XCTAssertTrue(composerState.beginSending())
+        composerState.requestUnsentAttachmentDiscard()
+
+        attachment.message = message
+        composerState.attachments = []
+        composerState.finishSending()
+
+        XCTAssertFalse(attachment.isDeleted)
+        XCTAssertEqual(attachment.message, message)
+    }
+
     func testListConversationNeverBecomesEffectivelyOneToOneAfterParticipantLoad() {
         let deps = makeDependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com")

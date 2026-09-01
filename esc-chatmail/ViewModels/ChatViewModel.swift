@@ -13,6 +13,7 @@ final class ChatComposerState: ObservableObject {
     @Published var replyingTo: Message?
     @Published var attachments: [Attachment]
     @Published private(set) var isSending = false
+    private var discardsAttachmentsWhenSendFinishes = false
 
     init(
         replyText: String = "",
@@ -59,6 +60,34 @@ final class ChatComposerState: ObservableObject {
 
     func finishSending() {
         isSending = false
+        if discardsAttachmentsWhenSendFinishes {
+            discardsAttachmentsWhenSendFinishes = false
+            discardUnsentAttachments()
+        }
+    }
+
+    func requestUnsentAttachmentDiscard() {
+        guard isSending else {
+            discardUnsentAttachments()
+            return
+        }
+        discardsAttachmentsWhenSendFinishes = true
+    }
+
+    func discardUnsentAttachments() {
+        let discardedAttachments = attachments.filter { attachment in
+            !attachment.isDeleted && attachment.message == nil
+        }
+        attachments.removeAll()
+
+        for attachment in discardedAttachments {
+            if attachment.isLocalAttachment {
+                AttachmentPaths.deleteFile(at: attachment.localURL)
+                AttachmentPaths.deleteFile(at: attachment.previewURL)
+            }
+
+            attachment.managedObjectContext?.delete(attachment)
+        }
     }
 }
 
@@ -283,6 +312,10 @@ final class ChatViewModel: ObservableObject {
               let lastMessage,
               isValidReplyTarget(lastMessage) else { return }
         replyingTo = lastMessage
+    }
+
+    func discardUnsentReplyAttachments() {
+        composerState.requestUnsentAttachmentDiscard()
     }
 
     /// Keeps the reply target anchored to this conversation as rows change.
