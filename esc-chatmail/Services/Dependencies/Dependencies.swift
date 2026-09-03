@@ -149,12 +149,6 @@ final class Dependencies: ObservableObject {
         )
     }
 
-    func makeComposeReplyModeContextBuilder() -> ComposeReplyModeContextBuilder {
-        ComposeReplyModeContextBuilder(
-            outboundReplyContextBuilder: makeOutboundReplyContextBuilder()
-        )
-    }
-
     func makeComposeForwardModeContextBuilder() -> ComposeForwardModeContextBuilder {
         ComposeForwardModeContextBuilder(
             messageFormatBuilder: makeMessageFormatBuilder()
@@ -214,9 +208,6 @@ final class Dependencies: ObservableObject {
             },
             makeOutboundReplyContextBuilder: { [self] in
                 makeOutboundReplyContextBuilder()
-            },
-            makeComposeReplyModeContextBuilder: { [self] in
-                makeComposeReplyModeContextBuilder()
             },
             makeComposeForwardModeContextBuilder: { [self] in
                 makeComposeForwardModeContextBuilder()
