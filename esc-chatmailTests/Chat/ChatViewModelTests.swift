@@ -1002,7 +1002,7 @@ final class ChatViewModelTests: XCTestCase {
         )
         XCTAssertEqual(request.body, "Reply body")
         XCTAssertEqual(viewModel.replyText, "")
-        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.replyingTo, replyTarget)
     }
 
     func testSendReply_usesStableReplyTargetIdentifierAfterSelection() async {
@@ -1195,7 +1195,7 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(result?.optimisticMessageID, persistedOptimisticResult?.optimisticMessageID)
         XCTAssertFalse(viewModel.composerState.isSending)
         XCTAssertEqual(viewModel.replyText, "")
-        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.replyingTo, capturedTarget)
     }
 
     func testSendReply_drainedConversationPreservesTextAndAttachments() async {

@@ -375,6 +375,62 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(metadata.recipientEmails, ["friend@example.com"])
     }
 
+    func testBuildReplyMetadata_withoutTargetSkipsLocalSendsAndEmptyThreads() async throws {
+        // Revert-check: ReplyConversationSnapshot's nonListMessages.first
+        // fallback selects a local or thread-less row instead of the server row.
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        _ = MessageBuilder()
+            .withThreadId("server-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        let localID = UUID().uuidString
+        let localMessage = MessageBuilder()
+            .withId(localID)
+            .withThreadId("unconfirmed-thread")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        localMessage.messageId = MimeBuilder.messageId(forOptimisticMessageID: localID)
+        try context.obtainPermanentIDs(for: [conversation, localMessage])
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = localID
+        record.createdAt = Date()
+        record.conversationId = conversation.id
+        record.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+        record.hidden = false
+        record.newlyInsertedConversation = false
+
+        let builder = makeBuilder()
+        let replyContext = builder.build(
+            conversationObjectID: conversation.objectID,
+            replyingToMessageObjectID: nil,
+            optimisticConversation: nil
+        )
+        let localMarkers: [String?] = [
+            nil,
+            OutboundSendRemoteState.inFlightMessageID,
+            OutboundSendRemoteState.notSentMessageID,
+            OutboundSendRemoteState.ambiguousMessageID
+        ]
+        for marker in localMarkers {
+            record.remoteCommittedMessageId = marker
+            record.remoteCommittedThreadId = nil
+            let metadata = try await builder.buildReplyMetadata(replyContext)
+            XCTAssertEqual(metadata.threadId, "server-thread")
+        }
+
+        // A legacy row can lack a thread even without an outbound marker.
+        context.delete(record)
+        for emptyThread in ["", " \n "] {
+            localMessage.gmThreadId = emptyThread
+            let metadata = try await builder.buildReplyMetadata(replyContext)
+            XCTAssertEqual(metadata.threadId, "server-thread")
+        }
+    }
+
     func testBuildReplyMetadata_backfillsReplyFromAliasFromLegacyTargetParticipants() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")

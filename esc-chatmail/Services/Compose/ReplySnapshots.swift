@@ -70,7 +70,11 @@ struct ReplyConversationSnapshot: Sendable {
         self.isListConversation = isListConversation
         self.latestThreadId = replyingTo?.threadId ?? (isListConversation
             ? latestListInboundMessage
-            : nonListMessages.first)?.gmThreadId
+            : nonListMessages.first {
+                // A retained local send is not a durable thread anchor.
+                !$0.gmThreadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                    OutboundSendDeliveryState.resolve(for: $0) == .none
+            })?.gmThreadId
         self.deliveredToAddress = latestReplyAddressHint?.deliveredToAddress
         self.replyFromAddress = latestReplyAddressHint?.replyFromAddress
     }
