@@ -55,6 +55,25 @@ describe('extractEmail', () => {
     expect(extractEmail('"Smith, Alice" <alice@example.com>')).toBe('alice@example.com')
   })
 
+  it('ignores an unbalanced angle bracket in the display name', () => {
+    // Revert-check: unquoted display-name brackets must not become part of
+    // the address capture, or it returns "3 Jerry <tom@x.com".
+    expect(extractEmail('Tom <3 Jerry <tom@x.com>')).toBe('tom@x.com')
+  })
+
+  it.each([
+    '"a<b"@example.com',
+    '"a>b"@example.com',
+    '"a<b>c"@example.com',
+    '"a@<b>"@example.com',
+    String.raw`"a\"<b"@example.com`,
+    String.raw`"a\\<b"@example.com`,
+    String.raw`"a\<b\>"@example.com`,
+  ])('preserves angle brackets and escapes inside a quoted local part: %s', (email) => {
+    expect(extractEmail(`Display <${email}>`)).toBe(email)
+    expect(extractEmail(`Tom <3 Jerry <${email}>`)).toBe(email)
+  })
+
   it('falls back to a bare address', () => {
     expect(extractEmail('alice@example.com')).toBe('alice@example.com')
     expect(extractEmail('Alice alice@example.com')).toBe('alice@example.com')

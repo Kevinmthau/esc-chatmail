@@ -32,7 +32,9 @@ export function addressTokens(headerValue: string): string[] {
       isInQuotes = !isInQuotes
       current += character
     } else if (character === '<' && !isInQuotes) {
-      angleDepth += 1
+      // Mailbox delimiters cannot nest. Restart at the newest '<'
+      // so an unmatched display-name bracket cannot swallow later recipients.
+      angleDepth = 1
       current += character
     } else if (character === '>' && !isInQuotes) {
       angleDepth = Math.max(0, angleDepth - 1)
