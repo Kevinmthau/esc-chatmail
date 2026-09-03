@@ -4,6 +4,29 @@ import CoreData
 
 final class ConversationIdentityTests: XCTestCase {
 
+    func testMakeConversationIdentity_unbalancedAngleBracketInDisplayName_preservesParticipantIdentity() {
+        // Revert-check: EmailNormalizer.extractEmail's angle-bracket capture
+        // must not include display-name text in the participant address/hash.
+        let expected = makeParticipantSetIdentity(
+            normalizedEmails: ["tom@x.com"],
+            myAliases: ["me@example.com"]
+        )
+
+        for headerName in ["From", "To", "Cc"] {
+            let identity = makeConversationIdentity(
+                from: [
+                    MessageHeader(name: headerName, value: "Tom <3 Jerry <tom@x.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                myAliases: ["me@example.com"]
+            )
+
+            XCTAssertEqual(identity.participants, ["tom@x.com"], headerName)
+            XCTAssertEqual(identity.participantHash, expected.participantHash, headerName)
+            XCTAssertEqual(identity.type, .oneToOne, headerName)
+        }
+    }
+
     func testMakeConversationIdentity_excludesHideMyEmailRelayParticipant() {
         let headers = [
             MessageHeader(name: "From", value: "San Francisco Ballet <tickets@sfballet.org>"),

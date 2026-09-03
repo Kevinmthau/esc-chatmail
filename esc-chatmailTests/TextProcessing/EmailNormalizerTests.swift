@@ -94,6 +94,13 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertEqual(result, "john@example.com")
     }
 
+    func testExtractEmail_unbalancedAngleBracketInDisplayName_extractsOnlyAddress() {
+        // Revert-check: EmailNormalizer.extractEmail must exclude both angle
+        // brackets from the address capture, or it returns "3 Jerry <tom@x.com".
+        let result = EmailNormalizer.extractEmail(from: "Tom <3 Jerry <tom@x.com>")
+        XCTAssertEqual(result, "tom@x.com")
+    }
+
     func testExtractEmail_quotedNameAngleBrackets_extractsEmail() {
         let result = EmailNormalizer.extractEmail(from: "\"Smith, John\" <john@example.com>")
         XCTAssertEqual(result, "john@example.com")
