@@ -103,28 +103,6 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
         XCTAssertTrue(plan.deletedHTMLArtifacts.isEmpty)
     }
 
-    // MARK: - Conversations
-
-    func testUpdatedConversation_invalidatesConversationId() {
-        let id = UUID()
-        let conversation = ConversationBuilder().withId(id).build(in: context)
-
-        let plan = computePlan(updated: [conversation])
-
-        XCTAssertEqual(plan.conversationIdsToInvalidate, [id.uuidString])
-        XCTAssertFalse(plan.shouldClearConversationCache)
-    }
-
-    func testDeletedConversation_invalidatesConversationId() {
-        let id = UUID()
-        let conversation = ConversationBuilder().withId(id).build(in: context)
-
-        let plan = computePlan(deleted: [conversation])
-
-        XCTAssertEqual(plan.conversationIdsToInvalidate, [id.uuidString])
-        XCTAssertFalse(plan.shouldClearConversationCache)
-    }
-
     // MARK: - People
 
     func testUpdatedPerson_invalidatesEmail() {
@@ -194,7 +172,6 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
 
         let plan = computePlan(updated: [conversation, person], deleted: [message])
 
-        XCTAssertEqual(plan.conversationIdsToInvalidate, [conversationId.uuidString])
         XCTAssertEqual(plan.personEmailsToInvalidate, ["bob@example.com"])
         XCTAssertEqual(plan.messageIdsToInvalidate, ["msg-mixed"])
     }
@@ -202,13 +179,11 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
     func testNoChanges_producesEmptyPlan() {
         let plan = computePlan()
 
-        XCTAssertTrue(plan.conversationIdsToInvalidate.isEmpty)
         XCTAssertTrue(plan.personEmailsToInvalidate.isEmpty)
         XCTAssertTrue(plan.messageIdsToInvalidate.isEmpty)
         XCTAssertTrue(plan.deletedHTMLArtifacts.isEmpty)
         XCTAssertTrue(plan.attachmentPathsToDelete.isEmpty)
         XCTAssertTrue(plan.attachmentIdentitiesToInvalidate.isEmpty)
-        XCTAssertFalse(plan.shouldClearConversationCache)
         XCTAssertFalse(plan.shouldClearPersonCache)
     }
 

@@ -45,7 +45,6 @@ final class Dependencies: ObservableObject {
     // MARK: - Cache Layer
 
     let personCache: PersonCache
-    let conversationCache: ConversationCache
     let contactsResolver: any ContactsResolving
     let htmlContentHandler: HTMLContentHandler
     let participantLoader: ParticipantLoader
@@ -381,7 +380,6 @@ final class Dependencies: ObservableObject {
         tokenManager: TokenManagerProtocol? = nil,
         gmailAPIClient: GmailAPIClient? = nil,
         personCache: PersonCache = PersonCache.shared,
-        conversationCache: ConversationCache? = nil,
         contactsResolver: (any ContactsResolving)? = nil,
         attachmentCache: AttachmentCacheActor = AttachmentCacheActor.shared,
         pendingActionsManager: PendingActionsManager = PendingActionsManager.shared,
@@ -401,7 +399,6 @@ final class Dependencies: ObservableObject {
         let resolvedAuthSession = authSession ?? AuthSession.shared
         let resolvedTokenManager = tokenManager ?? TokenManager.shared
         let resolvedGmailAPIClient = gmailAPIClient ?? GmailAPIClient.shared
-        let resolvedConversationCache = conversationCache ?? ConversationCache.shared
         let resolvedContactsResolver = contactsResolver ?? ContactsResolver.shared
         let resolvedSyncEngine = syncEngine ?? SyncEngine.shared
         let resolvedForegroundSyncCoordinator = foregroundSyncCoordinator ?? ForegroundSyncCoordinator.shared
@@ -415,7 +412,6 @@ final class Dependencies: ObservableObject {
         self.tokenManager = resolvedTokenManager
         self.gmailAPIClient = resolvedGmailAPIClient
         self.personCache = personCache
-        self.conversationCache = resolvedConversationCache
         self.contactsResolver = resolvedContactsResolver
         self.htmlContentHandler = htmlContentHandler
         self._attachmentCache = attachmentCache
