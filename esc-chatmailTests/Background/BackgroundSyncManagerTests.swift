@@ -1495,6 +1495,21 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
     }
 
+    func testModelV3Executor_maintenanceBlockSchedulesCatchUpAndFailsTask() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .blocked(by: .maintenance))
+        }
+        let manager = makeManager(
+            legacyDeltaSyncEnabled: false,
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(success)
+        XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
+    }
+
     func testModelV3Executor_quiescenceBlockSchedulesCatchUpAndFailsTask() async {
         let executor = await MainActor.run {
             BackgroundMailboxSyncExecutorSpy(result: .blocked(by: nil))

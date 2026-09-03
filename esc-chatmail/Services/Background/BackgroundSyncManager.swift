@@ -1026,6 +1026,8 @@ final class BackgroundSyncManager {
     }
 
     static func shouldScheduleRetryWhenBlocked(by activeRunKind: SyncRunKind?) -> Bool {
-        activeRunKind == nil || activeRunKind == .pendingActions
+        activeRunKind == nil
+            || activeRunKind == .pendingActions
+            || activeRunKind == .maintenance
     }
 }
