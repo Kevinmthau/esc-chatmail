@@ -121,6 +121,7 @@ extension GmailSendService {
         case authenticationFailed
         case optimisticCreationFailed
         case conversationNotFound
+        case noRecipients
         case replyTargetUnavailable
         case sendAsAliasUnavailable(String)
         case ambiguousDelivery(String)
@@ -137,6 +138,8 @@ extension GmailSendService {
                 return "Failed to prepare message for sending"
             case .conversationNotFound:
                 return "Failed to find conversation for message"
+            case .noRecipients:
+                return "This message has no recipients. Your draft and attachments are still here."
             case .replyTargetUnavailable:
                 return "The message you selected moved or is no longer available. Reopen the conversation and try again."
             case .sendAsAliasUnavailable(let address):

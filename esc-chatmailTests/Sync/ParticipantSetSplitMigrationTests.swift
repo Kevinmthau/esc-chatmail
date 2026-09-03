@@ -1370,9 +1370,9 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
             from: Self.alice, to: [Self.me],
             labels: [inbox], in: aliceChat
         )
-        // A reconciled optimistic send: participant rows were never written and
-        // senderEmail is the user's own address. Deriving identity from it would
-        // collapse the user's sent bubbles into the note-to-self chat.
+        // A legacy reconciled optimistic send: participant rows were never
+        // written and senderEmail is the user's own address. Deriving identity
+        // from it would collapse the sent bubble into the note-to-self chat.
         let sent = MessageBuilder()
             .withId("msg-sent-rowless")
             .withDate(Date(timeIntervalSince1970: 200))

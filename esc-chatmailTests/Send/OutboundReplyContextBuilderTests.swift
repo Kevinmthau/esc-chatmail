@@ -88,6 +88,179 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertTrue(resolvedOriginal?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
     }
 
+    func testBuildReplyMetadata_selfAliasesFallbackRequiresNonListParticipants() throws {
+        // Revert-check: ReplyMetadataBuilder's self-only fallback is required
+        // for legacy self aliases, but must not invent recipients for empty/list chats.
+        let builder = ReplyMetadataBuilder(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let cases: [(participants: [String], isList: Bool, expected: [String])] = [
+            (["legacy-self@example.com"], false, ["me@example.com"]),
+            (["alias@example.com"], false, ["me@example.com"]),
+            ([], false, []),
+            ([" "], false, []),
+            (["me@example.com"], true, []),
+            (["me@example.com", "friend@example.com"], false, ["friend@example.com"])
+        ]
+        for testCase in cases {
+            let metadata = try builder.buildReplyMetadata(
+                conversation: .init(
+                    participantEmails: testCase.participants,
+                    isListConversation: testCase.isList,
+                    latestThreadId: "thread",
+                    latestThreadParticipantEvidence: ReplyParticipantEvidence(
+                        emails: testCase.participants,
+                        hasAddressableRecipientRow: !testCase.participants.isEmpty,
+                        isComplete: true
+                    )
+                ),
+                replyingTo: nil,
+                sendAsAliases: sendAsAliases,
+                userAliases: ["legacy-self@example.com"]
+            )
+            XCTAssertEqual(metadata.recipientEmails, testCase.expected)
+        }
+    }
+
+    func testBuildReplyMetadata_targetNeverBorrowsSelfEvidenceFromConversationAnchor() throws {
+        let builder = ReplyMetadataBuilder(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let conversation = ReplyConversationSnapshot(
+            participantEmails: ["me@example.com"],
+            latestThreadId: "conversation-thread",
+            latestThreadParticipantEvidence: ReplyParticipantEvidence(
+                emails: ["me@example.com"],
+                hasAddressableRecipientRow: true,
+                isComplete: true
+            )
+        )
+        let targetEvidenceCases: [ReplyParticipantEvidence?] = [
+            nil,
+            ReplyParticipantEvidence(
+                emails: ["friend@example.com"],
+                hasAddressableRecipientRow: false,
+                isComplete: false
+            )
+        ]
+
+        for participantEvidence in targetEvidenceCases {
+            let metadata = try builder.buildReplyMetadata(
+                conversation: conversation,
+                replyingTo: ReplyTargetSnapshot(
+                    participantEmails: [],
+                    subject: "External reply",
+                    threadId: "target-thread",
+                    messageId: nil,
+                    references: [],
+                    deliveredToAddress: nil,
+                    replyFromAddress: nil,
+                    originalMessage: QuotedMessage(
+                        senderName: "Friend",
+                        senderEmail: "friend@example.com",
+                        date: .distantPast,
+                        body: nil
+                    ),
+                    participantEvidence: participantEvidence
+                ),
+                sendAsAliases: sendAsAliases
+            )
+
+            XCTAssertEqual(metadata.threadId, "target-thread")
+            XCTAssertEqual(metadata.recipientEmails, [])
+        }
+    }
+
+    func testBuildReplyMetadata_withoutTargetUsesAffirmedSelfOnlyThreadAnchor() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
+        let note = MessageBuilder()
+            .withId("self-note")
+            .withThreadId("self-thread")
+            .withSender(email: "me@example.com", name: "Me")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(email: "me@example.com", kind: .from, to: note)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: note)
+        try context.obtainPermanentIDs(for: [conversation, note])
+
+        let metadata = try await makeBuilder().buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: nil,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.threadId, "self-thread")
+        XCTAssertEqual(metadata.recipientEmails, ["me@example.com"])
+    }
+
+    func testBuildReplyMetadata_withoutTargetPreservesSelfEvidenceAtThreadlessLocalBarrier() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
+        try context.obtainPermanentIDs(for: [conversation])
+        let sendService = GmailSendService(
+            viewContext: context,
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["me@example.com"],
+            body: "First note",
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: conversation.objectID)
+            )
+        )
+        let note = try XCTUnwrap(
+            try context.existingObject(with: handle.optimisticMessageObjectID) as? Message
+        )
+        XCTAssertEqual(note.gmThreadId, "")
+        XCTAssertNotNil(OutboundSendDeliveryState.localOptimisticMessageID(for: note))
+
+        let metadata = try await makeBuilder().buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: nil,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertNil(metadata.threadId)
+        XCTAssertEqual(metadata.recipientEmails, ["me@example.com"])
+    }
+
+    func testBuildReplyMetadata_rowlessSelfMessageDoesNotManufactureRecipientForTargetOrAnchor() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
+        let note = MessageBuilder()
+            .withId("legacy-rowless-self-note")
+            .withThreadId("self-thread")
+            .withSender(email: "me@example.com", name: "Me")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, note])
+        XCTAssertEqual(note.participants?.count ?? 0, 0)
+
+        for replyingToMessageObjectID in [note.objectID, nil] {
+            let metadata = try await makeBuilder().buildReplyMetadata(
+                .init(
+                    conversationObjectID: conversation.objectID,
+                    replyingToMessageObjectID: replyingToMessageObjectID,
+                    optimisticConversation: .existingConversation(
+                        ConversationReference(objectID: conversation.objectID)
+                    )
+                )
+            )
+
+            XCTAssertEqual(metadata.threadId, "self-thread")
+            XCTAssertEqual(metadata.recipientEmails, [])
+        }
+    }
+
     func testBuildReplyMetadata_excludesHideMyEmailConversationParticipant() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")

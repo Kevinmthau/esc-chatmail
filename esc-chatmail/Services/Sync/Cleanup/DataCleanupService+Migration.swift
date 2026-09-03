@@ -498,9 +498,9 @@ extension DataCleanupService {
             for message in messages {
                 var processingError: Error?
                 autoreleasepool {
-                    // Messages without derivable identity (optimistic in-flight
-                    // sends have no participant rows and no senderEmail) stay put,
-                    // keeping their conversations alive for send reconciliation.
+                    // Messages without derivable identity (including legacy or
+                    // partially imported row-less sends) stay put, keeping their
+                    // conversations alive for send reconciliation.
                     guard let identity = message.strictParticipantSetIdentity(myAliases: myAliases) else {
                         return
                     }

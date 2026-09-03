@@ -12,10 +12,9 @@ extension Message {
     ///
     /// Returns nil when the message has no MessageParticipant rows at all. A
     /// row-less message's recipient set is unknowable — `senderEmail` alone
-    /// cannot reconstruct To/Cc, and for the user's own sent messages (whose
-    /// rows were never written on the optimistic-send reconciliation path) it
-    /// would collapse them into the note-to-self chat. Such messages must not
-    /// be re-homed.
+    /// cannot reconstruct To/Cc. Current optimistic sends persist their known
+    /// participant rows, but legacy or partially imported rows may still lack
+    /// them and must not be re-homed.
     func strictParticipantSetIdentity(myAliases: Set<String>) -> ParticipantSetIdentity? {
         var emails = Set<String>()
         var hasFromRow = false

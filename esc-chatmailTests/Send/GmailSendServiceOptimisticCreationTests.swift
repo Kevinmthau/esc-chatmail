@@ -110,6 +110,46 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(message.senderName, "Alias Example")
     }
 
+    func testCreateOptimisticMessage_persistsKnownParticipantRowsWithGraph() async throws {
+        let authSession = makeTestAuthSession(
+            userEmail: "me@example.com",
+            userName: "Me Example"
+        )
+        let sendService = GmailSendService(
+            viewContext: coreDataStack.viewContext,
+            authSession: authSession
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["friend@example.com"],
+            body: "hello",
+            senderEmail: "alias@example.com",
+            senderName: "Alias Example",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
+            )
+        )
+
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(participantSignatures(on: message), [
+            "from:alias@example.com",
+            "to:friend@example.com"
+        ])
+        XCTAssertTrue(message.participants?.allSatisfy { !$0.objectID.isTemporaryID } == true)
+        XCTAssertTrue(message.participants?.allSatisfy {
+            $0.person?.objectID.isTemporaryID == false
+        } == true)
+
+        coreDataStack.resetViewContext()
+        let durableMessage = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(participantSignatures(on: durableMessage), [
+            "from:alias@example.com",
+            "to:friend@example.com"
+        ])
+    }
+
     /// End-to-end pin of the issue-#151 trigger: an optimistic reply whose
     /// From identity round-trips through the real MIME header format must
     /// compare equal when the sent echo is persisted, even for names the
@@ -216,6 +256,13 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         return authSession
     }
 
+    private func participantSignatures(on message: Message) -> Set<String> {
+        Set((message.participants ?? []).compactMap { participant in
+            guard let email = participant.person?.email else { return nil }
+            return "\(participant.participantKind.rawValue):\(email)"
+        })
+    }
+
     func testCreateOptimisticMessage_populatesChatPreviewTextFromComposedBody() async throws {
         let body = """
         First paragraph.
@@ -316,6 +363,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(try messageCount(in: context), 0)
         XCTAssertEqual(try conversationCount(in: context), 0)
         XCTAssertEqual(try attachmentCount(in: context), 1)
+        XCTAssertEqual(try messageParticipantCount(in: context), 0)
         XCTAssertNil(attachment.message)
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
 
@@ -330,6 +378,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         )
         let retryMessage = try XCTUnwrap(failingSendService.fetchMessageSync(byID: retryHandle.optimisticMessageID))
         XCTAssertEqual(retryMessage.attachmentsArray.first?.objectID, attachment.objectID)
+        XCTAssertEqual(retryMessage.participants?.filter { $0.participantKind == .to }.count, 1)
     }
 
     func testCreateOptimisticMessage_reactivatesArchivedConversationDurably() async throws {
@@ -482,6 +531,12 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
 
     private func messageCount(in context: NSManagedObjectContext) throws -> Int {
         let request = Message.fetchRequest()
+        request.includesPendingChanges = true
+        return try context.count(for: request)
+    }
+
+    private func messageParticipantCount(in context: NSManagedObjectContext) throws -> Int {
+        let request = MessageParticipant.fetchRequest()
         request.includesPendingChanges = true
         return try context.count(for: request)
     }
