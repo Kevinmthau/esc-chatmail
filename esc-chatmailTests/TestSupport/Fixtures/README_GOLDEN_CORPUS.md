@@ -49,3 +49,15 @@ The snippet and chat-preview pipelines remain separate. Calendar cases include
 source, reply, and outgoing precedence so the ninth display-policy input cannot
 be silently dropped. Swift takes those inputs in `MessageDisplayInput`, matching
 the web value type.
+
+Run all shared contracts, including identity:
+
+```bash
+./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/GoldenCorpusReplayTests' -only-testing 'esc-chatmailTests/ConversationIdentityTests'
+```
+
+From `web/`:
+
+```bash
+corepack pnpm test src/identity/participantSet.test.ts src/mime/corpus.golden.test.ts src/lib/displayPolicy.test.ts src/rollup/rollup.test.ts
+```
