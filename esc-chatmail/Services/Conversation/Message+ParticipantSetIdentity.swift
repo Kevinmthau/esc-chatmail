@@ -28,14 +28,14 @@ extension Message {
             hasIdentityRow = true
             if kind == .from {
                 hasFromRow = true
-                // The header path drops a From whose display name is a
-                // Hide-My-Email placeholder; mirror it here (best effort — the
-                // stored display name can have been enriched since) so both
-                // derivations key HME mail the same way.
-                if let name = participant.person?.displayName,
-                   EmailNormalizer.isHideMyEmailDisplayName(name) {
-                    continue
-                }
+            }
+            // The header path drops Hide-My-Email entries from From, To, and
+            // Cc; mirror that exclusion for every identity row (best effort —
+            // the stored display name can have been enriched since) so both
+            // derivations key HME mail the same way.
+            if let name = participant.person?.displayName,
+               EmailNormalizer.isHideMyEmailDisplayName(name) {
+                continue
             }
             guard let person = participant.person else { continue }
             // Person.email is normalized at write time; re-normalizing is idempotent

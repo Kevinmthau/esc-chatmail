@@ -3,6 +3,7 @@ import type { ChatmailDB } from '@/db/schema'
 import type { AttachmentRow } from '@/db/types'
 import type { GmailMessage } from '@/gmail/types'
 import { calculateParticipantHash } from '@/identity/participantSet'
+import { strictParticipantSetIdentity } from '@/identity/strictIdentity'
 import { convoRow, msgRow, storableBlob } from '@/outbox/testSupport'
 import {
   applyPersist,
@@ -105,6 +106,40 @@ describe('preparePersistPlan', () => {
     expect(plan.participants.map((p) => `${p.kind}:${p.email}`)).toContain('bcc:secret@example.com')
     expect(plan.participants.some((p) => p.email.includes('privaterelay'))).toBe(false)
   })
+
+  it.each(['to', 'cc'] as const)(
+    'matches header identity when legacy rows still contain a Hide-My-Email %s recipient',
+    async (kind) => {
+      // Revert-check: the strict row derivation must exclude HME To/Cc rows
+      // just as preparePersistPlan's real header path does.
+      const plan = (await preparePersistPlan(
+        textMessage({
+          id: 'hme-parity',
+          from: 'alice@example.com',
+          to: [ME],
+          [kind]: [ME, 'Hide My Email <relay@icloud.com>'],
+        }),
+        ctx,
+      )) as MessagePersistPlan
+      // Current persistence already excludes HME recipients. Model the
+      // legacy/enriched row set consumed by migration and repair instead.
+      const legacyRows = [
+        ...plan.participants.map((participant) => ({ ...participant, messageId: plan.message.id })),
+        { messageId: plan.message.id, email: 'relay@icloud.com', displayName: '', kind },
+      ]
+      const rowIdentity = strictParticipantSetIdentity(
+        legacyRows,
+        plan.message.senderEmail,
+        ctx.myAliases,
+        new Map([['relay@icloud.com', 'Hide My Email']]),
+      )
+
+      expect(plan.identity.participants).toEqual(['alice@example.com'])
+      expect(rowIdentity?.participants).toEqual(plan.identity.participants)
+      expect(rowIdentity?.participantHash).toBe(plan.identity.participantHash)
+      expect(rowIdentity?.type).toBe(plan.identity.type)
+    },
+  )
 
   it('includes every mailbox of a multi-address From header in identity (iOS parity)', async () => {
     // Rare but valid RFC 5322 shape; iOS makeConversationIdentity splits the

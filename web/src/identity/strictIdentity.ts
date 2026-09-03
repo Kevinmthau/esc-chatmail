@@ -41,16 +41,15 @@ export function strictParticipantSetIdentity(
     hasIdentityRow = true
     if (participant.kind === 'from') {
       hasFromRow = true
-      // The header path drops a From whose display name is a Hide-My-Email
-      // placeholder; mirror it here so both derivations key HME mail the same
-      // way. Like iOS, test the person's CURRENT display name (which can have
-      // been enriched since the row was written); fall back to the frozen row
-      // name only when no person row exists — on web the email lives on the
-      // row, so a missing person must not drop the participant the way iOS's
-      // `guard let person` does.
-      const personName = personDisplayNames.get(normalizeEmail(participant.email))
-      if (isHideMyEmailDisplayName(personName ?? participant.displayName)) continue
     }
+    // The header path drops Hide-My-Email entries from From, To, and Cc;
+    // mirror that exclusion for every identity row. Like iOS, test the person's
+    // CURRENT display name (which can have been enriched since the row was
+    // written); fall back to the frozen row name only when no person row
+    // exists — on web the email lives on the row, so a missing person must
+    // not drop the participant the way iOS's `guard let person` does.
+    const personName = personDisplayNames.get(normalizeEmail(participant.email))
+    if (isHideMyEmailDisplayName(personName ?? participant.displayName)) continue
     // Row emails are normalized at write time; re-normalizing is idempotent.
     const normalized = normalizeEmail(participant.email)
     if (normalized !== '') emails.add(normalized)

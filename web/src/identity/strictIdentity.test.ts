@@ -78,6 +78,19 @@ describe('strictParticipantSetIdentity', () => {
     expect(identity?.participants).toEqual(['me@gmail.com'])
   })
 
+  it.each(['to', 'cc'] as const)('drops a legacy Hide-My-Email %s row', (kind) => {
+    // Revert-check: strictParticipantSetIdentity must check HME names outside
+    // the from-only branch, including its fallback when no Person is present.
+    const identity = strictParticipantSetIdentity(
+      [row('alice@example.com', 'from'), row('relay@icloud.com', kind, 'Hide My Email')],
+      '',
+      MY_ALIASES,
+      NO_PEOPLE,
+    )
+    expect(identity?.participants).toEqual(['alice@example.com'])
+    expect(identity?.type).toBe('oneToOne')
+  })
+
   it('returns null when every usable email drops out', () => {
     expect(
       strictParticipantSetIdentity(
@@ -104,6 +117,18 @@ describe('strictParticipantSetIdentity', () => {
   // record — for the Hide-My-Email placeholder, not the header name frozen on
   // the participant row. The people map stands in for db.people.
   describe('Hide-My-Email check reads the enriched person name', () => {
+    it.each(['to', 'cc'] as const)('drops a %s row enriched to Hide My Email', (kind) => {
+      // Revert-check: the current Person name must be checked for every
+      // non-BCC kind, even when the frozen row name is empty.
+      const identity = strictParticipantSetIdentity(
+        [row('alice@example.com', 'from'), row('relay@icloud.com', kind)],
+        '',
+        MY_ALIASES,
+        new Map([['relay@icloud.com', 'Hide My Email']]),
+      )
+      expect(identity?.participants).toEqual(['alice@example.com'])
+    })
+
     it('drops a from row whose person was enriched to Hide My Email after persist', () => {
       // Row written with an empty header name; a later message enriched the
       // person to the placeholder. iOS drops the relay; checking only the
