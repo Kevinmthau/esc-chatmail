@@ -67,8 +67,9 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
         guard let accountContext = await captureAccountWorkContext() else {
             return unavailableContentResult()
         }
-        let htmlAnalysis = await cachedHTMLAnalysis(for: request, accountContext: accountContext)
-        guard await isAccountWorkContextCurrent(accountContext) else {
+        guard let htmlAnalysis = await loadHTMLAnalysis(for: request, accountContext: accountContext),
+              !Task.isCancelled,
+              await isAccountWorkContextCurrent(accountContext) else {
             return unavailableContentResult()
         }
         let forwardedDisplayContent = forwardedDisplayContent(from: request)
@@ -168,7 +169,8 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
             hasRichHTMLContent: false,
             sharedDocumentLinks: [],
             forwardedDisplayContent: nil,
-            htmlAnalysis: .placeholder(hasHTMLSource: false)
+            htmlAnalysis: .placeholder(hasHTMLSource: false),
+            isComplete: false
         )
     }
 

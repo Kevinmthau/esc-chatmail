@@ -18,7 +18,7 @@ final class MessageBubbleViewModel: ObservableObject {
     private var lastContentSignature: String?
     /// Signature whose result was actually *published*. Distinct from `lastContentSignature`
     /// because an in-place refresh keeps the previous content on screen: if that refresh is
-    /// cancelled or superseded before `apply`, the published content still belongs to the older
+    /// incomplete, cancelled, or superseded before `apply`, the published content still belongs to the older
     /// signature, and the next `loadIfNeeded` must retry rather than short-circuit on stale content.
     private var appliedContentSignature: String?
 
@@ -58,15 +58,12 @@ final class MessageBubbleViewModel: ObservableObject {
             sharedDocumentLinks = []
             forwardedDisplayContent = nil
             htmlAnalysis = .placeholder(hasHTMLSource: context.contentRequest.hasHTMLSource)
+            senderName = context.prefetchedSenderName
+            senderAvatarURL = nil
+            senderImageData = nil
         }
 
         if let senderRequest = context.senderRequest {
-            if !refreshesInPlace {
-                senderName = context.prefetchedSenderName
-                senderAvatarURL = nil
-                senderImageData = nil
-            }
-
             async let senderResult = loader.loadSenderInfo(from: senderRequest)
             async let contentResult = loader.loadContent(from: context.contentRequest)
 
@@ -79,7 +76,7 @@ final class MessageBubbleViewModel: ObservableObject {
             }
 
             let loadedContent = await contentResult
-            guard isStillActive(context) else { return }
+            guard isStillActive(context), loadedContent.isComplete else { return }
             if refreshesInPlace {
                 // Held back so the refresh commits as one unit with the content below. Publishing
                 // it earlier would put the new signature's sender on screen while
@@ -91,14 +88,12 @@ final class MessageBubbleViewModel: ObservableObject {
             return
         }
 
-        // No sender load will run, so publish the terminal sender state now even on an in-place
-        // refresh — retaining it would strand an avatar with nothing left to replace it.
+        let contentResult = await loader.loadContent(from: context.contentRequest)
+        guard isStillActive(context), contentResult.isComplete else { return }
+        // Publish the terminal sender with completed content; an incomplete refresh keeps both.
         senderName = context.prefetchedSenderName
         senderAvatarURL = nil
         senderImageData = nil
-
-        let contentResult = await loader.loadContent(from: context.contentRequest)
-        guard isStillActive(context) else { return }
         apply(contentResult, for: context)
     }
 
