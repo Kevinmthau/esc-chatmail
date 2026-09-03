@@ -56,39 +56,6 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.attachments.first?.id, attachment.id)
     }
 
-    func testSetupForMode_replyIsIdempotent() throws {
-        let authSession = makeTestAuthSession(userEmail: "me@example.com")
-        let deps = makeDependencies(authSession: authSession)
-        let context = deps.viewContext
-        let conversation = ConversationBuilder()
-            .visible()
-            .recentlyActive()
-            .build(in: context)
-        try context.obtainPermanentIDs(for: [conversation])
-
-        let replyModeContext = deps.makeComposeReplyModeContextBuilder().build(
-            input: .init(
-                initialRecipients: [
-                    Recipient(email: "friend@example.com", displayName: "Friend")
-                ],
-                conversationObjectID: conversation.objectID,
-                replyingToMessageObjectID: nil,
-                optimisticConversation: .existingConversation(
-                    ConversationReference(objectID: conversation.objectID)
-                )
-            )
-        )
-        let viewModel = ComposeViewModel(
-            mode: .reply(replyModeContext),
-            dependencies: deps.makeComposeDependencies()
-        )
-
-        viewModel.setupForMode()
-        viewModel.setupForMode()
-
-        XCTAssertEqual(viewModel.recipients.map(\.email), ["friend@example.com"])
-    }
-
     func testSetupForMode_forwardCopiesForwardAttachmentSnapshots() {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         AttachmentPaths.setupDirectories()

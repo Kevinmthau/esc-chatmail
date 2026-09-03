@@ -216,7 +216,8 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "FW: Thau - post-Judgment matter",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_subject_stays_bubble",
@@ -228,7 +229,8 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "Re: [EXTERNAL]Re: Lending Follow up",
-      "expectedShowHTMLPreview": false
+      "expectedShowHTMLPreview": false,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_from_me_stays_bubble",
@@ -240,7 +242,8 @@
       "isFromMe": true,
       "isOneToOneConversation": true,
       "subject": "Re: Anything",
-      "expectedShowHTMLPreview": false
+      "expectedShowHTMLPreview": false,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "group_newsletter_uses_preview",
@@ -252,7 +255,8 @@
       "isFromMe": false,
       "isOneToOneConversation": false,
       "subject": "Weekly Update",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "newsletter_without_html_metadata_uses_preview",
@@ -265,7 +269,8 @@
       "isOneToOneConversation": true,
       "subject": "Tickets Now On Sale for the Margaret Mead Film Festival",
       "senderEmail": "publicprograms@email.amnh.org",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "group_reply_subject_personal_stays_bubble",
@@ -277,7 +282,8 @@
       "isFromMe": false,
       "isOneToOneConversation": false,
       "subject": "Re: Next steps",
-      "expectedShowHTMLPreview": false
+      "expectedShowHTMLPreview": false,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_rich_transactional_uses_preview",
@@ -289,7 +295,8 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "New message: Anything wrong with the phone?",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_trusted_ebay_sender_uses_preview",
@@ -302,7 +309,8 @@
       "isOneToOneConversation": true,
       "subject": "Re: ryfa-7369 sent a message about Item #1234",
       "senderEmail": "ryfa73_izw3749pf@members.ebay.com",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_trusted_amazon_subdomain_uses_preview",
@@ -315,7 +323,8 @@
       "isOneToOneConversation": true,
       "subject": "Re: New message about your listing",
       "senderEmail": "xyz123@marketplace.amazon.com",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_trusted_bill_sender_uses_preview",
@@ -328,7 +337,8 @@
       "isOneToOneConversation": true,
       "subject": "Re: Bill approval required",
       "senderEmail": "account-services@inform.bill.com",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_trusted_bill_sender_without_html_metadata_uses_preview",
@@ -341,7 +351,8 @@
       "isOneToOneConversation": true,
       "subject": "Re: Bill approval required",
       "senderEmail": "BILL <account-services@inform.bill.com>",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_rich_fallback_without_html_metadata_uses_preview",
@@ -353,7 +364,78 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "Your approval is needed",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
+    },
+    {
+      "id": "calendar_invite_preview",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": false,
+      "subject": "Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": true,
+      "expectedShowHTMLPreview": true,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
+    },
+    {
+      "id": "calendar_flag_false",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": false,
+      "subject": "Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": false,
+      "expectedShowHTMLPreview": false,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
+    },
+    {
+      "id": "calendar_invite_requires_source",
+      "hasHTMLSource": false,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": false,
+      "subject": "Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": true,
+      "expectedShowHTMLPreview": false,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
+    },
+    {
+      "id": "calendar_reply_stays_bubble",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Re: Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": true,
+      "expectedShowHTMLPreview": false,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
+    },
+    {
+      "id": "outgoing_calendar_stays_bubble",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": true,
+      "isOneToOneConversation": true,
+      "subject": "Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": true,
+      "expectedShowHTMLPreview": false,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
     }
   ],
   "conversationListSnippetCases": [
@@ -364,13 +446,33 @@
       "latestMessageSnippet": "Latest message snippet",
       "latestMessageCleanedSnippet": "Latest cleaned snippet",
       "expected": "Rollup snippet wins"
+    },
+    {
+      "id": "rollup_without_message",
+      "conversationSnippet": "Stored preview",
+      "expected": "Stored preview"
+    },
+    {
+      "id": "empty_rollup_does_not_scan_messages",
+      "conversationSnippet": "",
+      "latestMessageSnippet": "Raw fallback",
+      "latestMessageCleanedSnippet": "Cleaned fallback",
+      "expected": ""
+    },
+    {
+      "id": "rollup_preserves_paragraphs",
+      "conversationSnippet": "First paragraph.\n\nSecond paragraph.",
+      "latestMessageSnippet": "Flattened fallback",
+      "expected": "First paragraph.\n\nSecond paragraph."
     }
   ],
   "newsletterDetectionCases": [
     {
       "id": "support_reply_not_newsletter",
       "notes": "Typical support reply should not classify as newsletter.",
-      "labelIds": ["INBOX"],
+      "labelIds": [
+        "INBOX"
+      ],
       "from": "Support Team <support@company.com>",
       "subject": "Re: Your ticket #12345",
       "toCount": 1,
@@ -380,7 +482,9 @@
     {
       "id": "promotions_plus_support_still_not_newsletter",
       "notes": "CATEGORY_PROMOTIONS + support@ should stay below threshold.",
-      "labelIds": ["CATEGORY_PROMOTIONS"],
+      "labelIds": [
+        "CATEGORY_PROMOTIONS"
+      ],
       "from": "support@company.com",
       "expectedIsNewsletter": false,
       "expectedScore": 45
@@ -388,7 +492,9 @@
     {
       "id": "strong_marketing_newsletter",
       "notes": "Strong corroborating newsletter signals should classify as newsletter.",
-      "labelIds": ["CATEGORY_PROMOTIONS"],
+      "labelIds": [
+        "CATEGORY_PROMOTIONS"
+      ],
       "from": "newsletter@store.com",
       "listUnsubscribe": "<mailto:unsub@store.com>",
       "subject": "Limited time 50% off sale",
@@ -398,13 +504,415 @@
     {
       "id": "one_click_unsubscribe_membership_email_is_newsletter",
       "notes": "Membership/list mail with both List-Unsubscribe and one-click unsubscribe should classify as newsletter even without Gmail category labels.",
-      "labelIds": ["INBOX"],
+      "labelIds": [
+        "INBOX"
+      ],
       "from": "American Museum of Natural History <RSVP@email.amnh.org>",
       "subject": "Enjoy a Family Scientist Experience All About Earth!",
       "listUnsubscribe": "<https://pages.wordfly.com/americanmuseumofnaturalhistory/pages/Unsubscribe/?sid=example>",
       "listUnsubscribePost": "List-Unsubscribe=One-Click",
       "expectedIsNewsletter": true,
       "expectedScore": 55
+    }
+  ],
+  "conversationIdentityCases": [
+    {
+      "id": "single_participant",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "sorted_group_excludes_self_and_bcc",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Bob <bob@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com, Alice <alice@example.com>"
+        },
+        {
+          "name": "Bcc",
+          "value": "secret@example.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com",
+          "bob@example.com"
+        ],
+        "participantHash": "ec4db5bd2c6b0d995f2b4987e203c26c20ca4d6fd34e88cd49214dd2d8cd3394",
+        "type": "group",
+        "listId": null
+      }
+    },
+    {
+      "id": "gmail_dot_plus_domain",
+      "headers": [
+        {
+          "name": "From",
+          "value": "John <J.o.h.n+news@GoogleMail.com>"
+        }
+      ],
+      "myAliases": [],
+      "expected": {
+        "participants": [
+          "john@gmail.com"
+        ],
+        "participantHash": "a6549f01c8978be46c9196dc8b9bd4ddd293ceca91f2decedcf41e6128b554cd",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "self_only_sorted_alias_fallback",
+      "headers": [
+        {
+          "name": "From",
+          "value": "me@work.com"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@work.com",
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "me@gmail.com"
+        ],
+        "participantHash": "055af9c691b347492db7cb1f4b0840ea753d1c1ab7a20a41a54b2aadfe4cb6ad",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "empty_headers_unknown_fallback",
+      "headers": [],
+      "myAliases": [],
+      "expected": {
+        "participants": [
+          "unknown@email.com"
+        ],
+        "participantHash": "7b6bc9d36f60e002fa5780007ad24370917020b475f2f876feea9f82956d78e3",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "unicode_combining_scalar_sort",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Student <étudiant@x.fr>"
+        },
+        {
+          "name": "To",
+          "value": "Zed <z@x.com>"
+        }
+      ],
+      "myAliases": [],
+      "expected": {
+        "participants": [
+          "z@x.com",
+          "étudiant@x.fr"
+        ],
+        "participantHash": "11a44aa115d87379898b788a2de450d3984f23890b615bb2f26bda3cb6f8e7eb",
+        "type": "group",
+        "listId": null
+      }
+    },
+    {
+      "id": "unicode_astral_scalar_sort",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Astral <😀@x.com>"
+        },
+        {
+          "name": "To",
+          "value": "Replacement <�@x.com>"
+        }
+      ],
+      "myAliases": [],
+      "expected": {
+        "participants": [
+          "�@x.com",
+          "😀@x.com"
+        ],
+        "participantHash": "92cf32b37e62c8e21ba00dc50ca496eed48552ee133a832b11a5dbd9013bd01d",
+        "type": "group",
+        "listId": null
+      }
+    },
+    {
+      "id": "display_name_unbalanced_angle",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Tom <3 Jerry <tom@x.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "tom@x.com"
+        ],
+        "participantHash": "cca4b14d3ceafabab6ca87f5ba62a46efeccc4e684145107a09d24a43474fe8d",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "Revert-check: EmailNormalizer.extractEmail / web extractEmail must exclude nested angle brackets from the captured address."
+    },
+    {
+      "id": "hide_my_email_to",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "Hide My Email <relay@icloud.com>"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "Hide My Email placeholders in To are excluded just like From."
+    },
+    {
+      "id": "hide_my_email_cc",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        },
+        {
+          "name": "Cc",
+          "value": "Hide My Email <relay@icloud.com>"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "Hide My Email placeholders in Cc are excluded just like From."
+    },
+    {
+      "id": "hide_my_email_from",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Hide My Email <relay@icloud.com>"
+        },
+        {
+          "name": "To",
+          "value": "Alice <alice@example.com>"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "relay_address_with_real_name",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <relay@icloud.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "relay@icloud.com"
+        ],
+        "participantHash": "936a6047a491374d0d975d671c5fbe947af064e7afb78393de7bbc72ec52c966",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "An iCloud address with a real display name remains a participant."
+    },
+    {
+      "id": "all_aliases_excluded_and_duplicate_headers",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <ALICE@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        },
+        {
+          "name": "To",
+          "value": "me@work.com"
+        },
+        {
+          "name": "Cc",
+          "value": "alice@example.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com",
+        "me@work.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      }
+    }
+  ],
+  "cleanedSnippetCases": [
+    {
+      "id": "html_precedes_plain_and_raw",
+      "html": "<div>Visible HTML.</div>",
+      "plainText": "Plain fallback.",
+      "snippet": "Raw fallback.",
+      "isFromMe": false,
+      "expected": "Visible HTML."
+    },
+    {
+      "id": "html_removes_quoted_history",
+      "html": "<div>New content here.</div><div class=\"gmail_quote\"><blockquote>Old quoted</blockquote></div>",
+      "plainText": "Plain fallback.",
+      "snippet": null,
+      "isFromMe": false,
+      "expected": "New content here."
+    },
+    {
+      "id": "hidden_preheader_and_head_metadata",
+      "html": "<html><head><title>Metadata Title</title></head><body><div style=\"display:none\">Preheader teaser</div><div>Visible body.</div></body></html>",
+      "plainText": null,
+      "snippet": null,
+      "isFromMe": false,
+      "expected": "Visible body."
+    },
+    {
+      "id": "plain_precedes_raw",
+      "html": null,
+      "plainText": "Plain body text.",
+      "snippet": "Raw fallback.",
+      "isFromMe": false,
+      "expected": "Plain body text."
+    },
+    {
+      "id": "empty_html_falls_back_to_plain",
+      "html": "",
+      "plainText": "Plain body text.",
+      "snippet": "Raw fallback.",
+      "isFromMe": false,
+      "expected": "Plain body text."
+    },
+    {
+      "id": "raw_snippet_fallback",
+      "html": null,
+      "plainText": null,
+      "snippet": "Gmail snippet.",
+      "isFromMe": false,
+      "expected": "Gmail snippet."
+    },
+    {
+      "id": "empty_plain_falls_back_to_raw",
+      "html": null,
+      "plainText": "",
+      "snippet": "Gmail snippet.",
+      "isFromMe": false,
+      "expected": "Gmail snippet."
+    },
+    {
+      "id": "html_entities_decode",
+      "html": "<p>Fish &amp; chips.</p>",
+      "plainText": null,
+      "snippet": null,
+      "isFromMe": false,
+      "expected": "Fish & chips."
+    },
+    {
+      "id": "outgoing_plain_body",
+      "html": null,
+      "plainText": "I sent the documents.",
+      "snippet": "Raw fallback.",
+      "isFromMe": true,
+      "expected": "I sent the documents."
+    },
+    {
+      "id": "missing_content",
+      "html": null,
+      "plainText": null,
+      "snippet": null,
+      "isFromMe": false,
+      "expected": null
     }
   ]
 }

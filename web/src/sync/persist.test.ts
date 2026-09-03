@@ -160,6 +160,59 @@ describe('preparePersistPlan', () => {
     expect(plan.message.senderEmail).toBe('alice@x.com')
   })
 
+  it.each(['From', 'To', 'Cc'])(
+    'preserves quoted local-part brackets in %s participants and identity',
+    async (headerName) => {
+      const email = '"a<b"@example.com'
+      const mailbox = `Display <${email}>`
+      const plan = (await preparePersistPlan(
+        textMessage({
+          id: 'quoted-local-part',
+          from: headerName === 'From' ? mailbox : ME,
+          to: headerName === 'To' ? [ME, mailbox] : [ME],
+          cc: headerName === 'Cc' ? [mailbox] : [],
+        }),
+        ctx,
+      )) as MessagePersistPlan
+
+      expect(plan.identity.participants).toEqual([email])
+      expect(plan.identity.participantHash).toBe(calculateParticipantHash([email]))
+      expect(plan.participants).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: headerName.toLowerCase(), email }),
+        ]),
+      )
+    },
+  )
+
+  it.each(['From', 'To', 'Cc'])(
+    'preserves later %s recipients after a display name with an unbalanced angle bracket',
+    async (headerName) => {
+      const mailboxes = 'Tom <3 Jerry <tom@x.com>, Alice <alice@example.com>'
+      const plan = (await preparePersistPlan(
+        textMessage({
+          id: 'nested-display-name-group',
+          from: headerName === 'From' ? mailboxes : ME,
+          to: headerName === 'To' ? [ME, mailboxes] : [ME],
+          cc: headerName === 'Cc' ? [mailboxes] : [],
+        }),
+        ctx,
+      )) as MessagePersistPlan
+
+      const participants = ['alice@example.com', 'tom@x.com']
+      expect(plan.identity.participants).toEqual(participants)
+      expect(plan.identity.participantHash).toBe(calculateParticipantHash(participants))
+      expect(plan.identity.type).toBe('group')
+      if (headerName !== 'From') {
+        const recipientEmails = plan.participants
+          .filter((p) => p.kind === headerName.toLowerCase() && p.email !== ME)
+          .map((p) => p.email)
+          .sort()
+        expect(recipientEmails).toEqual(participants)
+      }
+    },
+  )
+
   it('marks own sent mail isFromMe and resolves reply-from', async () => {
     const plan = (await preparePersistPlan(
       textMessage({

@@ -247,12 +247,11 @@ extension DataCleanupService {
 
         let totalChanged = result.personCount + result.messageCount + result.conversationCount
         if totalChanged > 0 {
-            // Cached person rows and message-list snapshots may still carry
-            // the garbled names; drop them so the decoded values publish.
+            // Cached person rows may still carry garbled names; invalidate
+            // them and notify readers so the decoded values publish.
             PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(
                 emails: result.changedPersonEmails
             )
-            await ConversationCache.shared.clearAllCaches()
 
             let duration = CFAbsoluteTimeGetCurrent() - startTime
             Log.info(
@@ -333,9 +332,6 @@ extension DataCleanupService {
         }
 
         migrationFlags.set(true, forKey: Self.participantSetSplitMigrationKey)
-
-        // Re-homed message lists must not be served from stale caches.
-        await ConversationCache.shared.clearAllCaches()
 
         let duration = CFAbsoluteTimeGetCurrent() - startTime
         Log.info("Participant-set conversation split migration complete in \(String(format: "%.2f", duration))s (touched \(touchedIDs.count) conversation(s))", category: .coreData)
