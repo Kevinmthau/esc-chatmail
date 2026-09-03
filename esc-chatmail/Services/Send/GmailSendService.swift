@@ -16,17 +16,20 @@ final class GmailSendService: ObservableObject {
     let apiClient: any GmailAPIClientProtocol
     let authSession: AuthSession
     let viewContext: NSManagedObjectContext
+    let conversationMutationSerializer: ConversationRollupMutationSerializer
 
     // MARK: - Initialization
 
     @MainActor init(
         viewContext: NSManagedObjectContext,
         apiClient: (any GmailAPIClientProtocol)? = nil,
-        authSession: AuthSession? = nil
+        authSession: AuthSession? = nil,
+        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.viewContext = viewContext
         self.apiClient = apiClient ?? GmailAPIClient.shared
         self.authSession = authSession ?? .shared
+        self.conversationMutationSerializer = conversationMutationSerializer
     }
 
     // MARK: - Public API

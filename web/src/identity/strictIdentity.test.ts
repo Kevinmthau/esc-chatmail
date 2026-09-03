@@ -91,15 +91,25 @@ describe('strictParticipantSetIdentity', () => {
     expect(identity?.type).toBe('oneToOne')
   })
 
-  it('returns null when every usable email drops out', () => {
+  it('uses the canonical self fallback when identity rows all drop out', () => {
     expect(
       strictParticipantSetIdentity(
         [row('relay@privaterelay.appleid.com', 'from', 'hide-my-email')],
         '',
         MY_ALIASES,
         NO_PEOPLE,
-      ),
-    ).toBeNull()
+      )?.participants,
+    ).toEqual(['me@gmail.com'])
+  })
+
+  it('does not re-add a legacy senderEmail whose current Person is HME', () => {
+    const identity = strictParticipantSetIdentity(
+      [row('me@gmail.com', 'to')],
+      'relay@privaterelay.appleid.com',
+      MY_ALIASES,
+      new Map([['relay@privaterelay.appleid.com', 'Hide My Email']]),
+    )
+    expect(identity?.participants).toEqual(['me@gmail.com'])
   })
 
   it('self-only rows fall back to note-to-self', () => {

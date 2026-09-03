@@ -145,10 +145,11 @@ final class ConversationManager: Sendable {
 
     /// Updates rollups only for conversations that were modified.
     @MainActor
+    @discardableResult
     func updateRollupsForModifiedConversations(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
-    ) async {
+    ) async -> Bool {
         await rollupUpdater.updateRollupsForModified(
             conversationIDs: conversationIDs,
             in: context,
@@ -178,10 +179,14 @@ final class ConversationManager: Sendable {
     /// Archives stranded conversation shells that have a date but no messages,
     /// leaving alone anything created or active within the grace period.
     @MainActor
-    func archiveMessagelessConversations(in context: NSManagedObjectContext) async -> Int {
+    func archiveMessagelessConversations(
+        in context: NSManagedObjectContext,
+        excludingConversationIDs: Set<UUID> = []
+    ) async -> Int {
         await rollupUpdater.archiveMessagelessConversations(
             in: context,
-            olderThan: Date(timeIntervalSinceNow: -ConversationRollupUpdater.messagelessConversationGracePeriod)
+            olderThan: Date(timeIntervalSinceNow: -ConversationRollupUpdater.messagelessConversationGracePeriod),
+            excludingConversationIDs: excludingConversationIDs
         )
     }
 
@@ -204,7 +209,8 @@ final class ConversationManager: Sendable {
     }
 
     /// Merges duplicate ACTIVE conversations with same participantHash.
-    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async {
+    @discardableResult
+    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async -> Bool {
         await merger.mergeActiveConversationDuplicates(in: context)
     }
 

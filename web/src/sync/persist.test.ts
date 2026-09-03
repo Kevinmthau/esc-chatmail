@@ -29,6 +29,7 @@ afterEach(async () => {
 
 const ctx: PersistContext = {
   myAliases: new Set([ME]),
+  hideMyEmailAddresses: new Set(),
   sendAsAliases: [
     {
       email: ME,
@@ -107,6 +108,21 @@ describe('preparePersistPlan', () => {
     expect(plan.participants.some((p) => p.email.includes('privaterelay'))).toBe(false)
   })
 
+  it('drops an unnamed address whose cached Person is Hide My Email', async () => {
+    const relay = 'relay@privaterelay.appleid.com'
+    const plan = (await preparePersistPlan(
+      textMessage({
+        id: 'cached-hme',
+        from: relay,
+        to: [ME, 'Alice <alice@example.com>'],
+      }),
+      { ...ctx, hideMyEmailAddresses: new Set([relay]) },
+    )) as MessagePersistPlan
+
+    expect(plan.identity.participants).toEqual(['alice@example.com'])
+    expect(plan.participants.some((participant) => participant.email === relay)).toBe(false)
+  })
+
   it.each(['to', 'cc'] as const)(
     'matches header identity when legacy rows still contain a Hide-My-Email %s recipient',
     async (kind) => {
@@ -156,6 +172,21 @@ describe('preparePersistPlan', () => {
     expect(plan.identity.participantHash).toBe(
       calculateParticipantHash(['alice@x.com', 'bob@y.com']),
     )
+    expect(plan.participants.filter(({ kind }) => kind === 'from')).toEqual([
+      { email: 'alice@x.com', displayName: 'Alice', kind: 'from' },
+      { email: 'bob@y.com', displayName: 'Bob', kind: 'from' },
+    ])
+    const persistedIdentity = strictParticipantSetIdentity(
+      plan.participants.map((participant) => ({
+        ...participant,
+        messageId: plan.message.id,
+      })),
+      plan.message.senderEmail,
+      ctx.myAliases,
+      new Map(),
+    )
+    expect(persistedIdentity?.participants).toEqual(plan.identity.participants)
+    expect(persistedIdentity?.participantHash).toBe(plan.identity.participantHash)
     // The message row still keeps the first mailbox as the sender.
     expect(plan.message.senderEmail).toBe('alice@x.com')
   })

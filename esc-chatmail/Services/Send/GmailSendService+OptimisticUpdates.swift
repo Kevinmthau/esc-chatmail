@@ -45,6 +45,36 @@ extension GmailSendService {
         senderName: String? = nil,
         optimisticConversation: OptimisticConversationReference? = nil
     ) async throws -> OptimisticSendHandle {
+        try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
+            try await createOptimisticMessageWithoutCleanupInterleaving(
+                to: recipients,
+                body: body,
+                subject: subject,
+                threadId: threadId,
+                attachments: attachments,
+                chatPreviewText: chatPreviewText,
+                senderEmail: senderEmail,
+                senderName: senderName,
+                optimisticConversation: optimisticConversation
+            )
+        }
+    }
+
+    /// The shared cleanup-sensitive mutation gate makes the conversation lookup
+    /// and the atomic optimistic graph + recovery-record save one indivisible
+    /// operation relative to destructive store maintenance.
+    @MainActor
+    private func createOptimisticMessageWithoutCleanupInterleaving(
+        to recipients: [String],
+        body: String,
+        subject: String?,
+        threadId: String?,
+        attachments: [OutboundMessageRequest.AttachmentContext],
+        chatPreviewText: String?,
+        senderEmail: String?,
+        senderName: String?,
+        optimisticConversation: OptimisticConversationReference?
+    ) async throws -> OptimisticSendHandle {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
         let snippet = String(body.prefix(120))

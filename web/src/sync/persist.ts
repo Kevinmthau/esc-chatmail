@@ -15,7 +15,11 @@ import type {
   SendAsAlias,
 } from '@/db/types'
 import type { GmailHeader, GmailMessage, GmailPart } from '@/gmail/types'
-import { isBetterDisplayNameForEmail, isHideMyEmailDisplayName } from '@/identity/normalizeEmail'
+import {
+  isBetterDisplayNameForEmail,
+  isHideMyEmailDisplayName,
+  normalizeEmail,
+} from '@/identity/normalizeEmail'
 import {
   makeConversationIdentity,
   makeParticipantSetIdentity,
@@ -52,6 +56,8 @@ export const LOCAL_MODIFICATION_MAX_AGE_MS = 30 * 60 * 1000
 export interface PersistContext {
   /** Normalized identity aliases (self-removal from participant sets, isFromMe). */
   myAliases: ReadonlySet<string>
+  /** Normalized addresses whose current Person is classified as Hide My Email. */
+  hideMyEmailAddresses: ReadonlySet<string>
   /** Sendable aliases feeding reply-from resolution. */
   sendAsAliases: readonly SendAsAlias[]
   /**
@@ -129,6 +135,12 @@ interface IdentityParticipants {
   displayNames: Record<string, string>
 }
 
+/** Every usable mailbox from the raw From header, falling back to the parser's primary sender. */
+function fromParticipants(headers: ParsedHeaders): ParsedAddress[] {
+  const entries = headers.fromRaw !== null ? parseEmailAddresses(headers.fromRaw) : []
+  return entries.length > 0 ? entries : headers.from !== null ? [headers.from] : []
+}
+
 /**
  * From+To+Cc participant emails and display names for conversation identity.
  * BCC excluded; Hide-My-Email placeholder entries dropped entirely
@@ -138,18 +150,22 @@ interface IdentityParticipants {
  * split of the whole raw From value — headers.from alone keeps only the
  * first address.
  */
-function identityParticipants(headers: ParsedHeaders): IdentityParticipants {
+function identityParticipants(
+  headers: ParsedHeaders,
+  hideMyEmailAddresses: ReadonlySet<string>,
+): IdentityParticipants {
   const emails = new Set<string>()
   const displayNames: Record<string, string> = {}
 
-  const fromEntries: ParsedAddress[] =
-    headers.fromRaw !== null ? parseEmailAddresses(headers.fromRaw) : []
-  const fromForIdentity =
-    fromEntries.length > 0 ? fromEntries : headers.from !== null ? [headers.from] : []
-  const entries = [...fromForIdentity, ...headers.to, ...headers.cc]
+  const entries = [...fromParticipants(headers), ...headers.to, ...headers.cc]
   for (const entry of entries) {
     if (entry.email === '') continue
-    if (isHideMyEmailDisplayName(entry.name)) continue
+    if (
+      isHideMyEmailDisplayName(entry.name) ||
+      hideMyEmailAddresses.has(normalizeEmail(entry.email))
+    ) {
+      continue
+    }
     if (
       entry.name !== null &&
       isBetterDisplayNameForEmail(entry.name, displayNames[entry.email], entry.email)
@@ -245,32 +261,33 @@ export async function preparePersistPlan(
 
   const replyFrom = resolveReplyFrom(buildReplyFromHeaders(msg, labelIds), ctx.sendAsAliases)
 
-  const { emails, displayNames } = identityParticipants(headers)
+  const { emails, displayNames } = identityParticipants(headers, ctx.hideMyEmailAddresses)
   const setIdentity = makeParticipantSetIdentity(emails, ctx.myAliases)
   const identity = makeConversationIdentity(setIdentity, displayNames)
 
-  // Message participants: from always; to/cc/bcc minus Hide-My-Email entries
-  // (MessagePersister+Participants). BCC is stored but excluded from identity.
+  // Message participants: From/To/Cc/Bcc minus Hide-My-Email entries. BCC is
+  // stored when usable but excluded from identity.
   const participants: Array<Omit<MsgParticipantRow, 'pk' | 'messageId'>> = []
   const people = new Map<string, string>()
-  const addParticipant = (
-    email: string,
-    name: string | null,
-    kind: ParticipantKind,
-    skipHideMyEmail: boolean,
-  ): void => {
+  const addParticipant = (email: string, name: string | null, kind: ParticipantKind): void => {
     if (email === '') return
-    if (skipHideMyEmail && isHideMyEmailDisplayName(name)) return
-    participants.push({ email, displayName: name ?? '', kind })
+    const isHideMyEmail =
+      isHideMyEmailDisplayName(name) || ctx.hideMyEmailAddresses.has(normalizeEmail(email))
+    if (!isHideMyEmail) participants.push({ email, displayName: name ?? '', kind })
+
+    // Keep Person enrichment independent from identity-row exclusion. An
+    // explicit placeholder can upgrade an older weak Person name and trigger
+    // the signature-gated historical repair, while the current message is
+    // routed correctly immediately.
     const existing = people.get(email)
     if (existing === undefined || isBetterDisplayNameForEmail(name, existing, email)) {
       people.set(email, name?.trim() ?? existing ?? '')
     }
   }
-  if (headers.from !== null) addParticipant(headers.from.email, headers.from.name, 'from', false)
-  for (const r of headers.to) addParticipant(r.email, r.name, 'to', true)
-  for (const r of headers.cc) addParticipant(r.email, r.name, 'cc', true)
-  for (const r of headers.bcc) addParticipant(r.email, r.name, 'bcc', true)
+  for (const r of fromParticipants(headers)) addParticipant(r.email, r.name, 'from')
+  for (const r of headers.to) addParticipant(r.email, r.name, 'to')
+  for (const r of headers.cc) addParticipant(r.email, r.name, 'cc')
+  for (const r of headers.bcc) addParticipant(r.email, r.name, 'bcc')
 
   const partIds = attachmentPartIds(msg.payload)
   const attachments: PlannedAttachment[] = parsed.attachments.map((att) => {

@@ -35,4 +35,18 @@ extension PendingAction {
     var retryCountValue: Int16 {
         retryCount
     }
+
+    /// Fetches durable conversation-action references once so destructive
+    /// conversation maintenance can retarget or retain their source rows in
+    /// the same Core Data save as a merge/deletion.
+    static func referencesByConversationID(
+        in context: NSManagedObjectContext
+    ) throws -> [UUID: [PendingAction]] {
+        var references: [UUID: [PendingAction]] = [:]
+        for action in try context.fetch(fetchRequest()) {
+            guard let conversationID = action.conversationId else { continue }
+            references[conversationID, default: []].append(action)
+        }
+        return references
+    }
 }

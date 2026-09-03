@@ -63,6 +63,22 @@ struct ConversationMerger: Sendable {
                 return
             }
 
+            let pendingSendConversationIds: Set<UUID>
+            let pendingActionsByConversationID: [UUID: [PendingAction]]
+            do {
+                pendingSendConversationIds = try self.pendingSendConversationIDs(in: context)
+                pendingActionsByConversationID = try PendingAction.referencesByConversationID(
+                    in: context
+                )
+            } catch {
+                Log.error(
+                    "Failed to fetch protected references before duplicate conversation merge",
+                    category: .coreData,
+                    error: error
+                )
+                return
+            }
+
             var mergedCount = 0
             var deletedObjectIDs = [NSManagedObjectID]()
 
@@ -81,12 +97,23 @@ struct ConversationMerger: Sendable {
                     continue
                 }
 
-                guard let winner = self.selectWinner(from: group) else {
+                // A pending send owns its anchor's membership and rollup until
+                // reconciliation or rollback. Exclude pending rows from both
+                // winner selection and loser mutation; ordinary duplicates can
+                // still collapse around the untouched anchor.
+                let mergeableGroup = group.filter {
+                    !pendingSendConversationIds.contains($0.id)
+                }
+                guard mergeableGroup.count > 1,
+                      let winner = self.selectWinner(from: mergeableGroup) else {
                     continue
                 }
-                let losers = group.filter { $0 != winner }
+                let losers = mergeableGroup.filter { $0 != winner }
 
                 for loser in losers {
+                    for action in pendingActionsByConversationID[loser.id] ?? [] {
+                        action.conversationId = winner.id
+                    }
                     self.merge(from: loser, into: winner)
                     deletedObjectIDs.append(loser.objectID)
                     context.delete(loser)
@@ -95,7 +122,10 @@ struct ConversationMerger: Sendable {
             }
 
             if mergedCount > 0 {
-                self.coreDataStack.saveIfNeeded(context: context)
+                guard self.coreDataStack.saveIfNeeded(context: context) else {
+                    context.rollback()
+                    return
+                }
 
                 self.mergeDeletions(deletedObjectIDs, into: [self.coreDataStack.viewContext], excluding: context)
 
@@ -109,10 +139,11 @@ struct ConversationMerger: Sendable {
 
     /// Merges duplicate ACTIVE conversations that have the same participantHash.
     /// Handles race conditions where multiple conversations were created for the same participants.
-    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async {
+    @discardableResult
+    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async -> Bool {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        await context.perform {
+        return await context.perform {
             // Find active conversations (archivedAt == nil) grouped by participantHash
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "archivedAt == nil")
@@ -124,7 +155,7 @@ struct ConversationMerger: Sendable {
                 conversations = try context.fetch(request)
             } catch {
                 Log.error("Failed to fetch active conversations for duplicate merge", category: .coreData, error: error)
-                return
+                return false
             }
 
             // Group by participantHash
@@ -138,10 +169,21 @@ struct ConversationMerger: Sendable {
             // deleted as merge losers: their optimistic message can be unsaved on
             // the view context (invisible here), and deleting the row would
             // orphan it and dangle the send-reconciliation record.
-            let pendingSendConversationIds = Set(
-                ((try? context.fetch(OutboundSendMutationRecord.fetchRequest())) ?? [])
-                    .compactMap(\.conversationId)
-            )
+            let pendingSendConversationIds: Set<UUID>
+            let pendingActionsByConversationID: [UUID: [PendingAction]]
+            do {
+                pendingSendConversationIds = try self.pendingSendConversationIDs(in: context)
+                pendingActionsByConversationID = try PendingAction.referencesByConversationID(
+                    in: context
+                )
+            } catch {
+                Log.error(
+                    "Failed to fetch protected references before active conversation merge",
+                    category: .coreData,
+                    error: error
+                )
+                return false
+            }
 
             var mergedCount = 0
             var deletedObjectIDs = [NSManagedObjectID]()
@@ -150,12 +192,19 @@ struct ConversationMerger: Sendable {
             for (hash, group) in byHash where group.count > 1 {
                 Log.debug("Found \(group.count) duplicate active conversations for participantHash: \(hash.prefix(16))...", category: .conversation)
 
-                guard let winner = self.selectWinner(from: group) else {
+                let mergeableGroup = group.filter {
+                    !pendingSendConversationIds.contains($0.id)
+                }
+                guard mergeableGroup.count > 1,
+                      let winner = self.selectWinner(from: mergeableGroup) else {
                     continue
                 }
-                let losers = group.filter { $0 != winner && !pendingSendConversationIds.contains($0.id) }
+                let losers = mergeableGroup.filter { $0 != winner }
 
                 for loser in losers {
+                    for action in pendingActionsByConversationID[loser.id] ?? [] {
+                        action.conversationId = winner.id
+                    }
                     self.merge(from: loser, into: winner)
                     deletedObjectIDs.append(loser.objectID)
                     context.delete(loser)
@@ -164,13 +213,17 @@ struct ConversationMerger: Sendable {
             }
 
             if mergedCount > 0 {
-                self.coreDataStack.saveIfNeeded(context: context)
+                guard self.coreDataStack.saveIfNeeded(context: context) else {
+                    context.rollback()
+                    return false
+                }
 
                 self.mergeDeletions(deletedObjectIDs, into: [self.coreDataStack.viewContext], excluding: context)
 
                 let duration = CFAbsoluteTimeGetCurrent() - startTime
                 Log.info("Merged \(mergedCount) duplicate active conversations in \(String(format: "%.3f", duration))s", category: .conversation)
             }
+            return true
         }
     }
 
@@ -205,6 +258,7 @@ struct ConversationMerger: Sendable {
     /// Merges messages and data from loser into winner.
     func merge(from loser: Conversation, into winner: Conversation) {
         let wasPinned = winner.pinned || loser.pinned
+        let wasMuted = winner.muted || loser.muted
         let loserMessages = loser.messages ?? []
 
         // Reassign all messages from loser to winner
@@ -216,8 +270,9 @@ struct ConversationMerger: Sendable {
             from: (winner.messages ?? []).union(loserMessages)
         ).apply(to: winner)
 
-        // Preserve pinned status
+        // Preserve conversation-level user state.
         winner.pinned = wasPinned
+        winner.muted = wasMuted
     }
 
     private func visibilityRank(for conversation: Conversation) -> Int {
@@ -225,5 +280,11 @@ struct ConversationMerger: Sendable {
         if conversation.archivedAt == nil { return 2 }
         if !conversation.hidden { return 1 }
         return 0
+    }
+
+    private func pendingSendConversationIDs(
+        in context: NSManagedObjectContext
+    ) throws -> Set<UUID> {
+        Set(try context.fetch(OutboundSendMutationRecord.fetchRequest()).compactMap(\.conversationId))
     }
 }

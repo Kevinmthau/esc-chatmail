@@ -10,6 +10,7 @@
 import { getLastSuccessfulSyncAt, setLastSuccessfulSyncAt, setSyncProgress } from '@/db/kv'
 import type { ChatmailDB } from '@/db/schema'
 import type { AccountRow } from '@/db/types'
+import { isHideMyEmailDisplayName, normalizeEmail } from '@/identity/normalizeEmail'
 import { rollupConversation } from '@/rollup/rollup'
 import { persistAccountAliases } from './aliases'
 import { depsNow, depsRandom, depsSleep, makeFetchLargeBody, type SyncDeps } from './deps'
@@ -129,10 +130,19 @@ export async function buildPersistContext(
   deps: SyncDeps,
   account: AccountRow,
 ): Promise<PersistContext> {
-  const labelRows = await deps.db.labels.toArray()
+  const [labelRows, people] = await Promise.all([
+    deps.db.labels.toArray(),
+    deps.db.people.toArray(),
+  ])
   const knownLabelIds = labelRows.length > 0 ? new Set(labelRows.map((l) => l.id)) : null
   return {
     myAliases: new Set(account.aliases),
+    hideMyEmailAddresses: new Set(
+      people
+        .filter((person) => isHideMyEmailDisplayName(person.displayName))
+        .map((person) => normalizeEmail(person.email))
+        .filter((email) => email !== ''),
+    ),
     sendAsAliases: account.sendAsAliases,
     knownLabelIds,
     fetchLargeBody: makeFetchLargeBody(deps.api),
