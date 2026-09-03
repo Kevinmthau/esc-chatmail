@@ -19,6 +19,44 @@ final class ChatMessageRowModelTests: XCTestCase {
         super.tearDown()
     }
 
+    func testMap_attachmentDimensionsChangeReloadsBubbleContent() async throws {
+        let message = MessageBuilder().withId(UUID().uuidString).withAttachments().build(in: viewContext)
+        let attachment = viewContext.insertTestObject(Attachment.self)
+        attachment.id = UUID().uuidString
+        attachment.contentId = "image001"
+        attachment.filename = "image001.png"
+        attachment.mimeType = "image/png"
+        attachment.stateRaw = Attachment.State.downloaded.rawValue
+        attachment.message = message
+        try viewContext.obtainPermanentIDs(for: [message, attachment])
+
+        let loader = AttachmentRefreshBubbleLoader()
+        let viewModel = MessageBubbleViewModel(loader: loader)
+        func loadContext() -> MessageBubbleLoadContext {
+            let row = ChatMessageRowModelMapper.map(message)
+            return MessageBubbleLoadContext(
+                messageID: row.id,
+                contentSignature: row.loadSignatureComponents.signature(
+                    htmlSourceSignature: "unchanged", contactRefreshToken: 0
+                ),
+                prefetchedSenderName: nil, senderRequest: nil,
+                contentRequest: row.makeContentRequest()
+            )
+        }
+        await viewModel.loadIfNeeded(using: loadContext())
+        await viewModel.loadIfNeeded(using: loadContext())
+        let initialLoads = await loader.loadCount
+        XCTAssertEqual(initialLoads, 1)
+
+        attachment.width = 160
+        attachment.height = 40
+        // Revert-check: omitting attachment metadata from the mapper's load
+        // signature leaves the view model's signature unchanged and skips load 2.
+        await viewModel.loadIfNeeded(using: loadContext())
+        let refreshedLoads = await loader.loadCount
+        XCTAssertEqual(refreshedLoads, 2)
+    }
+
     func testMap_usesParticipantFallbacksAndAttachmentSnapshots() throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -325,6 +363,22 @@ final class ChatMessageRowModelTests: XCTestCase {
                 hasFailedLocalAttachmentUploads: true
             ).label,
             "Send failed"
+        )
+    }
+}
+
+private actor AttachmentRefreshBubbleLoader: MessageBubbleLoading {
+    private(set) var loadCount = 0
+
+    func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult {
+        MessageBubbleSenderResult(name: nil, avatarURL: nil, imageData: nil)
+    }
+
+    func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
+        loadCount += 1
+        return MessageBubbleContentResult(
+            fullTextContent: nil, hasRichHTMLContent: false, sharedDocumentLinks: [],
+            forwardedDisplayContent: nil, htmlAnalysis: .empty
         )
     }
 }

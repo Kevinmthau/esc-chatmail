@@ -2079,6 +2079,57 @@ final class MessageBubbleLoaderTests: XCTestCase {
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
     }
 
+    func testCachedHTMLAnalysis_invalidatedProducerDoesNotCachePlaceholder() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BubbleAnalysisInvalidation-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        let renderedCache = RenderedMessageCache()
+        let parsedProvider = SuspendedParsedEmailProvider()
+        let recovery = MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:])
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            processedTextCache: ProcessedTextCache(),
+            htmlContentHandler: handler,
+            htmlContentLoader: HTMLContentLoader(contentHandler: handler, recoveryService: recovery),
+            htmlContentRecoveryService: recovery,
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache(),
+            parsedEmailProvider: parsedProvider,
+            renderedMessageCache: renderedCache
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let messageID = UUID().uuidString
+        XCTAssertNotNil(handler.saveHTML("<html><body><img src=\"cid:hero\">Hello</body></html>", for: messageID))
+        let request = MessageBubbleContentRequest(
+            messageID: messageID, bodyText: nil, bodyStorageURI: nil,
+            cleanedSnippet: "Hello", snippet: "Hello", subject: "Hello", senderName: nil,
+            hasHTMLSource: true, hasAttachments: true, isFromMe: false,
+            isForwardedEmail: false, isLikelyCalendarInvite: false,
+            effectiveSenderEmail: "alice@example.com", attachmentSnapshots: []
+        )
+        let capturedContext = await loader.captureAccountWorkContext()
+        let context = try XCTUnwrap(capturedContext)
+        let firstLoad = Task { await loader.cachedHTMLAnalysis(for: request, accountContext: context) }
+        let deadline = Date().addingTimeInterval(5)
+        while !(await parsedProvider.hasEntered()), Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let entered = await parsedProvider.hasEntered()
+        guard entered else {
+            await parsedProvider.resume()
+            _ = await firstLoad.value
+            return XCTFail("Analysis producer did not reach the parser")
+        }
+        await renderedCache.invalidate(messageId: messageID)
+        await parsedProvider.resume()
+        let dropped = await firstLoad.value
+        XCTAssertEqual(dropped, .placeholder(hasHTMLSource: true))
+
+        // Revert-check: caching the nil producer's fallback in cachedHTMLAnalysis
+        // makes this same-key retry return the placeholder instead of real analysis.
+        let retried = await loader.cachedHTMLAnalysis(for: request, accountContext: context)
+        XCTAssertEqual(retried.referencedInlineContentIDs, ["hero"])
+    }
+
     func testLoadContent_accountTransitionWhileAnalysisIsSuspendedDoesNotRecoverOrRepopulateCaches() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MessageBubbleLoaderAccountBoundary-\(UUID().uuidString)", isDirectory: true)
@@ -2272,6 +2323,8 @@ private actor SuspendedParsedEmailProvider: ParsedEmailProviding {
     }
 
     func invalidate(messageId: String) async {}
+
+    func hasEntered() -> Bool { entered }
 
     func waitUntilEntered() async {
         guard !entered else { return }
