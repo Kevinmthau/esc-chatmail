@@ -2,12 +2,18 @@
 
 Fixture file: `golden_message_corpus.json`
 
-Test harness: `GoldenCorpusReplayTests` in `esc-chatmailTests/MessageProcessorTests.swift`
+Test harness: `GoldenCorpusReplayTests` in `esc-chatmailTests/Sync/MessageProcessorTests.swift`
 
 ## Purpose
 
 Each fixture is a real regression example. Add a new case whenever message cleaning,
 preview routing, or newsletter scoring fails in production.
+
+The web tests import this same JSON through the `@fixtures` alias. MIME replay
+lives in `web/src/mime/corpus.golden.test.ts`, display-policy and rich-HTML replay
+in `web/src/lib/displayPolicy.test.ts`, and list-snippet replay in
+`web/src/rollup/rollup.test.ts`. Keep expected results shared across platforms;
+changes under `Fixtures/` also trigger web CI.
 
 ## Sections
 
@@ -24,7 +30,13 @@ preview routing, or newsletter scoring fails in production.
 ## Run
 
 ```bash
-bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/GoldenCorpusReplayTests'
+./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/GoldenCorpusReplayTests'
+```
+
+From `web/`:
+
+```bash
+corepack pnpm test src/mime/corpus.golden.test.ts src/lib/displayPolicy.test.ts src/rollup/rollup.test.ts
 ```
 
 ## Workflow

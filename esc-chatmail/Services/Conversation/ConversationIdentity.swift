@@ -123,10 +123,12 @@ func normalizedEmail(_ raw: String) -> String {
 /// - participantHash: Identifies the SET of participants (same for all convos with same people)
 /// - keyHash: Unique identifier for THIS conversation instance (includes UUID for uniqueness)
 ///
-/// This allows:
-/// - Multiple conversation "epochs" with the same participants
-/// - When a conversation is archived and a new email arrives, a NEW conversation is created
-/// - The new conversation has the same participantHash but different keyHash
+/// Routing prefers an active conversation with the same participantHash.
+/// INBOX arrivals, own messages, and SENT mail can reuse and reactivate the most
+/// recent archived match. Other arrivals can create a new epoch when only archived
+/// matches exist; rollup immediately archives it if it has no inbox mail and no
+/// outgoing latest message. A newly created epoch has a distinct keyHash.
+/// Existing-message List-Id repair instead reuses archived matches without reactivation.
 ///
 /// Key format: "p|<sorted-participants>|<uuid>" where participants excludes the current user
 func makeConversationIdentity(from headers: [MessageHeader],
