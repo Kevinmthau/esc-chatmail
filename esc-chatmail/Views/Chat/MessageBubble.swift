@@ -69,7 +69,7 @@ struct MessageBubble: View {
             return false
         }
 
-        return MessageDisplayPolicy.shouldShowHTMLPreview(
+        return MessageDisplayPolicy.shouldShowHTMLPreview(.init(
             hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
@@ -79,7 +79,7 @@ struct MessageBubble: View {
             subject: message.subject,
             senderEmail: message.effectiveSenderEmail,
             isLikelyCalendarInvite: message.isLikelyCalendarInvite
-        )
+        ))
     }
 
     private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {

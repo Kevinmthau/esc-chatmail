@@ -21,6 +21,7 @@ interface DisplayPolicyCase {
   isNewsletter: boolean
   hasRichHTMLContent: boolean
   isFromMe: boolean
+  isLikelyCalendarInvite?: boolean
   isOneToOneConversation: boolean
   subject?: string | null
   senderEmail?: string | null
@@ -54,6 +55,7 @@ describe('golden corpus: displayPolicyCases', () => {
       isNewsletter: scenario.isNewsletter,
       hasRichHTMLContent: scenario.hasRichHTMLContent,
       isFromMe: scenario.isFromMe,
+      isLikelyCalendarInvite: scenario.isLikelyCalendarInvite ?? false,
       isOneToOneConversation: scenario.isOneToOneConversation,
       subject: scenario.subject ?? null,
       senderEmail: scenario.senderEmail ?? null,

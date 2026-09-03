@@ -4,6 +4,21 @@ import CoreData
 
 final class ConversationIdentityTests: XCTestCase {
 
+    func testMakeConversationIdentity_goldenCorpusPinsSharedHashes() throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "golden_message_corpus", withExtension: "json"))
+        let corpus = try JSONDecoder().decode(ConversationIdentityCorpus.self, from: Data(contentsOf: url))
+        XCTAssertFalse(corpus.conversationIdentityCases.isEmpty)
+        for scenario in corpus.conversationIdentityCases {
+            let identity = makeConversationIdentity(from: scenario.headers, myAliases: Set(scenario.myAliases))
+            // Revert-check: shared fixed digests detect normalizer, self/BCC/HME
+            // filtering, namespace, or Unicode ordering drift on either platform.
+            XCTAssertEqual(identity.participants, scenario.expected.participants, scenario.id)
+            XCTAssertEqual(identity.participantHash, scenario.expected.participantHash, scenario.id)
+            XCTAssertEqual(identity.type.rawValue, scenario.expected.type, scenario.id)
+            XCTAssertEqual(identity.listId, scenario.expected.listId, scenario.id)
+        }
+    }
+
     func testMakeConversationIdentity_unbalancedAngleBracketInDisplayName_preservesParticipantIdentity() {
         // Revert-check: EmailNormalizer.extractEmail's angle-bracket capture
         // must not include display-name text in the participant address/hash.
@@ -288,5 +303,23 @@ final class ConversationIdentityTests: XCTestCase {
                 fixture.name
             )
         }
+    }
+}
+
+private struct ConversationIdentityCorpus: Decodable {
+    let conversationIdentityCases: [IdentityCase]
+
+    struct IdentityCase: Decodable {
+        let id: String
+        let headers: [MessageHeader]
+        let myAliases: [String]
+        let expected: Expected
+    }
+
+    struct Expected: Decodable {
+        let participants: [String]
+        let participantHash: String
+        let type: String
+        let listId: String?
     }
 }

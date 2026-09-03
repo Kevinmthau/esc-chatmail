@@ -8,17 +8,16 @@ enum MessageDisplayPolicy {
     /// Rich HTML previews are conservative in one-to-one *reply threads* to avoid
     /// treating person-to-person replies like newsletters, but should still show
     /// for genuinely rich transactional/marketing HTML.
-    static func shouldShowHTMLPreview(
-        hasHTMLSource: Bool,
-        isForwardedEmail: Bool,
-        isNewsletter: Bool,
-        hasRichHTMLContent: Bool,
-        isFromMe: Bool,
-        isOneToOneConversation: Bool,
-        subject: String?,
-        senderEmail: String?,
-        isLikelyCalendarInvite: Bool = false
-    ) -> Bool {
+    static func shouldShowHTMLPreview(_ input: MessageDisplayInput) -> Bool {
+        let hasHTMLSource = input.hasHTMLSource
+        let isForwardedEmail = input.isForwardedEmail
+        let isNewsletter = input.isNewsletter
+        let hasRichHTMLContent = input.hasRichHTMLContent
+        let isFromMe = input.isFromMe
+        let isOneToOneConversation = input.isOneToOneConversation
+        let subject = input.subject
+        let senderEmail = input.senderEmail
+        let isLikelyCalendarInvite = input.isLikelyCalendarInvite
         let trustedTransactionalSender = isTrustedTransactionalSender(senderEmail)
         // Allow newsletter and rich-content preview routing even if the local HTML file/URI metadata is missing.
         // The preview loader can still recover embedded/recoverable HTML on demand.
