@@ -6,6 +6,12 @@ import CoreData
 extension DatabaseMaintenanceService {
 
     func performCleanup() async -> Bool {
+        await StoreMaintenanceCoordinator.shared.runExclusivelyWhenStoreIsIdle(operationName: "database cleanup") {
+            await self.performCleanupWhileStoreIsIdle()
+        }
+    }
+
+    private func performCleanupWhileStoreIsIdle() async -> Bool {
         let htmlContentHandler = HTMLContentHandler.shared
         let htmlAccountGeneration = htmlContentHandler.captureAccountGeneration()
         let context = coreDataStack.newBackgroundContext()

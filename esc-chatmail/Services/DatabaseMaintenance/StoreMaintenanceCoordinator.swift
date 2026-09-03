@@ -24,8 +24,16 @@ actor StoreMaintenanceCoordinator {
             return false
         }
 
-        await syncRunCoordinator.waitUntilIdle()
+        return await runExclusivelyWhenStoreIsIdle(
+            operationName: operationName,
+            operation: operation
+        )
+    }
 
+    func runExclusivelyWhenStoreIsIdle(
+        operationName: String,
+        operation: () async -> Bool
+    ) async -> Bool {
         guard !isRunning else {
             Log.info("Skipping \(operationName); database maintenance already running", category: .coreData)
             return false
@@ -34,6 +42,17 @@ actor StoreMaintenanceCoordinator {
         isRunning = true
         defer { isRunning = false }
 
-        return await operation()
+        guard let request = await syncRunCoordinator.makeAccountWorkRequest(),
+              let maintenanceRun = await syncRunCoordinator.acquireRun(
+                  kind: .maintenance,
+                  for: request
+              ) else {
+            Log.info("Skipping \(operationName); account transition invalidated maintenance", category: .coreData)
+            return false
+        }
+
+        let result = await operation()
+        await syncRunCoordinator.endRun(maintenanceRun)
+        return result
     }
 }
