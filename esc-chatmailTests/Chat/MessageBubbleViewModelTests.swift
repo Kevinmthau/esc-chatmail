@@ -70,6 +70,135 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.fullTextContent, "First load")
     }
 
+    func testLoadIfNeeded_incompleteInitialContentRemainsRetryableForSameSignature() async {
+        let loader = MockMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [
+                MessageBubbleContentResult(
+                    fullTextContent: "Incomplete body",
+                    hasRichHTMLContent: false,
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .placeholder(hasHTMLSource: true),
+                    isComplete: false
+                ),
+                Self.makeContentResult(text: "Recovered body", inlineContentID: "cid-recovered")
+            ]
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+        let context = makeContext(hasHTMLSource: true, includesSenderRequest: false)
+
+        await viewModel.loadIfNeeded(using: context)
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertNil(viewModel.fullTextContent)
+        XCTAssertEqual(viewModel.htmlAnalysis, .placeholder(hasHTMLSource: true))
+
+        await viewModel.loadIfNeeded(using: context)
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.fullTextContent, "Recovered body")
+        XCTAssertEqual(viewModel.htmlAnalysis.referencedInlineContentIDs, ["cid-recovered"])
+
+        await viewModel.loadIfNeeded(using: context)
+
+        let contentCallCount = await loader.contentCallCount()
+        XCTAssertEqual(contentCallCount, 2, "Only a complete result should suppress a same-signature retry")
+    }
+
+    func testLoadIfNeeded_incompleteRefreshPreservesPublishedStateAndCanRetrySameSignature() async {
+        let originalContent = Self.makeContentResult(text: "Original body", inlineContentID: "cid-original")
+        let recoveredContent = Self.makeContentResult(text: "Recovered body", inlineContentID: "cid-recovered")
+        let loader = MockMessageBubbleLoader(
+            senderResults: [
+                MessageBubbleSenderResult(
+                    name: "Original Name", avatarURL: "file:///original-avatar", imageData: Data([0x01])
+                ),
+                MessageBubbleSenderResult(
+                    name: "Incomplete Name", avatarURL: "file:///incomplete-avatar", imageData: Data([0x02])
+                ),
+                MessageBubbleSenderResult(
+                    name: "Recovered Name", avatarURL: "file:///recovered-avatar", imageData: Data([0x03])
+                )
+            ],
+            contentResults: [
+                originalContent,
+                MessageBubbleContentResult(
+                    fullTextContent: nil,
+                    hasRichHTMLContent: false,
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .placeholder(hasHTMLSource: true),
+                    isComplete: false
+                ),
+                recoveredContent
+            ]
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+        let refreshContext = makeContext(signature: "sig-refreshed", hasHTMLSource: true)
+
+        await viewModel.loadIfNeeded(using: makeContext(hasHTMLSource: true))
+        await viewModel.loadIfNeeded(using: refreshContext)
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.fullTextContent, originalContent.fullTextContent)
+        XCTAssertEqual(viewModel.hasRichHTMLContent, originalContent.hasRichHTMLContent)
+        XCTAssertEqual(viewModel.htmlAnalysis, originalContent.htmlAnalysis)
+        XCTAssertEqual(viewModel.sharedDocumentLinks, originalContent.sharedDocumentLinks)
+        XCTAssertEqual(viewModel.forwardedDisplayContent, originalContent.forwardedDisplayContent)
+        XCTAssertEqual(viewModel.senderName, "Original Name")
+        XCTAssertEqual(viewModel.senderAvatarURL, "file:///original-avatar")
+        XCTAssertEqual(viewModel.senderImageData, Data([0x01]))
+
+        await viewModel.loadIfNeeded(using: refreshContext)
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.fullTextContent, recoveredContent.fullTextContent)
+        XCTAssertEqual(viewModel.hasRichHTMLContent, recoveredContent.hasRichHTMLContent)
+        XCTAssertEqual(viewModel.htmlAnalysis, recoveredContent.htmlAnalysis)
+        XCTAssertEqual(viewModel.sharedDocumentLinks, recoveredContent.sharedDocumentLinks)
+        XCTAssertEqual(viewModel.forwardedDisplayContent, recoveredContent.forwardedDisplayContent)
+        XCTAssertEqual(viewModel.senderName, "Recovered Name")
+        XCTAssertEqual(viewModel.senderAvatarURL, "file:///recovered-avatar")
+        XCTAssertEqual(viewModel.senderImageData, Data([0x03]))
+        let contentCallCount = await loader.contentCallCount()
+        let senderCallCount = await loader.senderCallCount()
+        XCTAssertEqual(contentCallCount, 3)
+        XCTAssertEqual(senderCallCount, 3)
+    }
+
+    func testLoadIfNeeded_incompleteRefreshWithoutSenderRequestKeepsSenderUntilRecovery() async {
+        let loader = MockMessageBubbleLoader(
+            senderResults: [
+                MessageBubbleSenderResult(name: "Original Name", avatarURL: "file:///avatar", imageData: Data([1]))
+            ],
+            contentResults: [
+                Self.makeContentResult(text: "Original body", inlineContentID: "cid-original"),
+                MessageBubbleContentResult(
+                    fullTextContent: nil, hasRichHTMLContent: false, sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil, htmlAnalysis: .empty, isComplete: false
+                ),
+                Self.makeContentResult(text: "Recovered body", inlineContentID: "cid-recovered")
+            ]
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+        let refreshContext = makeContext(signature: "sig-refreshed", includesSenderRequest: false)
+        await viewModel.loadIfNeeded(using: makeContext())
+        await viewModel.loadIfNeeded(using: refreshContext)
+
+        XCTAssertEqual(viewModel.fullTextContent, "Original body")
+        XCTAssertEqual(viewModel.senderName, "Original Name")
+        XCTAssertEqual(viewModel.senderAvatarURL, "file:///avatar")
+        XCTAssertEqual(viewModel.senderImageData, Data([1]))
+
+        await viewModel.loadIfNeeded(using: refreshContext)
+
+        XCTAssertEqual(viewModel.fullTextContent, "Recovered body")
+        XCTAssertEqual(viewModel.senderName, "Prefetched Name")
+        XCTAssertNil(viewModel.senderAvatarURL)
+        XCTAssertNil(viewModel.senderImageData)
+    }
+
     func testLoadIfNeeded_reloadsForNewSignature() async {
         let loader = MockMessageBubbleLoader(
             senderResults: [

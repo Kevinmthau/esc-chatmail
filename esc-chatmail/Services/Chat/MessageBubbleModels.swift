@@ -142,6 +142,24 @@ struct MessageBubbleContentResult: Sendable, Equatable {
     let sharedDocumentLinks: [SharedDocumentLink]
     let forwardedDisplayContent: ForwardedMessageDisplayContent?
     let htmlAnalysis: MessageBubbleHTMLAnalysis
+    /// False when work was invalidated or unavailable, even if the fallback looks like .empty.
+    let isComplete: Bool
+
+    init(
+        fullTextContent: String?,
+        hasRichHTMLContent: Bool,
+        sharedDocumentLinks: [SharedDocumentLink],
+        forwardedDisplayContent: ForwardedMessageDisplayContent?,
+        htmlAnalysis: MessageBubbleHTMLAnalysis,
+        isComplete: Bool = true
+    ) {
+        self.fullTextContent = fullTextContent
+        self.hasRichHTMLContent = hasRichHTMLContent
+        self.sharedDocumentLinks = sharedDocumentLinks
+        self.forwardedDisplayContent = forwardedDisplayContent
+        self.htmlAnalysis = htmlAnalysis
+        self.isComplete = isComplete
+    }
 }
 
 struct MessageBubbleLoadContext: Sendable {
