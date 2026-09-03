@@ -36,9 +36,10 @@ extension MessageBubbleLoader {
                 for: request,
                 accountContext: accountContext
             )
-        } ?? fallback
+        }
 
-        guard await isAccountWorkContextCurrent(accountContext) else {
+        // An invalidated producer is transient; never memoize its placeholder.
+        guard let analysis, await isAccountWorkContextCurrent(accountContext) else {
             return fallback
         }
 
@@ -152,7 +153,7 @@ extension MessageBubbleLoader {
             "subject:\(cacheFingerprint(for: request.subject))",
             "flags:\(request.hasHTMLSource)-\(request.isForwardedEmail)-\(request.isLikelyCalendarInvite)",
             "hasAttachments:\(request.hasAttachments)",
-            "attachments:\(attachmentFingerprint(for: request.attachmentSnapshots))"
+            "attachments:\(MessageBubbleAttachmentSnapshot.analysisFingerprint(for: request.attachmentSnapshots))"
         ].joined(separator: "|")
     }
 
@@ -180,20 +181,5 @@ extension MessageBubbleLoader {
             .prefix(8)
             .map { String(format: "%02x", $0) }
             .joined()
-    }
-
-    private func attachmentFingerprint(for attachments: [MessageBubbleAttachmentSnapshot]) -> String {
-        guard !attachments.isEmpty else { return "none" }
-
-        return attachments
-            .map { attachment in
-                [
-                    EmailDocument.normalizedContentID(attachment.contentId) ?? "cid:nil",
-                    attachment.filename.lowercased(),
-                    attachment.mimeType.lowercased(),
-                    "\(attachment.width)x\(attachment.height)"
-                ].joined(separator: "~")
-            }
-            .joined(separator: ";")
     }
 }

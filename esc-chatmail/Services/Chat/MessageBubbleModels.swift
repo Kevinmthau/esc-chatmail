@@ -44,6 +44,21 @@ struct MessageBubbleAttachmentSnapshot: Sendable, Equatable {
         stateRaw == Attachment.State.downloaded.rawValue ||
         stateRaw == Attachment.State.uploaded.rawValue
     }
+
+    static func analysisFingerprint(for attachments: [MessageBubbleAttachmentSnapshot]) -> String {
+        guard !attachments.isEmpty else { return "none" }
+
+        return attachments
+            .map { attachment in
+                [
+                    EmailDocument.normalizedContentID(attachment.contentId) ?? "cid:nil",
+                    attachment.filename.lowercased(),
+                    attachment.mimeType.lowercased(),
+                    "\(attachment.width)x\(attachment.height)"
+                ].joined(separator: "~")
+            }
+            .joined(separator: ";")
+    }
 }
 
 struct MessageBubbleHTMLAnalysis: Sendable, Equatable {
