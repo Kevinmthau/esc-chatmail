@@ -351,6 +351,47 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         XCTAssertEqual(try state(Self.hashAlice, in: states).messageIDs, ["msg-hme-cc"])
     }
 
+    func testMaintenanceDoesNotReintroduceHideMyEmailAfterSplitMigration() async throws {
+        let relay = "relay@icloud.com"
+        let conversation = ConversationBuilder()
+            .withParticipantHash(Self.hashAlice)
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: Self.alice, to: conversation)
+        addConversationParticipant(
+            email: relay,
+            displayName: "Hide My Email",
+            to: conversation
+        )
+        try addMessage(
+            id: "msg-hme-cc", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me],
+            cc: ["Hide My Email <\(relay)>"], in: conversation
+        )
+        try context.save()
+
+        // The correctly-homed message does not touch/rebuild its conversation,
+        // so this legacy row survives the split pass and reaches maintenance.
+        await runMigration()
+        let postMigration = try state(Self.hashAlice, in: fetchConversationStates())
+        XCTAssertEqual(postMigration.participantEmails, [Self.alice, relay])
+
+        let service = DataCleanupService(
+            coreDataStack: coreDataStack,
+            conversationManager: ConversationManager(currentUserEmail: { Self.me }),
+            migrationFlags: migrationFlags,
+            identityAliasProvider: { _ in [Self.me] }
+        )
+        await service.fixAndMergeIncorrectParticipantHashes(
+            in: coreDataStack.newBackgroundContext()
+        )
+
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 1)
+        XCTAssertEqual(states.first?.participantHash, Self.hashAlice)
+    }
+
     func testEmptyAliasProviderDoesNotBurnFlag() async throws {
         let inbox = LabelBuilder().inbox().build(in: context)
         let lumped = ConversationBuilder()
@@ -801,10 +842,14 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         return message
     }
 
-    private func addConversationParticipant(email: String, to conversation: Conversation) {
+    private func addConversationParticipant(
+        email: String,
+        displayName: String? = nil,
+        to conversation: Conversation
+    ) {
         let person = PersonBuilder()
             .withEmail(email)
-            .noDisplayName()
+            .withDisplayName(displayName)
             .build(in: context)
         let participant = context.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()

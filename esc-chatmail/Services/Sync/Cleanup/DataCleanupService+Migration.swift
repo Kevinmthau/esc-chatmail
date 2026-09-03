@@ -89,10 +89,16 @@ extension DataCleanupService {
                 // participant chat sharing the same row set.
                 if conv.conversationType == .list { continue }
 
-                // Calculate the correct participantHash by excluding user's aliases
-                let currentParticipants = conv.participantsArray
-                let correctParticipants = currentParticipants
-                    .map { normalizedEmail($0) }
+                // Match routing identity by excluding both the user's aliases
+                // and Hide-My-Email placeholder participants.
+                let correctParticipants = (conv.participants ?? [])
+                    .compactMap { participant -> String? in
+                        guard let person = participant.person,
+                              !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
+                            return nil
+                        }
+                        return normalizedEmail(person.email)
+                    }
                     .filter { !myAliases.contains($0) }
 
                 if correctParticipants.isEmpty { continue }
