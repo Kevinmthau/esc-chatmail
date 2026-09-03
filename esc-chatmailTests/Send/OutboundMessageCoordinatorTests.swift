@@ -160,6 +160,131 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
     }
 
+    func testSend_consecutiveChatRepliesPreserveSubjectAndThreadingBeforeSyncEcho() async throws {
+        // Revert-check: restoring ChatViewModel.sendReply's replyingTo = nil
+        // drops the second request's subject, In-Reply-To, and References.
+        let context = coreDataStack.viewContext
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let sendService = MockOutboundMessageSendService(context: context)
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            authSession: authSession
+        )
+        let tokenManager = MockTokenManager()
+        let dependencies = Dependencies(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: coreDataStack.persistentContainer),
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let target = MessageBuilder()
+            .withId(UUID().uuidString)
+            .withThreadId("existing-thread")
+            .withSubject("Weekend plans")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSender(email: "friend@example.com")
+            .inConversation(conversation)
+            .build(in: context)
+        target.messageId = "<original@example.com>"
+        target.references = "<older@example.com>"
+        try context.obtainPermanentIDs(for: [conversation, target])
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: dependencies.makeChatDependencies()
+        )
+        viewModel.initializeReplyingTo(lastMessage: target)
+
+        viewModel.replyText = "First reply"
+        let firstResult = await viewModel.sendReply()
+        XCTAssertNotNil(firstResult)
+        XCTAssertEqual(viewModel.replyText, "")
+
+        // No sync echo or navigation reappearance re-arms the composer here.
+        viewModel.replyText = "Second reply"
+        let secondResult = await viewModel.sendReply()
+        XCTAssertNotNil(secondResult)
+        _ = outboundTaskRegistry.closeAdmission()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+
+        let calls = sendService.snapshot.sendReplyCalls
+        XCTAssertEqual(calls.count, 2)
+        for (call, body) in zip(calls, ["First reply", "Second reply"]) {
+            XCTAssertEqual(call.body, body)
+            XCTAssertEqual(call.subject, "Re: Weekend plans")
+            XCTAssertEqual(call.threadId, "existing-thread")
+            XCTAssertEqual(call.inReplyTo, "<original@example.com>")
+            XCTAssertEqual(call.references, ["<older@example.com>", "<original@example.com>"])
+        }
+        XCTAssertEqual(viewModel.replyingTo, target)
+        XCTAssertEqual(viewModel.replyText, "")
+    }
+
+    func testSend_chatReplyWithoutTargetPreservesDraftBehindThreadlessLocalSend() async throws {
+        let context = coreDataStack.viewContext
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let sendService = MockOutboundMessageSendService(context: context)
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            authSession: authSession
+        )
+        let tokenManager = MockTokenManager()
+        let dependencies = Dependencies(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: coreDataStack.persistentContainer),
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        _ = MessageBuilder()
+            .withThreadId("unrelated-old-thread")
+            .withSubject("Earlier topic")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        let localID = UUID().uuidString
+        let localMessage = MessageBuilder()
+            .withId(localID)
+            .withThreadId("")
+            .withSubject("New topic")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .withSender(email: "me@example.com")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        localMessage.messageId = MimeBuilder.messageId(forOptimisticMessageID: localID)
+        try context.obtainPermanentIDs(for: [conversation, localMessage])
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = localID
+        record.createdAt = Date()
+        record.conversationId = conversation.id
+        record.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+        record.hidden = false
+        record.newlyInsertedConversation = false
+        record.remoteCommittedMessageId = OutboundSendRemoteState.inFlightMessageID
+        try context.save()
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: dependencies.makeChatDependencies()
+        )
+        viewModel.replyText = "Follow-up to the new topic"
+
+        let result = await viewModel.sendReply()
+        _ = outboundTaskRegistry.closeAdmission()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+
+        XCTAssertNil(result)
+        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.replyText, "Follow-up to the new topic")
+        XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertTrue(sendService.snapshot.sendReplyCalls.isEmpty)
+        XCTAssertTrue(sendService.snapshot.sendNewCalls.isEmpty)
+    }
+
     func testSend_replyCreatesOptimisticMessageBeforeResolvingQuotedHTML() async throws {
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
