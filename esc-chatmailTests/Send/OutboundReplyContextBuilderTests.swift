@@ -105,7 +105,12 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
                 conversation: .init(
                     participantEmails: testCase.participants,
                     isListConversation: testCase.isList,
-                    latestThreadId: "thread"
+                    latestThreadId: "thread",
+                    latestThreadParticipantEvidence: ReplyParticipantEvidence(
+                        emails: testCase.participants,
+                        hasAddressableRecipientRow: !testCase.participants.isEmpty,
+                        isComplete: true
+                    )
                 ),
                 replyingTo: nil,
                 sendAsAliases: sendAsAliases,
@@ -113,6 +118,176 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             )
             XCTAssertEqual(metadata.recipientEmails, testCase.expected)
         }
+    }
+
+    func testBuildReplyMetadata_targetNeverBorrowsSelfEvidenceFromConversationAnchor() throws {
+        let builder = ReplyMetadataBuilder(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let conversation = ReplyConversationSnapshot(
+            participantEmails: ["me@example.com"],
+            latestThreadId: "conversation-thread",
+            latestThreadParticipantEvidence: ReplyParticipantEvidence(
+                emails: ["me@example.com"],
+                hasAddressableRecipientRow: true,
+                isComplete: true
+            )
+        )
+        let targetEvidenceCases: [ReplyParticipantEvidence?] = [
+            nil,
+            ReplyParticipantEvidence(
+                emails: ["friend@example.com"],
+                hasAddressableRecipientRow: false,
+                isComplete: false
+            )
+        ]
+
+        for participantEvidence in targetEvidenceCases {
+            let metadata = try builder.buildReplyMetadata(
+                conversation: conversation,
+                replyingTo: ReplyTargetSnapshot(
+                    participantEmails: [],
+                    subject: "External reply",
+                    threadId: "target-thread",
+                    messageId: nil,
+                    references: [],
+                    deliveredToAddress: nil,
+                    replyFromAddress: nil,
+                    originalMessage: QuotedMessage(
+                        senderName: "Friend",
+                        senderEmail: "friend@example.com",
+                        date: .distantPast,
+                        body: nil
+                    ),
+                    participantEvidence: participantEvidence
+                ),
+                sendAsAliases: sendAsAliases
+            )
+
+            XCTAssertEqual(metadata.threadId, "target-thread")
+            XCTAssertEqual(metadata.recipientEmails, [])
+        }
+    }
+
+    func testBuildReplyMetadata_withoutTargetUsesAffirmedSelfOnlyThreadAnchor() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
+        let note = MessageBuilder()
+            .withId("self-note")
+            .withThreadId("self-thread")
+            .withSender(email: "me@example.com", name: "Me")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(email: "me@example.com", kind: .from, to: note)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: note)
+        try context.obtainPermanentIDs(for: [conversation, note])
+
+        let metadata = try await makeBuilder().buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: nil,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.threadId, "self-thread")
+        XCTAssertEqual(metadata.recipientEmails, ["me@example.com"])
+    }
+
+    func testBuildReplyMetadata_withoutTargetPreservesSelfEvidenceAtThreadlessLocalBarrier() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
+        try context.obtainPermanentIDs(for: [conversation])
+        let sendService = GmailSendService(
+            viewContext: context,
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        )
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["me@example.com"],
+            body: "First note",
+            optimisticConversation: .existingConversation(
+                ConversationReference(objectID: conversation.objectID)
+            )
+        )
+        let note = try XCTUnwrap(
+            try context.existingObject(with: handle.optimisticMessageObjectID) as? Message
+        )
+        XCTAssertEqual(note.gmThreadId, "")
+        XCTAssertNotNil(OutboundSendDeliveryState.localOptimisticMessageID(for: note))
+
+        let metadata = try await makeBuilder().buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: nil,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertNil(metadata.threadId)
+        XCTAssertEqual(metadata.recipientEmails, ["me@example.com"])
+    }
+
+    func testBuildReplyMetadata_rowlessSelfMessageDoesNotManufactureRecipientForTargetOrAnchor() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
+        let note = MessageBuilder()
+            .withId("legacy-rowless-self-note")
+            .withThreadId("self-thread")
+            .withSender(email: "me@example.com", name: "Me")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, note])
+        XCTAssertEqual(note.participants?.count ?? 0, 0)
+
+        for replyingToMessageObjectID in [note.objectID, nil] {
+            let metadata = try await makeBuilder().buildReplyMetadata(
+                .init(
+                    conversationObjectID: conversation.objectID,
+                    replyingToMessageObjectID: replyingToMessageObjectID,
+                    optimisticConversation: .existingConversation(
+                        ConversationReference(objectID: conversation.objectID)
+                    )
+                )
+            )
+
+            XCTAssertEqual(metadata.threadId, "self-thread")
+            XCTAssertEqual(metadata.recipientEmails, [])
+        }
+    }
+
+    func testBuildReplyMetadata_excludesHideMyEmailConversationParticipant() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        addConversationParticipant(
+            email: "relay@icloud.com",
+            displayName: "Hide My Email",
+            to: conversation
+        )
+        let target = MessageBuilder()
+            .withId("message-hme")
+            .withThreadId("thread-hme")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, target])
+
+        let metadata = try await makeBuilder().buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: target.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.recipientEmails, ["friend@example.com"])
     }
 
     func testBuildReplyMetadata_defersOriginalHTMLResolution() async throws {
@@ -402,6 +577,175 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(metadata.recipientEmails, ["friend@example.com"])
     }
 
+    func testBuildReplyMetadata_withoutTargetSkipsLocalSendsAndEmptyThreads() async throws {
+        // Revert-check: ReplyConversationSnapshot's nonListMessages.first
+        // fallback selects a local or thread-less row instead of the server row.
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        _ = MessageBuilder()
+            .withThreadId("server-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        let localID = UUID().uuidString
+        let localMessage = MessageBuilder()
+            .withId(localID)
+            .withThreadId("unconfirmed-thread")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        localMessage.messageId = MimeBuilder.messageId(forOptimisticMessageID: localID)
+        try context.obtainPermanentIDs(for: [conversation, localMessage])
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = localID
+        record.createdAt = Date()
+        record.conversationId = conversation.id
+        record.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+        record.hidden = false
+        record.newlyInsertedConversation = false
+
+        let builder = makeBuilder()
+        let replyContext = builder.build(
+            conversationObjectID: conversation.objectID,
+            replyingToMessageObjectID: nil,
+            optimisticConversation: nil
+        )
+        let localMarkers: [String?] = [
+            nil,
+            OutboundSendRemoteState.inFlightMessageID,
+            OutboundSendRemoteState.notSentMessageID,
+            OutboundSendRemoteState.ambiguousMessageID
+        ]
+        for marker in localMarkers {
+            record.remoteCommittedMessageId = marker
+            record.remoteCommittedThreadId = nil
+            let metadata = try await builder.buildReplyMetadata(replyContext)
+            XCTAssertEqual(metadata.threadId, "server-thread")
+        }
+
+        // A legacy row can lack a thread even without an outbound marker.
+        context.delete(record)
+        localMessage.messageId = nil
+        for emptyThread in ["", " \n "] {
+            localMessage.gmThreadId = emptyThread
+            let metadata = try await builder.buildReplyMetadata(replyContext)
+            XCTAssertEqual(metadata.threadId, "server-thread")
+        }
+    }
+
+    func testBuildReplyMetadata_withoutTargetThreadlessLocalSendBlocksOlderThread() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        _ = MessageBuilder()
+            .withThreadId("unrelated-older-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        let localSend = try makeLocalSend(
+            in: conversation,
+            threadId: "",
+            date: Date(timeIntervalSince1970: 200)
+        )
+        let builder = makeBuilder()
+        let replyContext = builder.build(
+            conversationObjectID: conversation.objectID,
+            replyingToMessageObjectID: nil,
+            optimisticConversation: nil
+        )
+        let localMarkers: [String?] = [
+            nil,
+            OutboundSendRemoteState.inFlightMessageID,
+            OutboundSendRemoteState.ambiguousMessageID,
+            OutboundSendRemoteState.notSentMessageID
+        ]
+
+        for marker in localMarkers {
+            for emptyThread in ["", " \n\t "] {
+                localSend.record.remoteCommittedMessageId = marker
+                localSend.message.gmThreadId = emptyThread
+                try context.save()
+
+                let metadata = try await builder.buildReplyMetadata(replyContext)
+
+                XCTAssertNil(
+                    metadata.threadId,
+                    "A fresh local send must block the older thread for \(marker ?? "pending") with \(String(reflecting: emptyThread))"
+                )
+                XCTAssertEqual(metadata.recipientEmails, ["friend@example.com"])
+            }
+        }
+
+        context.delete(localSend.record)
+        for emptyThread in ["", " \n\t "] {
+            localSend.message.gmThreadId = emptyThread
+            try context.save()
+
+            let metadata = try await builder.buildReplyMetadata(replyContext)
+            XCTAssertNil(
+                metadata.threadId,
+                "An identifiable optimistic send must remain a barrier even without its durable record"
+            )
+        }
+    }
+
+    func testBuildReplyMetadata_withoutTargetPreservesLocalBarrierUntilReconciliation() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        _ = MessageBuilder()
+            .withThreadId("unrelated-older-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        let freshSend = try makeLocalSend(
+            in: conversation,
+            threadId: "",
+            date: Date(timeIntervalSince1970: 200)
+        )
+        freshSend.record.remoteCommittedMessageId = OutboundSendRemoteState.ambiguousMessageID
+        _ = try makeLocalSend(
+            in: conversation,
+            threadId: "unconfirmed-newer-thread",
+            date: Date(timeIntervalSince1970: 300)
+        )
+        try context.save()
+        let builder = makeBuilder()
+        let replyContext = builder.build(
+            conversationObjectID: conversation.objectID,
+            replyingToMessageObjectID: nil,
+            optimisticConversation: nil
+        )
+
+        let unresolvedMetadata = try await builder.buildReplyMetadata(replyContext)
+        XCTAssertNil(
+            unresolvedMetadata.threadId,
+            "Skipping a newer thread-bearing local send must still encounter the fresh-send barrier"
+        )
+
+        freshSend.record.remoteCommittedMessageId = "committed-message"
+        freshSend.record.remoteCommittedThreadId = "new-durable-thread"
+        try context.save()
+
+        let awaitingReconciliationMetadata = try await builder.buildReplyMetadata(replyContext)
+        XCTAssertNil(
+            awaitingReconciliationMetadata.threadId,
+            "Remote commit must not expose the older thread before reconciliation updates the message"
+        )
+
+        freshSend.message.gmThreadId = "new-durable-thread"
+        try context.save()
+
+        let committedMetadata = try await builder.buildReplyMetadata(replyContext)
+        XCTAssertEqual(committedMetadata.threadId, "new-durable-thread")
+
+        freshSend.message.id = "committed-message"
+        context.delete(freshSend.record)
+        try context.save()
+
+        let reconciledMetadata = try await builder.buildReplyMetadata(replyContext)
+        XCTAssertEqual(reconciledMetadata.threadId, "new-durable-thread")
+    }
+
     func testBuildReplyMetadata_backfillsReplyFromAliasFromLegacyTargetParticipants() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
@@ -540,6 +884,37 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             }.count,
             1
         )
+    }
+
+    func testBuildReplyMetadata_listTargetExcludesHideMyEmailParticipant() async throws {
+        let fixture = try makeRotatingListConversation()
+        fixture.laterMessage.replyTo =
+            #"Hide My Email <reply-relay@icloud.com>, Reply Control <reply-control@example.com>"#
+        let relay = PersonBuilder()
+            .withEmail("participant-relay@icloud.com")
+            .withDisplayName("Hide My Email")
+            .build(in: coreDataStack.viewContext)
+        addMessageParticipant(person: relay, kind: .cc, to: fixture.laterMessage)
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: fixture.laterMessage.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            metadata.recipientEmails,
+            [
+                "reply-control@example.com",
+                "later-list@example.com",
+                "later-cc@example.com"
+            ]
+        )
+        XCTAssertFalse(metadata.recipientEmails.contains("later-sender@example.com"))
     }
 
     func testBuildReplyMetadata_listConversationUsesLatestInboundReplyToInsteadOfFrom() async throws {
@@ -952,6 +1327,34 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         return conversation
     }
 
+    private func makeLocalSend(
+        in conversation: Conversation,
+        threadId: String,
+        date: Date
+    ) throws -> (message: Message, record: OutboundSendMutationRecord) {
+        let context = coreDataStack.viewContext
+        let localID = UUID().uuidString
+        let message = MessageBuilder()
+            .withId(localID)
+            .withThreadId(threadId)
+            .withDate(date)
+            .withSender(email: "me@example.com", name: "Me")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        message.messageId = MimeBuilder.messageId(forOptimisticMessageID: localID)
+        try context.obtainPermanentIDs(for: [conversation, message])
+
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = localID
+        record.createdAt = date
+        record.conversationId = conversation.id
+        record.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+        record.hidden = false
+        record.newlyInsertedConversation = false
+        return (message, record)
+    }
+
     private func makeRotatingListConversation() throws -> (
         conversation: Conversation,
         laterMessage: Message
@@ -1017,11 +1420,12 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
 
     private func addConversationParticipant(
         email: String,
+        displayName: String? = nil,
         to conversation: Conversation
     ) {
         let person = PersonBuilder()
             .withEmail(email)
-            .noDisplayName()
+            .withDisplayName(displayName)
             .build(in: coreDataStack.viewContext)
         let participant = coreDataStack.viewContext.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()

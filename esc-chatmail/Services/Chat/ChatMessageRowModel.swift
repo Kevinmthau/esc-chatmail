@@ -13,6 +13,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
     private let senderDisplayNameFingerprint: String
     private let senderHeaderDisplayNameFingerprint: String
     private let senderAvatarURLFingerprint: String
+    private let attachmentFingerprint: String
 
     init(
         bodyStorageURI: String?,
@@ -24,7 +25,8 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         senderEmail: String? = nil,
         senderDisplayName: String? = nil,
         senderHeaderDisplayName: String? = nil,
-        senderAvatarURL: String? = nil
+        senderAvatarURL: String? = nil,
+        attachmentSnapshots: [MessageBubbleAttachmentSnapshot] = []
     ) {
         self.bodyStorageURI = bodyStorageURI
         self.bodyTextFingerprint = Self.contentFingerprint(for: bodyText)
@@ -36,6 +38,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         self.senderDisplayNameFingerprint = Self.contentFingerprint(for: senderDisplayName)
         self.senderHeaderDisplayNameFingerprint = Self.contentFingerprint(for: senderHeaderDisplayName)
         self.senderAvatarURLFingerprint = Self.contentFingerprint(for: senderAvatarURL)
+        self.attachmentFingerprint = MessageBubbleAttachmentSnapshot.analysisFingerprint(for: attachmentSnapshots)
     }
 
     func signature(
@@ -54,7 +57,8 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
             "senderEmail:\(senderEmailFingerprint)",
             "senderName:\(senderDisplayNameFingerprint)",
             "senderHeaderName:\(senderHeaderDisplayNameFingerprint)",
-            "senderAvatar:\(senderAvatarURLFingerprint)"
+            "senderAvatar:\(senderAvatarURLFingerprint)",
+            "attachments:\(attachmentFingerprint)"
         ].joined(separator: "|")
     }
 
@@ -70,7 +74,8 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         senderEmail: String? = nil,
         senderDisplayName: String? = nil,
         senderHeaderDisplayName: String? = nil,
-        senderAvatarURL: String? = nil
+        senderAvatarURL: String? = nil,
+        attachmentSnapshots: [MessageBubbleAttachmentSnapshot] = []
     ) -> String {
         Self(
             bodyStorageURI: bodyStorageURI,
@@ -82,7 +87,8 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
             senderEmail: senderEmail,
             senderDisplayName: senderDisplayName,
             senderHeaderDisplayName: senderHeaderDisplayName,
-            senderAvatarURL: senderAvatarURL
+            senderAvatarURL: senderAvatarURL,
+            attachmentSnapshots: attachmentSnapshots
         ).signature(
             htmlSourceSignature: htmlSourceSignature,
             contactRefreshToken: contactRefreshToken
@@ -318,6 +324,7 @@ enum ChatMessageRowModelMapper {
             hasAttachments: message.hasAttachments
         )
 
+        let attachments = message.attachmentsArray.map(map)
         return ChatMessageRowModel(
             id: message.id,
             messageObjectID: message.objectID,
@@ -345,7 +352,7 @@ enum ChatMessageRowModelMapper {
             isLikelyCalendarInvite: message.isLikelyCalendarInvite,
             htmlDisplayCleanupMode: message.htmlDisplayCleanupMode,
             hasAttachments: message.hasAttachments,
-            attachments: message.attachmentsArray.map(map),
+            attachments: attachments,
             isSendingLocalAttachments: message.isSendingLocalAttachments,
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads,
             outboundSendDeliveryState: outboundSendDeliveryState,
@@ -361,7 +368,8 @@ enum ChatMessageRowModelMapper {
                 senderEmail: effectiveSenderEmail,
                 senderDisplayName: effectiveSenderPerson?.displayName,
                 senderHeaderDisplayName: message.senderName,
-                senderAvatarURL: effectiveSenderPerson?.avatarURL
+                senderAvatarURL: effectiveSenderPerson?.avatarURL,
+                attachmentSnapshots: attachments.map(\.bubbleSnapshot)
             )
         )
     }

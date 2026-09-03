@@ -19,7 +19,7 @@ class EmailTextProcessor {
     /// - Returns: Plain text extracted from the HTML
     static func extractPlainFromHTML(_ html: String) -> String {
         // Use lightweight regex-based extraction instead of expensive NSAttributedString
-        // TextProcessing is defined in ProcessedTextCache.swift and is thread-safe
+        // TextProcessing is defined in Services/TextProcessing/TextProcessing.swift and is thread-safe
         TextProcessing.extractPlainText(from: html)
     }
 

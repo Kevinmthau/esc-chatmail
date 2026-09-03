@@ -23,7 +23,6 @@ is behavior-preserving and anchored by characterization tests.
 | Target | PRs | Notes |
 |---|---|---|
 | CacheCoordinator | #54 | Extracted invalidation planning into a pure function |
-| ConversationCache | #55 | Characterization tests for core operations |
 | InFlightRequestManager | #56 | Characterized dedup + failure tracking |
 | EmailDOMQuoteRemover | #57–#63 | 7-part decomposition (input detection, footers/shared `tagNameNormal`, provider containers, tree-surgery keystone, text markers, structural boundaries, signatures) |
 | HTMLContentLoader | #64–#67 | 4-part decomposition (plain-text/HTML conversion, cache-key derivation, source preparation, `HTMLContentResultCache` type) |

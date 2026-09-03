@@ -4,6 +4,88 @@ import CoreData
 
 final class ConversationIdentityTests: XCTestCase {
 
+    func testMakeConversationIdentity_goldenCorpusPinsSharedHashes() throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "golden_message_corpus", withExtension: "json"))
+        let corpus = try JSONDecoder().decode(ConversationIdentityCorpus.self, from: Data(contentsOf: url))
+        XCTAssertFalse(corpus.conversationIdentityCases.isEmpty)
+        for scenario in corpus.conversationIdentityCases {
+            let identity = makeConversationIdentity(from: scenario.headers, myAliases: Set(scenario.myAliases))
+            // Revert-check: shared fixed digests detect normalizer, self/BCC/HME
+            // filtering, namespace, or Unicode ordering drift on either platform.
+            XCTAssertEqual(identity.participants, scenario.expected.participants, scenario.id)
+            XCTAssertEqual(identity.participantHash, scenario.expected.participantHash, scenario.id)
+            XCTAssertEqual(identity.type.rawValue, scenario.expected.type, scenario.id)
+            XCTAssertEqual(identity.listId, scenario.expected.listId, scenario.id)
+        }
+    }
+
+    func testMakeConversationIdentity_unbalancedAngleBracketInDisplayName_preservesParticipantIdentity() {
+        // Revert-check: EmailNormalizer.extractEmail's angle-bracket capture
+        // must not include display-name text in the participant address/hash.
+        let expected = makeParticipantSetIdentity(
+            normalizedEmails: ["tom@x.com"],
+            myAliases: ["me@example.com"]
+        )
+
+        for headerName in ["From", "To", "Cc"] {
+            let identity = makeConversationIdentity(
+                from: [
+                    MessageHeader(name: headerName, value: "Tom <3 Jerry <tom@x.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                myAliases: ["me@example.com"]
+            )
+
+            XCTAssertEqual(identity.participants, ["tom@x.com"], headerName)
+            XCTAssertEqual(identity.participantHash, expected.participantHash, headerName)
+            XCTAssertEqual(identity.type, .oneToOne, headerName)
+        }
+    }
+
+    func testMakeConversationIdentity_quotedLocalPartWithAngleBracket_preservesParticipantIdentity() {
+        let email = #""a<b"@example.com"#
+        let expected = makeParticipantSetIdentity(
+            normalizedEmails: [email],
+            myAliases: ["me@example.com"]
+        )
+
+        for headerName in ["From", "To", "Cc"] {
+            let identity = makeConversationIdentity(
+                from: [
+                    MessageHeader(name: headerName, value: "Display <\(email)>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                myAliases: ["me@example.com"]
+            )
+
+            XCTAssertEqual(identity.participants, [email], headerName)
+            XCTAssertEqual(identity.participantHash, expected.participantHash, headerName)
+            XCTAssertEqual(identity.type, .oneToOne, headerName)
+        }
+    }
+
+    func testMakeConversationIdentity_unbalancedDisplayNameBracket_preservesLaterParticipants() {
+        let participants = ["alice@example.com", "tom@x.com"]
+        let expected = makeParticipantSetIdentity(
+            normalizedEmails: Set(participants),
+            myAliases: ["me@example.com"]
+        )
+
+        for headerName in ["From", "To", "Cc"] {
+            let identity = makeConversationIdentity(
+                from: [
+                    MessageHeader(name: headerName, value: "Tom <3 Jerry <tom@x.com>, Alice <alice@example.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                myAliases: ["me@example.com"]
+            )
+
+            XCTAssertEqual(identity.participants, participants, headerName)
+            XCTAssertEqual(identity.participantHash, expected.participantHash, headerName)
+            XCTAssertEqual(identity.type, .group, headerName)
+        }
+    }
+
     func testMakeConversationIdentity_excludesHideMyEmailRelayParticipant() {
         let headers = [
             MessageHeader(name: "From", value: "San Francisco Ballet <tickets@sfballet.org>"),
@@ -175,6 +257,19 @@ final class ConversationIdentityTests: XCTestCase {
                 from: "Hide My Email <relay123@privaterelay.appleid.com>",
                 to: ["me@example.com"]
             ),
+            // Revert-check: Message.strictParticipantSetIdentity must apply
+            // the HME exclusion to To and Cc rows as well as From rows.
+            Fixture(
+                name: "hide-my-email To is dropped by both derivations",
+                from: "tickets@sfballet.org",
+                to: ["Hide My Email <to-relay@icloud.com>"]
+            ),
+            Fixture(
+                name: "hide-my-email Cc is dropped by both derivations",
+                from: "alice@example.com",
+                to: ["me@example.com"],
+                cc: ["Hide-My-Email <cc-relay@icloud.com>", "Bob <bob@example.com>"]
+            ),
             Fixture(
                 name: "list mail keys by List-Id in both derivations",
                 from: "Announcements <announce@lists.example.com>",
@@ -265,5 +360,23 @@ final class ConversationIdentityTests: XCTestCase {
                 fixture.name
             )
         }
+    }
+}
+
+private struct ConversationIdentityCorpus: Decodable {
+    let conversationIdentityCases: [IdentityCase]
+
+    struct IdentityCase: Decodable {
+        let id: String
+        let headers: [MessageHeader]
+        let myAliases: [String]
+        let expected: Expected
+    }
+
+    struct Expected: Decodable {
+        let participants: [String]
+        let participantHash: String
+        let type: String
+        let listId: String?
     }
 }
