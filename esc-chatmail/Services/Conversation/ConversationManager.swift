@@ -210,7 +210,9 @@ final class ConversationManager: Sendable {
 
     /// Merges duplicate ACTIVE conversations with same participantHash.
     @discardableResult
-    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async -> Bool {
+    func mergeActiveConversationDuplicates(
+        in context: NSManagedObjectContext
+    ) async -> Set<NSManagedObjectID>? {
         await merger.mergeActiveConversationDuplicates(in: context)
     }
 

@@ -371,13 +371,13 @@ extension DataCleanupService {
             Log.warning("Participant-set split migration sweep failed; will retry next cleanup", category: .coreData)
             return
         }
-        guard await mergeActiveConversationDuplicates(in: context) else {
+        guard let mergedWinnerIDs = await mergeActiveConversationDuplicates(in: context) else {
             await context.perform { context.rollback() }
             Log.warning("Participant-set duplicate merge failed; will retry next cleanup", category: .coreData)
             return
         }
         guard await rebuildParticipantRowsForRehomedConversations(
-            candidateIDs: rowRepairCandidateIDs,
+            candidateIDs: rowRepairCandidateIDs.union(mergedWinnerIDs),
             myAliases: myAliases,
             in: context
         ) else {

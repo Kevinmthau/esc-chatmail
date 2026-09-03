@@ -121,6 +121,49 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         XCTAssertEqual(merged.messageIDs, ["msg-thread-1", "msg-thread-2"])
     }
 
+    func testDuplicateWinnerRepairsRowsFromAbsorbedCandidate() async throws {
+        let exactCandidate = ConversationBuilder()
+            .withParticipantHash(Self.hashAliceBob)
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: Self.alice, to: exactCandidate)
+        addConversationParticipant(email: Self.bob, to: exactCandidate)
+        try addMessage(
+            id: "msg-exact-ab", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me, Self.bob], in: exactCandidate
+        )
+
+        let staleWinner = ConversationBuilder()
+            .withParticipantHash(Self.hashAliceBob)
+            .withLastMessageDate(Date(timeIntervalSince1970: 300))
+            .visible()
+            .build(in: context)
+        let staleWinnerID = staleWinner.id
+        addConversationParticipant(email: Self.alice, to: staleWinner)
+        addConversationParticipant(email: Self.bob, to: staleWinner)
+        addConversationParticipant(email: Self.carol, to: staleWinner)
+        for index in 0..<2 {
+            MessageBuilder()
+                .withId("msg-rowless-\(index)")
+                .withDate(Date(timeIntervalSince1970: TimeInterval(200 + index)))
+                .inConversation(staleWinner)
+                .build(in: context)
+        }
+        try context.save()
+
+        await runMigration()
+
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 1)
+        let merged = try XCTUnwrap(states.first)
+        XCTAssertEqual(merged.id, staleWinnerID, "The conversation with more messages should win")
+        XCTAssertEqual(merged.participantHash, Self.hashAliceBob)
+        XCTAssertEqual(merged.participantEmails, [Self.alice, Self.bob])
+        XCTAssertEqual(merged.messageIDs, ["msg-exact-ab", "msg-rowless-0", "msg-rowless-1"])
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.participantSetSplitMigrationKey))
+    }
+
     func testRollupsAndUnreadCountsCorrectAfterHideMyEmailRepair() async throws {
         let inbox = LabelBuilder().inbox().build(in: context)
         let source = ConversationBuilder()

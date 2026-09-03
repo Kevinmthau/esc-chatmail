@@ -139,8 +139,12 @@ struct ConversationMerger: Sendable {
 
     /// Merges duplicate ACTIVE conversations that have the same participantHash.
     /// Handles race conditions where multiple conversations were created for the same participants.
+    /// Returns the object IDs of winners that absorbed at least one loser, or nil
+    /// when the merge could not be completed and persisted.
     @discardableResult
-    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async -> Bool {
+    func mergeActiveConversationDuplicates(
+        in context: NSManagedObjectContext
+    ) async -> Set<NSManagedObjectID>? {
         let startTime = CFAbsoluteTimeGetCurrent()
 
         return await context.perform {
@@ -155,7 +159,7 @@ struct ConversationMerger: Sendable {
                 conversations = try context.fetch(request)
             } catch {
                 Log.error("Failed to fetch active conversations for duplicate merge", category: .coreData, error: error)
-                return false
+                return nil
             }
 
             // Group by participantHash
@@ -182,10 +186,11 @@ struct ConversationMerger: Sendable {
                     category: .coreData,
                     error: error
                 )
-                return false
+                return nil
             }
 
             var mergedCount = 0
+            var mergedWinnerIDs: Set<NSManagedObjectID> = []
             var deletedObjectIDs = [NSManagedObjectID]()
 
             // Process groups with duplicates
@@ -200,6 +205,7 @@ struct ConversationMerger: Sendable {
                     continue
                 }
                 let losers = mergeableGroup.filter { $0 != winner }
+                mergedWinnerIDs.insert(winner.objectID)
 
                 for loser in losers {
                     for action in pendingActionsByConversationID[loser.id] ?? [] {
@@ -215,7 +221,7 @@ struct ConversationMerger: Sendable {
             if mergedCount > 0 {
                 guard self.coreDataStack.saveIfNeeded(context: context) else {
                     context.rollback()
-                    return false
+                    return nil
                 }
 
                 self.mergeDeletions(deletedObjectIDs, into: [self.coreDataStack.viewContext], excluding: context)
@@ -223,7 +229,7 @@ struct ConversationMerger: Sendable {
                 let duration = CFAbsoluteTimeGetCurrent() - startTime
                 Log.info("Merged \(mergedCount) duplicate active conversations in \(String(format: "%.3f", duration))s", category: .conversation)
             }
-            return true
+            return mergedWinnerIDs
         }
     }
 
