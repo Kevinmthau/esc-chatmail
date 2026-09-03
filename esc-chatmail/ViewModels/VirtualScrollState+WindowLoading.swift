@@ -340,14 +340,27 @@ extension VirtualScrollState {
                 )
                 return nil
             }
-            let rebasedStartIndex = max(
-                0,
-                page.totalCount - configuration.visibleItemCount
+            // Rebase onto the observed tail at the requested window's width,
+            // mirroring the range-clamp branch below. Recomputing the head
+            // from `visibleItemCount` here discarded the accumulated start
+            // index loadLatestWindow threaded in as `startIndex`, so a save
+            // committing between the count and page loads collapsed a
+            // tail-abutting window back to the last `visibleItemCount` rows —
+            // exactly the post-send collapse `preservedWindowStartIndex`
+            // exists to prevent. The dataset-generation retry does not close
+            // that hole: it re-runs with the same stale `endIndex` and lands
+            // right back here. The `visibleItemCount` floor keeps a window
+            // narrower than one viewport (a short conversation that just
+            // grew) from rebasing to fewer rows than a collapse would give.
+            let desiredWindowCount = max(
+                configuration.visibleItemCount,
+                endIndex - startIndex
             )
+            let rebasedStartIndex = max(0, page.totalCount - desiredWindowCount)
             Log.diagnostic(
                 .chatView,
                 level: .info,
-                "VirtualScroll latest window count drift conv=\(conversationId) requested=\(startIndex)..<\(endIndex) observedTotal=\(page.totalCount); rebasing",
+                "VirtualScroll latest window count drift conv=\(conversationId) requested=\(startIndex)..<\(endIndex) observedTotal=\(page.totalCount); rebasing to \(rebasedStartIndex)..<\(page.totalCount)",
                 category: .ui
             )
             return await loadWindow(
