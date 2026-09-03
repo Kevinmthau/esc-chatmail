@@ -259,9 +259,6 @@ struct FreshInstallHandler {
 
     private func clearCaches() async {
         Log.debug("Clearing in-memory caches", category: .general)
-        await MainActor.run {
-            ConversationCache.shared.clear()
-        }
         await PersonCache.shared.clearCache()
         Log.debug("In-memory caches cleared", category: .general)
 
