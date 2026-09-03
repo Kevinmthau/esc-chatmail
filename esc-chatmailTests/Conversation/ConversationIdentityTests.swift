@@ -27,6 +27,50 @@ final class ConversationIdentityTests: XCTestCase {
         }
     }
 
+    func testMakeConversationIdentity_quotedLocalPartWithAngleBracket_preservesParticipantIdentity() {
+        let email = #""a<b"@example.com"#
+        let expected = makeParticipantSetIdentity(
+            normalizedEmails: [email],
+            myAliases: ["me@example.com"]
+        )
+
+        for headerName in ["From", "To", "Cc"] {
+            let identity = makeConversationIdentity(
+                from: [
+                    MessageHeader(name: headerName, value: "Display <\(email)>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                myAliases: ["me@example.com"]
+            )
+
+            XCTAssertEqual(identity.participants, [email], headerName)
+            XCTAssertEqual(identity.participantHash, expected.participantHash, headerName)
+            XCTAssertEqual(identity.type, .oneToOne, headerName)
+        }
+    }
+
+    func testMakeConversationIdentity_unbalancedDisplayNameBracket_preservesLaterParticipants() {
+        let participants = ["alice@example.com", "tom@x.com"]
+        let expected = makeParticipantSetIdentity(
+            normalizedEmails: Set(participants),
+            myAliases: ["me@example.com"]
+        )
+
+        for headerName in ["From", "To", "Cc"] {
+            let identity = makeConversationIdentity(
+                from: [
+                    MessageHeader(name: headerName, value: "Tom <3 Jerry <tom@x.com>, Alice <alice@example.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                myAliases: ["me@example.com"]
+            )
+
+            XCTAssertEqual(identity.participants, participants, headerName)
+            XCTAssertEqual(identity.participantHash, expected.participantHash, headerName)
+            XCTAssertEqual(identity.type, .group, headerName)
+        }
+    }
+
     func testMakeConversationIdentity_excludesHideMyEmailRelayParticipant() {
         let headers = [
             MessageHeader(name: "From", value: "San Francisco Ballet <tickets@sfballet.org>"),

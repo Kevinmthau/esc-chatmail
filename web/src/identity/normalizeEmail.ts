@@ -60,7 +60,9 @@ function firstBareEmailMatch(value: string): BareEmailMatch | null {
 
 /** Extracts the address from a header value: prefers `<...>`, falls back to a bare address. */
 export function extractEmail(value: string): string | null {
-  const angled = /<([^<>]+@[^<>]+)>/.exec(value)
+  // Quoted local parts can contain brackets and escaped quotes. Consume
+  // them as a unit, but never capture an unquoted nested '<' from a name.
+  const angled = /<((?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+)>/.exec(value)
   const angledEmail = angled?.[1]
   if (angledEmail !== undefined) return angledEmail
 
