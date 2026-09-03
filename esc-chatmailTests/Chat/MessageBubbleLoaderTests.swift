@@ -1398,7 +1398,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.hasRichHTMLContent)
         XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
         XCTAssertTrue(
-            MessageDisplayPolicy.shouldShowHTMLPreview(
+            MessageDisplayPolicy.shouldShowHTMLPreview(.init(
                 hasHTMLSource: result.htmlAnalysis.hasHTMLSource,
                 isForwardedEmail: true,
                 isNewsletter: false,
@@ -1407,7 +1407,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 isOneToOneConversation: true,
                 subject: "Fwd: Dinner reservation",
                 senderEmail: "alice@example.com"
-            )
+            ))
         )
     }
 

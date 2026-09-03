@@ -1834,7 +1834,7 @@ final class GoldenCorpusReplayTests: XCTestCase {
 
         for scenario in corpus.displayPolicyCases {
             XCTContext.runActivity(named: "displayPolicy:\(scenario.id)") { _ in
-                let shouldShowPreview = MessageDisplayPolicy.shouldShowHTMLPreview(
+                let shouldShowPreview = MessageDisplayPolicy.shouldShowHTMLPreview(.init(
                     hasHTMLSource: scenario.hasHTMLSource,
                     isForwardedEmail: scenario.isForwardedEmail,
                     isNewsletter: scenario.isNewsletter,
@@ -1842,8 +1842,9 @@ final class GoldenCorpusReplayTests: XCTestCase {
                     isFromMe: scenario.isFromMe,
                     isOneToOneConversation: scenario.isOneToOneConversation,
                     subject: scenario.subject,
-                    senderEmail: scenario.senderEmail
-                )
+                    senderEmail: scenario.senderEmail,
+                    isLikelyCalendarInvite: scenario.isLikelyCalendarInvite ?? false
+                ))
 
                 XCTAssertEqual(
                     shouldShowPreview,
@@ -1919,6 +1920,39 @@ final class GoldenCorpusReplayTests: XCTestCase {
         }
     }
 
+    func testCleanedSnippetCorpusReplay() async throws {
+        let corpus = try loadCorpus()
+        XCTAssertFalse(corpus.cleanedSnippetCases.isEmpty)
+        for scenario in corpus.cleanedSnippetCases {
+            let messageID = "golden-cleaned-\(scenario.id)-\(UUID().uuidString)"
+            let parts = [("text/html", scenario.html), ("text/plain", scenario.plainText)]
+                .enumerated().compactMap { index, item -> MessagePart? in
+                    guard let content = item.1 else { return nil }
+                    return MessagePart(
+                        partId: "0.\(index)", mimeType: item.0, filename: nil, headers: nil,
+                        body: MessageBody(size: content.utf8.count,
+                                          data: Data(content.utf8).base64EncodedString(), attachmentId: nil),
+                        parts: nil
+                    )
+                }
+            let message = GmailMessage(
+                id: messageID, threadId: messageID, labelIds: scenario.isFromMe ? ["SENT"] : ["INBOX"],
+                snippet: scenario.snippet, historyId: nil, internalDate: "1704067200000",
+                payload: MessagePart(
+                    partId: "0", mimeType: "multipart/alternative", filename: nil,
+                    headers: [MessageHeader(name: "From", value: scenario.isFromMe ? "me@example.com" : "alice@example.com"),
+                              MessageHeader(name: "To", value: "me@example.com")],
+                    body: nil, parts: parts
+                ), sizeEstimate: nil
+            )
+            // Pins createCleanedSnippet through its production ingest caller;
+            // no private helper is exposed and the chat-preview pipeline stays separate.
+            let processed = try await processor.processGmailMessage(message, myAliases: ["me@example.com"])
+            XCTAssertNotNil(processed, scenario.id)
+            XCTAssertEqual(processed?.cleanedSnippet, scenario.expected, scenario.id)
+        }
+    }
+
     // MARK: - Corpus Loading
 
     private func loadCorpus() throws -> GoldenCorpus {
@@ -1950,6 +1984,7 @@ private struct GoldenCorpus: Decodable {
     let richHTMLDetectionCases: [RichHTMLDetectionCase]
     let displayPolicyCases: [DisplayPolicyCase]
     let conversationListSnippetCases: [ConversationListSnippetCase]
+    let cleanedSnippetCases: [CleanedSnippetCase]
     let newsletterDetectionCases: [NewsletterDetectionCase]
 
     enum CodingKeys: String, CodingKey {
@@ -1959,6 +1994,7 @@ private struct GoldenCorpus: Decodable {
         case richHTMLDetectionCases
         case displayPolicyCases
         case conversationListSnippetCases
+        case cleanedSnippetCases
         case newsletterDetectionCases
     }
 
@@ -1970,6 +2006,7 @@ private struct GoldenCorpus: Decodable {
         richHTMLDetectionCases = try container.decodeIfPresent([RichHTMLDetectionCase].self, forKey: .richHTMLDetectionCases) ?? []
         displayPolicyCases = try container.decodeIfPresent([DisplayPolicyCase].self, forKey: .displayPolicyCases) ?? []
         conversationListSnippetCases = try container.decodeIfPresent([ConversationListSnippetCase].self, forKey: .conversationListSnippetCases) ?? []
+        cleanedSnippetCases = try container.decode([CleanedSnippetCase].self, forKey: .cleanedSnippetCases)
         newsletterDetectionCases = try container.decodeIfPresent([NewsletterDetectionCase].self, forKey: .newsletterDetectionCases) ?? []
     }
 }
@@ -2005,6 +2042,7 @@ private struct RichHTMLDetectionCase: Decodable {
 }
 
 private struct DisplayPolicyCase: Decodable {
+    let isLikelyCalendarInvite: Bool?
     let id: String
     let hasHTMLSource: Bool
     let isForwardedEmail: Bool
@@ -2077,4 +2115,13 @@ private struct NewsletterDetectionCase: Decodable {
         expectedScore = try container.decodeIfPresent(Int.self, forKey: .expectedScore)
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
     }
+}
+
+private struct CleanedSnippetCase: Decodable {
+    let id: String
+    let html: String?
+    let plainText: String?
+    let snippet: String?
+    let isFromMe: Bool
+    let expected: String?
 }
