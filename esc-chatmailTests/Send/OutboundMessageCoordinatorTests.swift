@@ -1200,6 +1200,132 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
 
+    func testSend_emptyRecipientsThrowsBeforeCreatingOptimisticMessage() async throws {
+        // Revert-check: OutboundMessageCoordinator.send's noRecipients guard
+        // used to return nil, so the catch below was never reached.
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let mutationTracker = MockOutboundSendMutationTracker()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            mutationTracker: mutationTracker
+        )
+
+        do {
+            _ = try await coordinator.send(
+                .compose(.init(
+                    recipientEmails: [],
+                    subject: "Draft",
+                    body: "Keep this draft",
+                    attachments: [],
+                    optimisticConversation: nil
+                ))
+            )
+            XCTFail("Expected a noRecipients error")
+        } catch {
+            guard case GmailSendService.SendError.noRecipients = error else {
+                return XCTFail("Expected noRecipients, got \(error)")
+            }
+        }
+
+        XCTAssertTrue(sendService.snapshot.createOptimisticCalls.isEmpty)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(mutationTracker.pendingMutationIDs.isEmpty)
+        let transition = outboundTaskRegistry.closeAdmission()
+        XCTAssertEqual(outboundTaskRegistry.reopenAdmission(after: transition), .reopened)
+    }
+
+    func testSend_emptyListReplySurfacesErrorAndPreservesChatDraft() async throws {
+        // Revert-check: returning nil for no recipients leaves sendErrorAlert nil.
+        let context = coreDataStack.viewContext
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let sendService = MockOutboundMessageSendService(context: context)
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            authSession: authSession
+        )
+        let tokenManager = MockTokenManager()
+        let dependencies = Dependencies(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: coreDataStack.persistentContainer),
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("list.example.com")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation])
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: dependencies.makeChatDependencies()
+        )
+        viewModel.replyText = "Keep this draft"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNil(result)
+        XCTAssertEqual(viewModel.replyText, "Keep this draft")
+        XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertEqual(viewModel.sendErrorAlert?.title, "Couldn’t Send Reply")
+        XCTAssertEqual(
+            viewModel.sendErrorAlert?.message,
+            GmailSendService.SendError.noRecipients.localizedDescription
+        )
+        XCTAssertTrue(sendService.snapshot.createOptimisticCalls.isEmpty)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
+    }
+
+    func testSend_noteToSelfRepliesToAccountAddress() async throws {
+        // Revert-check: removing ReplyMetadataBuilder's self-only fallback
+        // leaves no recipients and prevents this send from reaching transport.
+        let context = coreDataStack.viewContext
+        let sendService = MockOutboundMessageSendService(context: context)
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer()
+        )
+        let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
+        let target = MessageBuilder()
+            .withThreadId("self-thread")
+            .withSender(email: "me@example.com")
+            .withSubject("Notes")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, target])
+        let completion = expectation(description: "note-to-self send completes")
+
+        let result = try await coordinator.send(
+            .reply(.init(
+                context: .init(
+                    conversationObjectID: conversation.objectID,
+                    replyingToMessageObjectID: target.objectID,
+                    optimisticConversation: .existingConversation(
+                        ConversationReference(objectID: conversation.objectID)
+                    )
+                ),
+                body: "Another note",
+                attachments: []
+            )),
+            reconciliationHooks: .init(
+                onSuccess: { _ in completion.fulfill() },
+                onFailure: nil
+            )
+        )
+        await fulfillment(of: [completion], timeout: 1.0)
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(sendService.snapshot.createOptimisticCalls.first?.recipients, ["me@example.com"])
+        XCTAssertEqual(sendService.snapshot.sendReplyCalls.first?.recipients, ["me@example.com"])
+        XCTAssertEqual(sendService.snapshot.sendReplyCalls.first?.subject, "Re: Notes")
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 1)
+    }
+
     private func makeCoordinator(
         sendService: MockOutboundMessageSendService,
         syncPerformer: MockCoordinatorSyncPerformer,

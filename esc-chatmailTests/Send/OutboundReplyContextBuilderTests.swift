@@ -88,6 +88,33 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertTrue(resolvedOriginal?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
     }
 
+    func testBuildReplyMetadata_selfAliasesFallbackRequiresNonListParticipants() throws {
+        // Revert-check: ReplyMetadataBuilder's self-only fallback is required
+        // for legacy self aliases, but must not invent recipients for empty/list chats.
+        let builder = ReplyMetadataBuilder(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let cases: [(participants: [String], isList: Bool, expected: [String])] = [
+            (["legacy-self@example.com"], false, ["me@example.com"]),
+            (["alias@example.com"], false, ["me@example.com"]),
+            ([], false, []),
+            ([" "], false, []),
+            (["me@example.com"], true, []),
+            (["me@example.com", "friend@example.com"], false, ["friend@example.com"])
+        ]
+        for testCase in cases {
+            let metadata = try builder.buildReplyMetadata(
+                conversation: .init(
+                    participantEmails: testCase.participants,
+                    isListConversation: testCase.isList,
+                    latestThreadId: "thread"
+                ),
+                replyingTo: nil,
+                sendAsAliases: sendAsAliases,
+                userAliases: ["legacy-self@example.com"]
+            )
+            XCTAssertEqual(metadata.recipientEmails, testCase.expected)
+        }
+    }
+
     func testBuildReplyMetadata_defersOriginalHTMLResolution() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")

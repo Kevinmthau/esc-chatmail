@@ -259,12 +259,12 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             }
         }
 
-        let preparationTask: Task<OptimisticPreparation?, Error> = Task { @MainActor in
+        let preparationTask: Task<OptimisticPreparation, Error> = Task { @MainActor in
             let request = try await requestBuilder()
             let preparedSend = try await prepare(request)
             try checkActive(reservation)
             guard !preparedSend.recipientEmails.isEmpty else {
-                return nil
+                throw GmailSendService.SendError.noRecipients
             }
 
             let handle = try await sendService.createOptimisticMessage(
@@ -303,11 +303,6 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         } onCancel: {
             preparationTask.cancel()
         }
-        guard let preparation else {
-            Log.warning("Skipping outbound send with no recipients", category: .message)
-            return nil
-        }
-
         let preparedSend = preparation.preparedSend
         let optimisticSendHandle = preparation.handle
         let optimisticMessageID = optimisticSendHandle.optimisticMessageID

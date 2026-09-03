@@ -38,10 +38,21 @@ struct ReplyMetadataBuilder {
             }
         }
         let conversationRecipients = usableRecipients(conversation.participantEmails)
+        let normalizedParticipants = Set(
+            conversation.participantEmails.map(EmailNormalizer.normalize).filter { !$0.isEmpty }
+        )
         let recipients: [String]
         if conversation.isListConversation, let replyingTo {
             let targetRecipients = usableRecipients(replyingTo.participantEmails)
             recipients = targetRecipients.isEmpty ? conversationRecipients : targetRecipients
+        } else if !conversation.isListConversation,
+                  conversationRecipients.isEmpty,
+                  !normalizedParticipants.isEmpty,
+                  normalizedParticipants.isSubset(of: userAddresses),
+                  !EmailNormalizer.normalize(currentUserEmail).isEmpty {
+            // Note-to-self conversations keep a self participant for identity.
+            // Missing participants and list replies still require recipients.
+            recipients = [currentUserEmail]
         } else {
             recipients = conversationRecipients
         }
