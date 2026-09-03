@@ -319,9 +319,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             GIDSignIn.sharedInstance.signOut()
         },
         userDefaults: UserDefaults = .standard,
-        clearConversationCaches: @escaping @MainActor @Sendable () -> Void = {
-            ConversationCache.shared.clearAllCaches()
-        },
+        clearConversationCaches: @escaping @MainActor @Sendable () -> Void = {},
         clearParticipantCaches: @escaping @Sendable () async -> Void = {
             await ProductionParticipantCacheAccountTransition.closeAccountWorkAndClear()
         },

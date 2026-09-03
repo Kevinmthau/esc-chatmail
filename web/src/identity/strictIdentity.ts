@@ -11,11 +11,11 @@ import type { MsgParticipantRow } from '@/db/types'
  * `makeParticipantSetIdentity` core. Both paths must produce identical hashes
  * or migrated and freshly-synced messages fork into duplicate chats.
  *
- * Returns null when the message has no participant rows at all. A row-less
- * message's recipient set is unknowable — `senderEmail` alone cannot
- * reconstruct To/Cc, and for the user's own sent messages (whose rows were
- * never written on the optimistic-send reconciliation path) it would collapse
- * them into the note-to-self chat. Such messages must not be re-homed.
+ * Returns null when the message has no identity rows (no rows, or BCC only).
+ * A row-less message's recipient set is unknowable — `senderEmail` alone
+ * cannot reconstruct To/Cc, and for the user's own sent messages it would
+ * collapse them into the note-to-self chat. The repair layer may separately
+ * recover terminal outgoing rows from a validated conversation identity.
  *
  * @param senderEmail Stored un-normalized; only supplements a legacy row set
  *   that lacks a 'from' row. Pass '' when absent.
@@ -41,16 +41,15 @@ export function strictParticipantSetIdentity(
     hasIdentityRow = true
     if (participant.kind === 'from') {
       hasFromRow = true
-      // The header path drops a From whose display name is a Hide-My-Email
-      // placeholder; mirror it here so both derivations key HME mail the same
-      // way. Like iOS, test the person's CURRENT display name (which can have
-      // been enriched since the row was written); fall back to the frozen row
-      // name only when no person row exists — on web the email lives on the
-      // row, so a missing person must not drop the participant the way iOS's
-      // `guard let person` does.
-      const personName = personDisplayNames.get(normalizeEmail(participant.email))
-      if (isHideMyEmailDisplayName(personName ?? participant.displayName)) continue
     }
+    // The header path drops Hide-My-Email entries from From, To, and Cc;
+    // mirror that exclusion for every identity row. Like iOS, test the person's
+    // CURRENT display name (which can have been enriched since the row was
+    // written); fall back to the frozen row name only when no person row
+    // exists — on web the email lives on the row, so a missing person must
+    // not drop the participant the way iOS's `guard let person` does.
+    const personName = personDisplayNames.get(normalizeEmail(participant.email))
+    if (isHideMyEmailDisplayName(personName ?? participant.displayName)) continue
     // Row emails are normalized at write time; re-normalizing is idempotent.
     const normalized = normalizeEmail(participant.email)
     if (normalized !== '') emails.add(normalized)
@@ -60,9 +59,13 @@ export function strictParticipantSetIdentity(
 
   if (!hasFromRow && senderEmail !== '') {
     const normalized = normalizeEmail(senderEmail)
-    if (normalized !== '') emails.add(normalized)
+    if (normalized !== '' && !isHideMyEmailDisplayName(personDisplayNames.get(normalized))) {
+      emails.add(normalized)
+    }
   }
 
-  if (emails.size === 0) return null
+  // Identity rows existed, so an empty set here is meaningful: every address
+  // was self or HME. Feed it through the canonical helper to get the same
+  // deterministic note-to-self fallback as header routing.
   return makeParticipantSetIdentity(emails, myAliases)
 }

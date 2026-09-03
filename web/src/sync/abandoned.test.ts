@@ -42,6 +42,7 @@ afterEach(async () => {
 
 const ctx: PersistContext = {
   myAliases: new Set([ME]),
+  hideMyEmailAddresses: new Set(),
   sendAsAliases: [
     {
       email: ME,

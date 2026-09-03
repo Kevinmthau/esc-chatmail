@@ -14,7 +14,6 @@ import Combine
 /// ```
 ///
 /// The coordinator automatically invalidates:
-/// - ConversationCache when Conversation entities are updated/deleted
 /// - PersonCache when Person entities are updated/deleted
 /// - ProcessedTextCache when Message entities are deleted
 @MainActor
@@ -48,13 +47,11 @@ final class CacheCoordinator {
             let attachmentId: String
         }
 
-        var conversationIdsToInvalidate: Set<String> = []
         var personEmailsToInvalidate: Set<String> = []
         var messageIdsToInvalidate: Set<String> = []
         var deletedHTMLArtifacts: Set<DeletedHTMLArtifact> = []
         var attachmentPathsToDelete: Set<String> = []
         var attachmentIdentitiesToInvalidate: Set<AttachmentIdentity> = []
-        var shouldClearConversationCache = false
         var shouldClearPersonCache = false
     }
 
@@ -190,18 +187,6 @@ final class CacheCoordinator {
         // Access managed object values on the context's queue to avoid cross-queue reads.
         for objectID in updatedObjectIDs.union(deletedObjectIDs) {
             let object = context.object(with: objectID)
-            if let conversation = object as? Conversation {
-                // Deleted objects can fault/lose property values; use KVC defensively.
-                if let id = conversation.value(forKey: "id") as? NSUUID {
-                    plan.conversationIdsToInvalidate.insert(id.uuidString)
-                } else if let id = conversation.value(forKey: "id") as? UUID {
-                    plan.conversationIdsToInvalidate.insert(id.uuidString)
-                } else {
-                    plan.shouldClearConversationCache = true
-                }
-                continue
-            }
-
             if let person = object as? Person {
                 if let email = person.value(forKey: "email") as? String, !email.isEmpty {
                     plan.personEmailsToInvalidate.insert(email)
@@ -273,17 +258,6 @@ final class CacheCoordinator {
         accountContext: CacheInvalidationAccountContext
     ) {
         guard isAccountContextCurrent(accountContext) else { return }
-
-        // Invalidate conversation cache
-        if plan.shouldClearConversationCache {
-            Log.warning("Conversation id missing during cache invalidation; clearing ConversationCache", category: .coreData)
-            ConversationCache.shared.clear()
-        } else if !plan.conversationIdsToInvalidate.isEmpty {
-            for conversationId in plan.conversationIdsToInvalidate {
-                ConversationCache.shared.invalidate(conversationId)
-            }
-            Log.debug("Invalidated \(plan.conversationIdsToInvalidate.count) conversation cache entries", category: .coreData)
-        }
 
         let shouldProcessDeletedArtifacts =
             !plan.messageIdsToInvalidate.isEmpty ||

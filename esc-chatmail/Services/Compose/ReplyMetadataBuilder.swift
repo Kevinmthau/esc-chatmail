@@ -38,10 +38,33 @@ struct ReplyMetadataBuilder {
             }
         }
         let conversationRecipients = usableRecipients(conversation.participantEmails)
+        let replyTargetRecipients = replyingTo.map {
+            usableRecipients($0.participantEmails)
+        } ?? []
+        let normalizedParticipants = Set(
+            conversation.participantEmails.map(EmailNormalizer.normalize).filter { !$0.isEmpty }
+        )
+        let selfFallbackEvidence: ReplyParticipantEvidence?
+        if let replyingTo {
+            // A targeted reply must be authorized by that exact message. Never
+            // borrow evidence from another conversation row when its snapshot
+            // is incomplete or synthetic.
+            selfFallbackEvidence = replyingTo.participantEvidence
+        } else {
+            selfFallbackEvidence = conversation.latestThreadParticipantEvidence
+        }
         let recipients: [String]
-        if conversation.isListConversation, let replyingTo {
-            let targetRecipients = usableRecipients(replyingTo.participantEmails)
-            recipients = targetRecipients.isEmpty ? conversationRecipients : targetRecipients
+        if conversation.isListConversation, replyingTo != nil {
+            recipients = replyTargetRecipients.isEmpty ? conversationRecipients : replyTargetRecipients
+        } else if !conversation.isListConversation,
+                  conversationRecipients.isEmpty,
+                  !normalizedParticipants.isEmpty,
+                  normalizedParticipants.isSubset(of: userAddresses),
+                  selfFallbackEvidence?.confirmsSelfOnly(in: userAddresses) == true,
+                  !EmailNormalizer.normalize(currentUserEmail).isEmpty {
+            // Note-to-self conversations keep a self participant for identity.
+            // Missing or inconsistent message evidence must fail closed instead.
+            recipients = [currentUserEmail]
         } else {
             recipients = conversationRecipients
         }

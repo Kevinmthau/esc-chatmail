@@ -276,14 +276,8 @@ struct CacheConfig {
     /// Maximum items in HTML content cache
     static let htmlCacheSize = 1000
 
-    /// Maximum items in conversation cache
-    static let conversationCacheSize = 100
-
     /// Time-to-live for cached profile photos (24 hours)
     static let photoCacheTTL: TimeInterval = 86400
-
-    /// Time-to-live for conversation cache entries (5 minutes)
-    static let conversationCacheTTL: TimeInterval = 300
 
     /// Time-to-live for disk image cache (7 days)
     static let diskImageCacheTTL: TimeInterval = 604800

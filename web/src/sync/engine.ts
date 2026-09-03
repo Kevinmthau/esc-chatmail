@@ -5,8 +5,9 @@
 
 import { setSyncProgress } from '@/db/kv'
 import { AuthRequiredError } from '@/gmail/errors'
-import type { SyncDeps } from './deps'
+import { depsNow, type SyncDeps } from './deps'
 import { runIncrementalSync, type SyncRunResult } from './incremental'
+import { repairParticipantSetConversations } from './participantSetRepair'
 
 export type SyncReason = 'manual' | 'startup' | 'interval' | 'visibility' | 'online'
 
@@ -76,7 +77,13 @@ export async function runSync(deps: SyncDeps, reason: SyncReason): Promise<RunSy
   return currentLock().request(syncLockName(deps.accountEmail), async (acquired) => {
     if (!acquired) return { ran: false }
     try {
+      // The cached alias/People snapshot can repair stale local routing before
+      // any network work. A second pass catches aliases or Person display-name
+      // enrichment learned during this sync; its signature gate makes the
+      // usual no-change pass a small metadata check.
+      await repairParticipantSetConversations(deps.db, deps.accountEmail, depsNow(deps))
       const result = await runIncrementalSync(deps)
+      await repairParticipantSetConversations(deps.db, deps.accountEmail, depsNow(deps))
       return { ran: true, result }
     } catch (error) {
       const message =

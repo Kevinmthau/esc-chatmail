@@ -35,10 +35,8 @@ import {
 import type { SendMessageResponse } from '@/gmail/types'
 import type { TokenBroker } from '@/gmail/gmailFetch'
 import { normalizeEmail } from '@/identity/normalizeEmail'
-import {
-  makeConversationIdentity,
-  makeRecipientParticipantSetIdentity,
-} from '@/identity/participantSet'
+import { makeConversationIdentity } from '@/identity/participantSet'
+import { makeStoredRecipientParticipantSetIdentity } from '@/identity/recipientIdentity'
 import { resolveConversation } from '@/identity/routing'
 import { newId } from '@/lib/uuid'
 import { createCleanSnippet } from '@/mime/preview'
@@ -284,7 +282,11 @@ export async function sendMessage(
   } else {
     // Compose path: the participant hash MUST come from identity/participantSet
     // so the optimistic conversation and the synced-back copy hash identically.
-    const setIdentity = makeRecipientParticipantSetIdentity(draft.to ?? [], myAliases)
+    const setIdentity = await makeStoredRecipientParticipantSetIdentity(
+      db,
+      draft.to ?? [],
+      myAliases,
+    )
     if (setIdentity === null) throw new SendFailedError('No valid recipients')
     const identity = makeConversationIdentity(setIdentity)
     const resolved = await resolveConversation(
