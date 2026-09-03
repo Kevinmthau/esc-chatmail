@@ -267,7 +267,9 @@ extension DataCleanupService {
 
 extension DataCleanupService {
 
-    static let participantSetSplitMigrationKey = "hasDoneParticipantSetSplitV1"
+    // Bump whenever strict participant extraction changes so stores that already
+    // completed an older pass are re-evaluated with the corrected identity rule.
+    static let participantSetSplitMigrationKey = "hasDoneParticipantSetSplitV2"
 
     /// One-time migration: re-buckets every message into the conversation matching
     /// its strict participant set (From+To+Cc minus the user's aliases). Splits

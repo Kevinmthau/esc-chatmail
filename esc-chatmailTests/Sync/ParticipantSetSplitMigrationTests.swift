@@ -325,6 +325,32 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         XCTAssertEqual(states.first?.messageIDs, ["msg-ab-wrong-home"])
     }
 
+    func testV1FlagDoesNotBlockHideMyEmailRecipientRepair() async throws {
+        migrationFlags.set(true, forKey: "hasDoneParticipantSetSplitV1")
+
+        let relay = "relay@icloud.com"
+        let staleHash = calculateParticipantHash(from: [Self.alice, relay])
+        let staleConversation = ConversationBuilder()
+            .withParticipantHash(staleHash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        let staleConversationID = staleConversation.id
+        try addMessage(
+            id: "msg-hme-cc", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me],
+            cc: ["Hide My Email <\(relay)>"], in: staleConversation
+        )
+        try context.save()
+
+        await runMigration()
+
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.participantSetSplitMigrationKey))
+        let states = try fetchConversationStates()
+        XCTAssertNil(states.first { $0.id == staleConversationID })
+        XCTAssertEqual(try state(Self.hashAlice, in: states).messageIDs, ["msg-hme-cc"])
+    }
+
     func testEmptyAliasProviderDoesNotBurnFlag() async throws {
         let inbox = LabelBuilder().inbox().build(in: context)
         let lumped = ConversationBuilder()
