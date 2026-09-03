@@ -88,6 +88,35 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertTrue(resolvedOriginal?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
     }
 
+    func testBuildReplyMetadata_excludesHideMyEmailConversationParticipant() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        addConversationParticipant(
+            email: "relay@icloud.com",
+            displayName: "Hide My Email",
+            to: conversation
+        )
+        let target = MessageBuilder()
+            .withId("message-hme")
+            .withThreadId("thread-hme")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, target])
+
+        let metadata = try await makeBuilder().buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: target.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.recipientEmails, ["friend@example.com"])
+    }
+
     func testBuildReplyMetadata_defersOriginalHTMLResolution() async throws {
         let context = coreDataStack.viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
@@ -684,6 +713,37 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         )
     }
 
+    func testBuildReplyMetadata_listTargetExcludesHideMyEmailParticipant() async throws {
+        let fixture = try makeRotatingListConversation()
+        fixture.laterMessage.replyTo =
+            #"Hide My Email <reply-relay@icloud.com>, Reply Control <reply-control@example.com>"#
+        let relay = PersonBuilder()
+            .withEmail("participant-relay@icloud.com")
+            .withDisplayName("Hide My Email")
+            .build(in: coreDataStack.viewContext)
+        addMessageParticipant(person: relay, kind: .cc, to: fixture.laterMessage)
+
+        let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: fixture.conversation.objectID,
+                replyingToMessageObjectID: fixture.laterMessage.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: fixture.conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            metadata.recipientEmails,
+            [
+                "reply-control@example.com",
+                "later-list@example.com",
+                "later-cc@example.com"
+            ]
+        )
+        XCTAssertFalse(metadata.recipientEmails.contains("later-sender@example.com"))
+    }
+
     func testBuildReplyMetadata_listConversationUsesLatestInboundReplyToInsteadOfFrom() async throws {
         let fixture = try makeRotatingListConversation()
         fixture.laterMessage.replyTo = #"GitHub <reply+conversation@reply.github.com>"#
@@ -1187,11 +1247,12 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
 
     private func addConversationParticipant(
         email: String,
+        displayName: String? = nil,
         to conversation: Conversation
     ) {
         let person = PersonBuilder()
             .withEmail(email)
-            .noDisplayName()
+            .withDisplayName(displayName)
             .build(in: coreDataStack.viewContext)
         let participant = coreDataStack.viewContext.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()

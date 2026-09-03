@@ -9,6 +9,11 @@ import CoreData
 actor ConversationRollupMutationSerializer {
     static let shared = ConversationRollupMutationSerializer()
 
+    /// Cleanup reads a store-wide snapshot before making destructive conversation
+    /// decisions. Optimistic-send creation uses the same key so its durable
+    /// message + mutation record lands wholly before or wholly after that snapshot.
+    private static let cleanupSensitiveMutationKey = "conversation-cleanup-sensitive-mutation"
+
     private actor CompletionGate {
         private var isOpen = false
         private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -40,6 +45,7 @@ actor ConversationRollupMutationSerializer {
 
     func perform<Value: Sendable>(
         conversationKeys: Set<String>,
+        onEnqueued: (@Sendable () async -> Void)? = nil,
         operation: @escaping @Sendable () async -> Value
     ) async -> Value {
         guard !conversationKeys.isEmpty else {
@@ -62,6 +68,7 @@ actor ConversationRollupMutationSerializer {
             tailsByConversationKey[key] = completionTask
             tokensByConversationKey[key] = token
         }
+        await onEnqueued?()
 
         let value = await task.value
 
@@ -75,6 +82,7 @@ actor ConversationRollupMutationSerializer {
 
     func performThrowing<Value: Sendable>(
         conversationKeys: Set<String>,
+        onEnqueued: (@Sendable () async -> Void)? = nil,
         operation: @escaping @Sendable () async throws -> Value
     ) async throws -> Value {
         guard !conversationKeys.isEmpty else {
@@ -93,6 +101,7 @@ actor ConversationRollupMutationSerializer {
             tailsByConversationKey[key] = completionTask
             tokensByConversationKey[key] = token
         }
+        await onEnqueued?()
 
         do {
             for previousTask in previousTasks {
@@ -108,6 +117,28 @@ actor ConversationRollupMutationSerializer {
             releaseTails(for: conversationKeys, token: token)
             throw error
         }
+    }
+
+    func performCleanupSensitiveMutation<Value: Sendable>(
+        onEnqueued: (@Sendable () async -> Void)? = nil,
+        operation: @escaping @Sendable () async -> Value
+    ) async -> Value {
+        await perform(
+            conversationKeys: [Self.cleanupSensitiveMutationKey],
+            onEnqueued: onEnqueued,
+            operation: operation
+        )
+    }
+
+    func performThrowingCleanupSensitiveMutation<Value: Sendable>(
+        onEnqueued: (@Sendable () async -> Void)? = nil,
+        operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try await performThrowing(
+            conversationKeys: [Self.cleanupSensitiveMutationKey],
+            onEnqueued: onEnqueued,
+            operation: operation
+        )
     }
 
     func performSyncMutation<Value: Sendable>(

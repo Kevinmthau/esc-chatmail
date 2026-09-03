@@ -5,16 +5,54 @@ import CoreData
 
 extension DataCleanupService {
 
-    /// Removes conversations that have no messages and no participants.
+    /// Removes conversations that have no messages, participants, or user state.
+    /// Empty pinned/muted shells are archived and hidden instead.
     func removeEmptyConversations(in context: NSManagedObjectContext) async {
         let startTime = CFAbsoluteTimeGetCurrent()
 
         await context.perform {
-            let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
-            request.predicate = ConversationPredicates.empty
-            request.resultType = .managedObjectIDResultType
-
             do {
+                let pendingSendConversationIDs = try self.pendingSendConversationIDs(in: context)
+                let pendingActionConversationIDs = Set(
+                    try PendingAction.referencesByConversationID(in: context).keys
+                )
+                let protectedConversationIDs = pendingSendConversationIDs
+                    .union(pendingActionConversationIDs)
+                let notProtected = protectedConversationIDs.isEmpty
+                    ? NSPredicate(value: true)
+                    : NSPredicate(
+                        format: "NOT (id IN %@)",
+                        Array(protectedConversationIDs) as NSArray
+                    )
+
+                // A crash-safe identity repair can leave an empty shell as the
+                // only persisted owner of pin/mute state. Archive it through
+                // the canonical empty rollup instead of exposing a ghost row
+                // or batch-deleting user state.
+                let statefulRequest = Conversation.fetchRequest()
+                statefulRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    ConversationPredicates.empty,
+                    NSPredicate(format: "pinned == YES OR muted == YES"),
+                    notProtected
+                ])
+                let emptySnapshot = ConversationRollupSnapshot.make(from: [])
+                for conversation in try context.fetch(statefulRequest) {
+                    emptySnapshot.apply(to: conversation)
+                }
+                guard self.coreDataStack.saveIfNeeded(
+                    context: context,
+                    caller: "DataCleanupService.removeEmptyConversations.archiveStateful"
+                ) else {
+                    return
+                }
+
+                let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
+                request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    ConversationPredicates.empty,
+                    NSPredicate(format: "pinned == NO AND muted == NO"),
+                    notProtected
+                ])
+                request.resultType = .managedObjectIDResultType
                 guard let objectIDs = try context.fetch(request) as? [NSManagedObjectID],
                       !objectIDs.isEmpty else {
                     return
@@ -43,24 +81,51 @@ extension DataCleanupService {
 
     /// Fallback for removing empty conversations when batch delete fails.
     internal func removeEmptyConversationsFallback(in context: NSManagedObjectContext) {
+        let protectedConversationIDs: Set<UUID>
+        do {
+            let pendingSendConversationIDs = try self.pendingSendConversationIDs(in: context)
+            let pendingActionConversationIDs = Set(
+                try PendingAction.referencesByConversationID(in: context).keys
+            )
+            protectedConversationIDs = pendingSendConversationIDs
+                .union(pendingActionConversationIDs)
+        } catch {
+            Log.error(
+                "Failed to fetch protected references before fallback empty conversation cleanup",
+                category: .coreData,
+                error: error
+            )
+            return
+        }
+
         let request = Conversation.fetchRequest()
         request.fetchBatchSize = 50
 
         guard let conversations = try? context.fetch(request) else { return }
 
         var removedCount = 0
-        for conversation in conversations {
+        var archivedCount = 0
+        let emptySnapshot = ConversationRollupSnapshot.make(from: [])
+        for conversation in conversations where !protectedConversationIDs.contains(conversation.id) {
             let hasParticipants = (conversation.participants?.count ?? 0) > 0
             let hasMessages = (conversation.messages?.count ?? 0) > 0
 
             if !hasParticipants && !hasMessages {
-                context.delete(conversation)
-                removedCount += 1
+                if conversation.pinned || conversation.muted {
+                    emptySnapshot.apply(to: conversation)
+                    archivedCount += 1
+                } else {
+                    context.delete(conversation)
+                    removedCount += 1
+                }
             }
         }
 
-        if removedCount > 0 {
-            Log.info("Removed \(removedCount) empty conversations (fallback)", category: .coreData)
+        if removedCount > 0 || archivedCount > 0 {
+            Log.info(
+                "Cleaned empty conversations (fallback): removed \(removedCount), archived \(archivedCount) stateful",
+                category: .coreData
+            )
             coreDataStack.saveIfNeeded(context: context)
         }
     }
@@ -120,8 +185,9 @@ extension DataCleanupService {
 
     // MARK: - Orphaned Data Cleanup
 
-    /// Removes orphaned PendingActions whose conversation has been deleted.
-    /// This can happen if a conversation is deleted while actions are pending.
+    /// Detaches PendingActions whose metadata-only conversation has been
+    /// deleted. Their message ID or payload remains the executable target, so
+    /// deleting the action here would silently discard a queued user command.
     func removeOrphanedPendingActions(in context: NSManagedObjectContext) async {
         let startTime = CFAbsoluteTimeGetCurrent()
 
@@ -144,20 +210,22 @@ extension DataCleanupService {
                 let existingResults = try context.fetch(existingRequest)
                 let existingIds = Set(existingResults.compactMap { $0["id"] as? UUID })
 
-                // Delete actions whose conversation no longer exists
-                var removedCount = 0
+                // Detach actions whose conversation no longer exists. This is
+                // the race-safe backstop when an action is enqueued after a
+                // destructive cleanup pass captured its retargeting map.
+                var detachedCount = 0
                 for action in actions {
                     if let conversationId = action.conversationId, !existingIds.contains(conversationId) {
-                        Log.debug("Removing orphaned pending action for deleted conversation: \(conversationId)", category: .coreData)
-                        context.delete(action)
-                        removedCount += 1
+                        Log.debug("Detaching pending action from deleted conversation: \(conversationId)", category: .coreData)
+                        action.conversationId = nil
+                        detachedCount += 1
                     }
                 }
 
-                if removedCount > 0 {
+                if detachedCount > 0 {
                     try context.save()
                     let duration = CFAbsoluteTimeGetCurrent() - startTime
-                    Log.info("Removed \(removedCount) orphaned pending actions in \(String(format: "%.3f", duration))s", category: .coreData)
+                    Log.info("Detached \(detachedCount) pending actions from deleted conversations in \(String(format: "%.3f", duration))s", category: .coreData)
                 }
             } catch {
                 Log.error("Failed to cleanup orphaned pending actions", category: .coreData, error: error)

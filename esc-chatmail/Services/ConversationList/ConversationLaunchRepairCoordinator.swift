@@ -30,6 +30,7 @@ final class ConversationLaunchRepairCoordinator {
     private let conversationManager: ConversationManager
     private let syncWaiter: any ForegroundSyncPerforming
     private let notificationCenter: NotificationCenter
+    private let conversationMutationSerializer: ConversationRollupMutationSerializer
     private let taskManager = ViewModelTaskManager()
     private var cancellables = Set<AnyCancellable>()
 
@@ -54,12 +55,14 @@ final class ConversationLaunchRepairCoordinator {
         storage: StorageDependencies,
         conversationManager: ConversationManager,
         syncWaiter: any ForegroundSyncPerforming,
-        notificationCenter: NotificationCenter = .default
+        notificationCenter: NotificationCenter = .default,
+        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.storage = storage
         self.conversationManager = conversationManager
         self.syncWaiter = syncWaiter
         self.notificationCenter = notificationCenter
+        self.conversationMutationSerializer = conversationMutationSerializer
         bindSyncCompletionRepairRearm()
     }
 
@@ -203,15 +206,13 @@ final class ConversationLaunchRepairCoordinator {
             // sync-completion re-arm re-sweeps anything still broken.
             context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
 
-            let archivedCount = await conversationManager.archiveMessagelessConversations(in: context)
+            guard let archivedCount = await conversationMutationSerializer
+                .performCleanupSensitiveMutation(operation: { [self] in
+                    await self.archiveMessagelessConversationsAndSave(in: context)
+                }) else {
+                return
+            }
             if archivedCount > 0 {
-                guard storage.saveIfNeeded(context) else {
-                    Log.error(
-                        "Failed to save \(archivedCount) archived message-less conversations; skipping preview repair",
-                        category: .conversation
-                    )
-                    return
-                }
                 Log.info("Archived \(archivedCount) stranded message-less conversations", category: .conversation)
             }
 
@@ -247,6 +248,43 @@ final class ConversationLaunchRepairCoordinator {
                 await Task.yield()
             }
         }
+    }
+
+    /// The stranded-shell sweep is destructive conversation maintenance. Read
+    /// pending anchors and persist the archive while holding the same gate as
+    /// optimistic graph creation, failing closed if either operation fails.
+    private func archiveMessagelessConversationsAndSave(
+        in context: NSManagedObjectContext
+    ) async -> Int? {
+        let pendingConversationIDs: Set<UUID>? = await context.perform {
+            do {
+                return Set(
+                    try context.fetch(OutboundSendMutationRecord.fetchRequest())
+                        .compactMap(\.conversationId)
+                )
+            } catch {
+                Log.error(
+                    "Failed to fetch pending sends before stranded-shell cleanup",
+                    category: .conversation,
+                    error: error
+                )
+                return nil
+            }
+        }
+        guard let pendingConversationIDs else { return nil }
+
+        let archivedCount = await conversationManager.archiveMessagelessConversations(
+            in: context,
+            excludingConversationIDs: pendingConversationIDs
+        )
+        guard archivedCount == 0 || storage.saveIfNeeded(context) else {
+            Log.error(
+                "Failed to save \(archivedCount) archived message-less conversations; skipping preview repair",
+                category: .conversation
+            )
+            return nil
+        }
+        return archivedCount
     }
 
     /// Whether any conversations exist in the persistent store. Gates the

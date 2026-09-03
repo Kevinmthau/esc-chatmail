@@ -5,7 +5,12 @@
 // participantSet.test.ts.
 
 import { sha256Hex } from './hash'
-import { normalizeEmail } from './normalizeEmail'
+import {
+  extractDisplayName,
+  extractEmail,
+  isHideMyEmailDisplayName,
+  normalizeEmail,
+} from './normalizeEmail'
 import { newId } from '@/lib/uuid'
 import type { ConversationType } from '@/db/types'
 
@@ -121,9 +126,21 @@ export function makeParticipantSetIdentity(
 export function makeRecipientParticipantSetIdentity(
   recipients: readonly string[],
   myAliases: ReadonlySet<string>,
+  hideMyEmailAddresses: ReadonlySet<string> = new Set(),
 ): ParticipantSetIdentity | null {
-  const normalized = new Set(recipients.map(normalizeEmail).filter((email) => email !== ''))
-  if (normalized.size === 0) return null
+  const usable = recipients
+    .map((recipient) => ({
+      email: normalizeEmail(extractEmail(recipient) ?? recipient),
+      isHideMyEmail: isHideMyEmailDisplayName(extractDisplayName(recipient)),
+    }))
+    .filter((recipient) => recipient.email !== '')
+  if (usable.length === 0) return null
+
+  const normalized = new Set(
+    usable
+      .filter((recipient) => !recipient.isHideMyEmail && !hideMyEmailAddresses.has(recipient.email))
+      .map((recipient) => recipient.email),
+  )
   return makeParticipantSetIdentity(normalized, myAliases)
 }
 

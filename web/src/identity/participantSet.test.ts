@@ -138,6 +138,28 @@ describe('makeRecipientParticipantSetIdentity', () => {
     expect(identity?.participantHash).toBe(VECTORS.gmailNormalized)
   })
 
+  it('excludes raw and cached Hide My Email recipients before keying', () => {
+    const aliases = new Set(['me@example.com'])
+    const cachedRelay = 'cached@privaterelay.appleid.com'
+    const identity = makeRecipientParticipantSetIdentity(
+      ['Alice <alice@example.com>', 'Hide My Email <raw@icloud.com>', cachedRelay],
+      aliases,
+      new Set([cachedRelay]),
+    )
+
+    expect(identity?.participants).toEqual(['alice@example.com'])
+  })
+
+  it('uses the self fallback when every usable recipient is Hide My Email', () => {
+    const identity = makeRecipientParticipantSetIdentity(
+      ['relay@privaterelay.appleid.com'],
+      new Set(['me@example.com']),
+      new Set(['relay@privaterelay.appleid.com']),
+    )
+
+    expect(identity?.participants).toEqual(['me@example.com'])
+  })
+
   it('returns null when nothing normalizes to a usable address', () => {
     expect(makeRecipientParticipantSetIdentity([], new Set())).toBeNull()
     expect(makeRecipientParticipantSetIdentity(['   '], new Set())).toBeNull()
@@ -235,6 +257,7 @@ describe('golden corpus: conversationIdentityCases', () => {
         },
         {
           myAliases: new Set(scenario.myAliases.map(normalizeEmail)),
+          hideMyEmailAddresses: new Set(),
           sendAsAliases: [],
           knownLabelIds: null,
         },

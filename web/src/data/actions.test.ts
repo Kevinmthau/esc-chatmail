@@ -52,6 +52,17 @@ describe('data/actions facade', () => {
       await expect(findConversationByParticipants(['nobody@example.com'])).resolves.toBeNull()
       await expect(findConversationByParticipants([])).resolves.toBeNull()
     })
+
+    it('uses cached Hide My Email classification for recipient lookup', async () => {
+      const relay = 'relay@privaterelay.appleid.com'
+      const identity = makeRecipientParticipantSetIdentity([ME], new Set([ME]))
+      await db.people.add({ email: relay, displayName: 'Hide My Email' })
+      await db.conversations.add(
+        convoRow({ id: 'self-chat', participantHash: identity?.participantHash ?? '' }),
+      )
+
+      await expect(findConversationByParticipants([relay])).resolves.toBe('self-chat')
+    })
   })
 
   describe('searchPeople', () => {

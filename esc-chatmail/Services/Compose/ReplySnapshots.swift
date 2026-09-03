@@ -65,7 +65,13 @@ struct ReplyConversationSnapshot: Sendable {
             } ?? []
         } else {
             self.participantEmails = Array(conversation.participants ?? [])
-                .compactMap { $0.person?.email }
+                .compactMap { participant in
+                    guard let person = participant.person,
+                          !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
+                        return nil
+                    }
+                    return person.email
+                }
         }
         self.isListConversation = isListConversation
         self.latestThreadId = replyingTo?.threadId ?? (isListConversation
@@ -293,7 +299,15 @@ private enum ReplyParticipantSnapshot {
         replacingFromWithReplyTo: Bool = false
     ) -> [String] {
         let replyToEmails = replacingFromWithReplyTo
-            ? message.replyTo.map { EmailAddressListParser.emailAddresses(from: $0) } ?? []
+            ? message.replyTo.map { header in
+                EmailAddressListParser.addressTokens(from: header)
+                    .filter { token in
+                        !EmailNormalizer.isHideMyEmailDisplayName(
+                            EmailNormalizer.extractDisplayName(from: token)
+                        )
+                    }
+                    .flatMap { EmailAddressListParser.emailAddresses(from: $0) }
+            } ?? []
             : []
         let participants = Array(message.participants ?? [])
             .filter {
@@ -314,7 +328,11 @@ private enum ReplyParticipantSnapshot {
         }
 
         recipientEmails.append(contentsOf: participants.compactMap { participant in
-            guard let email = participant.person?.email else { return nil }
+            guard let person = participant.person,
+                  !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
+                return nil
+            }
+            let email = person.email
             let normalized = EmailNormalizer.normalize(email)
             guard !normalized.isEmpty, seen.insert(normalized).inserted else {
                 return nil
