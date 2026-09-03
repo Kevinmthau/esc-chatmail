@@ -55,6 +55,12 @@ describe('extractEmail', () => {
     expect(extractEmail('"Smith, Alice" <alice@example.com>')).toBe('alice@example.com')
   })
 
+  it('ignores an unbalanced angle bracket in the display name', () => {
+    // Revert-check: extractEmail must exclude both angle brackets from the
+    // address capture, or it returns "3 Jerry <tom@x.com".
+    expect(extractEmail('Tom <3 Jerry <tom@x.com>')).toBe('tom@x.com')
+  })
+
   it('falls back to a bare address', () => {
     expect(extractEmail('alice@example.com')).toBe('alice@example.com')
     expect(extractEmail('Alice alice@example.com')).toBe('alice@example.com')
