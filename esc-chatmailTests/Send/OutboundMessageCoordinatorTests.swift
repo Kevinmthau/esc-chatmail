@@ -222,6 +222,69 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(viewModel.replyText, "")
     }
 
+    func testSend_chatReplyWithoutTargetPreservesDraftBehindThreadlessLocalSend() async throws {
+        let context = coreDataStack.viewContext
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let sendService = MockOutboundMessageSendService(context: context)
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            authSession: authSession
+        )
+        let tokenManager = MockTokenManager()
+        let dependencies = Dependencies(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: coreDataStack.persistentContainer),
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        _ = MessageBuilder()
+            .withThreadId("unrelated-old-thread")
+            .withSubject("Earlier topic")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        let localID = UUID().uuidString
+        let localMessage = MessageBuilder()
+            .withId(localID)
+            .withThreadId("")
+            .withSubject("New topic")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .withSender(email: "me@example.com")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        localMessage.messageId = MimeBuilder.messageId(forOptimisticMessageID: localID)
+        try context.obtainPermanentIDs(for: [conversation, localMessage])
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = localID
+        record.createdAt = Date()
+        record.conversationId = conversation.id
+        record.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+        record.hidden = false
+        record.newlyInsertedConversation = false
+        record.remoteCommittedMessageId = OutboundSendRemoteState.inFlightMessageID
+        try context.save()
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: dependencies.makeChatDependencies()
+        )
+        viewModel.replyText = "Follow-up to the new topic"
+
+        let result = await viewModel.sendReply()
+        _ = outboundTaskRegistry.closeAdmission()
+        await outboundTaskRegistry.cancelAndAwaitAll()
+
+        XCTAssertNil(result)
+        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.replyText, "Follow-up to the new topic")
+        XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertTrue(sendService.snapshot.sendReplyCalls.isEmpty)
+        XCTAssertTrue(sendService.snapshot.sendNewCalls.isEmpty)
+    }
+
     func testSend_replyCreatesOptimisticMessageBeforeResolvingQuotedHTML() async throws {
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()

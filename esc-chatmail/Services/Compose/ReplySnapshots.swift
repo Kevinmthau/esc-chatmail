@@ -69,14 +69,29 @@ struct ReplyConversationSnapshot: Sendable {
         }
         self.isListConversation = isListConversation
         self.latestThreadId = replyingTo?.threadId ?? (isListConversation
-            ? latestListInboundMessage
-            : nonListMessages.first {
-                // A retained local send is not a durable thread anchor.
-                !$0.gmThreadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-                    OutboundSendDeliveryState.resolve(for: $0) == .none
-            })?.gmThreadId
+            ? latestListInboundMessage?.gmThreadId
+            : Self.latestNonListThreadId(in: nonListMessages))
         self.deliveredToAddress = latestReplyAddressHint?.deliveredToAddress
         self.replyFromAddress = latestReplyAddressHint?.replyFromAddress
+    }
+
+    @MainActor
+    private static func latestNonListThreadId(in messages: [Message]) -> String? {
+        for message in messages {
+            let threadId = message.gmThreadId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if threadId.isEmpty {
+                // Keep a new compose/forward boundary until its row receives the
+                // committed thread, even if its delivery state already reads sent.
+                guard OutboundSendDeliveryState.localOptimisticMessageID(for: message) == nil else {
+                    return nil
+                }
+                continue
+            }
+            if OutboundSendDeliveryState.resolve(for: message) == .none {
+                return threadId
+            }
+        }
+        return nil
     }
 
     @MainActor
