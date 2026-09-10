@@ -596,6 +596,43 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         }
     }
 
+    func testSignatureTailAndTrailingImagesAreRemovedOnlyAfterConfirmedContacts() {
+        // Revert-check: bounded signature-tail scan and image-only extension after accepted contact block.
+        for tail in ["Protecting what matters most.", "Auto | Home | Life | Business", "Licensed in GA, AL and TN - NPN 1234567"] {
+            let html = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><p>\(tail)</p><p><img src='cid:badge'></p>"
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertEqual(plainText(cleaned), "Current reply.", tail)
+            XCTAssertFalse(cleaned.contains("cid:badge"))
+        }
+        let contactList = "<p>Please contact:</p><p>Jane Doe</p><p>jane@example.test</p><p>415-555-1212</p><p>Please pick one.</p>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: contactList, mode: .quotedAndSignatures)), plainText(contactList))
+    }
+
+    func testLegalFooterOpenersAreAnchoredToVisibleLineStart() {
+        // Revert-check: legal openers remove the full notice, not just a later disclaimer sentence.
+        let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
+        let footer = "<p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient.</p>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + footer, mode: .quotedAndSignatures)), "Current reply.")
+        for body in ["<p>Please read the confidentiality notice: it changed.</p>", "<p>Please read the <b>confidentiality notice:</b> it changed.</p>"] {
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: body, mode: .quotedAndSignatures)), plainText(body))
+        }
+    }
+
+    func testRemovedTrailingImageFeedsBubbleSuppressionWithoutIdentityOrDimensions() {
+        // Revert-check: DOM cleanup CID difference, not generated-name or dimension heuristics.
+        let html = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><p><img src='cid:arbitrary'></p>"
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html, hasHTMLSourceHint: true, isForwardedEmail: false,
+            isLikelyCalendarInvite: false, bodyText: nil, cleanedSnippet: "Current reply.", subject: "Review",
+            attachmentSnapshots: [MessageBubbleAttachmentSnapshot(
+                contentId: "arbitrary", filename: "asset.png", mimeType: "image/png",
+                stateRaw: Attachment.State.queued.rawValue, localURL: nil, byteSize: 0,
+                pageCount: 0, width: 0, height: 0
+            )]
+        )
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("arbitrary"))
+    }
+
     func testSignatureNamesAndTitlesUseWordBoundaries() {
         // Revert-check: shared name/contact word boundaries and strong-support prose guard.
         for name in ["Marcella Ruiz", "Persephone Lee"] {

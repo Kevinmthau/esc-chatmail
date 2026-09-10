@@ -13,6 +13,7 @@ import {
   WEB_URL_PATTERN,
   ADDRESS_KEYWORD_PATTERN,
   SIGN_OFF_PHRASES,
+  LEGAL_FOOTER_OPENERS,
   DESCRIPTIVE_PHONE_LINE_PATTERN,
   isStrongSignatureSupportLine,
 } from './patterns'
@@ -1242,6 +1243,7 @@ function escapedHTML(text: string): string {
 }
 
 const SIGNATURE_TEXT_MARKERS: RegExp[] = [
+  ...LEGAL_FOOTER_OPENERS.map((pattern) => new RegExp(pattern, 'i')),
   /^\s*--\s*$/i,
   /Sent from my (?:iPhone|iPad|Android|Galaxy|Pixel|Samsung)/i,
   /Sent from (?:Outlook|Mail for Windows|Spark|ProtonMail|BlueMail|Gmail|Yahoo Mail)/i,
@@ -1264,11 +1266,24 @@ function truncateAtSignatureMarkers(document: Document): void {
     for (const pattern of SIGNATURE_TEXT_MARKERS) {
       const match = pattern.exec(text)
       if (match) {
+        if (LEGAL_FOOTER_OPENERS.includes(pattern.source) && !isAtSignatureLineStart(textNode))
+          continue
         truncateAtTextNode(textNode, match.index, text)
         return
       }
     }
   }
+}
+
+function isAtSignatureLineStart(textNode: Text): boolean {
+  let ancestor = textNode.parentElement
+  while (ancestor) {
+    if (['p', 'div', 'li', 'td', 'body'].includes(tagName(ancestor))) {
+      return inlineHeaderLines(ancestor).some((line) => line.startTextNode === textNode)
+    }
+    ancestor = ancestor.parentElement
+  }
+  return false
 }
 
 const SIGNATURE_CITY_STATE_ZIP_PATTERN = /^[A-Z][A-Z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$/i
@@ -1308,17 +1323,25 @@ function truncateTrailingContactSignature(document: Document): void {
     }
   }
   if (lastNonEmpty === -1) return
-  if (!isContactSignatureLine(lines[lastNonEmpty]!.text)) return
+  let lastContact = lastNonEmpty
+  let tailCount = 0
+  while (!isContactSignatureLine(lines[lastContact]!.text)) {
+    if (tailCount >= 3 || !isSignatureTailLine(lines[lastContact]!.text)) return
+    const previous = previousNonEmptyLineIndex(lastContact, 0, lines)
+    if (previous === null) return
+    tailCount += 1
+    lastContact = previous
+  }
 
   const scanStart = Math.max(0, lastNonEmpty - 32)
   let contactLineCount = 0
-  let signatureStart = lastNonEmpty
+  let signatureStart = lastContact
   let strongSupportLineCount = 0
   let signatureSupportLineCount = 0
   let nonEmailContactLineCount = 0
   let sawSignOffBeforeSignature = false
   let precedingBodyLine: string | null = null
-  let scanIndex = lastNonEmpty
+  let scanIndex = lastContact
 
   while (scanIndex >= scanStart) {
     const text = lines[scanIndex]!.text
@@ -1383,9 +1406,42 @@ function truncateTrailingContactSignature(document: Document): void {
     return
   }
 
-  for (let index = signatureStart; index <= lastNonEmpty; index++) {
+  // A logo below a confirmed contact block is signature chrome. Bound image-only tails.
+  let removalEnd = lastNonEmpty
+  let imageCount = 0
+  for (let index = lastNonEmpty + 1; index < lines.length; index++) {
+    if (lines[index]!.text.length > 0) break
+    if (lines[index]!.element.querySelector('img')) {
+      if (imageCount >= 3) break
+      imageCount += 1
+    }
+    removalEnd = index
+  }
+  for (let index = signatureStart; index <= removalEnd; index++) {
     lines[index]!.element.remove()
   }
+}
+
+function isSignatureTailLine(text: string): boolean {
+  if (/^(?:licensed|licen[cs]e|registration|registered|npn)\b[^.!?]*\d/i.test(text)) return true
+  if (isSignatureProductList(text)) return true
+  return text.split(/\s+/).length <= 7 && !/\p{Nd}/u.test(text) && /[.!]$/.test(text)
+}
+
+function isSignatureProductList(text: string): boolean {
+  const segments = text.split(/[|•]/)
+  return (
+    segments.length >= 3 &&
+    segments.every((segment) => {
+      const words = segment.trim().split(/\s+/).filter(Boolean)
+      return (
+        words.length >= 1 &&
+        words.length <= 3 &&
+        !/\p{Nd}/u.test(segment) &&
+        !/@|http|www\.|[.!?:;]/i.test(segment)
+      )
+    })
+  )
 }
 
 function previousNonEmptyLineIndex(

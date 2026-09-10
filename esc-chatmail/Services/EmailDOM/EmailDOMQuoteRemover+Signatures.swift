@@ -109,7 +109,7 @@ extension EmailDOMQuoteRemover {
     // MARK: - Signature text markers
 
     private static let signatureTextMarkers: [NSRegularExpression] = {
-        let raw = [
+        let raw = SignaturePatterns.legalFooterOpeners + [
             "^\\s*--\\s*$",                  // line containing only --
             "Sent from my (?:iPhone|iPad|Android|Galaxy|Pixel|Samsung)",
             "Sent from (?:Outlook|Mail for Windows|Spark|ProtonMail|BlueMail|Gmail|Yahoo Mail)",
@@ -144,11 +144,26 @@ extension EmailDOMQuoteRemover {
             for pattern in signatureTextMarkers {
                 let range = NSRange(location: 0, length: text.utf16.count)
                 if let match = pattern.firstMatch(in: text, options: [], range: range) {
+                    if SignaturePatterns.legalFooterOpeners.contains(pattern.pattern),
+                       !isAtSignatureLineStart(textNode) {
+                        continue
+                    }
                     try truncateAtTextNode(textNode, matchStartUTF16: match.range.location, in: text)
                     return
                 }
             }
         }
+    }
+
+    private static func isAtSignatureLineStart(_ textNode: TextNode) -> Bool {
+        var ancestor = textNode.parent() as? Element
+        while let element = ancestor {
+            if ["p", "div", "li", "td", "body"].contains(element.tagNameNormal()) {
+                return inlineHeaderLines(in: element).contains { $0.startTextNode === textNode }
+            }
+            ancestor = element.parent()
+        }
+        return false
     }
 
     private static let signatureEmailPattern = EmailPatterns.address
@@ -218,17 +233,24 @@ extension EmailDOMQuoteRemover {
         guard let body = document.body() else { return }
         let lines = visibleLineElements(in: body, includingEmpty: true)
         guard let lastNonEmpty = lines.indices.last(where: { !lines[$0].text.isEmpty }) else { return }
-        guard isContactSignatureLine(lines[lastNonEmpty].text) else { return }
+        var lastContact = lastNonEmpty
+        var tailCount = 0
+        while !isContactSignatureLine(lines[lastContact].text) {
+            guard tailCount < 3, isSignatureTailLine(lines[lastContact].text),
+                  let previous = previousNonEmptyLineIndex(before: lastContact, lowerBound: 0, in: lines) else { return }
+            tailCount += 1
+            lastContact = previous
+        }
 
         let scanStart = max(0, lastNonEmpty - 32)
         var contactLineCount = 0
-        var signatureStart = lastNonEmpty
+        var signatureStart = lastContact
         var strongSupportLineCount = 0
         var signatureSupportLineCount = 0
         var nonEmailContactLineCount = 0
         var sawSignOffBeforeSignature = false
         var precedingBodyLine: String?
-        var scanIndex = lastNonEmpty
+        var scanIndex = lastContact
 
         while scanIndex >= scanStart {
             let text = lines[scanIndex].text
@@ -292,8 +314,39 @@ extension EmailDOMQuoteRemover {
             return
         }
 
-        for index in signatureStart...lastNonEmpty {
+        // A logo below a confirmed contact block is signature chrome. Bound image-only tails.
+        var removalEnd = lastNonEmpty
+        var imageCount = 0
+        for index in (lastNonEmpty + 1)..<lines.count {
+            guard lines[index].text.isEmpty else { break }
+            if (try? lines[index].element.select("img").isEmpty()) == false {
+                guard imageCount < 3 else { break }
+                imageCount += 1
+            }
+            removalEnd = index
+        }
+        for index in signatureStart...removalEnd {
             try lines[index].element.remove()
+        }
+    }
+
+    private static func isSignatureTailLine(_ text: String) -> Bool {
+        let words = text.split(whereSeparator: \.isWhitespace)
+        if text.range(of: #"^(?:licensed|licen[cs]e|registration|registered|npn)\b[^.!?]*\d"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        if isSignatureProductList(text) { return true }
+        return words.count <= 7 && text.rangeOfCharacter(from: .decimalDigits) == nil &&
+            text.last.map { ".!".contains($0) } == true
+    }
+
+    private static func isSignatureProductList(_ text: String) -> Bool {
+        let segments = text.components(separatedBy: CharacterSet(charactersIn: "|•"))
+        return segments.count >= 3 && segments.allSatisfy { segment in
+            let words = segment.split(whereSeparator: \.isWhitespace)
+            return (1...3).contains(words.count) && segment.rangeOfCharacter(from: .decimalDigits) == nil &&
+                !segment.contains("@") && !segment.contains("http") && !segment.contains("www.") &&
+                segment.rangeOfCharacter(from: CharacterSet(charactersIn: ".!?:;")) == nil
         }
     }
 

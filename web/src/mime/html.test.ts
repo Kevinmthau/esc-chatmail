@@ -92,3 +92,33 @@ describe('signature classifier preservation', () => {
     expect(shouldPreserveSignatureNameLine('Partner')).toBe(false)
   })
 })
+
+describe('confirmed signature tails', () => {
+  // Revert-check: bounded tail skip and trailing image-only extension.
+  it.each([
+    'Protecting what matters most.',
+    'Auto | Home | Life | Business',
+    'Licensed in GA, AL and TN - NPN 1234567',
+  ])('removes a bounded tail: %s', (tail) => {
+    const html = messageWithTrailingSignature('') + `<p>${tail}</p><p><img src="cid:badge"></p>`
+    expect(cleanedText(html)).toBe('Current reply.')
+    expect(removeQuotesFromHtml(html)).not.toContain('cid:badge')
+  })
+  it('preserves a contact list followed by a final body sentence', () => {
+    const html =
+      '<p>Please contact:</p><p>Jane Doe</p><p>jane@example.test</p><p>415-555-1212</p><p>Please pick one.</p>'
+    expect(cleanedText(html)).toContain('jane@example.test')
+    expect(cleanedText(html)).toContain('Please pick one.')
+  })
+  it('removes paragraph-start legal notices and preserves inline discussion', () => {
+    // Revert-check: anchored shared legal openers plus visible-line-start guard.
+    expect(
+      cleanedText(
+        messageWithTrailingSignature('') +
+          '<p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient.</p>',
+      ),
+    ).toBe('Current reply.')
+    const html = '<p>Please read the <b>confidentiality notice:</b> it changed.</p>'
+    expect(cleanedText(html)).toBe('Please read the confidentiality notice: it changed.')
+  })
+})

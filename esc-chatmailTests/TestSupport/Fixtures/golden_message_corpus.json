@@ -151,6 +151,12 @@
       "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine separator collapse / web isSignaturePhoneLine.",
       "inputHTML": "<div>Current reply.</div><div>Jane Doe</div><div>Partner</div><div>jane@example.test</div><div>Office: 770-555-0148 | Fax: 770-555-0149</div>",
       "expected": "Current reply."
+    },
+    {
+      "id": "html_outlook_contact_signature_before_confidentiality_notice_removed",
+      "notes": "Revert-check: shared paragraph-start legal footer openers in EmailDOMQuoteRemover and web html.ts.",
+      "inputHTML": "<p>Also, please confirm that it will be registered in Georgia.</p><p>Sincerely,</p><p>Marcita Threash</p><p>Senior Account Manager | Threash Insurance Agency</p><p>1234 Peachtree Road NE, Suite 200</p><p>Atlanta, GA 30309</p><p>Phone: 404-555-0142 | Fax: 404-555-0143</p><p>marcita@threashinsurance.com</p><p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive and confidential use of the intended recipient.</p>",
+      "expected": "Also, please confirm that it will be registered in Georgia.\n\nSincerely,"
     }
   ],
   "rawSourceHTMLRecoveryCases": [
