@@ -77,6 +77,66 @@
       "notes": "Law-firm style 'Notice To Recipient' legal footers should be removed when they survive quote extraction as trailing disclaimer text.",
       "input": "Any word?\n\nNotice To Recipient: This e-mail is meant for only the intended recipient of the transmission, and may be a communication privileged by law. If you received this e-mail in error, any review, use, dissemination, distribution, or copying of this e-mail is strictly prohibited. Please notify us immediately of the error by return e-mail and please delete this message and any and all duplicates of this message from your system. Thank you in advance for your cooperation. For additional policies governing this e-mail, please see http://www.examplelaw.com/about/firm-policies/.",
       "expected": "Any word?"
+    },
+    {
+      "id": "signature_guard_plain_thanks_name",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "That works for me.\n\nThanks,\nAlex",
+      "expected": "That works for me.\n\nThanks,\n\nAlex"
+    },
+    {
+      "id": "signature_guard_plain_best_name",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "See you tomorrow.\n\nBest,\nAlex",
+      "expected": "See you tomorrow.\n\nBest,\n\nAlex"
+    },
+    {
+      "id": "signature_guard_plain_phone_sentence",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Please call me at 415-555-0101 when you arrive.",
+      "expected": "Please call me at 415-555-0101 when you arrive."
+    },
+    {
+      "id": "signature_guard_plain_phone_question",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Can you give me a call? 415-555-0101",
+      "expected": "Can you give me a call? 415-555-0101"
+    },
+    {
+      "id": "signature_guard_plain_hours_in_body",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "We are open Monday - Friday, 9am - 5pm.\n\nPlease come by.",
+      "expected": "We are open Monday - Friday, 9am - 5pm.\n\nPlease come by."
+    },
+    {
+      "id": "signature_guard_plain_single_link",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Here is the link you asked for:\n\nhttps://example.com/report",
+      "expected": "Here is the link you asked for:\n\nhttps://example.com/report"
+    },
+    {
+      "id": "signature_guard_plain_email_sentence",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Please send the draft to alex@example.com for review.",
+      "expected": "Please send the draft to alex@example.com for review."
+    },
+    {
+      "id": "signature_guard_plain_reference_line",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Reference: 12345678\n\nPlease include this on the form.",
+      "expected": "Reference: 12345678\n\nPlease include this on the form."
+    },
+    {
+      "id": "signature_guard_plain_date_line",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Deadline: 08-15-2026\n\nWe can discuss the plan tomorrow.",
+      "expected": "Deadline: 08-15-2026\n\nWe can discuss the plan tomorrow."
+    },
+    {
+      "id": "signature_guard_plain_postscript_after_name",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Sounds good.\n\nThanks,\nAlex\n\nP.S. Bring the printed plan.",
+      "expected": "Sounds good.\n\nThanks,\nAlex\n\nP.S. Bring the printed plan."
     }
   ],
   "htmlToBubbleTextCases": [
@@ -133,6 +193,66 @@
       "notes": "When Gmail quote cleanup removes nested blockquotes but leaves a trailing 'Notice To Recipient' paragraph, bubble text should keep only the new user content.",
       "inputHTML": "<div dir=\"ltr\">Any word?</div><br><div class=\"gmail_quote gmail_quote_container\"><div dir=\"ltr\" class=\"gmail_attr\">On Tue, Feb 24, 2026 at 11:27 AM Kevin Thau &lt;kmthau@gmail.com&gt; wrote:<br></div><blockquote class=\"gmail_quote\" style=\"margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex\"><div dir=\"ltr\">Makes sense. Thank you.</div></blockquote><p style=\"font-size:8pt;margin-top:0\">Notice To Recipient: This e-mail is meant for only the intended recipient of the transmission, and may be a communication privileged by law. If you received this e-mail in error, any review, use, dissemination, distribution, or copying of this e-mail is strictly prohibited. Please notify us immediately of the error by return e-mail and please delete this message and any and all duplicates of this message from your system. Thank you in advance for your cooperation. For additional policies governing this e-mail, please see <a href=\"http://www.examplelaw.com/about/firm-policies/\">http://www.examplelaw.com/about/firm-policies/</a>.</p></div>",
       "expected": "Any word?"
+    },
+    {
+      "id": "signature_guard_html_short_reply_best_name",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>See you tomorrow.</div><div>Best,</div><div>Alex</div>",
+      "expected": "See you tomorrow.\n\nBest,\n\nAlex"
+    },
+    {
+      "id": "signature_guard_html_hours_line_in_body",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>We are open: Monday - Friday | 9am - 5pm</div><div>Please come by.</div>",
+      "expected": "We are open: Monday - Friday | 9am - 5pm\n\nPlease come by."
+    },
+    {
+      "id": "signature_guard_html_address_on_own_lines",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please send the samples here:</div><div>123 Main Street</div><div>Atlanta, GA 30309</div><div>We need them by Friday.</div>",
+      "expected": "Please send the samples here:\n\n123 Main Street\n\nAtlanta, GA 30309\n\nWe need them by Friday."
+    },
+    {
+      "id": "signature_guard_html_contact_list_intro",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please contact:</div><div>Alex Example — alex@example.com — 415-555-0101</div><div>Jordan Example — jordan@example.com — 415-555-0102</div>",
+      "expected": "Please contact:\n\nAlex Example — alex@example.com — 415-555-0101\n\nJordan Example — jordan@example.com — 415-555-0102"
+    },
+    {
+      "id": "signature_guard_html_contact_list_intro_followed_by_signoff",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please contact:</div><div>Alex Example — alex@example.com — 415-555-0101</div><div>Jordan Example — jordan@example.com — 415-555-0102</div><div>Thank you,</div><div>Casey</div>",
+      "expected": "Please contact:\n\nAlex Example — alex@example.com — 415-555-0101\n\nJordan Example — jordan@example.com — 415-555-0102\n\nThank you,\nCasey"
+    },
+    {
+      "id": "signature_guard_html_closing_sentence_after_contacts",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please contact:</div><div>Alex Example — alex@example.com — 415-555-0101</div><div>Jordan Example — jordan@example.com — 415-555-0102</div><div>Please pick one.</div>",
+      "expected": "Please contact:\n\nAlex Example — alex@example.com — 415-555-0101\n\nJordan Example — jordan@example.com — 415-555-0102\n\nPlease pick one."
+    },
+    {
+      "id": "signature_guard_html_standalone_phone",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>The gate code is on the form.</div><div>415-555-0101</div><div>Please call when you arrive.</div>",
+      "expected": "The gate code is on the form.\n\n415-555-0101\n\nPlease call when you arrive."
+    },
+    {
+      "id": "signature_guard_html_body_phone_sentence",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Can you give me a call? 415-555-0101</div><div>We should discuss the estimate.</div>",
+      "expected": "Can you give me a call? 415-555-0101\n\nWe should discuss the estimate."
+    },
+    {
+      "id": "signature_guard_html_single_document_link",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Here is the link you asked for:</div><div>https://example.com/report</div>",
+      "expected": "Here is the link you asked for:\n\nhttps://example.com/report"
+    },
+    {
+      "id": "signature_guard_html_midbody_confidentiality",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please read the confidentiality notice: it changed.</div><div>The revised wording is in the document.</div>",
+      "expected": "Please read the confidentiality notice: it changed.\n\nThe revised wording is in the document."
     }
   ],
   "rawSourceHTMLRecoveryCases": [
