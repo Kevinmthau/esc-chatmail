@@ -226,17 +226,24 @@ extension EmailDOMQuoteRemover {
         guard let body = document.body() else { return }
         let lines = visibleLineElements(in: body, includingEmpty: true)
         guard let lastNonEmpty = lines.indices.last(where: { !lines[$0].text.isEmpty }) else { return }
-        guard isContactSignatureLine(lines[lastNonEmpty].text) else { return }
+        var lastContact = lastNonEmpty
+        var tailCount = 0
+        while !isContactSignatureLine(lines[lastContact].text) {
+            guard tailCount < 3, isSignatureTailLine(lines[lastContact].text),
+                  let previous = previousNonEmptyLineIndex(before: lastContact, lowerBound: 0, in: lines) else { return }
+            tailCount += 1
+            lastContact = previous
+        }
 
         let scanStart = max(0, lastNonEmpty - 32)
         var contactLineCount = 0
-        var signatureStart = lastNonEmpty
+        var signatureStart = lastContact
         var strongSupportLineCount = 0
         var signatureSupportLineCount = 0
         var nonEmailContactLineCount = 0
         var sawSignOffBeforeSignature = false
         var precedingBodyLine: String?
-        var scanIndex = lastNonEmpty
+        var scanIndex = lastContact
 
         while scanIndex >= scanStart {
             let text = lines[scanIndex].text
@@ -300,9 +307,50 @@ extension EmailDOMQuoteRemover {
             return
         }
 
+        // Widening the range for metadata must not claim unmarked body media,
+        // including images between the contacts and footer or inside a footer line.
+        if tailCount > 0 {
+            for index in signatureStart...lastNonEmpty {
+                guard try !containsSignatureTailMedia(lines[index].element) else { return }
+            }
+        }
+
+        // Unmarked images can be authored attachments, even after confirmed contacts.
+        // Only remove the text block; explicit signature wrappers own their images.
         for index in signatureStart...lastNonEmpty {
             try lines[index].element.remove()
         }
+    }
+
+    private static func containsSignatureTailMedia(_ element: Element) throws -> Bool {
+        let mediaSelector = "img, picture, svg, video, audio, object, embed, iframe, [src], [srcset], [background], [poster]"
+        if try !element.select(mediaSelector).isEmpty() { return true }
+        // CID references also include linked attachments (href/xlink:href).
+        if try element.outerHtml().range(of: "cid:", options: .caseInsensitive) != nil { return true }
+        let styledElements = [element] + (try element.select("[style]")).array()
+        return styledElements.contains { candidate in
+            let style = (try? candidate.attr("style")) ?? ""
+            return style.range(of: #"url\s*\("#, options: [.regularExpression, .caseInsensitive]) != nil
+        }
+    }
+
+    private static func isSignatureTailLine(_ text: String) -> Bool {
+        // Match the entire known boilerplate sentence. A heading or keyword match
+        // would also swallow authored discussion or a postscript in the same block.
+        if text.range(
+            of: #"^(?:(?:confidentiality notice|disclaimer)\s*:\s*)?this e-?mail and any attachments are for the exclusive(?: and confidential)? use of the intended recipients?\.?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+
+        // A whole license/registration identifier is metadata. Sentences containing
+        // a number, short slogans, and pipe-separated choices are ambiguous body text.
+        guard text.utf16.count <= 160 else { return false }
+        return text.range(
+            of: #"^(?:(?:licen[cs]e|registration|npn)\b(?:\s+(?:number|no\.?))?\s*[:#]?\s*[A-Z0-9-]*\d[A-Z0-9-]*|licensed in [A-Z]{2}(?:\s*(?:,|&|\band\b)\s*[A-Z]{2})*\s*[-–—]\s*NPN\s*[:#]?\s*\d[\d-]*)\.?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
     }
 
     private static func previousNonEmptyLineIndex(

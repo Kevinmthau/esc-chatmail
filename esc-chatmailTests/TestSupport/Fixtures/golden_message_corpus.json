@@ -231,6 +231,36 @@
       "expected": "Current reply."
     },
     {
+      "id": "html_outlook_contact_signature_before_confidentiality_notice_removed",
+      "notes": "Confirmed contact signatures may include a terminal confidentiality notice; authored legal discussion is preserved.",
+      "inputHTML": "<p>Also, please confirm that it will be registered in Georgia.</p><p>Sincerely,</p><p>Marcita Threash</p><p>Senior Account Manager | Threash Insurance Agency</p><p>1234 Peachtree Road NE, Suite 200</p><p>Atlanta, GA 30309</p><p>Phone: 404-555-0142 | Fax: 404-555-0143</p><p>marcita@threashinsurance.com</p><p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive and confidential use of the intended recipient.</p>",
+      "expected": "Also, please confirm that it will be registered in Georgia.\n\nSincerely,"
+    },
+    {
+      "id": "authored_instruction_after_contact_signature_preserved",
+      "notes": "PR 230 regression: ambiguous trailing body content must survive the HTML-to-bubble pipeline.",
+      "inputHTML": "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p><p>Do not send the money.</p>",
+      "expected": "Current reply.\n\nJohn Smith\n\nPartner john@example.test 415-555-1212\n\nDo not send the money."
+    },
+    {
+      "id": "authored_registration_sentence_after_contact_signature_preserved",
+      "notes": "PR 230 regression: ambiguous trailing body content must survive the HTML-to-bubble pipeline.",
+      "inputHTML": "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p><p>Registration closes on September 15; send the application by then.</p>",
+      "expected": "Current reply.\n\nJohn Smith\n\nPartner john@example.test 415-555-1212\n\nRegistration closes on September 15; send the application by then."
+    },
+    {
+      "id": "authored_choices_after_contact_signature_preserved",
+      "notes": "PR 230 regression: ambiguous trailing body content must survive the HTML-to-bubble pipeline.",
+      "inputHTML": "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p><p>Approve payment | Sign contract | Request changes</p>",
+      "expected": "Current reply.\n\nJohn Smith\n\nPartner john@example.test 415-555-1212\n\nApprove payment | Sign contract | Request changes"
+    },
+    {
+      "id": "authored_disclaimer_paragraph_preserved",
+      "notes": "PR 230 regression: a legal heading without a confirmed signature must not truncate the message.",
+      "inputHTML": "<p>Here are my concerns.</p><p>Disclaimer: figures are provisional.</p><p>Do not approve yet.</p>",
+      "expected": "Here are my concerns.\n\nDisclaimer: figures are provisional.\n\nDo not approve yet."
+    },
+    {
       "id": "signature_guard_html_short_reply_best_name",
       "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
       "inputHTML": "<div>See you tomorrow.</div><div>Best,</div><div>Alex</div>",
