@@ -1289,6 +1289,9 @@ const SIGNATURE_PHONE_SUFFIX_LABEL_PATTERN =
 
 const SIGNATURE_NON_PHONE_DATE_PATTERN =
   /^(?:(?:19|20)\p{Nd}{2}(?:-|\.)(?:\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}|\p{Nd}{4})|\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}(?:-|\.)(?:19|20)\p{Nd}{2})$/u
+const SIGNATURE_TIME_RANGE_PATTERN =
+  /^(?:[01]?\d|2[0-3])[.:]?[0-5]\d-(?:(?:[01]?\d|2[0-3])[.:]?[0-5]\d|24[.:]?00)$/
+const SIGNATURE_BARE_HOURS_LABEL_PATTERN = /^after[ -]hours\s*:$/i
 
 // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
 const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
@@ -1308,17 +1311,25 @@ function truncateTrailingContactSignature(document: Document): void {
     }
   }
   if (lastNonEmpty === -1) return
-  if (!isContactSignatureLine(lines[lastNonEmpty]!.text)) return
+  let lastContact = lastNonEmpty
+  let tailCount = 0
+  while (!isContactSignatureLine(lines[lastContact]!.text)) {
+    if (tailCount >= 3 || !isSignatureTailLine(lines[lastContact]!.text)) return
+    const previous = previousNonEmptyLineIndex(lastContact, 0, lines)
+    if (previous === null) return
+    tailCount += 1
+    lastContact = previous
+  }
 
   const scanStart = Math.max(0, lastNonEmpty - 32)
   let contactLineCount = 0
-  let signatureStart = lastNonEmpty
+  let signatureStart = lastContact
   let strongSupportLineCount = 0
   let signatureSupportLineCount = 0
   let nonEmailContactLineCount = 0
   let sawSignOffBeforeSignature = false
   let precedingBodyLine: string | null = null
-  let scanIndex = lastNonEmpty
+  let scanIndex = lastContact
 
   while (scanIndex >= scanStart) {
     const text = lines[scanIndex]!.text
@@ -1383,9 +1394,49 @@ function truncateTrailingContactSignature(document: Document): void {
     return
   }
 
+  // Widening the range for metadata must not claim unmarked body media,
+  // including images between the contacts and footer or inside a footer line.
+  if (tailCount > 0) {
+    for (let index = signatureStart; index <= lastNonEmpty; index++) {
+      if (containsSignatureTailMedia(lines[index]!.element)) return
+    }
+  }
+
+  // Unmarked images can be authored attachments, even after confirmed contacts.
+  // Only remove the text block; explicit signature wrappers own their images.
   for (let index = signatureStart; index <= lastNonEmpty; index++) {
     lines[index]!.element.remove()
   }
+}
+
+function containsSignatureTailMedia(element: Element): boolean {
+  const mediaSelector =
+    'img, picture, svg, video, audio, object, embed, iframe, [src], [srcset], [background], [poster]'
+  if (element.matches(mediaSelector) || element.querySelector(mediaSelector)) return true
+  // CID references also include linked attachments (href/xlink:href).
+  if (/cid:/i.test(element.outerHTML)) return true
+  return [element, ...element.querySelectorAll('[style]')].some((candidate) =>
+    /url\s*\(/i.test(candidate.getAttribute('style') ?? ''),
+  )
+}
+
+function isSignatureTailLine(text: string): boolean {
+  // Match the entire known boilerplate sentence. A heading or keyword match
+  // would also swallow authored discussion or a postscript in the same block.
+  if (
+    /^(?:(?:confidentiality notice|disclaimer)\s*:\s*)?this e-?mail and any attachments are for the exclusive(?: and confidential)? use of the intended recipients?\.?$/i.test(
+      text,
+    )
+  ) {
+    return true
+  }
+
+  // A whole license/registration identifier is metadata. Sentences containing
+  // a number, short slogans, and pipe-separated choices are ambiguous body text.
+  if (text.length > 160) return false
+  return /^(?:(?:licen[cs]e|registration|npn)\b(?:\s+(?:number|no\.?))?\s*[:#]?\s*[A-Z0-9-]*\d[A-Z0-9-]*|licensed in [A-Z]{2}(?:\s*(?:,|&|\band\b)\s*[A-Z]{2})*\s*[-–—]\s*NPN\s*[:#]?\s*\d[\d-]*)\.?$/i.test(
+    text,
+  )
 }
 
 function previousNonEmptyLineIndex(
@@ -1474,7 +1525,6 @@ function isSignaturePhoneLine(text: string): boolean {
 }
 
 function isSignaturePhoneSegment(text: string): boolean {
-  if (DESCRIPTIVE_PHONE_LINE_PATTERN.test(text)) return true
   let phone: string | undefined
   let phoneStart = -1
   for (const candidateMatch of text.matchAll(SIGNATURE_PHONE_PATTERN)) {
@@ -1496,7 +1546,17 @@ function isSignaturePhoneSegment(text: string): boolean {
   const suffix = text.slice(phoneStart + phone.length)
   if (!isAllowedSignaturePhoneSuffix(suffix)) return false
 
-  return prefix.length === 0 || SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix)
+  const compactCandidate = phone.replace(/\s+/g, '')
+  return (
+    prefix.length === 0 ||
+    SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix) ||
+    (DESCRIPTIVE_PHONE_LINE_PATTERN.test(text) &&
+      !SIGNATURE_NON_PHONE_DATE_PATTERN.test(compactCandidate) &&
+      !(
+        SIGNATURE_BARE_HOURS_LABEL_PATTERN.test(prefix) &&
+        SIGNATURE_TIME_RANGE_PATTERN.test(compactCandidate)
+      ))
+  )
 }
 
 function isSignaturePhoneLeadingSegment(text: string): boolean {
