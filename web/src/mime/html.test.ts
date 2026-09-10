@@ -130,3 +130,58 @@ it.each(['P.S. Bring the draft.', 'Please bring the draft.', 'The estimate chang
     expect(cleanedText(messageWithTrailingSignature('') + `<p>${tail}</p>`)).toContain(tail)
   },
 )
+describe('signature sub-lines and sign-off policy', () => {
+  const contact = 'Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212'
+  // Revert-check: scoped sub-line expansion and preserved authored prefix/name.
+  it.each([
+    `<div>Current reply.<br>${contact}</div>`,
+    `<p>Current reply.</p><p>${contact}</p>`,
+    `<table><tr><td>Current reply.<br>${contact}</td></tr></table>`,
+    `<p>Current reply.</p><table><tr><td><img src="cid:badge"></td><td>${contact}</td></tr></table>`,
+  ])('removes only the contact block in %s', (html) => {
+    const result = cleanedText(html)
+    expect(result).toContain('Current reply.')
+    expect(result).toContain('Best,')
+    expect(result).toContain('John Smith')
+    expect(result).not.toContain('Partner')
+    expect(result).not.toContain('john@example.test')
+    expect(removeQuotesFromHtml(html)).not.toContain('cid:badge')
+  })
+  it('preserves contact lists and reference lines in a shared block', () => {
+    const list =
+      '<div>Please contact:<br>Alice: alice@example.test<br>Bob: bob@example.test<br>415-555-1212</div>'
+    expect(cleanedText(list)).toContain('Bob: bob@example.test')
+    const reference =
+      '<div>Current reply.<br>Invoice | 12345678<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>'
+    expect(cleanedText(reference)).toContain('Invoice | 12345678')
+    expect(cleanedText(reference)).not.toContain('John Smith')
+  })
+  it('removes bounded product fillers but preserves a postscript', () => {
+    const html =
+      '<p>Current reply.</p><p>Best,</p><p>John Smith</p><p>Partner</p><p>Auto | Home | Life | Business</p><p>john@example.test</p><p>415-555-1212</p>'
+    expect(cleanedText(html)).not.toContain('Auto')
+    expect(cleanedText(html)).toContain('John Smith')
+    expect(cleanedText(html + '<p>P.S. Bring the draft.</p>')).toContain('P.S. Bring the draft.')
+  })
+  it.each(['Partner', 'Threash Insurance Agency'])(
+    'does not preserve a title/company as a name: %s',
+    (name) => {
+      for (const signature of [
+        `<div class="gmail_signature">Best,<br>${name}<br>john@example.test<br>415-555-1212</div>`,
+        `<p>Best,</p><p>${name}</p><p>john@example.test</p><p>415-555-1212</p>`,
+      ]) {
+        expect(cleanedText('<p>Current reply.</p>' + signature)).toBe('Current reply.')
+      }
+    },
+  )
+})
+
+it('keeps the fourth trailing image when cutting inside a shared block', () => {
+  // Revert-check: text-node truncation stops at the owner block rather than deleting later images.
+  const html =
+    '<div>Current reply.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>' +
+    [1, 2, 3, 4].map((n) => `<p><img src="cid:photo${n}"></p>`).join('')
+  const cleaned = removeQuotesFromHtml(html)
+  expect(cleaned).toContain('cid:photo4')
+  expect(cleaned).not.toContain('cid:photo3')
+})

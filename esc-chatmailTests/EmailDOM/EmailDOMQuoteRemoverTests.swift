@@ -596,6 +596,69 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         }
     }
 
+    func testBRAndTableSignaturesPreserveAuthoredPrefixAndSignOffName() {
+        // Revert-check: signature sub-line expansion, bounded surgery, shared sign-off/name policy.
+        let contact = "Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        let shapes = [
+            "<div>Current reply.<br>\(contact)</div>",
+            "<p>Current reply.</p><p>\(contact)</p>",
+            "<table><tr><td>Current reply.<br>\(contact)</td></tr></table>",
+            "<p>Current reply.</p><table><tr><td><img src='cid:badge'></td><td>\(contact)</td></tr></table>"
+        ]
+        for html in shapes {
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            let text = plainText(cleaned)
+            XCTAssertTrue(text.contains("Current reply."))
+            XCTAssertTrue(text.contains("Best,"))
+            XCTAssertTrue(text.contains("John Smith"))
+            XCTAssertFalse(text.contains("Partner"))
+            XCTAssertFalse(text.contains("john@example.test"))
+            XCTAssertFalse(cleaned.contains("cid:badge"))
+        }
+    }
+
+    func testSubLineTruncationHonorsTrailingImageLimit() {
+        // Revert-check: stoppingAt bounds text-node surgery to the shared block, preserving a fourth image.
+        let html = "<div>Current reply.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>" +
+            (1...4).map { "<p><img src='cid:photo\($0)'></p>" }.joined()
+        let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+        XCTAssertTrue(cleaned.contains("cid:photo4"))
+        XCTAssertFalse(cleaned.contains("cid:photo3"))
+        XCTAssertTrue(plainText(cleaned).contains("Current reply."))
+    }
+
+    func testBRContactListAndReferenceGuardsSurviveSubLineExpansion() {
+        // Revert-check: sub-lines must retain the contact-list veto and stop at reference/body lines.
+        let list = "<div>Please contact:<br>Alice: alice@example.test<br>Bob: bob@example.test<br>415-555-1212</div>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: list, mode: .quotedAndSignatures)), plainText(list))
+        let reference = "<div>Current reply.<br>Invoice | 12345678<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: reference, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("Invoice | 12345678"))
+        XCTAssertFalse(cleaned.contains("John Smith"))
+    }
+
+    func testBoundedProductFillersDoNotAbsorbBodySentencesOrPostscripts() {
+        // Revert-check: product fillers count only inside a confirmed signature; prose remains a boundary.
+        let html = "<p>Current reply.</p><p>Best,</p><p>John Smith</p><p>Partner</p><p>Auto | Home | Life | Business</p><p>john@example.test</p><p>415-555-1212</p>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("John Smith"))
+        XCTAssertFalse(cleaned.contains("Auto"))
+        for tail in ["P.S. Bring the draft.", "Please bring the draft."] {
+            let withTail = html + "<p>\(tail)</p>"
+            XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: withTail, mode: .quotedAndSignatures)).contains(tail))
+        }
+    }
+
+    func testSignatureSignOffPolicyExcludesTitlesAndCompanyNames() {
+        // Revert-check: the wrapper and inferred block use the same personal-name exclusion.
+        for name in ["Partner", "Threash Insurance Agency"] {
+            for signature in ["<div class='gmail_signature'>Best,<br>\(name)<br>john@example.test<br>415-555-1212</div>", "<p>Best,</p><p>\(name)</p><p>john@example.test</p><p>415-555-1212</p>"] {
+                let html = "<p>Current reply.</p>" + signature
+                XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Current reply.")
+            }
+        }
+    }
+
     func testSignatureTailAndTrailingImagesAreRemovedOnlyAfterConfirmedContacts() {
         // Revert-check: bounded signature-tail scan and image-only extension after accepted contact block.
         for tail in ["Protecting what matters most.", "Auto | Home | Life | Business", "Licensed in GA, AL and TN - NPN 1234567"] {

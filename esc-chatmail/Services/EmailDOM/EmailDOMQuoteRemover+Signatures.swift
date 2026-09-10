@@ -60,8 +60,9 @@ extension EmailDOMQuoteRemover {
 
         guard isLikelySignOffLine(lines[0]) else { return "" }
 
+        guard lines.count > 1, SignatureSignOffPolicy.shouldPreserveNameLine(lines[1]) else { return "" }
         var preserved = [lines[0]]
-        if lines.count > 1, looksLikeNameLine(lines[1]) {
+        if lines.count > 1, SignatureSignOffPolicy.shouldPreserveNameLine(lines[1]) {
             preserved.append(lines[1])
         }
 
@@ -87,7 +88,7 @@ extension EmailDOMQuoteRemover {
                 let prefix = signOff + separator
                 guard lowercased.hasPrefix(prefix) else { continue }
                 let remainder = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                return looksLikeNameLine(remainder)
+                return SignatureSignOffPolicy.shouldPreserveNameLine(remainder)
             }
         }
 
@@ -229,9 +230,35 @@ extension EmailDOMQuoteRemover {
         "contact", "email", "reviewer", "recipient"
     ]
 
+    private struct SignatureLine {
+        let element: Element
+        let text: String
+        let startTextNode: TextNode?
+        let startUTF16Offset: Int
+    }
+
+    /// Expand only signature scanning: quote/header passes retain their existing line units.
+    private static func signatureLines(in body: Element) -> [SignatureLine] {
+        visibleLineElements(in: body, includingEmpty: true).flatMap { line in
+            let element = line.element
+            let cells = element.tagNameNormal() == "tr" ? element.children().array().filter {
+                ["td", "th"].contains($0.tagNameNormal())
+            } : []
+            if !cells.isEmpty || (try? element.select("br").isEmpty()) == false {
+                return (cells.isEmpty ? [element] : cells).flatMap { cell in
+                    inlineHeaderLines(in: cell).map {
+                        SignatureLine(element: element, text: $0.text, startTextNode: $0.startTextNode,
+                                      startUTF16Offset: $0.startUTF16Offset)
+                    }
+                }
+            }
+            return [SignatureLine(element: element, text: line.text, startTextNode: nil, startUTF16Offset: 0)]
+        }
+    }
+
     static func truncateTrailingContactSignature(in document: Document) throws {
         guard let body = document.body() else { return }
-        let lines = visibleLineElements(in: body, includingEmpty: true)
+        let lines = signatureLines(in: body)
         guard let lastNonEmpty = lines.indices.last(where: { !lines[$0].text.isEmpty }) else { return }
         var lastContact = lastNonEmpty
         var tailCount = 0
@@ -244,6 +271,7 @@ extension EmailDOMQuoteRemover {
 
         let scanStart = max(0, lastNonEmpty - 32)
         var contactLineCount = 0
+        var fillerCount = 0
         var signatureStart = lastContact
         var strongSupportLineCount = 0
         var signatureSupportLineCount = 0
@@ -264,7 +292,8 @@ extension EmailDOMQuoteRemover {
                 }
 
                 let previousText = lines[previousNonEmptyIndex].text
-                guard isContactSignatureLine(previousText) || isSignatureSupportLine(previousText) else {
+                guard isContactSignatureLine(previousText) || isSignatureSupportLine(previousText) ||
+                    isLikelySignOffLine(previousText) || isSignatureProductList(previousText) else {
                     precedingBodyLine = previousText
                     break
                 }
@@ -288,6 +317,13 @@ extension EmailDOMQuoteRemover {
                 continue
             }
 
+            if isSignatureProductList(text), contactLineCount > 0, fillerCount < 3 {
+                fillerCount += 1
+                signatureStart = scanIndex
+                scanIndex -= 1
+                continue
+            }
+
             guard isSignatureSupportLine(text) else {
                 precedingBodyLine = text
                 break
@@ -301,7 +337,7 @@ extension EmailDOMQuoteRemover {
             scanIndex -= 1
         }
 
-        guard contactLineCount >= 2 else { return }
+        guard contactLineCount >= 2, !isSignatureProductList(lines[signatureStart].text) else { return }
 
         let nonEmptyRemovalCount = (signatureStart...lastNonEmpty).filter { !lines[$0].text.isEmpty }.count
         guard nonEmptyRemovalCount >= 3 else { return }
@@ -325,8 +361,46 @@ extension EmailDOMQuoteRemover {
             }
             removalEnd = index
         }
-        for index in signatureStart...removalEnd {
-            try lines[index].element.remove()
+        var preservedHTML = ""
+        if sawSignOffBeforeSignature {
+            if SignatureSignOffPolicy.shouldPreserveNameLine(lines[signatureStart].text),
+               !isContactSignatureLine(lines[signatureStart].text) {
+                preservedHTML = "<div>\(escapedHTML(lines[scanIndex].text))<br>\(escapedHTML(lines[signatureStart].text))</div>"
+            }
+            signatureStart = scanIndex
+        }
+        try removeSignatureLines(lines, from: signatureStart, through: removalEnd, preserving: preservedHTML)
+    }
+
+    /// Trim within a shared block; only remove whole rows when no authored prefix shares that row.
+    private static func removeSignatureLines(
+        _ lines: [SignatureLine], from start: Int, through end: Int, preserving html: String
+    ) throws {
+        let first = lines[start]
+        let hasPrefix = lines[..<start].contains { $0.element === first.element && !$0.text.isEmpty }
+        if hasPrefix, let node = first.startTextNode {
+            try truncateAtTextNode(node, matchStartUTF16: first.startUTF16Offset,
+                                   in: node.getWholeText(), stoppingAt: first.element)
+            if !html.isEmpty {
+                let target = first.element.tagNameNormal() == "tr" ? first.element.children().last() ?? first.element : first.element
+                try target.append(html)
+            }
+        } else {
+            if !html.isEmpty {
+                if first.element.tagNameNormal() == "tr" {
+                    let row = try Element(Tag.valueOf("tr"), first.element.getBaseUri())
+                    try row.appendElement("td").html(html)
+                    try first.element.before(row)
+                } else {
+                    try first.element.before(html)
+                }
+            }
+            try first.element.remove()
+        }
+        var removed = Set<ObjectIdentifier>([ObjectIdentifier(first.element)])
+        for index in start...end {
+            let element = lines[index].element
+            if removed.insert(ObjectIdentifier(element)).inserted { try element.remove() }
         }
     }
 
@@ -354,7 +428,7 @@ extension EmailDOMQuoteRemover {
     private static func previousNonEmptyLineIndex(
         before index: Int,
         lowerBound: Int,
-        in lines: [VisibleLineElement]
+        in lines: [SignatureLine]
     ) -> Int? {
         guard index > lowerBound else { return nil }
 

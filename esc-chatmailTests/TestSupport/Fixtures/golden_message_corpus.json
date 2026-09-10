@@ -136,15 +136,15 @@
     },
     {
       "id": "html_labeled_phone_hours_signature_without_wrapper_removed",
-      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately.",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately. Revert-check: shared signoff/name preservation policy.",
       "inputHTML": "<div>We hope you are happy with our work. Please call or email with any questions.</div><div>Thank you!</div><div>Best,</div><div>John Boga</div><div>Property Manager</div><div>NYC Brownstone Maintenance</div><div>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</div><div>Emergency line after hours: 914-373-4658</div><div>www.nycbrownstone.net</div>",
-      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,"
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,\n\nJohn Boga"
     },
     {
       "id": "html_outlook_paragraph_signature_with_hours_phone_removed",
-      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately.",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately. Revert-check: shared signoff/name preservation policy.",
       "inputHTML": "<p>We hope you are happy with our work. Please call or email with any questions.</p><p>Thank you!</p><p>Best,</p><p>John Boga</p><p>Property Manager</p><p>NYC Brownstone Maintenance</p><p>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</p><p>Emergency line after hours: 914-373-4658</p><p>www.nycbrownstone.net</p>",
-      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,"
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,\n\nJohn Boga"
     },
     {
       "id": "html_pipe_colon_phone_signature_removed",
@@ -154,9 +154,21 @@
     },
     {
       "id": "html_outlook_contact_signature_before_confidentiality_notice_removed",
-      "notes": "Revert-check: shared paragraph-start legal footer openers in EmailDOMQuoteRemover and web html.ts.",
+      "notes": "Revert-check: shared paragraph-start legal footer openers in EmailDOMQuoteRemover and web html.ts. Revert-check: shared signoff/name preservation policy.",
       "inputHTML": "<p>Also, please confirm that it will be registered in Georgia.</p><p>Sincerely,</p><p>Marcita Threash</p><p>Senior Account Manager | Threash Insurance Agency</p><p>1234 Peachtree Road NE, Suite 200</p><p>Atlanta, GA 30309</p><p>Phone: 404-555-0142 | Fax: 404-555-0143</p><p>marcita@threashinsurance.com</p><p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive and confidential use of the intended recipient.</p>",
-      "expected": "Also, please confirm that it will be registered in Georgia.\n\nSincerely,"
+      "expected": "Also, please confirm that it will be registered in Georgia.\n\nSincerely,\n\nMarcita Threash"
+    },
+    {
+      "id": "html_br_separated_signature_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover signatureLines and scoped truncation / web html.ts sub-line expansion; preserve the personal signoff/name pair.",
+      "inputHTML": "<div>Current reply.<br>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>",
+      "expected": "Current reply.\n\nBest,\n\nJohn Smith"
+    },
+    {
+      "id": "html_table_signature_with_logo_cell_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover signatureLines and scoped truncation / web html.ts sub-line expansion; preserve the personal signoff/name pair.",
+      "inputHTML": "<p>Current reply.</p><table><tr><td><img src=\"cid:badge\"></td><td>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</td></tr></table>",
+      "expected": "Current reply.\n\nBest,\n\nJohn Smith"
     }
   ],
   "rawSourceHTMLRecoveryCases": [
