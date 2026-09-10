@@ -42,6 +42,29 @@ final class MessageBubbleInlineImageAnalysisTests: XCTestCase {
         XCTAssertTrue(analyze(prefix: signOff, suffix: "<p>Please review the attached photo.</p>").nonDisplayableInlineContentIDs.isEmpty)
     }
 
+    func testKeepsBodyScreenshotAfterSignatureWhenAuthoredProseResumes() {
+        for signature in [signOff, "<div class='gmail_signature'>Jane Doe</div>"] {
+            for filename in ["screenshot.png", "PastedGraphic-1.png"] {
+                for size: Int16 in [0, 600] {
+                    XCTAssertTrue(analyze(prefix: signature + "<p>Here is the screenshot for review.</p>",
+                        cid: "draft", filename: filename, width: size, height: size)
+                        .nonDisplayableInlineContentIDs.isEmpty, filename)
+                }
+            }
+        }
+    }
+
+    func testKeepsBodyScreenshotAfterClosedSignatureContainerWithoutProse() {
+        for filename in ["screenshot.png", "PastedGraphic-1.png"] {
+            for size: Int16 in [0, 600] {
+                XCTAssertTrue(analyze(prefix: "<div class='gmail_signature'>" + signOff + "</div>",
+                    cid: "draft", filename: filename, width: size, height: size,
+                    attributes: "width='300' height='300'")
+                    .nonDisplayableInlineContentIDs.isEmpty, filename)
+            }
+        }
+    }
+
     // Revert-check: zero-dimension generated names qualify only in corroborated regions.
     func testSuppressesQueuedGeneratedBadgesButKeepsUnknownCameraPhotos() {
         for filename in ["image1.png", "PastedGraphic-1.png", "Outlook-abcd1234.png"] {
@@ -67,9 +90,18 @@ final class MessageBubbleInlineImageAnalysisTests: XCTestCase {
         }
     }
 
-    // Revert-check: keywords work without a section signal, bounded by size/prose.
-    func testSuppressesKeywordLogoWithoutSignOffButKeepsReviewMockupAndLargePhoto() {
-        XCTAssertFalse(analyze(filename: "agency-logo.png").nonDisplayableInlineContentIDs.isEmpty)
+    func testKeepsKeywordNamedBodyAssetsWithoutSignatureEvidence() {
+        for (width, height): (Int16, Int16) in [(0, 0), (600, 600)] {
+            for prefix in ["", "<p>Please use this new logo for the launch.</p>"] {
+                XCTAssertTrue(analyze(prefix: prefix, cid: "artwork", filename: "agency-logo.png",
+                    width: width, height: height).nonDisplayableInlineContentIDs.isEmpty)
+            }
+        }
+    }
+
+    func testSuppressesKeywordLogoInSignatureButKeepsReviewMockupAndLargePhoto() {
+        XCTAssertFalse(analyze(prefix: signOff, filename: "agency-logo.png").nonDisplayableInlineContentIDs.isEmpty)
+        XCTAssertFalse(analyze(prefix: signOff, filename: "agency-logo.png", width: 0, height: 0).nonDisplayableInlineContentIDs.isEmpty)
         XCTAssertTrue(analyze(filename: "logo-mockup.png", suffix: "<p>Please review this draft.</p>").nonDisplayableInlineContentIDs.isEmpty)
         XCTAssertTrue(analyze(filename: "agency-logo.png", width: 1200, height: 1000).nonDisplayableInlineContentIDs.isEmpty)
     }

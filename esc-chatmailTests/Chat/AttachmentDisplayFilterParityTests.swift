@@ -261,6 +261,27 @@ final class AttachmentDisplayFilterParityTests: XCTestCase {
         XCTAssertEqual(Set(messageResultIDs(fixture, hidingInline: true, hidingCalendar: false)), withInvite)
         XCTAssertEqual(Set(rowResultIDs(fixture, hidingInline: true, hidingCalendar: false)), withInvite)
     }
+    func testUnsignedLogoDeliveryRemainsDisplayableBeforeAndAfterDownload() {
+        for (width, height): (Int16, Int16) in [(0, 0), (600, 600)] {
+            for prefix in ["", "<p>Please use this new logo for the launch.</p>"] {
+                let message = MessageBuilder().withAttachments().build(in: context)
+                let attachment = AttachmentBuilder().withId("delivered-logo").withContentId("artwork")
+                    .withFilename("agency-logo.png").asImage(width: width, height: height)
+                    .withByteSize(50_000).forMessage(message).build(in: context)
+                attachment.state = width == 0 ? .queued : .downloaded
+                let html = prefix + "<p><img src='cid:artwork'></p>"
+                let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+                    canonicalHTML: html, hasHTMLSourceHint: true, isForwardedEmail: false,
+                    isLikelyCalendarInvite: false, bodyText: nil, cleanedSnippet: nil,
+                    subject: nil, attachmentSnapshots: [attachment.bubbleSnapshot]
+                )
+                let fixture = Fixture(message: message, analysis: analysis)
+                XCTAssertEqual(messageResultIDs(fixture, hidingInline: false, hidingCalendar: false), ["delivered-logo"])
+                XCTAssertEqual(rowResultIDs(fixture, hidingInline: false, hidingCalendar: false), ["delivered-logo"])
+            }
+        }
+    }
+
     // Revert-check: download selection uses the unfiltered row, including hidden candidates.
     func testQueuedUnknownInlineDownloadsSurviveSignatureSuppression() throws {
         let message = MessageBuilder().withId("hidden-inline-download").withAttachments().build(in: context)

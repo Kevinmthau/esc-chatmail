@@ -222,13 +222,31 @@ enum MessageBubbleHTMLAnalysisBuilder {
                 return
             }
 
+            // Body prose can resume after a loose signature and before an image.
+            // That image remains authored content regardless of its asset name.
+            let usesLooseSignatureHeuristics = usesExpandedHeuristics &&
+                !isAfterHardBoundary && !isAfterReplyBoundary
+            if usesLooseSignatureHeuristics,
+               let signOffOffset = trailingSignatureStartOffsets.last(where: { $0 < cidOffset }) {
+                let signOffStart = lowercasedHTML.index(lowercasedHTML.startIndex, offsetBy: signOffOffset)
+                let precedingHTML = String(lowercasedHTML[signOffStart..<occurrenceStart])
+                if signatureContactOrRoleLines(in: precedingHTML).contains(where: isBodyProseLine) {
+                    bodyReferenced.insert(normalizedCID)
+                    return
+                }
+            }
+
+            // Container membership is handled structurally above. Preserve the
+            // old identity gates after offset-only hard/reply markers, which can
+            // precede body siblings outside those containers.
             guard isLikelySignatureInlineAttachment(
                 contentID: normalizedCID,
                 attachments: attachments,
                 htmlImageDimensions: imageDimensions(in: lowercasedHTML, at: valueStart),
                 hasCorroboratedRegion: isAfterHardBoundary || isAfterReplyBoundary || isAfterCorroboratedSignOff,
                 hasBrandingRegion: isAfterBrandingSignOff,
-                usesExpandedHeuristics: usesExpandedHeuristics
+                allowsDimensionOnlyClassification: isAfterCorroboratedSignOff,
+                usesExpandedHeuristics: usesLooseSignatureHeuristics
             ) else {
                 bodyReferenced.insert(normalizedCID)
                 return
@@ -886,10 +904,15 @@ enum MessageBubbleHTMLAnalysisBuilder {
         htmlImageDimensions: (width: Int, height: Int)?,
         hasCorroboratedRegion: Bool,
         hasBrandingRegion: Bool,
+        allowsDimensionOnlyClassification: Bool,
         usesExpandedHeuristics: Bool
     ) -> Bool {
         guard let attachment = attachments.first(where: { EmailDocument.normalizedContentID($0.contentId) == contentID }),
               attachment.mimeType.hasPrefix("image/") else { return false }
+
+        // Filenames such as logo.png or award.jpg also describe authored content.
+        // Require signature context even when the image's identity looks familiar.
+        guard hasCorroboratedRegion || hasBrandingRegion else { return false }
 
         let filename = attachment.filename.lowercased()
         let contentIDLocalPart = contentID.split(separator: "@", maxSplits: 1).first.map(String.init) ?? contentID
@@ -927,7 +950,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         // height bound; a 1200 × 400 content photo does not qualify.
         let isBanner = dimensions.height <= 300 && dimensions.width / dimensions.height >= 3
         guard isBadge || isBanner else { return false }
-        return hasSignatureKeyword || hasCorroboratedRegion || (hasBrandingRegion && isGenerated)
+        return hasSignatureKeyword || isGenerated || allowsDimensionOnlyClassification
     }
 
     private static func supportsCalendarInvitePreviewCard(
