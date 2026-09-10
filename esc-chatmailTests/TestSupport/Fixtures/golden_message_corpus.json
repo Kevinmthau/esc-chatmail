@@ -195,6 +195,42 @@
       "expected": "Any word?"
     },
     {
+      "id": "html_labeled_phone_hours_signature_without_wrapper_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately.",
+      "inputHTML": "<div>We hope you are happy with our work. Please call or email with any questions.</div><div>Thank you!</div><div>Best,</div><div>John Boga</div><div>Property Manager</div><div>NYC Brownstone Maintenance</div><div>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</div><div>Emergency line after hours: 914-373-4658</div><div>www.nycbrownstone.net</div>",
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,"
+    },
+    {
+      "id": "html_outlook_paragraph_signature_with_hours_phone_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately.",
+      "inputHTML": "<p>We hope you are happy with our work. Please call or email with any questions.</p><p>Thank you!</p><p>Best,</p><p>John Boga</p><p>Property Manager</p><p>NYC Brownstone Maintenance</p><p>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</p><p>Emergency line after hours: 914-373-4658</p><p>www.nycbrownstone.net</p>",
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,"
+    },
+    {
+      "id": "html_body_instruction_before_contact_signature_preserved",
+      "notes": "PR 229 regression: a role keyword in a short instruction must not make it removable signature text.",
+      "inputHTML": "<div>The proposal looks good.</div><div>Do not pay the consultant</div><div>Jane Smith</div><div>jane@example.test</div><div>415-555-1212</div>",
+      "expected": "The proposal looks good.\n\nDo not pay the consultant"
+    },
+    {
+      "id": "html_capitalized_instruction_before_contact_signature_preserved",
+      "notes": "PR 229 regression: capitalization is not evidence that an authored warning is a signature title.",
+      "inputHTML": "<div>The proposal looks good.</div><div>DO NOT PAY THE CONSULTANT</div><div>Jane Smith</div><div>jane@example.test</div><div>415-555-1212</div>",
+      "expected": "The proposal looks good.\n\nDO NOT PAY THE CONSULTANT"
+    },
+    {
+      "id": "html_body_period_before_contact_signature_preserved",
+      "notes": "PR 229 regression: descriptive phone labels must not absorb authored period/date fields.",
+      "inputHTML": "<div>The requested details are below.</div><div>Service period: 2026-2027</div><div>John Smith</div><div>Partner</div><div>john@example.test</div><div>415-555-1212</div>",
+      "expected": "The requested details are below.\n\nService period: 2026-2027"
+    },
+    {
+      "id": "html_pipe_colon_phone_signature_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine separator collapse / web isSignaturePhoneLine.",
+      "inputHTML": "<div>Current reply.</div><div>Jane Doe</div><div>Partner</div><div>jane@example.test</div><div>Office: 770-555-0148 | Fax: 770-555-0149</div>",
+      "expected": "Current reply."
+    },
+    {
       "id": "signature_guard_html_short_reply_best_name",
       "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
       "inputHTML": "<div>See you tomorrow.</div><div>Best,</div><div>Alex</div>",

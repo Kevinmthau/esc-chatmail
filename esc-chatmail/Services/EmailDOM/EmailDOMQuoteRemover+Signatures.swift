@@ -95,19 +95,7 @@ extension EmailDOMQuoteRemover {
     }
 
     private static func looksLikeNameLine(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 40 else { return false }
-        guard trimmed.rangeOfCharacter(from: .letters) != nil else { return false }
-        guard trimmed.rangeOfCharacter(from: .decimalDigits) == nil else { return false }
-
-        let lowercased = trimmed.lowercased()
-        let disallowedFragments = ["@", "http", "www.", "|", "tel:", "fax", "mobile", "office", "cell", "phone"]
-        guard !disallowedFragments.contains(where: { lowercased.contains($0) }) else { return false }
-
-        let words = trimmed.split(whereSeparator: \.isWhitespace)
-        guard (1...4).contains(words.count) else { return false }
-
-        return true
+        SignatureSignOffPolicy.looksLikeNameLine(line)
     }
 
     private static func escapedHTML(_ text: String) -> String {
@@ -139,22 +127,7 @@ extension EmailDOMQuoteRemover {
         }
     }()
 
-    private static let signOffPhrases: Set<String> = [
-        "all the best",
-        "best",
-        "best regards",
-        "best wishes",
-        "cheers",
-        "kind regards",
-        "many thanks",
-        "regards",
-        "sincerely",
-        "thank you",
-        "thanks",
-        "warm regards",
-        "warmly",
-        "yours truly"
-    ]
+    private static let signOffPhrases = SignaturePatterns.signOffPhrases
 
     private static let signOffPhrasesForPrefixMatching: [String] = signOffPhrases.sorted {
         if $0.count == $1.count {
@@ -228,6 +201,14 @@ extension EmailDOMQuoteRemover {
 
     private static let signatureAddressPattern = SignaturePatterns.addressKeyword
 
+    private static let signatureTimeRangePattern = try? NSRegularExpression(
+        pattern: #"^(?:[01]?\d|2[0-3])[.:]?[0-5]\d-(?:(?:[01]?\d|2[0-3])[.:]?[0-5]\d|24[.:]?00)$"#
+    )
+
+    private static let signatureBareHoursLabelPattern = try? NSRegularExpression(
+        pattern: #"^after[ -]hours\s*:$"#, options: [.caseInsensitive]
+    )
+
     private static let signatureCityStateZipPattern: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: #"^[A-Z][A-Z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$"#,
@@ -236,17 +217,6 @@ extension EmailDOMQuoteRemover {
     }()
 
     private static let signatureStandaloneContactLabelPattern = SignaturePatterns.standaloneContactLabel
-
-    private static let signatureTitleKeywords: [String] = [
-        "director", "manager", "vp", "vice president", "president", "founder",
-        "ceo", "cfo", "cto", "coo", "realtor", "broker", "associate",
-        "sales", "agent", "partner", "principal", "owner", "specialist"
-    ]
-
-    private static let signatureOrganizationKeywords: [String] = [
-        " inc", " inc.", " llc", " ltd", " corp", " corp.", " corporation",
-        " company", " co.", " partners", " group", " llp", " lp"
-    ]
 
     private static let contactListIntroKeywords: [String] = [
         "contact", "email", "reviewer", "recipient"
@@ -411,8 +381,9 @@ extension EmailDOMQuoteRemover {
             with: "|",
             options: .regularExpression
         )
+        // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
         let normalized = slashNormalized.replacingOccurrences(
-            of: #"\s+(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
+            of: #"(?:\s*[|•│┃¦]\s*|\s+)(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
             with: "|",
             options: [.regularExpression, .caseInsensitive]
         )
@@ -425,11 +396,16 @@ extension EmailDOMQuoteRemover {
         guard !segments.isEmpty, segments.allSatisfy({ !$0.isEmpty }) else { return false }
 
         var foundPhone = false
+        var phoneWasLabeled = false
         var requiresClearlyFormattedPhone = false
         for segment in segments {
             if isSignaturePhoneSegment(segment) {
                 if requiresClearlyFormattedPhone && !isClearlyFormattedSignaturePhoneSegment(segment) {
                     return false
+                }
+                if let firstDigit = segment.firstIndex(where: \.isNumber) {
+                    let prefix = normalizedSignaturePhonePrefix(String(segment[..<firstDigit]))
+                    phoneWasLabeled = phoneWasLabeled || isStandaloneSignaturePhoneLabel(prefix)
                 }
                 foundPhone = true
                 requiresClearlyFormattedPhone = false
@@ -437,7 +413,7 @@ extension EmailDOMQuoteRemover {
             }
 
             if foundPhone {
-                guard isSignaturePhoneModifier(segment) else { return false }
+                guard isSignaturePhoneModifier(segment, allowsBusinessHours: phoneWasLabeled) else { return false }
             } else {
                 guard isSignaturePhoneLeadingSegment(segment) else { return false }
                 if isStandaloneSignaturePhoneLabel(segment) {
@@ -478,7 +454,11 @@ extension EmailDOMQuoteRemover {
         if matchesEntireLine(signaturePhoneKnownLabelPattern, text: prefix) {
             return true
         }
-        return false
+        let compactCandidate = String(text[matchRange]).filter { !$0.isWhitespace }
+        return matchesEntireLine(SignaturePatterns.descriptivePhoneLine, text: text) &&
+            !matchesEntireLine(signatureNonPhoneDatePattern, text: compactCandidate) &&
+            !(matchesEntireLine(signatureBareHoursLabelPattern, text: prefix) &&
+                matchesEntireLine(signatureTimeRangePattern, text: compactCandidate))
     }
 
     private static func isSignaturePhoneLeadingSegment(_ text: String) -> Bool {
@@ -490,10 +470,22 @@ extension EmailDOMQuoteRemover {
         return words.count >= 2 && looksLikeSignatureNameSupportLine(text)
     }
 
-    private static func isSignaturePhoneModifier(_ text: String) -> Bool {
+    private static let signatureBusinessHoursPattern: NSRegularExpression? = {
+        let day = #"(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"#
+        let time = #"(?:\d{1,2}(?::\d{2})?\s*(?:am|pm))"#
+        let dayRange = day + #"\s*[-–—]\s*"# + day
+        let timeRange = time + #"\s*[-–—]\s*"# + time
+        return try? NSRegularExpression(
+            pattern: "^(?:" + dayRange + "(?:\\s+" + timeRange + ")?|" + timeRange + "|24/7)$",
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static func isSignaturePhoneModifier(_ text: String, allowsBusinessHours: Bool) -> Bool {
         matchesEntireLine(signaturePhoneExtensionPattern, text: text) ||
             matchesEntireLine(signaturePhoneSuffixLabelPattern, text: text) ||
-            isStandaloneSignaturePhoneLabel(text)
+            isStandaloneSignaturePhoneLabel(text) ||
+            (allowsBusinessHours && matchesEntireLine(signatureBusinessHoursPattern, text: text))
     }
 
     private static func isStandaloneSignaturePhoneLabel(_ text: String) -> Bool {
@@ -561,14 +553,7 @@ extension EmailDOMQuoteRemover {
     }
 
     private static func isStrongSignatureSupportLine(_ text: String) -> Bool {
-        let lowercased = text.lowercased()
-        if signatureTitleKeywords.contains(where: { lowercased.contains($0) }) {
-            return true
-        }
-        if signatureOrganizationKeywords.contains(where: { lowercased.contains($0) }) {
-            return true
-        }
-        return false
+        SignatureSignOffPolicy.isStrongSupportLine(text)
     }
 
     private static func isContactListIntroLine(_ text: String) -> Bool {

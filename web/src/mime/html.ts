@@ -12,6 +12,9 @@ import {
   TO_HEADER_PREFIXES,
   WEB_URL_PATTERN,
   ADDRESS_KEYWORD_PATTERN,
+  SIGN_OFF_PHRASES,
+  DESCRIPTIVE_PHONE_LINE_PATTERN,
+  isStrongSignatureSupportLine,
 } from './patterns'
 import { looksLikeNameLine } from './text'
 
@@ -1159,23 +1162,6 @@ const SIGNATURE_WRAPPER_SELECTORS: string[] = [
   'div[class*="moz-signature"]',
 ]
 
-const SIGN_OFF_PHRASES = new Set([
-  'all the best',
-  'best',
-  'best regards',
-  'best wishes',
-  'cheers',
-  'kind regards',
-  'many thanks',
-  'regards',
-  'sincerely',
-  'thank you',
-  'thanks',
-  'warm regards',
-  'warmly',
-  'yours truly',
-])
-
 const SIGN_OFF_PHRASES_FOR_PREFIX_MATCHING = [...SIGN_OFF_PHRASES].sort((a, b) => {
   if (a.length === b.length) return a < b ? -1 : 1
   return b.length - a.length
@@ -1303,47 +1289,13 @@ const SIGNATURE_PHONE_SUFFIX_LABEL_PATTERN =
 
 const SIGNATURE_NON_PHONE_DATE_PATTERN =
   /^(?:(?:19|20)\p{Nd}{2}(?:-|\.)(?:\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}|\p{Nd}{4})|\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}(?:-|\.)(?:19|20)\p{Nd}{2})$/u
+const SIGNATURE_TIME_RANGE_PATTERN =
+  /^(?:[01]?\d|2[0-3])[.:]?[0-5]\d-(?:(?:[01]?\d|2[0-3])[.:]?[0-5]\d|24[.:]?00)$/
+const SIGNATURE_BARE_HOURS_LABEL_PATTERN = /^after[ -]hours\s*:$/i
 
+// A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
 const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
-  /\s+(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)/gi
-
-const SIGNATURE_TITLE_KEYWORDS = [
-  'director',
-  'manager',
-  'vp',
-  'vice president',
-  'president',
-  'founder',
-  'ceo',
-  'cfo',
-  'cto',
-  'coo',
-  'realtor',
-  'broker',
-  'associate',
-  'sales',
-  'agent',
-  'partner',
-  'principal',
-  'owner',
-  'specialist',
-]
-
-const SIGNATURE_ORGANIZATION_KEYWORDS = [
-  ' inc',
-  ' inc.',
-  ' llc',
-  ' ltd',
-  ' corp',
-  ' corp.',
-  ' corporation',
-  ' company',
-  ' co.',
-  ' partners',
-  ' group',
-  ' llp',
-  ' lp',
-]
+  /(?:\s*[|•│┃¦]\s*|\s+)(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)/gi
 
 const CONTACT_LIST_INTRO_KEYWORDS = ['contact', 'email', 'reviewer', 'recipient']
 
@@ -1490,11 +1442,18 @@ function isSignaturePhoneLine(text: string): boolean {
   }
 
   let foundPhone = false
+  let phoneWasLabeled = false
   let requiresClearlyFormattedPhone = false
   for (const segment of segments) {
     if (isSignaturePhoneSegment(segment)) {
       if (requiresClearlyFormattedPhone && !isClearlyFormattedSignaturePhoneSegment(segment)) {
         return false
+      }
+      const firstDigit = segment.search(SIGNATURE_DECIMAL_DIGIT_PATTERN)
+      if (firstDigit >= 0) {
+        phoneWasLabeled ||= isStandaloneSignaturePhoneLabel(
+          normalizedSignaturePhonePrefix(segment.slice(0, firstDigit)),
+        )
       }
       foundPhone = true
       requiresClearlyFormattedPhone = false
@@ -1502,7 +1461,7 @@ function isSignaturePhoneLine(text: string): boolean {
     }
 
     if (foundPhone) {
-      if (!isSignaturePhoneModifier(segment)) return false
+      if (!isSignaturePhoneModifier(segment, phoneWasLabeled)) return false
       continue
     }
 
@@ -1539,7 +1498,17 @@ function isSignaturePhoneSegment(text: string): boolean {
   const suffix = text.slice(phoneStart + phone.length)
   if (!isAllowedSignaturePhoneSuffix(suffix)) return false
 
-  return prefix.length === 0 || SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix)
+  const compactCandidate = phone.replace(/\s+/g, '')
+  return (
+    prefix.length === 0 ||
+    SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix) ||
+    (DESCRIPTIVE_PHONE_LINE_PATTERN.test(text) &&
+      !SIGNATURE_NON_PHONE_DATE_PATTERN.test(compactCandidate) &&
+      !(
+        SIGNATURE_BARE_HOURS_LABEL_PATTERN.test(prefix) &&
+        SIGNATURE_TIME_RANGE_PATTERN.test(compactCandidate)
+      ))
+  )
 }
 
 function isSignaturePhoneLeadingSegment(text: string): boolean {
@@ -1551,11 +1520,27 @@ function isSignaturePhoneLeadingSegment(text: string): boolean {
   return words.length >= 2 && looksLikeSignatureNameSupportLine(text)
 }
 
-function isSignaturePhoneModifier(text: string): boolean {
+const SIGNATURE_WEEKDAY = String.raw`(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)`
+const SIGNATURE_TIME = String.raw`(?:\d{1,2}(?::\d{2})?\s*(?:am|pm))`
+const SIGNATURE_DAY_RANGE = SIGNATURE_WEEKDAY + String.raw`\s*[-–—]\s*` + SIGNATURE_WEEKDAY
+const SIGNATURE_TIME_RANGE = SIGNATURE_TIME + String.raw`\s*[-–—]\s*` + SIGNATURE_TIME
+const SIGNATURE_BUSINESS_HOURS_PATTERN = new RegExp(
+  '^(?:' +
+    SIGNATURE_DAY_RANGE +
+    String.raw`(?:\s+` +
+    SIGNATURE_TIME_RANGE +
+    ')?|' +
+    SIGNATURE_TIME_RANGE +
+    '|24/7)$',
+  'i',
+)
+
+function isSignaturePhoneModifier(text: string, allowsBusinessHours: boolean): boolean {
   return (
     SIGNATURE_PHONE_EXTENSION_PATTERN.test(text) ||
     SIGNATURE_PHONE_SUFFIX_LABEL_PATTERN.test(text) ||
-    isStandaloneSignaturePhoneLabel(text)
+    isStandaloneSignaturePhoneLabel(text) ||
+    (allowsBusinessHours && SIGNATURE_BUSINESS_HOURS_PATTERN.test(text))
   )
 }
 
@@ -1609,17 +1594,6 @@ function isSignatureSupportLine(text: string): boolean {
     return true
   }
   if (looksLikeSignatureNameSupportLine(text)) {
-    return true
-  }
-  return false
-}
-
-function isStrongSignatureSupportLine(text: string): boolean {
-  const lowercased = text.toLowerCase()
-  if (SIGNATURE_TITLE_KEYWORDS.some((keyword) => lowercased.includes(keyword))) {
-    return true
-  }
-  if (SIGNATURE_ORGANIZATION_KEYWORDS.some((keyword) => lowercased.includes(keyword))) {
     return true
   }
   return false
