@@ -201,6 +201,14 @@ extension EmailDOMQuoteRemover {
 
     private static let signatureAddressPattern = SignaturePatterns.addressKeyword
 
+    private static let signatureTimeRangePattern = try? NSRegularExpression(
+        pattern: #"^(?:[01]?\d|2[0-3])[.:]?[0-5]\d-(?:(?:[01]?\d|2[0-3])[.:]?[0-5]\d|24[.:]?00)$"#
+    )
+
+    private static let signatureBareHoursLabelPattern = try? NSRegularExpression(
+        pattern: #"^after[ -]hours\s*:$"#, options: [.caseInsensitive]
+    )
+
     private static let signatureCityStateZipPattern: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: #"^[A-Z][A-Z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$"#,
@@ -420,7 +428,6 @@ extension EmailDOMQuoteRemover {
     }
 
     private static func isSignaturePhoneSegment(_ text: String) -> Bool {
-        if matchesEntireLine(SignaturePatterns.descriptivePhoneLine, text: text) { return true }
         let range = NSRange(location: 0, length: text.utf16.count)
 
         let matches = signaturePhonePattern?.matches(in: text, options: [], range: range) ?? []
@@ -447,7 +454,11 @@ extension EmailDOMQuoteRemover {
         if matchesEntireLine(signaturePhoneKnownLabelPattern, text: prefix) {
             return true
         }
-        return false
+        let compactCandidate = String(text[matchRange]).filter { !$0.isWhitespace }
+        return matchesEntireLine(SignaturePatterns.descriptivePhoneLine, text: text) &&
+            !matchesEntireLine(signatureNonPhoneDatePattern, text: compactCandidate) &&
+            !(matchesEntireLine(signatureBareHoursLabelPattern, text: prefix) &&
+                matchesEntireLine(signatureTimeRangePattern, text: compactCandidate))
     }
 
     private static func isSignaturePhoneLeadingSegment(_ text: String) -> Bool {
