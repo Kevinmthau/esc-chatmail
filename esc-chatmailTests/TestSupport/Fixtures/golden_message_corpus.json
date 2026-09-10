@@ -355,6 +355,60 @@
       "notes": "Revert-check: EmailDOMQuoteRemover signatureLines and scoped truncation / web html.ts sub-line expansion; preserve the personal signoff/name pair.",
       "inputHTML": "<p>Current reply.</p><table><tr><td><img src=\"cid:badge\"></td><td>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</td></tr></table>",
       "expected": "Current reply.\n\nBest,\n\nJohn Smith"
+    },
+    {
+      "id": "html_section_lines_contact_signature_removed",
+      "inputHTML": "<section>The repair is scheduled.</section><section>Best,</section><section>John Boga</section><section>Property Manager</section><section>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</section><section>Emergency line after hours: 914-373-4658</section><section>www.nycbrownstone.net</section>",
+      "expected": "The repair is scheduled.\n\nBest,\n\nJohn Boga",
+      "notes": "Revert-check: PlainTextSignatureRemover.removeTrailingContactSignature / web removeTrailingContactSignature. Section blocks become distinct contact lines after extraction, beyond the DOM visible-line projection; no hard-indicator chaining."
+    },
+    {
+      "id": "html_section_lines_contact_list_kept",
+      "inputHTML": "<section>Here are the reviewer contacts:</section><section>Jane Doe</section><section>Account Manager</section><section>jane@example.com</section><section>404-555-0142</section>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nAccount Manager jane@example.com 404-555-0142",
+      "notes": "Revert-check: contact-only second-pass explicit contact-list intro veto in Swift / web. Authored contact list remains visible, including its job title."
+    },
+    {
+      "id": "html_section_lines_contact_card_then_body_kept",
+      "inputHTML": "<section>Please contact our manager:</section><section>Jane Doe</section><section>Property Manager</section><section>jane@example.com</section><section>404-555-0142</section><section>Please copy me on the reply.</section>",
+      "expected": "Please contact our manager:\n\nJane Doe\n\nProperty Manager jane@example.com 404-555-0142\n\nPlease copy me on the reply.",
+      "notes": "Revert-check: end-anchored contact-only second pass in Swift / web. Body prose after a card prevents removal."
+    },
+    {
+      "id": "html_contact_only_document_rescue_preserved",
+      "inputHTML": "<div>Jane Doe</div><div>jane@example.com</div><div>404-555-0142</div>",
+      "expected": "Jane Doe jane@example.com 404-555-0142",
+      "notes": "Revert-check: contact-only second-pass empty-result guard in Swift / web preserves a contact card rescued by quote-only DOM cleanup."
+    },
+    {
+      "id": "html_titled_contact_only_div_preserved",
+      "inputHTML": "<div>Jordan Smith</div><div>Partner</div><div>jordan@example.com</div><div>404-555-0142</div>",
+      "expected": "Jordan Smith\n\nPartner jordan@example.com 404-555-0142",
+      "notes": "Revert-check: empty-result guard of contact-only second pass in Swift / web preserves a full contact card rescued by quote-only DOM cleanup."
+    },
+    {
+      "id": "html_titled_contact_only_pre_preserved",
+      "inputHTML": "<pre>Jordan Smith<br>Partner<br>jordan@example.com<br>404-555-0142</pre>",
+      "expected": "Jordan Smith\n\nPartner jordan@example.com 404-555-0142",
+      "notes": "Revert-check: empty-result guard of contact-only second pass in Swift / web preserves a full contact card rescued by quote-only DOM cleanup. Explicit br boundaries avoid depending on text-node whitespace normalization."
+    },
+    {
+      "id": "html_section_contact_email_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>Please send the revised plan to bob@example.com.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nPlease send the revised plan to bob@example.com.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
+    },
+    {
+      "id": "html_section_contact_url_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>Please review the revised plan at https://example.com/plan.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nPlease review the revised plan at https://example.com/plan.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
+    },
+    {
+      "id": "html_section_contact_title_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>The manager will call tomorrow.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nThe manager will call tomorrow.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
     }
   ],
   "rawSourceHTMLRecoveryCases": [

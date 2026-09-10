@@ -1065,7 +1065,12 @@ actor ProcessedTextCache: MemoryWarningHandler {
         let textBeforeUnwrap = applyPlainTextQuoteRemoval
             ? decoded
             : removeConsecutivePlainTextQuoteLines(from: decoded)
-        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: textBeforeUnwrap)
+        // Only successful DOM cleanup gets the narrow second pass. Original-HTML
+        // fallback already uses the plain-text quote/signature path below.
+        let contactCleaned = applyPlainTextQuoteRemoval
+            ? textBeforeUnwrap
+            : PlainTextSignatureRemover.removeTrailingContactSignature(from: textBeforeUnwrap)
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: contactCleaned)
         let quoteRemoved: String
         if applyPlainTextQuoteRemoval {
             quoteRemoved = PlainTextQuoteRemover.extractQuotes(from: unwrapped).mainContent

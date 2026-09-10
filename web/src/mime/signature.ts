@@ -14,6 +14,7 @@ import {
   STANDALONE_CONTACT_LABEL_PATTERN,
   WEB_URL_PATTERN,
 } from './patterns'
+import { hasNonEmailContactSignal, isContactSignatureLine, isSignatureSupportLine } from './html'
 import { isListItem, normalizeLineEndings } from './text'
 
 const TRAILING_SCAN_LINE_LIMIT = 80
@@ -343,6 +344,63 @@ export function removeSignature(text: string): string {
   }
 
   return trimmed
+}
+
+/** Contact-only fallback after DOM cleanup, using the same classifiers and thresholds. */
+export function removeTrailingContactSignature(text: string): string {
+  const normalized = normalizeLineEndings(text)
+  const trimmed = normalized.trim()
+  const lines = normalized.split('\n')
+  let last = lines.length - 1
+  while (last >= 0 && lines[last]!.trim().length === 0) last--
+  if (last < 0 || !isContactSignatureLine(lines[last]!.trim())) return trimmed
+
+  let start = last
+  let contacts = 0
+  let nonEmailContacts = 0
+  let supportLines = 0
+  let strongSupport = false
+  let signOffIndex: number | null = null
+  let precedingBody: string | null = null
+  for (let index = last; index >= Math.max(0, last - 32); index--) {
+    const line = lines[index]!.trim()
+    if (line.length === 0) continue
+    if (isSignOffLineForSignatureContext(line)) {
+      signOffIndex = index
+      break
+    }
+    // Email addresses and titles inside instructions are still body prose.
+    if (
+      isBodyProseLine(line) ||
+      ((EMAIL_ADDRESS_PATTERN.test(line) || WEB_URL_PATTERN.test(line)) &&
+        !isStrictContactLine(line))
+    ) {
+      precedingBody = line
+      break
+    }
+    if (isContactSignatureLine(line)) {
+      contacts++
+      if (hasNonEmailContactSignal(line)) nonEmailContacts++
+    } else if (isSignatureSupportLine(line)) {
+      supportLines++
+      strongSupport ||= isStrongSignatureSupportLine(line)
+    } else {
+      precedingBody = line
+      break
+    }
+    start = index
+  }
+  const removalCount = lines.slice(start, last + 1).filter((line) => line.trim().length > 0).length
+  if (
+    contacts < 2 ||
+    removalCount < 3 ||
+    !(signOffIndex !== null || strongSupport || (supportLines === 1 && nonEmailContacts > 0)) ||
+    (precedingBody !== null && isContactListIntroLine(precedingBody))
+  )
+    return trimmed
+  const result = joinLines(lines, preservingSignOff(signOffIndex ?? start, last, lines))
+  // Keep contact-only documents rescued by quote-only DOM cleanup.
+  return result.length > 0 ? result : trimmed
 }
 
 // Markers in a reply are footers only when their entire tail is signature-like.

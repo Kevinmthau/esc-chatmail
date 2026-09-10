@@ -1557,7 +1557,7 @@ function previousNonEmptyLineIndex(
   return null
 }
 
-function isContactSignatureLine(text: string): boolean {
+export function isContactSignatureLine(text: string): boolean {
   if (text.length === 0) return false
   if (EMAIL_ADDRESS_PATTERN.test(text)) return true
   if (WEB_URL_PATTERN.test(text)) return true
@@ -1572,7 +1572,7 @@ function containsEmailAddress(text: string): boolean {
   return EMAIL_ADDRESS_PATTERN.test(text)
 }
 
-function hasNonEmailContactSignal(text: string): boolean {
+export function hasNonEmailContactSignal(text: string): boolean {
   if (WEB_URL_PATTERN.test(text)) return true
   if (isSignaturePhoneLine(text)) return true
   if (ADDRESS_KEYWORD_PATTERN.test(text)) return true
@@ -1729,7 +1729,7 @@ function isAllowedSignaturePhoneSuffix(rawSuffix: string): boolean {
   )
 }
 
-function isSignatureSupportLine(text: string): boolean {
+export function isSignatureSupportLine(text: string): boolean {
   if (text.length === 0) return false
   if (isStrongSignatureSupportLine(text)) {
     return true

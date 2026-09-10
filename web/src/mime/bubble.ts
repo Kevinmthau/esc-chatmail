@@ -4,6 +4,7 @@
 // header quote blocks).
 
 import { decodeHtmlEntities } from './decode'
+import { removeTrailingContactSignature } from './signature'
 import { extractPlainTextFromHtml } from './htmlText'
 import {
   EMAIL_ADDRESS_PATTERN,
@@ -190,7 +191,11 @@ function extractPlainTextFromHtmlForBubble(
   const textBeforeUnwrap = applyPlainTextQuoteRemoval
     ? decoded
     : removeConsecutivePlainTextQuoteLines(decoded)
-  const unwrapped = unwrapEmailLineBreaks(textBeforeUnwrap)
+  // Only a successful DOM cleanup gets the contact-only second pass.
+  const contactCleaned = applyPlainTextQuoteRemoval
+    ? textBeforeUnwrap
+    : removeTrailingContactSignature(textBeforeUnwrap)
+  const unwrapped = unwrapEmailLineBreaks(contactCleaned)
   let quoteRemoved: string
   if (applyPlainTextQuoteRemoval) {
     quoteRemoved = extractQuotes(unwrapped).mainContent

@@ -478,7 +478,8 @@ extension EmailDOMQuoteRemover {
         return signatureEmailPattern?.firstMatch(in: text, options: [], range: range) != nil
     }
 
-    private static func hasNonEmailContactSignal(_ text: String) -> Bool {
+    // Shared with the contact-only fallback after DOM text extraction.
+    static func hasNonEmailContactSignal(_ text: String) -> Bool {
         let range = NSRange(location: 0, length: text.utf16.count)
         if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
             return true
@@ -662,7 +663,8 @@ extension EmailDOMQuoteRemover {
         return pattern?.firstMatch(in: text, options: [], range: range)?.range == range
     }
 
-    private static func isSignatureSupportLine(_ text: String) -> Bool {
+    // Shared with the contact-only fallback after DOM text extraction.
+    static func isSignatureSupportLine(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
         if isStrongSignatureSupportLine(text) {
             return true
