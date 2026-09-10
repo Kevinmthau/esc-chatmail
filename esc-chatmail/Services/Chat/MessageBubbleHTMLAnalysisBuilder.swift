@@ -259,6 +259,18 @@ enum MessageBubbleHTMLAnalysisBuilder {
         return nonDisplayable
     }
 
+    private static func hasFollowingBodyProse(in html: String, at valueStart: String.Index, before replyOffset: Int?) -> Bool {
+        let cidOffset = html.distance(from: html.startIndex, to: valueStart)
+        let start = isInsideHTMLTag(in: html, at: valueStart)
+            ? html[..<valueStart].lastIndex(of: "<") ?? valueStart
+            : html.index(valueStart, offsetBy: -4)
+        let end = replyOffset.flatMap { offset in
+            offset > cidOffset ? html.index(html.startIndex, offsetBy: offset) : nil
+        } ?? html.endIndex
+        let followingHTML = htmlAfterFirstCIDBeforeNextSignOff(in: String(html[start..<end])) ?? ""
+        return signatureContactOrRoleLines(in: followingHTML).contains(where: isBodyProseLine)
+    }
+
     private static func firstHardSignatureBoundaryOffset(in lowercasedHTML: String) -> Int? {
         let trustedOffsets = trustedSignatureWrapperMarkers.compactMap { marker -> Int? in
             guard let range = lowercasedHTML.range(of: marker) else { return nil }
@@ -953,6 +965,27 @@ enum MessageBubbleHTMLAnalysisBuilder {
         return hasSignatureKeyword || isGenerated || allowsDimensionOnlyClassification
     }
 
+    /// Presentation may compact a surviving signature candidate, but ordinary
+    /// pasted photos (including a bare thanks/name with no signature evidence)
+    /// retain their existing size and chrome.
+    private static func bodyInlineContentIDs(in html: String) -> Set<String> {
+        let lowercasedHTML = html.lowercased()
+        let replyOffset = firstReplyBoundaryOffset(in: lowercasedHTML)
+        let boundaries = [firstHardSignatureBoundaryOffset(in: lowercasedHTML), replyOffset] +
+            standaloneTrailingSignatureStartOffsets(in: lowercasedHTML, before: replyOffset).map(Optional.some)
+        guard let firstBoundary = boundaries.compactMap({ $0 }).min() else {
+            return EmailDocument.referencedContentIDs(in: lowercasedHTML)
+        }
+        let end = lowercasedHTML.index(lowercasedHTML.startIndex, offsetBy: firstBoundary)
+        var bodyIDs = EmailDocument.referencedContentIDs(in: String(lowercasedHTML[..<end]))
+        EmailDocument.scanReferencedContentIDs(in: lowercasedHTML) { cid, start in
+            if hasFollowingBodyProse(in: lowercasedHTML, at: start, before: replyOffset) {
+                bodyIDs.insert(cid)
+            }
+        }
+        return bodyIDs
+    }
+
     private static func supportsCalendarInvitePreviewCard(
         canonicalHTML: String,
         isForwardedEmail: Bool,
@@ -1014,7 +1047,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
                 senderName: senderName,
                 senderEmail: senderEmail,
                 subject: subject
-            )
+            ),
+            bodyInlineContentIDs: bodyInlineContentIDs(in: canonicalHTML)
         )
     }
 

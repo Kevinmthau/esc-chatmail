@@ -304,4 +304,79 @@ final class AttachmentDisplayFilterParityTests: XCTestCase {
         XCTAssertTrue(InlineAttachmentDownloadPolicy.pendingImages(in: row.attachments, isFromMe: true).isEmpty)
     }
 
+    // Revert-check: received text-only CID survivors get bounded presentation;
+    // body photos, large images, sent mail and regular attachments keep their path.
+    func testInlineImagePresentationPreservesBodyPhotosAndRegularAttachments() {
+        let message = MessageBuilder().withId("inline-presentation").withAttachments().build(in: context)
+        let image = AttachmentBuilder().withId("inline").withContentId("BODY")
+            .asImage(width: 300, height: 300).withByteSize(50_000).downloaded()
+            .forMessage(message).build(in: context)
+        func policy(sent: Bool = false, preview: Bool = false, body: Set<String> = []) -> InlineImagePresentationPolicy {
+            InlineImagePresentationPolicy.resolve(attachment: image, isFromMe: sent, isHTMLPreview: preview, bodyContentIDs: body)
+        }
+        XCTAssertEqual(policy(), .compact)
+        XCTAssertEqual(policy(sent: true), .standard)
+        XCTAssertEqual(policy(preview: true), .standard)
+        XCTAssertEqual(policy(body: ["body"]), .standard)
+        image.width = 1200
+        image.height = 400
+        XCTAssertEqual(policy(), .standard)
+        image.width = 0
+        image.height = 0
+        image.state = .queued
+        XCTAssertEqual(policy(), .collapsed)
+        XCTAssertEqual(policy(sent: true), .standard)
+        image.state = .failed
+        XCTAssertEqual(policy(), .standard)
+        image.state = .downloaded
+        XCTAssertEqual(policy(), .standard, "Missing metadata must not produce a zero-size decoded image")
+        image.contentId = nil
+        image.state = .queued
+        XCTAssertEqual(policy(), .standard)
+    }
+
+    func testInlineImageSizingFitsWithoutUpscalingNativePixels() {
+        XCTAssertEqual(InlineImagePresentationPolicy.fittedSize(pixelWidth: 300, pixelHeight: 300, maxWidth: 260, displayScale: 3), CGSize(width: 100, height: 100))
+        XCTAssertEqual(InlineImagePresentationPolicy.fittedSize(pixelWidth: 900, pixelHeight: 900, maxWidth: 260, displayScale: 3), CGSize(width: 160, height: 160))
+        XCTAssertEqual(InlineImagePresentationPolicy.fittedSize(pixelWidth: 600, pixelHeight: 150, maxWidth: 100, displayScale: 3), CGSize(width: 100, height: 25))
+    }
+
+    // Revert-check: failure remains actionable even when containment/DOM cleanup
+    // suppressed the CID. Explicit retry avoids a hide/fail/onAppear retry loop.
+    func testFailedUnknownInlineImageKeepsRetryAcrossBothDisplayRepresentations() {
+        let message = MessageBuilder().withId("inline-retry").withAttachments().build(in: context)
+        let image = AttachmentBuilder().withId("failed-inline").withContentId("failed-image")
+            .asImage(width: 0, height: 0).withByteSize(50_000).queued().forMessage(message).build(in: context)
+        image.state = .failed
+        let analysis = MessageBubbleHTMLAnalysis(hasHTMLSource: true,
+            referencedInlineContentIDs: ["failed-image"], nonDisplayableInlineContentIDs: ["failed-image"],
+            supportsCalendarInvitePreviewCard: false)
+        let fixture = Fixture(message: message, analysis: analysis)
+        XCTAssertEqual(messageResultIDs(fixture, hidingInline: false, hidingCalendar: false), ["failed-inline"])
+        XCTAssertEqual(rowResultIDs(fixture, hidingInline: false, hidingCalendar: false), ["failed-inline"])
+        XCTAssertTrue(rowResultIDs(fixture, hidingInline: true, hidingCalendar: false).isEmpty)
+        XCTAssertTrue(InlineImagePresentationPolicy.requiresExplicitRetry(attachment: image, isFromMe: false))
+        XCTAssertFalse(InlineImagePresentationPolicy.requiresExplicitRetry(attachment: image, isFromMe: true))
+    }
+
+    func testAnalysisMarksPhotoBeforeOutlookSignOffAsBodyContent() {
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: "<p>Photo from the job.</p><p><img src='cid:body'></p><p>Best,<o:p></o:p></p><p>Jane</p><p>Account Manager</p><p><img src='cid:after'></p>",
+            hasHTMLSourceHint: true, isForwardedEmail: false, isLikelyCalendarInvite: false,
+            bodyText: nil, cleanedSnippet: nil, subject: nil, attachmentSnapshots: []
+        )
+        XCTAssertEqual(analysis.bodyInlineContentIDs, ["body"])
+    }
+
+    func testAnalysisPreservesOrdinaryPhotosWithoutCorroboratedSignature() {
+        for prefix in ["<p>Thanks, here is the photo.</p>", "<p>Thanks,<o:p></o:p></p><p>Jane</p>"] {
+            let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+                canonicalHTML: prefix + "<p><img src='cid:body'></p>",
+                hasHTMLSourceHint: true, isForwardedEmail: false, isLikelyCalendarInvite: false,
+                bodyText: nil, cleanedSnippet: nil, subject: nil, attachmentSnapshots: []
+            )
+            XCTAssertEqual(analysis.bodyInlineContentIDs, ["body"])
+        }
+    }
+
 }

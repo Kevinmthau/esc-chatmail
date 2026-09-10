@@ -3,6 +3,8 @@ import SwiftUI
 struct ImageAttachmentBubble: View {
     let attachment: Attachment
     @ObservedObject var downloader: AttachmentDownloader
+    var presentation: InlineImagePresentationPolicy = .standard
+    @Environment(\.displayScale) private var displayScale
     let onTap: () -> Void
     @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
@@ -12,15 +14,28 @@ struct ImageAttachmentBubble: View {
         Button(action: onTap) {
             ZStack {
                 if let image = thumbnailLoader.image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(maxWidth: maxWidth)
-                        .cornerRadius(14)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
+                    if presentation == .compact {
+                        let size = InlineImagePresentationPolicy.fittedSize(
+                            pixelWidth: CGFloat(attachment.width), pixelHeight: CGFloat(attachment.height),
+                            maxWidth: maxWidth - 16, displayScale: displayScale
                         )
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: size.width, height: size.height)
+                            .padding(8)
+                            .background(MessageBubbleStyle.standard.recipientBubbleColor(), in: RoundedRectangle(cornerRadius: 14))
+                    } else {
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(maxWidth: maxWidth)
+                            .cornerRadius(14)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
+                            )
+                    }
                 } else if thumbnailLoader.isLoading {
                     RoundedRectangle(cornerRadius: 14)
                         .fill(Color.gray.opacity(0.1))
@@ -54,7 +69,7 @@ struct ImageAttachmentBubble: View {
         }
         .buttonStyle(PlainButtonStyle())
         .opacity([.downloaded, .uploaded, .failed].contains(attachment.state) ? 1.0 : 0.7)
-        .disabled(!attachment.isReady)
+        .disabled(!attachment.isReady && attachment.state != .failed)
         .onAppear {
             thumbnailLoader.load(
                 attachmentId: attachment.id,
@@ -62,7 +77,10 @@ struct ImageAttachmentBubble: View {
                 previewPath: attachment.previewURL
             )
             // Download if queued, failed, or file is missing from disk
-            if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
+            let waitsForRetry = InlineImagePresentationPolicy.requiresExplicitRetry(
+                attachment: attachment, isFromMe: attachment.message?.isFromMe ?? false
+            )
+            if attachment.state == .queued || (attachment.state == .failed && !waitsForRetry) || attachment.needsRedownload {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }

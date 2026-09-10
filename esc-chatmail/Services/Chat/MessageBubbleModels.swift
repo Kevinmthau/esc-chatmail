@@ -67,6 +67,21 @@ struct MessageBubbleHTMLAnalysis: Sendable, Equatable {
     let referencedInlineContentIDs: Set<String>
     let nonDisplayableInlineContentIDs: Set<String>
     let supportsCalendarInvitePreviewCard: Bool
+    let bodyInlineContentIDs: Set<String>
+
+    init(
+        hasHTMLSource: Bool,
+        referencedInlineContentIDs: Set<String>,
+        nonDisplayableInlineContentIDs: Set<String>,
+        supportsCalendarInvitePreviewCard: Bool,
+        bodyInlineContentIDs: Set<String> = []
+    ) {
+        self.hasHTMLSource = hasHTMLSource
+        self.referencedInlineContentIDs = referencedInlineContentIDs
+        self.nonDisplayableInlineContentIDs = nonDisplayableInlineContentIDs
+        self.supportsCalendarInvitePreviewCard = supportsCalendarInvitePreviewCard
+        self.bodyInlineContentIDs = bodyInlineContentIDs
+    }
 
     static let empty = MessageBubbleHTMLAnalysis(
         hasHTMLSource: false,
