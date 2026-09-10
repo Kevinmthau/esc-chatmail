@@ -8,7 +8,24 @@ struct ChatPreviewRepair {
         var lastMessageID: String?
         var changedMessageIDs: Set<String> = []
         var didDrain = false
-        var deferredForPendingSend = false
+        var firstDeferredMessageID: String?
+    }
+
+    /// One serialized checkpoint keeps the scan cursor and deferred retry
+    /// boundary together if the process exits between batches.
+    struct Checkpoint: Codable, Sendable {
+        var afterMessageID: String?
+        var firstDeferredMessageID: String?
+        var resumeAtMessageID: String?
+
+        static func decode(_ value: String?) -> Self {
+            value.flatMap { $0.data(using: .utf8) }
+                .flatMap { try? JSONDecoder().decode(Self.self, from: $0) } ?? Self()
+        }
+
+        var encoded: String? {
+            (try? JSONEncoder().encode(self)).flatMap { String(data: $0, encoding: .utf8) }
+        }
     }
 
     let htmlContentHandler: HTMLContentHandler
@@ -16,6 +33,7 @@ struct ChatPreviewRepair {
     func prepareBatch(
         in context: NSManagedObjectContext,
         after messageID: String?,
+        startingAt firstMessageID: String? = nil,
         limit: Int = 100
     ) async throws -> Batch {
         try await context.perform {
@@ -29,6 +47,9 @@ struct ChatPreviewRepair {
             if let messageID {
                 predicates.append(NSPredicate(format: "id > %@", messageID))
             }
+            if let firstMessageID {
+                predicates.append(NSPredicate(format: "id >= %@", firstMessageID))
+            }
             request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
             request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
             request.fetchLimit = max(1, limit)
@@ -40,10 +61,11 @@ struct ChatPreviewRepair {
                 try Task.checkCancellation()
                 if let conversationID = message.conversation?.id,
                    pendingConversationIDs.contains(conversationID) {
-                    // Do not checkpoint past this row: its optimistic-send
-                    // protection must be re-evaluated after reconciliation.
-                    batch.deferredForPendingSend = true
-                    break
+                    // Retained failed sends can live indefinitely. Remember a
+                    // retry boundary without starving later unrelated messages.
+                    if batch.firstDeferredMessageID == nil { batch.firstDeferredMessageID = message.id }
+                    batch.lastMessageID = message.id
+                    continue
                 }
                 let html = htmlContentHandler.loadHTML(for: message.id) ??
                     message.bodyStorageURI.flatMap(StorageURIResolver.resolve)

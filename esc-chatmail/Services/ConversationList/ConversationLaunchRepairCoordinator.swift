@@ -108,7 +108,7 @@ final class ConversationLaunchRepairCoordinator {
     }
 
     static let chatPreviewRepairMigrationKey = "chatPreviewRepair." + CacheVersioning.chatPreviewDerivationVersion
-    static let chatPreviewRepairCursorKey = chatPreviewRepairMigrationKey + ".lastMessageID"
+    static let chatPreviewRepairCheckpointKey = chatPreviewRepairMigrationKey + ".checkpoint"
 
     /// Checkpoint after each saved batch so cancellation or process exit can
     /// resume without re-reading every earlier HTML file. No model migration.
@@ -120,37 +120,50 @@ final class ConversationLaunchRepairCoordinator {
             guard let self else { return }
             defer { isChatPreviewRepairRunning = false }
             guard let request = await accountWorkCoordinator.makeAccountWorkRequest() else { return }
+            var checkpoint = ChatPreviewRepair.Checkpoint.decode(
+                storage.migrationFlags.string(forKey: Self.chatPreviewRepairCheckpointKey)
+            )
             while !Task.isCancelled {
                 // Never wait for sync while holding a lease: account teardown
                 // waits for leases to drain before replacing the store.
                 await syncWaiter.waitForCurrentSyncToComplete()
                 guard !Task.isCancelled,
                       let lease = await accountWorkCoordinator.acquireAccountWorkLease(kind: .maintenance, for: request) else { return }
+                let batchCheckpoint = checkpoint
                 let batch = await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
-                    await self.prepareAndSaveChatPreviewBatch(lease: lease)
+                    await self.prepareAndSaveChatPreviewBatch(lease: lease, checkpoint: batchCheckpoint)
                 }
                 if let batch {
-                    storage.migrationFlags.setString(batch.lastMessageID, forKey: Self.chatPreviewRepairCursorKey)
-                    if batch.didDrain {
+                    checkpoint.afterMessageID = batch.lastMessageID
+                    checkpoint.firstDeferredMessageID = checkpoint.firstDeferredMessageID ?? batch.firstDeferredMessageID
+                    let isComplete = batch.didDrain && checkpoint.firstDeferredMessageID == nil
+                    if batch.didDrain, let deferred = checkpoint.firstDeferredMessageID {
+                        checkpoint = ChatPreviewRepair.Checkpoint(resumeAtMessageID: deferred)
+                    }
+                    storage.migrationFlags.setString(checkpoint.encoded, forKey: Self.chatPreviewRepairCheckpointKey)
+                    if isComplete {
                         storage.migrationFlags.set(true, forKey: Self.chatPreviewRepairMigrationKey)
-                        storage.migrationFlags.setString(nil, forKey: Self.chatPreviewRepairCursorKey)
+                        storage.migrationFlags.setString(nil, forKey: Self.chatPreviewRepairCheckpointKey)
                     }
                 }
                 await accountWorkCoordinator.endRun(lease)
-                guard let batch, !batch.didDrain, !batch.deferredForPendingSend else { return }
+                guard let batch, !batch.didDrain else { return }
                 await Task.yield()
             }
         }
     }
 
-    private func prepareAndSaveChatPreviewBatch(lease: SyncRun) async -> ChatPreviewRepair.Batch? {
+    private func prepareAndSaveChatPreviewBatch(
+        lease: SyncRun, checkpoint: ChatPreviewRepair.Checkpoint
+    ) async -> ChatPreviewRepair.Batch? {
         guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease) else { return nil }
         let context = storage.makeBackgroundContext()
         context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
         do {
             let batch = try await chatPreviewRepair.prepareBatch(
                 in: context,
-                after: storage.migrationFlags.string(forKey: Self.chatPreviewRepairCursorKey)
+                after: checkpoint.afterMessageID,
+                startingAt: checkpoint.resumeAtMessageID
             )
             guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease),
                   storage.saveIfNeeded(context) else {

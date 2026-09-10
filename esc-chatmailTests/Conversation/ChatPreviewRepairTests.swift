@@ -71,10 +71,11 @@ final class ChatPreviewRepairTests: XCTestCase {
         }
     }
 
-    // Revert-check: pending mutations must stop the cursor before their conversation, then resume.
+    // Revert-check: pending mutations preserve their conversation without stopping unrelated repairs.
     func testPendingSendDefersWithoutSkippingProtectedMessage() async throws {
         _ = try message("001")
         let protected = try message("002")
+        let unrelated = try message("003")
         let record = context.insertTestObject(OutboundSendMutationRecord.self)
         record.id = "pending-send"
         record.createdAt = Date()
@@ -83,19 +84,64 @@ final class ChatPreviewRepairTests: XCTestCase {
         let repair = ChatPreviewRepair(htmlContentHandler: handler)
         let background = stack.newBackgroundContext()
         let first = try await repair.prepareBatch(in: background, after: nil)
-        XCTAssertTrue(first.deferredForPendingSend)
+        XCTAssertEqual(first.firstDeferredMessageID, "002")
         XCTAssertFalse(first.didDrain)
-        XCTAssertEqual(first.lastMessageID, "001")
-        XCTAssertEqual(first.changedMessageIDs, ["001"])
+        XCTAssertEqual(first.lastMessageID, "003")
+        XCTAssertEqual(first.changedMessageIDs, ["001", "003"])
         XCTAssertTrue(stack.saveIfNeeded(context: background))
         context.refreshAllObjects()
         XCTAssertEqual(protected.chatPreviewText, "Old preview")
+        XCTAssertEqual(unrelated.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         context.delete(record)
         try context.save()
 
-        let resumed = try await repair.prepareBatch(in: stack.newBackgroundContext(), after: first.lastMessageID)
-        XCTAssertFalse(resumed.deferredForPendingSend)
+        let resumed = try await repair.prepareBatch(in: stack.newBackgroundContext(), after: nil, startingAt: first.firstDeferredMessageID)
+        XCTAssertNil(resumed.firstDeferredMessageID)
         XCTAssertEqual(resumed.changedMessageIDs, ["002"])
+    }
+
+    // Revert-check: deferred records must not starve later IDs or be lost when a sweep drains.
+    func testCoordinatorRepairsUnrelatedRowsThenRetriesDeferredConversation() async throws {
+        _ = try message("001")
+        let protected = try message("002")
+        let unrelated = try message("003")
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = "retained-ambiguous-send"
+        record.createdAt = Date()
+        record.conversationId = protected.conversation?.id
+        try context.save()
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await waitUntil {
+            ChatPreviewRepair.Checkpoint.decode(self.flags.string(
+                forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey
+            )).resumeAtMessageID == "002"
+        }
+        context.refreshAllObjects()
+        XCTAssertEqual(protected.chatPreviewText, "Old preview")
+        XCTAssertEqual(unrelated.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
+        XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
+        context.delete(record)
+        try context.save()
+        await waitUntil {
+            repair.repairPersistedChatPreviews()
+            return self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey)
+        }
+        context.refreshAllObjects()
+        XCTAssertEqual(protected.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
+        withExtendedLifetime(repair) {}
+    }
+
+    // Revert-check: empty derivations never replace a non-empty saved preview.
+    func testEmptyHTMLPreservesSavedPreview() async throws {
+        let empty = try message("001")
+        empty.bodyStorageURI = try XCTUnwrap(handler.saveHTML("<div></div>", for: "001")).absoluteString
+        try context.save()
+        let background = stack.newBackgroundContext()
+        let batch = try await ChatPreviewRepair(htmlContentHandler: handler).prepareBatch(in: background, after: nil)
+        XCTAssertTrue(batch.changedMessageIDs.isEmpty)
+        XCTAssertEqual(batch.lastMessageID, "001")
+        XCTAssertEqual(empty.chatPreviewText, "Old preview")
     }
 
     // Revert-check: checkpoints are only persisted after a successful save; failed work stays rerunnable.
@@ -109,7 +155,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         failing.cancel()
         context.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Old preview")
-        XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCursorKey))
+        XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey))
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
 
         let resumed = coordinator()
@@ -117,7 +163,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
         context.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
-        XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCursorKey))
+        XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey))
         withExtendedLifetime((failing, resumed)) {}
     }
 
@@ -126,7 +172,8 @@ final class ChatPreviewRepairTests: XCTestCase {
         let alreadyProcessed = try message("001")
         let next = try message("002")
         try context.save()
-        flags.setString("001", forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCursorKey)
+        flags.setString(ChatPreviewRepair.Checkpoint(afterMessageID: "001").encoded,
+                        forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey)
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
