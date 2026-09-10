@@ -212,7 +212,10 @@ enum MessageBubbleHTMLAnalysisBuilder {
             let occurrenceHTML = String(lowercasedHTML[occurrenceStart..<occurrenceEnd])
             let followingHTML = htmlAfterFirstCIDBeforeNextSignOff(in: occurrenceHTML) ?? ""
             let hasFollowingBodyProse = signatureContactOrRoleLines(in: followingHTML).contains(where: isBodyProseLine)
-            let isBeforeSignOff = firstSignOffOffset.map { cidOffset < $0 } ?? false
+            let isBeforeCorroboratedSignOff = !isAfterCorroboratedSignOff &&
+                !isAfterBrandingSignOff && corroboratedOffsets.contains { cidOffset < $0 }
+            let isBeforeSignOff = (firstSignOffOffset.map { cidOffset < $0 } ?? false) ||
+                isBeforeCorroboratedSignOff
             if usesExpandedHeuristics && (hasFollowingBodyProse || isBeforeSignOff) &&
                 !isAfterReplyBoundary && !isAfterHardBoundary {
                 bodyReferenced.insert(normalizedCID)

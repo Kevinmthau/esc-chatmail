@@ -29,6 +29,15 @@ final class MessageBubbleInlineImageAnalysisTests: XCTestCase {
         }
     }
 
+    // Revert-check: an early casual thanks must not expose a body asset to the
+    // keyword rule before the later, corroborated closing signature.
+    func testKeepsLogoNamedBodyAssetBetweenCasualThanksAndLaterSignature() {
+        XCTAssertTrue(analyze(
+            prefix: "<p>Thanks,</p><p>Here is the draft for review.</p>",
+            cid: "draft", filename: "agency-logo.png", suffix: signOff
+        ).nonDisplayableInlineContentIDs.isEmpty)
+    }
+
     func testKeepsBodyPhotoWhenInstructionsFollowItsCID() {
         XCTAssertTrue(analyze(prefix: signOff, suffix: "<p>Please review the attached photo.</p>").nonDisplayableInlineContentIDs.isEmpty)
     }
