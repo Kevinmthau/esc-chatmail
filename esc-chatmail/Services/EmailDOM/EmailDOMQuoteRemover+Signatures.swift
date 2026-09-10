@@ -60,10 +60,8 @@ extension EmailDOMQuoteRemover {
 
         guard isLikelySignOffLine(lines[0]) else { return "" }
 
-        var preserved = [lines[0]]
-        if lines.count > 1, looksLikeNameLine(lines[1]) {
-            preserved.append(lines[1])
-        }
+        guard lines.count > 1, SignatureSignOffPolicy.shouldPreserveNameLine(lines[1]) else { return "" }
+        let preserved = [lines[0], lines[1]]
 
         return "<div>\(preserved.map(escapedHTML).joined(separator: "<br>"))</div>"
     }
@@ -87,7 +85,7 @@ extension EmailDOMQuoteRemover {
                 let prefix = signOff + separator
                 guard lowercased.hasPrefix(prefix) else { continue }
                 let remainder = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                return looksLikeNameLine(remainder)
+                return SignatureSignOffPolicy.shouldPreserveNameLine(remainder)
             }
         }
 
@@ -222,14 +220,41 @@ extension EmailDOMQuoteRemover {
         "contact", "email", "reviewer", "recipient"
     ]
 
+    private struct SignatureLine {
+        let element: Element
+        let text: String
+        let startTextNode: TextNode?
+        let startUTF16Offset: Int
+    }
+
+    /// Expand only signature scanning: quote/header passes retain their existing line units.
+    private static func signatureLines(in body: Element) -> [SignatureLine] {
+        visibleLineElements(in: body, includingEmpty: true).flatMap { line in
+            let element = line.element
+            let cells = element.tagNameNormal() == "tr" ? element.children().array().filter {
+                ["td", "th"].contains($0.tagNameNormal())
+            } : []
+            if !cells.isEmpty || (try? element.select("br").isEmpty()) == false {
+                return (cells.isEmpty ? [element] : cells).flatMap { cell in
+                    inlineHeaderLines(in: cell).map {
+                        SignatureLine(element: element, text: $0.text, startTextNode: $0.startTextNode,
+                                      startUTF16Offset: $0.startUTF16Offset)
+                    }
+                }
+            }
+            return [SignatureLine(element: element, text: line.text, startTextNode: nil, startUTF16Offset: 0)]
+        }
+    }
+
     static func truncateTrailingContactSignature(in document: Document) throws {
         guard let body = document.body() else { return }
-        let lines = visibleLineElements(in: body, includingEmpty: true)
+        let lines = signatureLines(in: body)
         guard let lastNonEmpty = lines.indices.last(where: { !lines[$0].text.isEmpty }) else { return }
         var lastContact = lastNonEmpty
         var tailCount = 0
-        while !isContactSignatureLine(lines[lastContact].text) {
-            guard tailCount < 3, isSignatureTailLine(lines[lastContact].text),
+        while !isTrailingSignatureContactLine(lines[lastContact].text) {
+            guard !isContactSignatureLine(lines[lastContact].text),
+                  tailCount < 3, isSignatureTailLine(lines[lastContact].text),
                   let previous = previousNonEmptyLineIndex(before: lastContact, lowerBound: 0, in: lines) else { return }
             tailCount += 1
             lastContact = previous
@@ -237,6 +262,7 @@ extension EmailDOMQuoteRemover {
 
         let scanStart = max(0, lastNonEmpty - 32)
         var contactLineCount = 0
+        var fillerCount = 0
         var signatureStart = lastContact
         var strongSupportLineCount = 0
         var signatureSupportLineCount = 0
@@ -257,7 +283,8 @@ extension EmailDOMQuoteRemover {
                 }
 
                 let previousText = lines[previousNonEmptyIndex].text
-                guard isContactSignatureLine(previousText) || isSignatureSupportLine(previousText) else {
+                guard isContactSignatureLine(previousText) || isSignatureSupportLine(previousText) ||
+                    isLikelySignOffLine(previousText) || isSignatureProductList(previousText) else {
                     precedingBodyLine = previousText
                     break
                 }
@@ -272,10 +299,26 @@ extension EmailDOMQuoteRemover {
             }
 
             if isContactSignatureLine(text) {
+                guard isTrailingSignatureContactLine(text) else {
+                    precedingBodyLine = text
+                    break
+                }
                 contactLineCount += 1
                 if hasNonEmailContactSignal(text) {
                     nonEmailContactLineCount += 1
                 }
+                signatureStart = scanIndex
+                scanIndex -= 1
+                continue
+            }
+
+            if isSignatureProductList(text) {
+                // Once the name/title has been reached, a product list above it belongs to the body.
+                guard contactLineCount > 0, fillerCount < 3, signatureSupportLineCount == 0 else {
+                    precedingBodyLine = text
+                    break
+                }
+                fillerCount += 1
                 signatureStart = scanIndex
                 scanIndex -= 1
                 continue
@@ -294,7 +337,14 @@ extension EmailDOMQuoteRemover {
             scanIndex -= 1
         }
 
-        guard contactLineCount >= 2 else { return }
+        guard contactLineCount >= 2, !isSignatureProductList(lines[signatureStart].text) else { return }
+
+        if try shouldPreserveContactTable(
+            Array(lines[signatureStart...lastNonEmpty]),
+            hasStrongSignal: sawSignOffBeforeSignature || strongSupportLineCount > 0
+        ) {
+            return
+        }
 
         let nonEmptyRemovalCount = (signatureStart...lastNonEmpty).filter { !lines[$0].text.isEmpty }.count
         guard nonEmptyRemovalCount >= 3 else { return }
@@ -314,12 +364,210 @@ extension EmailDOMQuoteRemover {
                 guard try !containsSignatureTailMedia(lines[index].element) else { return }
             }
         }
-
-        // Unmarked images can be authored attachments, even after confirmed contacts.
-        // Only remove the text block; explicit signature wrappers own their images.
-        for index in signatureStart...lastNonEmpty {
-            try lines[index].element.remove()
+        var preservedHTML = ""
+        if sawSignOffBeforeSignature {
+            if SignatureSignOffPolicy.shouldPreserveNameLine(lines[signatureStart].text),
+               !isContactSignatureLine(lines[signatureStart].text) {
+                preservedHTML = "<div>\(escapedHTML(lines[scanIndex].text))<br>\(escapedHTML(lines[signatureStart].text))</div>"
+            }
+            signatureStart = scanIndex
         }
+        // Preserve unmarked media after the signature; only explicit wrappers own their images.
+        try removeSignatureLines(lines, from: signatureStart, through: lastNonEmpty, preserving: preservedHTML)
+    }
+
+    /// Column headings and repeated person records distinguish directories from signatures.
+    private static func shouldPreserveContactTable(_ lines: [SignatureLine], hasStrongSignal: Bool) throws -> Bool {
+        var tables: [Element] = []
+        var seenTables = Set<ObjectIdentifier>()
+        var cells = Set<ObjectIdentifier>()
+        for line in lines where !line.text.isEmpty {
+            let element = (line.startTextNode?.parent() as? Element) ?? line.element
+            if let table = signatureAncestor(of: element, tags: ["table"]),
+               seenTables.insert(ObjectIdentifier(table)).inserted {
+                tables.append(table)
+            }
+            if let cell = signatureAncestor(of: element, tags: ["td", "th"]) {
+                cells.insert(ObjectIdentifier(cell))
+            }
+        }
+        // A name, email, and phone in separate columns are insufficient evidence on their own.
+        if !hasStrongSignal, cells.count > 1 { return true }
+
+        let fieldHeadings: Set<String> = ["name", "full name", "role", "title", "email", "e-mail", "phone", "telephone"]
+        for table in tables {
+            var personRows = 0
+            for row in try table.select("tr").array() {
+                guard signatureAncestor(of: row, tags: ["table"]) === table else { continue }
+                let rowCells = row.children().array().filter { ["td", "th"].contains($0.tagNameNormal()) }
+                if rowCells.contains(where: { $0.tagNameNormal() == "th" }) { return true }
+                let texts = rowCells.map { cell in
+                    inlineHeaderLines(in: cell).map(\.text).joined(separator: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if texts.filter({ fieldHeadings.contains($0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ":"))) }).count >= 2 {
+                    return true
+                }
+                if texts.contains(where: { looksLikeSignatureNameSupportLine($0) && SignatureSignOffPolicy.shouldPreserveNameLine($0) }),
+                   texts.contains(where: isContactSignatureLine) {
+                    personRows += 1
+                    if personRows > 1 { return true }
+                }
+            }
+        }
+        return false
+    }
+
+    private static func signatureAncestor(of element: Element, tags: Set<String>) -> Element? {
+        var current: Element? = element
+        while let ancestor = current {
+            if tags.contains(ancestor.tagNameNormal()) { return ancestor }
+            current = ancestor.parent()
+        }
+        return nil
+    }
+
+    /// Trim within a shared block; only remove whole rows when no authored prefix shares that row.
+    private static func removeSignatureLines(
+        _ lines: [SignatureLine], from start: Int, through end: Int, preserving html: String
+    ) throws {
+        let first = lines[start]
+        // Text embedded in a diagram is part of the media, not a safe signature boundary.
+        if let parent = first.startTextNode?.parent() as? Element,
+           signatureAncestor(of: parent, tags: ["svg", "video", "audio", "object", "iframe", "canvas"]) != nil {
+            return
+        }
+        // A CID link or background on the boundary's ancestor owns content too.
+        var parent = first.startTextNode?.parent() as? Element
+        while let element = parent {
+            if hasSignatureMediaAttributes(element) { return }
+            if element === first.element { break }
+            parent = element.parent()
+        }
+        // Sub-line truncation must preserve the same unmarked trailing media as whole-block cleanup.
+        if let boundary = first.startTextNode {
+            if try containsMediaAfterSignature(boundary, in: first.element) { return }
+        } else if try containsSignatureTailMedia(first.element) {
+            return
+        }
+        var checked = Set<ObjectIdentifier>([ObjectIdentifier(first.element)])
+        for line in lines[start...end] where checked.insert(ObjectIdentifier(line.element)).inserted {
+            if try containsSignatureTailMedia(line.element) { return }
+        }
+        // SwiftSoup can reuse an ancestor's raw table HTML after a previously dirty child changes.
+        // Reassigning the unchanged tag invalidates that snapshot without changing markup or attributes.
+        var ancestor = first.element.parent()
+        while let element = ancestor, element.tagNameNormal() != "body" {
+            try element.tagName(element.tagName())
+            ancestor = element.parent()
+        }
+        let hasPrefix = lines[..<start].contains { $0.element === first.element && !$0.text.isEmpty } ||
+            hasMediaBeforeSignature(first.startTextNode, in: first.element)
+        if hasPrefix, let node = first.startTextNode {
+            try truncateAtTextNode(node, matchStartUTF16: first.startUTF16Offset,
+                                   in: node.getWholeText(), stoppingAt: first.element)
+            if !html.isEmpty {
+                let target = first.element.tagNameNormal() == "tr" ? first.element.children().last() ?? first.element : first.element
+                try target.append(html)
+            }
+        } else {
+            if !html.isEmpty {
+                if first.element.tagNameNormal() == "tr" {
+                    let row = try Element(Tag.valueOf("tr"), first.element.getBaseUri())
+                    try row.appendElement("td").html(html)
+                    try first.element.before(row)
+                } else {
+                    try first.element.before(html)
+                }
+            }
+            try first.element.remove()
+        }
+        var removed = Set<ObjectIdentifier>([ObjectIdentifier(first.element)])
+        for index in start...end {
+            let element = lines[index].element
+            if removed.insert(ObjectIdentifier(element)).inserted { try element.remove() }
+        }
+    }
+
+    private static func containsMediaAfterSignature(_ boundary: TextNode, in root: Element) throws -> Bool {
+        var reachedBoundary = false
+        var stack: [Node] = [root]
+        while let node = stack.popLast() {
+            if node === boundary {
+                reachedBoundary = true
+                continue
+            }
+            if reachedBoundary, let element = node as? Element {
+                if try containsSignatureTailMedia(element) { return true }
+                // The subtree was checked as a whole.
+                continue
+            }
+            stack.append(contentsOf: node.getChildNodes().reversed())
+        }
+        return false
+    }
+
+    private static func hasSignatureMediaAttributes(_ element: Element) -> Bool {
+        if ["src", "srcset", "background", "poster"].contains(where: element.hasAttr) { return true }
+        if ["href", "xlink:href"].contains(where: {
+            ((try? element.attr($0)) ?? "").range(of: "cid:", options: .caseInsensitive) != nil
+        }) { return true }
+        return ((try? element.attr("style")) ?? "").range(
+            of: #"url\s*\("#, options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func hasMediaBeforeSignature(_ boundary: TextNode?, in root: Element) -> Bool {
+        guard let boundary else { return false }
+        var stack: [Node] = [root]
+        while let node = stack.popLast() {
+            if node === boundary { return false }
+            if let element = node as? Element {
+                if ["img", "picture", "svg", "video", "audio", "object", "embed", "iframe", "canvas"].contains(element.tagNameNormal()) ||
+                    hasSignatureMediaAttributes(element) {
+                    return true
+                }
+            }
+            stack.append(contentsOf: node.getChildNodes().reversed())
+        }
+        return false
+    }
+
+    /// Contact tokens may have labels or a name, but must not swallow an authored instruction.
+    /// Keep the broader contact predicate unchanged for quote/header detection.
+    private static func isTrailingSignatureContactLine(_ text: String) -> Bool {
+        guard isContactSignatureLine(text) else { return false }
+        var remainder = text
+        var hasLink = false
+        for pattern in [signatureEmailPattern, signatureURLPattern].compactMap({ $0 }) {
+            let range = NSRange(location: 0, length: remainder.utf16.count)
+            if pattern.firstMatch(in: remainder, range: range) != nil {
+                hasLink = true
+                remainder = pattern.stringByReplacingMatches(in: remainder, range: range, withTemplate: "")
+            }
+        }
+        guard hasLink else {
+            return isSignaturePhoneLine(text) || matchesEntireLine(signatureCityStateZipPattern, text: text) ||
+                matchesEntireLine(signatureStandaloneContactLabelPattern, text: text) || isSignaturePostalLine(text)
+        }
+        remainder = remainder.replacingOccurrences(of: "mailto:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: #"[<>]"#, with: "", options: .regularExpression)
+        let punctuation = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "<>()[]:;,."))
+        return remainder.components(separatedBy: CharacterSet(charactersIn: "|•│┃¦")).allSatisfy { segment in
+            let label = segment.trimmingCharacters(in: punctuation)
+                .replacingOccurrences(of: #"^(?:email|e-mail|website|web|url|tel|phone|e|w|t)\s*:?\s+"#,
+                                      with: "", options: [.regularExpression, .caseInsensitive])
+            return label.isEmpty || ["e", "email", "e-mail", "w", "web", "website", "url"].contains(label.lowercased()) ||
+                looksLikeSignatureNameSupportLine(label) || isSignaturePhoneLine(label) ||
+                matchesEntireLine(signatureCityStateZipPattern, text: label) ||
+                isSignaturePostalLine(label)
+        }
+    }
+
+    private static func isSignaturePostalLine(_ text: String) -> Bool {
+        text.rangeOfCharacter(from: .decimalDigits) != nil &&
+            text.range(of: #"^(?:\d|suite\b|ste\b|floor\b|fl\b)"#, options: [.regularExpression, .caseInsensitive]) != nil &&
+            signatureAddressPattern?.firstMatch(in: text, range: NSRange(location: 0, length: text.utf16.count)) != nil
     }
 
     private static func containsSignatureTailMedia(_ element: Element) throws -> Bool {
@@ -353,10 +601,20 @@ extension EmailDOMQuoteRemover {
         ) != nil
     }
 
+    private static func isSignatureProductList(_ text: String) -> Bool {
+        let segments = text.components(separatedBy: CharacterSet(charactersIn: "|•"))
+        return segments.count >= 3 && segments.allSatisfy { segment in
+            let words = segment.split(whereSeparator: \.isWhitespace)
+            return (1...3).contains(words.count) && segment.rangeOfCharacter(from: .decimalDigits) == nil &&
+                !segment.contains("@") && !segment.contains("http") && !segment.contains("www.") &&
+                segment.rangeOfCharacter(from: CharacterSet(charactersIn: ".!?:;")) == nil
+        }
+    }
+
     private static func previousNonEmptyLineIndex(
         before index: Int,
         lowerBound: Int,
-        in lines: [VisibleLineElement]
+        in lines: [SignatureLine]
     ) -> Int? {
         guard index > lowerBound else { return nil }
 

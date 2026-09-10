@@ -15,6 +15,7 @@ import {
   SIGN_OFF_PHRASES,
   DESCRIPTIVE_PHONE_LINE_PATTERN,
   isStrongSignatureSupportLine,
+  shouldPreserveSignatureNameLine,
 } from './patterns'
 import { looksLikeNameLine } from './text'
 
@@ -411,12 +412,17 @@ function removeAllSiblingsAfter(node: Node): void {
  * Truncates the document at the given text node/offset: text before the match
  * is preserved, everything after (at every ancestor level up to body) removed.
  */
-function truncateAtTextNode(textNode: Text, matchStart: number, fullText: string): void {
+function truncateAtTextNode(
+  textNode: Text,
+  matchStart: number,
+  fullText: string,
+  boundary: Element | null = null,
+): void {
   removeAllSiblingsAfter(textNode)
 
   let current: Element | null = textNode.parentElement
   while (current) {
-    if (tagName(current) === 'body') break
+    if (tagName(current) === 'body' || current === boundary) break
     removeAllSiblingsAfter(current)
     current = current.parentElement
   }
@@ -1199,10 +1205,8 @@ function preservedSignOffHTML(element: Element): string {
 
   if (!isLikelySignOffLine(lines[0]!)) return ''
 
-  const preserved = [lines[0]!]
-  if (lines.length > 1 && looksLikeNameLine(lines[1]!)) {
-    preserved.push(lines[1]!)
-  }
+  if (lines.length <= 1 || !shouldPreserveSignatureNameLine(lines[1]!)) return ''
+  const preserved = [lines[0]!, lines[1]!]
 
   return `<div>${preserved.map(escapedHTML).join('<br>')}</div>`
 }
@@ -1226,7 +1230,7 @@ function isLikelyCombinedSignOffAndNameLine(line: string): boolean {
       const prefix = signOff + separator
       if (!lowercased.startsWith(prefix)) continue
       const remainder = trimmed.slice(prefix.length).trim()
-      return looksLikeNameLine(remainder)
+      return shouldPreserveSignatureNameLine(remainder)
     }
   }
 
@@ -1299,10 +1303,32 @@ const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
 
 const CONTACT_LIST_INTRO_KEYWORDS = ['contact', 'email', 'reviewer', 'recipient']
 
+interface SignatureLine extends VisibleLineElement {
+  startTextNode: Text | null
+  startOffset: number
+}
+
+// Expand only signature scanning; quote/header passes retain their existing line units.
+function signatureLines(body: Element): SignatureLine[] {
+  return visibleLineElements(body, true).flatMap((line) => {
+    const element = line.element
+    const cells =
+      tagName(element) === 'tr'
+        ? Array.from(element.children).filter((cell) => ['td', 'th'].includes(tagName(cell)))
+        : []
+    if (cells.length > 0 || element.querySelector('br')) {
+      return (cells.length > 0 ? cells : [element]).flatMap((cell) =>
+        inlineHeaderLines(cell).map((subline) => ({ ...subline, element })),
+      )
+    }
+    return [{ ...line, startTextNode: null, startOffset: 0 }]
+  })
+}
+
 function truncateTrailingContactSignature(document: Document): void {
   const body = document.body
   if (!body) return
-  const lines = visibleLineElements(body, true)
+  const lines = signatureLines(body)
   let lastNonEmpty = -1
   for (let i = lines.length - 1; i >= 0; i--) {
     if (lines[i]!.text.length > 0) {
@@ -1313,8 +1339,13 @@ function truncateTrailingContactSignature(document: Document): void {
   if (lastNonEmpty === -1) return
   let lastContact = lastNonEmpty
   let tailCount = 0
-  while (!isContactSignatureLine(lines[lastContact]!.text)) {
-    if (tailCount >= 3 || !isSignatureTailLine(lines[lastContact]!.text)) return
+  while (!isTrailingSignatureContactLine(lines[lastContact]!.text)) {
+    if (
+      isContactSignatureLine(lines[lastContact]!.text) ||
+      tailCount >= 3 ||
+      !isSignatureTailLine(lines[lastContact]!.text)
+    )
+      return
     const previous = previousNonEmptyLineIndex(lastContact, 0, lines)
     if (previous === null) return
     tailCount += 1
@@ -1323,6 +1354,7 @@ function truncateTrailingContactSignature(document: Document): void {
 
   const scanStart = Math.max(0, lastNonEmpty - 32)
   let contactLineCount = 0
+  let fillerCount = 0
   let signatureStart = lastContact
   let strongSupportLineCount = 0
   let signatureSupportLineCount = 0
@@ -1340,7 +1372,12 @@ function truncateTrailingContactSignature(document: Document): void {
       }
 
       const previousText = lines[previousNonEmptyIndex]!.text
-      if (!isContactSignatureLine(previousText) && !isSignatureSupportLine(previousText)) {
+      if (
+        !isContactSignatureLine(previousText) &&
+        !isSignatureSupportLine(previousText) &&
+        !isLikelySignOffLine(previousText) &&
+        !isSignatureProductList(previousText)
+      ) {
         precedingBodyLine = previousText
         break
       }
@@ -1355,6 +1392,10 @@ function truncateTrailingContactSignature(document: Document): void {
     }
 
     if (isContactSignatureLine(text)) {
+      if (!isTrailingSignatureContactLine(text)) {
+        precedingBodyLine = text
+        break
+      }
       contactLineCount += 1
       if (hasNonEmailContactSignal(text)) {
         nonEmailContactLineCount += 1
@@ -1364,6 +1405,17 @@ function truncateTrailingContactSignature(document: Document): void {
       continue
     }
 
+    if (isSignatureProductList(text)) {
+      // Once the name/title has been reached, a product list above it belongs to the body.
+      if (contactLineCount === 0 || fillerCount >= 3 || signatureSupportLineCount > 0) {
+        precedingBodyLine = text
+        break
+      }
+      fillerCount += 1
+      signatureStart = scanIndex
+      scanIndex -= 1
+      continue
+    }
     if (!isSignatureSupportLine(text)) {
       precedingBodyLine = text
       break
@@ -1377,7 +1429,16 @@ function truncateTrailingContactSignature(document: Document): void {
     scanIndex -= 1
   }
 
-  if (contactLineCount < 2) return
+  if (contactLineCount < 2 || isSignatureProductList(lines[signatureStart]!.text)) return
+
+  if (
+    shouldPreserveContactTable(
+      lines.slice(signatureStart, lastNonEmpty + 1),
+      sawSignOffBeforeSignature || strongSupportLineCount > 0,
+    )
+  ) {
+    return
+  }
 
   let nonEmptyRemovalCount = 0
   for (let i = signatureStart; i <= lastNonEmpty; i++) {
@@ -1401,12 +1462,236 @@ function truncateTrailingContactSignature(document: Document): void {
       if (containsSignatureTailMedia(lines[index]!.element)) return
     }
   }
-
-  // Unmarked images can be authored attachments, even after confirmed contacts.
-  // Only remove the text block; explicit signature wrappers own their images.
-  for (let index = signatureStart; index <= lastNonEmpty; index++) {
-    lines[index]!.element.remove()
+  let preservedHTML = ''
+  if (sawSignOffBeforeSignature) {
+    if (
+      shouldPreserveSignatureNameLine(lines[signatureStart]!.text) &&
+      !isContactSignatureLine(lines[signatureStart]!.text)
+    ) {
+      preservedHTML = `<div>${escapedHTML(lines[scanIndex]!.text)}<br>${escapedHTML(lines[signatureStart]!.text)}</div>`
+    }
+    signatureStart = scanIndex
   }
+  // Preserve unmarked media after the signature; only explicit wrappers own their images.
+  removeSignatureLines(lines, signatureStart, lastNonEmpty, preservedHTML)
+}
+
+// Column headings and repeated person records distinguish directories from signatures.
+function shouldPreserveContactTable(lines: SignatureLine[], hasStrongSignal: boolean): boolean {
+  const tables = new Set<Element>()
+  const cells = new Set<Element>()
+  for (const line of lines) {
+    if (!line.text) continue
+    const element = line.startTextNode?.parentElement ?? line.element
+    const table = element.closest('table')
+    if (table) tables.add(table)
+    const cell = element.closest('td, th')
+    if (cell) cells.add(cell)
+  }
+  // A name, email, and phone in separate columns are insufficient evidence on their own.
+  if (!hasStrongSignal && cells.size > 1) return true
+
+  const fieldHeadings = new Set([
+    'name',
+    'full name',
+    'role',
+    'title',
+    'email',
+    'e-mail',
+    'phone',
+    'telephone',
+  ])
+  for (const table of tables) {
+    let personRows = 0
+    for (const row of Array.from(table.querySelectorAll('tr'))) {
+      if (row.closest('table') !== table) continue
+      const rowCells = Array.from(row.children).filter((cell) =>
+        ['td', 'th'].includes(tagName(cell)),
+      )
+      if (rowCells.some((cell) => tagName(cell) === 'th')) return true
+      const texts = rowCells.map((cell) =>
+        inlineHeaderLines(cell)
+          .map((line) => line.text)
+          .join(' ')
+          .trim(),
+      )
+      if (
+        texts.filter((text) => fieldHeadings.has(text.toLowerCase().replace(/:$/, ''))).length >= 2
+      ) {
+        return true
+      }
+      if (
+        texts.some(
+          (text) =>
+            looksLikeSignatureNameSupportLine(text) && shouldPreserveSignatureNameLine(text),
+        ) &&
+        texts.some(isContactSignatureLine)
+      ) {
+        personRows += 1
+        if (personRows > 1) return true
+      }
+    }
+  }
+  return false
+}
+
+// Trim shared blocks; remove whole rows only when no authored prefix shares that row.
+function removeSignatureLines(
+  lines: SignatureLine[],
+  start: number,
+  end: number,
+  html: string,
+): void {
+  const first = lines[start]!
+  // Text embedded in a diagram is part of the media, not a safe signature boundary.
+  if (first.startTextNode?.parentElement?.closest('svg, video, audio, object, iframe, canvas'))
+    return
+  // A CID link or background on the boundary's ancestor owns content too.
+  let parent = first.startTextNode?.parentElement
+  while (parent) {
+    if (hasSignatureMediaAttributes(parent)) return
+    if (parent === first.element) break
+    parent = parent.parentElement
+  }
+  // Sub-line truncation must preserve the same unmarked trailing media as whole-block cleanup.
+  if (first.startTextNode) {
+    if (containsMediaAfterSignature(first.startTextNode, first.element)) return
+  } else if (containsSignatureTailMedia(first.element)) {
+    return
+  }
+  const checked = new Set([first.element])
+  for (const line of lines.slice(start, end + 1)) {
+    if (checked.has(line.element)) continue
+    checked.add(line.element)
+    if (containsSignatureTailMedia(line.element)) return
+  }
+  const hasPrefix =
+    lines.slice(0, start).some((line) => line.element === first.element && line.text.length > 0) ||
+    hasMediaBeforeSignature(first.startTextNode, first.element)
+  if (hasPrefix && first.startTextNode) {
+    truncateAtTextNode(
+      first.startTextNode,
+      first.startOffset,
+      first.startTextNode.data,
+      first.element,
+    )
+    if (html) {
+      const target =
+        tagName(first.element) === 'tr'
+          ? (first.element.lastElementChild ?? first.element)
+          : first.element
+      target.insertAdjacentHTML('beforeend', html)
+    }
+  } else {
+    if (html) {
+      if (tagName(first.element) === 'tr') {
+        const row = first.element.ownerDocument.createElement('tr')
+        const cell = first.element.ownerDocument.createElement('td')
+        cell.innerHTML = html
+        row.append(cell)
+        first.element.before(row)
+      } else {
+        first.element.insertAdjacentHTML('beforebegin', html)
+      }
+    }
+    first.element.remove()
+  }
+  const removed = new Set([first.element])
+  for (let index = start; index <= end; index++) {
+    const element = lines[index]!.element
+    if (!removed.has(element)) {
+      removed.add(element)
+      element.remove()
+    }
+  }
+}
+
+function containsMediaAfterSignature(boundary: Text, root: Element): boolean {
+  let reachedBoundary = false
+  const stack: Node[] = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    if (node === boundary) {
+      reachedBoundary = true
+      continue
+    }
+    if (reachedBoundary && node.nodeType === NODE_ELEMENT) {
+      if (containsSignatureTailMedia(node as Element)) return true
+      // The subtree was checked as a whole.
+      continue
+    }
+    stack.push(...Array.from(node.childNodes).reverse())
+  }
+  return false
+}
+
+function hasSignatureMediaAttributes(element: Element): boolean {
+  return (
+    ['src', 'srcset', 'background', 'poster'].some((name) => element.hasAttribute(name)) ||
+    ['href', 'xlink:href'].some((name) => /cid:/i.test(element.getAttribute(name) ?? '')) ||
+    /url\s*\(/i.test(element.getAttribute('style') ?? '')
+  )
+}
+
+function hasMediaBeforeSignature(boundary: Text | null, root: Element): boolean {
+  if (!boundary) return false
+  const stack: Node[] = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    if (node === boundary) return false
+    if (node.nodeType === NODE_ELEMENT) {
+      const element = node as Element
+      if (
+        ['img', 'picture', 'svg', 'video', 'audio', 'object', 'embed', 'iframe', 'canvas'].includes(
+          tagName(element),
+        ) ||
+        hasSignatureMediaAttributes(element)
+      )
+        return true
+    }
+    stack.push(...Array.from(node.childNodes).reverse())
+  }
+  return false
+}
+
+// Contact tokens may have labels or a name, but must not swallow an authored instruction.
+// Keep the broader contact predicate unchanged for quote/header detection.
+function isTrailingSignatureContactLine(text: string): boolean {
+  if (!isContactSignatureLine(text)) return false
+  const hasLink = EMAIL_ADDRESS_PATTERN.test(text) || WEB_URL_PATTERN.test(text)
+  if (!hasLink) {
+    return (
+      isSignaturePhoneLine(text) ||
+      SIGNATURE_CITY_STATE_ZIP_PATTERN.test(text) ||
+      STANDALONE_CONTACT_LABEL_PATTERN.test(text) ||
+      isSignaturePostalLine(text)
+    )
+  }
+  const remainder = text
+    .replace(new RegExp(EMAIL_ADDRESS_PATTERN.source, 'gi'), '')
+    .replace(new RegExp(WEB_URL_PATTERN.source, 'gi'), '')
+    .replace(/mailto:|[<>]/gi, '')
+  return remainder.split(/[|•│┃¦]/u).every((segment) => {
+    const label = segment
+      .replace(/^[\s<>()[\]:;,.]+|[\s<>()[\]:;,.]+$/g, '')
+      .replace(/^(?:email|e-mail|website|web|url|tel|phone|e|w|t)\s*:?\s+/i, '')
+    return (
+      label.length === 0 ||
+      ['e', 'email', 'e-mail', 'w', 'web', 'website', 'url'].includes(label.toLowerCase()) ||
+      looksLikeSignatureNameSupportLine(label) ||
+      isSignaturePhoneLine(label) ||
+      SIGNATURE_CITY_STATE_ZIP_PATTERN.test(label) ||
+      isSignaturePostalLine(label)
+    )
+  })
+}
+
+function isSignaturePostalLine(text: string): boolean {
+  return (
+    /\p{Nd}/u.test(text) &&
+    /^(?:\p{Nd}|suite\b|ste\b|floor\b|fl\b)/iu.test(text) &&
+    ADDRESS_KEYWORD_PATTERN.test(text)
+  )
 }
 
 function containsSignatureTailMedia(element: Element): boolean {
@@ -1439,10 +1724,29 @@ function isSignatureTailLine(text: string): boolean {
   )
 }
 
+function isSignatureProductList(text: string): boolean {
+  const segments = text.split(/[|•]/)
+  return (
+    segments.length >= 3 &&
+    segments.every((segment) => {
+      const words = segment.trim().split(/\s+/).filter(Boolean)
+      return (
+        words.length >= 1 &&
+        words.length <= 3 &&
+        !/\p{Nd}/u.test(segment) &&
+        !segment.includes('@') &&
+        !segment.includes('http') &&
+        !segment.includes('www.') &&
+        !/[.!?:;]/.test(segment)
+      )
+    })
+  )
+}
+
 function previousNonEmptyLineIndex(
   index: number,
   lowerBound: number,
-  lines: VisibleLineElement[],
+  lines: SignatureLine[],
 ): number | null {
   if (index <= lowerBound) return null
 

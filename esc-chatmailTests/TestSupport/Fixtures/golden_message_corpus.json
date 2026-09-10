@@ -196,15 +196,15 @@
     },
     {
       "id": "html_labeled_phone_hours_signature_without_wrapper_removed",
-      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately.",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately. Revert-check: shared signoff/name preservation policy.",
       "inputHTML": "<div>We hope you are happy with our work. Please call or email with any questions.</div><div>Thank you!</div><div>Best,</div><div>John Boga</div><div>Property Manager</div><div>NYC Brownstone Maintenance</div><div>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</div><div>Emergency line after hours: 914-373-4658</div><div>www.nycbrownstone.net</div>",
-      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,"
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,\n\nJohn Boga"
     },
     {
       "id": "html_outlook_paragraph_signature_with_hours_phone_removed",
-      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately.",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately. Revert-check: shared signoff/name preservation policy.",
       "inputHTML": "<p>We hope you are happy with our work. Please call or email with any questions.</p><p>Thank you!</p><p>Best,</p><p>John Boga</p><p>Property Manager</p><p>NYC Brownstone Maintenance</p><p>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</p><p>Emergency line after hours: 914-373-4658</p><p>www.nycbrownstone.net</p>",
-      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,"
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,\n\nJohn Boga"
     },
     {
       "id": "html_body_instruction_before_contact_signature_preserved",
@@ -232,9 +232,39 @@
     },
     {
       "id": "html_outlook_contact_signature_before_confidentiality_notice_removed",
-      "notes": "Confirmed contact signatures may include a terminal confidentiality notice; authored legal discussion is preserved.",
+      "notes": "Confirmed contact signatures may include a terminal confidentiality notice; authored legal discussion and the personal signoff/name pair are preserved.",
       "inputHTML": "<p>Also, please confirm that it will be registered in Georgia.</p><p>Sincerely,</p><p>Marcita Threash</p><p>Senior Account Manager | Threash Insurance Agency</p><p>1234 Peachtree Road NE, Suite 200</p><p>Atlanta, GA 30309</p><p>Phone: 404-555-0142 | Fax: 404-555-0143</p><p>marcita@threashinsurance.com</p><p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive and confidential use of the intended recipient.</p>",
-      "expected": "Also, please confirm that it will be registered in Georgia.\n\nSincerely,"
+      "expected": "Also, please confirm that it will be registered in Georgia.\n\nSincerely,\n\nMarcita Threash"
+    },
+    {
+      "id": "html_body_product_list_before_signature_preserved",
+      "notes": "P1 regression: product fillers must not bridge across the signature name/title into authored options.",
+      "inputHTML": "<p>Current reply.</p><p>Available Options</p><p>Basic | Pro | Enterprise</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>",
+      "expected": "Current reply.\n\nAvailable Options\n\nBasic | Pro | Enterprise"
+    },
+    {
+      "id": "html_br_contact_instruction_before_signature_preserved",
+      "notes": "P1 regression: expanded BR lines must distinguish authored contact instructions from signature contact lines.",
+      "inputHTML": "<div>Current reply.<br>Please send the signed document to legal@example.test before Friday.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>",
+      "expected": "Current reply.\n\nPlease send the signed document to legal@example.test before Friday."
+    },
+    {
+      "id": "html_authored_contact_table_preserved",
+      "notes": "P1 regression: splitting table cells must not remove the contact records below column headings.",
+      "inputHTML": "<p>Please use the person listed below to arrange the repairs.</p><table><tr><th>Engineer</th><th>Email</th><th>Phone</th></tr><tr><td>John Smith</td><td>john@example.test</td><td>415-555-1212</td></tr></table>",
+      "expected": "Please use the person listed below to arrange the repairs.\n\nEngineer Email Phone\n\nJohn Smith john@example.test 415-555-1212"
+    },
+    {
+      "id": "html_br_separated_signature_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover signatureLines and scoped truncation / web html.ts sub-line expansion; preserve the personal signoff/name pair.",
+      "inputHTML": "<div>Current reply.<br>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>",
+      "expected": "Current reply.\n\nBest,\n\nJohn Smith"
+    },
+    {
+      "id": "html_table_signature_with_logo_cell_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover signatureLines and scoped truncation / web html.ts sub-line expansion; preserve the personal signoff/name pair.",
+      "inputHTML": "<p>Current reply.</p><table><tr><td><img src=\"cid:badge\"></td><td>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</td></tr></table>",
+      "expected": "Current reply.\n\nBest,\n\nJohn Smith"
     },
     {
       "id": "authored_instruction_after_contact_signature_preserved",

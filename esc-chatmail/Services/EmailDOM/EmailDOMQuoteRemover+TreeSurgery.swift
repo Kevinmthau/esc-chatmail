@@ -306,14 +306,14 @@ extension EmailDOMQuoteRemover {
     /// - at every ancestor up to (but not including) `<body>`, all siblings
     ///   appearing after the ancestor are removed; the ancestor itself is kept
     ///   because it may contain preserved-prefix content above the match.
-    static func truncateAtTextNode(_ textNode: TextNode, matchStartUTF16: Int, in fullText: String) throws {
+    static func truncateAtTextNode(_ textNode: TextNode, matchStartUTF16: Int, in fullText: String, stoppingAt boundary: Element? = nil) throws {
         // Remove siblings AFTER textNode at its level.
         try removeAllSiblingsAfter(textNode)
 
         // Walk up and remove siblings after each ancestor (but keep the ancestor itself).
         var current: Element? = textNode.parent() as? Element
         while let node = current {
-            if node.tagNameNormal() == "body" { break }
+            if node.tagNameNormal() == "body" || node === boundary { break }
             try removeAllSiblingsAfter(node)
             current = node.parent()
         }
