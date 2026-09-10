@@ -217,6 +217,27 @@ final class ChatPreviewRepairTests: XCTestCase {
         withExtendedLifetime(repair) {}
     }
 
+    // Revert-check: a sync-idle signal cannot be lost before the repair starts waiting.
+    func testRepairContinuesWhenSyncGateOpensBeforeWaitStarts() async throws {
+        let received = try message("001")
+        try context.save()
+        let gate = ChatPreviewRepairGate()
+        syncWaiter.onWaitForCurrentSyncToComplete = { await gate.wait() }
+        let repair = coordinator()
+
+        await gate.open()
+        repair.repairPersistedChatPreviews()
+        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
+        context.refreshAllObjects()
+        XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
+
+        // Drain the worker even if the regression leaves it parked past the assertion.
+        syncWaiter.onWaitForCurrentSyncToComplete = nil
+        await gate.open()
+        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
+        withExtendedLifetime(repair) {}
+    }
+
     // Revert-check: a request captured before account teardown cannot acquire a lease in the next account.
     func testAccountTransitionWhileWaitingDoesNotWriteOrMarkCompletion() async throws {
         let received = try message("001")
@@ -276,15 +297,32 @@ final class ChatPreviewRepairTests: XCTestCase {
         )
     }
 
-    private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async {
+    private func waitUntil(
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: @escaping @MainActor () -> Bool
+    ) async {
         let deadline = Date().addingTimeInterval(10)
         while !condition(), Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
-        XCTAssertTrue(condition(), "Repair did not reach the expected state")
+        XCTAssertTrue(condition(), "Repair did not reach the expected state", file: file, line: line)
     }
 }
 
+/// Remembers sync becoming idle so a worker arriving after `open()` cannot miss it.
 private actor ChatPreviewRepairGate {
-    private var continuation: CheckedContinuation<Void, Never>?
-    func wait() async { await withCheckedContinuation { continuation = $0 } }
-    func open() { continuation?.resume(); continuation = nil }
+    private var isOpen = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuations.append($0) }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = continuations
+        continuations.removeAll()
+        pending.forEach { $0.resume() }
+    }
 }
