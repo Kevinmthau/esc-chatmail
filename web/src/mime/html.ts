@@ -1351,8 +1351,13 @@ function truncateTrailingContactSignature(document: Document): void {
   if (lastNonEmpty === -1) return
   let lastContact = lastNonEmpty
   let tailCount = 0
-  while (!isContactSignatureLine(lines[lastContact]!.text)) {
-    if (tailCount >= 3 || !isSignatureTailLine(lines[lastContact]!.text)) return
+  while (!isTrailingSignatureContactLine(lines[lastContact]!.text)) {
+    if (
+      isContactSignatureLine(lines[lastContact]!.text) ||
+      tailCount >= 3 ||
+      !isSignatureTailLine(lines[lastContact]!.text)
+    )
+      return
     const previous = previousNonEmptyLineIndex(lastContact, 0, lines)
     if (previous === null) return
     tailCount += 1
@@ -1399,6 +1404,10 @@ function truncateTrailingContactSignature(document: Document): void {
     }
 
     if (isContactSignatureLine(text)) {
+      if (!isTrailingSignatureContactLine(text)) {
+        precedingBodyLine = text
+        break
+      }
       contactLineCount += 1
       if (hasNonEmailContactSignal(text)) {
         nonEmailContactLineCount += 1
@@ -1408,7 +1417,12 @@ function truncateTrailingContactSignature(document: Document): void {
       continue
     }
 
-    if (isSignatureProductList(text) && contactLineCount > 0 && fillerCount < 3) {
+    if (isSignatureProductList(text)) {
+      // Once the name/title has been reached, a product list above it belongs to the body.
+      if (contactLineCount === 0 || fillerCount >= 3 || signatureSupportLineCount > 0) {
+        precedingBodyLine = text
+        break
+      }
       fillerCount += 1
       signatureStart = scanIndex
       scanIndex -= 1
@@ -1428,6 +1442,15 @@ function truncateTrailingContactSignature(document: Document): void {
   }
 
   if (contactLineCount < 2 || isSignatureProductList(lines[signatureStart]!.text)) return
+
+  if (
+    shouldPreserveContactTable(
+      lines.slice(signatureStart, lastNonEmpty + 1),
+      sawSignOffBeforeSignature || strongSupportLineCount > 0,
+    )
+  ) {
+    return
+  }
 
   let nonEmptyRemovalCount = 0
   for (let i = signatureStart; i <= lastNonEmpty; i++) {
@@ -1468,6 +1491,65 @@ function truncateTrailingContactSignature(document: Document): void {
   removeSignatureLines(lines, signatureStart, removalEnd, preservedHTML)
 }
 
+// Column headings and repeated person records distinguish directories from signatures.
+function shouldPreserveContactTable(lines: SignatureLine[], hasStrongSignal: boolean): boolean {
+  const tables = new Set<Element>()
+  const cells = new Set<Element>()
+  for (const line of lines) {
+    if (!line.text) continue
+    const element = line.startTextNode?.parentElement ?? line.element
+    const table = element.closest('table')
+    if (table) tables.add(table)
+    const cell = element.closest('td, th')
+    if (cell) cells.add(cell)
+  }
+  // A name, email, and phone in separate columns are insufficient evidence on their own.
+  if (!hasStrongSignal && cells.size > 1) return true
+
+  const fieldHeadings = new Set([
+    'name',
+    'full name',
+    'role',
+    'title',
+    'email',
+    'e-mail',
+    'phone',
+    'telephone',
+  ])
+  for (const table of tables) {
+    let personRows = 0
+    for (const row of Array.from(table.querySelectorAll('tr'))) {
+      if (row.closest('table') !== table) continue
+      const rowCells = Array.from(row.children).filter((cell) =>
+        ['td', 'th'].includes(tagName(cell)),
+      )
+      if (rowCells.some((cell) => tagName(cell) === 'th')) return true
+      const texts = rowCells.map((cell) =>
+        inlineHeaderLines(cell)
+          .map((line) => line.text)
+          .join(' ')
+          .trim(),
+      )
+      if (
+        texts.filter((text) => fieldHeadings.has(text.toLowerCase().replace(/:$/, ''))).length >= 2
+      ) {
+        return true
+      }
+      if (
+        texts.some(
+          (text) =>
+            looksLikeSignatureNameSupportLine(text) && shouldPreserveSignatureNameLine(text),
+        ) &&
+        texts.some(isContactSignatureLine)
+      ) {
+        personRows += 1
+        if (personRows > 1) return true
+      }
+    }
+  }
+  return false
+}
+
 // Trim shared blocks; remove whole rows only when no authored prefix shares that row.
 function removeSignatureLines(
   lines: SignatureLine[],
@@ -1476,9 +1558,12 @@ function removeSignatureLines(
   html: string,
 ): void {
   const first = lines[start]!
-  const hasPrefix = lines
-    .slice(0, start)
-    .some((line) => line.element === first.element && line.text.length > 0)
+  // Text embedded in a diagram is part of the media, not a safe signature boundary.
+  if (first.startTextNode?.parentElement?.closest('svg, video, audio, object, iframe, canvas'))
+    return
+  const hasPrefix =
+    lines.slice(0, start).some((line) => line.element === first.element && line.text.length > 0) ||
+    hasMediaBeforeSignature(first.startTextNode, first.element)
   if (hasPrefix && first.startTextNode) {
     truncateAtTextNode(
       first.startTextNode,
@@ -1515,6 +1600,68 @@ function removeSignatureLines(
       element.remove()
     }
   }
+}
+
+function hasMediaBeforeSignature(boundary: Text | null, root: Element): boolean {
+  if (!boundary) return false
+  const stack: Node[] = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    if (node === boundary) return false
+    if (node.nodeType === NODE_ELEMENT) {
+      const element = node as Element
+      if (
+        ['img', 'picture', 'svg', 'video', 'audio', 'object', 'embed', 'iframe', 'canvas'].includes(
+          tagName(element),
+        ) ||
+        element.hasAttribute('background') ||
+        element.getAttribute('style')?.toLowerCase().includes('url(')
+      )
+        return true
+    }
+    stack.push(...Array.from(node.childNodes).reverse())
+  }
+  return false
+}
+
+// Contact tokens may have labels or a name, but must not swallow an authored instruction.
+// Keep the broader contact predicate unchanged for quote/header detection.
+function isTrailingSignatureContactLine(text: string): boolean {
+  if (!isContactSignatureLine(text)) return false
+  const hasLink = EMAIL_ADDRESS_PATTERN.test(text) || WEB_URL_PATTERN.test(text)
+  if (!hasLink) {
+    return (
+      isSignaturePhoneLine(text) ||
+      SIGNATURE_CITY_STATE_ZIP_PATTERN.test(text) ||
+      STANDALONE_CONTACT_LABEL_PATTERN.test(text) ||
+      isSignaturePostalLine(text)
+    )
+  }
+  const remainder = text
+    .replace(new RegExp(EMAIL_ADDRESS_PATTERN.source, 'gi'), '')
+    .replace(new RegExp(WEB_URL_PATTERN.source, 'gi'), '')
+    .replace(/mailto:|[<>]/gi, '')
+  return remainder.split(/[|•│┃¦]/u).every((segment) => {
+    const label = segment
+      .replace(/^[\s<>()[\]:;,.]+|[\s<>()[\]:;,.]+$/g, '')
+      .replace(/^(?:email|e-mail|website|web|url|tel|phone|e|w|t)\s*:?\s+/i, '')
+    return (
+      label.length === 0 ||
+      ['e', 'email', 'e-mail', 'w', 'web', 'website', 'url'].includes(label.toLowerCase()) ||
+      looksLikeSignatureNameSupportLine(label) ||
+      isSignaturePhoneLine(label) ||
+      SIGNATURE_CITY_STATE_ZIP_PATTERN.test(label) ||
+      isSignaturePostalLine(label)
+    )
+  })
+}
+
+function isSignaturePostalLine(text: string): boolean {
+  return (
+    /\p{Nd}/u.test(text) &&
+    /^(?:\p{Nd}|suite\b|ste\b|floor\b|fl\b)/iu.test(text) &&
+    ADDRESS_KEYWORD_PATTERN.test(text)
+  )
 }
 
 function isSignatureTailLine(text: string): boolean {

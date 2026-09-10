@@ -145,7 +145,33 @@ describe('signature sub-lines and sign-off policy', () => {
     expect(result).toContain('John Smith')
     expect(result).not.toContain('Partner')
     expect(result).not.toContain('john@example.test')
-    expect(removeQuotesFromHtml(html)).not.toContain('cid:badge')
+    // Leading media has no reliable signature ownership; retain it during inferred cleanup.
+    expect(removeQuotesFromHtml(html)?.includes('cid:badge')).toBe(html.includes('cid:badge'))
+  })
+  it.each(['<img src="cid:floorplan">', '<svg><image href="cid:floorplan"></image></svg>'])(
+    'preserves leading media before an inferred signature: %s',
+    (media) => {
+      for (const block of [
+        `<div>${media}<br>${contact}</div>`,
+        `<div>${media}${contact}</div>`,
+        `<table><tr><td>${media}<br>${contact}</td></tr></table>`,
+        `<table><tr><td>${media}</td><td>${contact}</td></tr></table>`,
+      ]) {
+        const html = '<p>The floorplan is attached below.</p>' + block
+        const cleaned = removeQuotesFromHtml(html)
+        expect(cleaned).toContain('cid:floorplan')
+        expect(cleaned).not.toContain('john@example.test')
+        expect(cleanedText(html)).toContain('John Smith')
+      }
+    },
+  )
+  it.each(['text', 'title'])('does not truncate inside diagram %s', (tag) => {
+    const html =
+      '<p>The floorplan is below.</p>' +
+      `<div><svg><${tag}>Floorplan</${tag}><rect width="200" height="200"></rect></svg><br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>`
+    const cleaned = removeQuotesFromHtml(html)
+    expect(cleaned).toContain('Floorplan')
+    expect(cleaned).toContain('<rect')
   })
   it('preserves contact lists and reference lines in a shared block', () => {
     const list =
@@ -162,6 +188,78 @@ describe('signature sub-lines and sign-off policy', () => {
     expect(cleanedText(html)).not.toContain('Auto')
     expect(cleanedText(html)).toContain('John Smith')
     expect(cleanedText(html + '<p>P.S. Bring the draft.</p>')).toContain('P.S. Bring the draft.')
+  })
+  it('preserves an authored heading and product list before a signature', () => {
+    const html =
+      '<p>Current reply.</p><p>Available Options</p><p>Basic | Pro | Enterprise</p>' +
+      '<p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>'
+    const result = cleanedText(html)
+    expect(result).toContain('Available Options')
+    expect(result).toContain('Basic | Pro | Enterprise')
+    expect(result).not.toContain('john@example.test')
+  })
+  it.each([
+    'Please send the signed document to legal@example.test before Friday.',
+    'Please upload the signed document to https://example.test/upload before Friday.',
+    'Please meet us on Market Street.',
+    'Send to legal@example.test.',
+  ])('preserves an authored instruction before a BR signature: %s', (instruction) => {
+    const html = `<div>Current reply.<br>${instruction}<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>`
+    const result = cleanedText(html)
+    expect(result).toContain(instruction)
+    expect(result).not.toContain('john@example.test')
+    const withPostscript = `<div>Current reply.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212<br>${instruction}</div>`
+    expect(cleanedText(withPostscript)).toContain(instruction)
+  })
+  it('preserves a contact table with column headings', () => {
+    for (const tag of ['th', 'td']) {
+      const html =
+        '<p>Please use the person listed below to arrange the repairs.</p>' +
+        `<table><tr><${tag}>Engineer</${tag}><${tag}>Role</${tag}><${tag}>Email</${tag}><${tag}>Phone</${tag}></tr>` +
+        '<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr></table>'
+      const result = cleanedText(html)
+      expect(result).toContain('John Smith')
+      expect(result).toContain('Partner')
+      expect(result).toContain('john@example.test')
+      expect(result).toContain('415-555-1212')
+    }
+  })
+  it('preserves multiple person records in a table without headings', () => {
+    const html =
+      '<p>Use these people.</p><table>' +
+      '<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr>' +
+      '<tr><td>Jane Brown</td><td>Partner</td><td>jane@example.test</td><td>212-555-1212</td></tr></table>'
+    const result = cleanedText(html)
+    expect(result).toContain('John Smith')
+    expect(result).toContain('john@example.test')
+    expect(result).toContain('Jane Brown')
+    expect(result).toContain('jane@example.test')
+  })
+  it('requires stronger evidence for a single contact record spread across cells', () => {
+    const html =
+      '<p>Please use the person listed below to arrange the repairs.</p>' +
+      '<table><tr><td>John Smith</td><td>john@example.test</td><td>415-555-1212</td></tr></table>'
+    const result = cleanedText(html)
+    expect(result).toContain('John Smith')
+    expect(result).toContain('john@example.test')
+    expect(result).toContain('415-555-1212')
+  })
+  it.each([
+    '<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr>',
+    '<tr><td>John Smith<br>john@example.test<br>415-555-1212</td></tr>',
+    '<tr><td><img src="cid:badge"></td><td>John Smith<br>john@example.test<br>415-555-1212</td></tr>',
+  ])('still removes a confirmed signature table: %s', (rows) => {
+    expect(cleanedText(`<p>Current reply.</p><table>${rows}</table>`)).toBe('Current reply.')
+  })
+  it('preserves a personal sign-off when a horizontal signature has no title', () => {
+    const html =
+      '<p>Current reply.</p><table><tr><td>Best,</td><td>John Smith</td>' +
+      '<td>john@example.test</td><td>415-555-1212</td></tr></table>'
+    const result = cleanedText(html)
+    expect(result).toContain('Current reply.')
+    expect(result).toContain('Best,')
+    expect(result).toContain('John Smith')
+    expect(result).not.toContain('john@example.test')
   })
   it.each(['Partner', 'Threash Insurance Agency'])(
     'does not preserve a title/company as a name: %s',

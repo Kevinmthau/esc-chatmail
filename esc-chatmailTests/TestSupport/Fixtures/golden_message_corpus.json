@@ -159,6 +159,24 @@
       "expected": "Also, please confirm that it will be registered in Georgia.\n\nSincerely,\n\nMarcita Threash"
     },
     {
+      "id": "html_body_product_list_before_signature_preserved",
+      "notes": "P1 regression: product fillers must not bridge across the signature name/title into authored options.",
+      "inputHTML": "<p>Current reply.</p><p>Available Options</p><p>Basic | Pro | Enterprise</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>",
+      "expected": "Current reply.\n\nAvailable Options\n\nBasic | Pro | Enterprise"
+    },
+    {
+      "id": "html_br_contact_instruction_before_signature_preserved",
+      "notes": "P1 regression: expanded BR lines must distinguish authored contact instructions from signature contact lines.",
+      "inputHTML": "<div>Current reply.<br>Please send the signed document to legal@example.test before Friday.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>",
+      "expected": "Current reply.\n\nPlease send the signed document to legal@example.test before Friday."
+    },
+    {
+      "id": "html_authored_contact_table_preserved",
+      "notes": "P1 regression: splitting table cells must not remove the contact records below column headings.",
+      "inputHTML": "<p>Please use the person listed below to arrange the repairs.</p><table><tr><th>Engineer</th><th>Email</th><th>Phone</th></tr><tr><td>John Smith</td><td>john@example.test</td><td>415-555-1212</td></tr></table>",
+      "expected": "Please use the person listed below to arrange the repairs.\n\nEngineer Email Phone\n\nJohn Smith john@example.test 415-555-1212"
+    },
+    {
       "id": "html_br_separated_signature_removed",
       "notes": "Revert-check: EmailDOMQuoteRemover signatureLines and scoped truncation / web html.ts sub-line expansion; preserve the personal signoff/name pair.",
       "inputHTML": "<div>Current reply.<br>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>",

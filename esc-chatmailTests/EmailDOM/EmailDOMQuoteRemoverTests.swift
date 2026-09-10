@@ -613,7 +613,36 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             XCTAssertTrue(text.contains("John Smith"))
             XCTAssertFalse(text.contains("Partner"), cleaned)
             XCTAssertFalse(text.contains("john@example.test"))
-            XCTAssertFalse(cleaned.contains("cid:badge"))
+            // Leading media has no reliable signature ownership; retain it during inferred cleanup.
+            XCTAssertEqual(cleaned.contains("cid:badge"), html.contains("cid:badge"))
+        }
+    }
+
+    func testInferredSignaturePreservesLeadingMedia() {
+        let contact = "Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        for media in ["<img src='cid:floorplan'>", "<svg><image href='cid:floorplan'></image></svg>"] {
+            for block in [
+                "<div>\(media)<br>\(contact)</div>",
+                "<div>\(media)\(contact)</div>",
+                "<table><tr><td>\(media)<br>\(contact)</td></tr></table>",
+                "<table><tr><td>\(media)</td><td>\(contact)</td></tr></table>"
+            ] {
+                let html = "<p>The floorplan is attached below.</p>" + block
+                let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+                XCTAssertTrue(cleaned.contains("cid:floorplan"), cleaned)
+                XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+                XCTAssertTrue(plainText(cleaned).contains("John Smith"), cleaned)
+            }
+        }
+    }
+
+    func testInferredSignatureDoesNotTruncateInsideDiagramText() {
+        for tag in ["text", "title"] {
+            let html = "<p>The floorplan is below.</p><div><svg><\(tag)>Floorplan</\(tag)>" +
+                "<rect width='200' height='200'></rect></svg><br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>"
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertTrue(cleaned.contains("Floorplan"), cleaned)
+            XCTAssertTrue(cleaned.contains("<rect"), cleaned)
         }
     }
 
@@ -647,6 +676,85 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             let withTail = html + "<p>\(tail)</p>"
             XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: withTail, mode: .quotedAndSignatures)).contains(tail))
         }
+    }
+
+    func testProductListBeforeSignaturePreservesAuthoredHeadingAndOptions() {
+        let html = "<p>Current reply.</p><p>Available Options</p><p>Basic | Pro | Enterprise</p>" +
+            "<p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("Available Options"), cleaned)
+        XCTAssertTrue(cleaned.contains("Basic | Pro | Enterprise"), cleaned)
+        XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+    }
+
+    func testBRSignaturePreservesAuthoredContactInstructions() {
+        for instruction in [
+            "Please send the signed document to legal@example.test before Friday.",
+            "Please upload the signed document to https://example.test/upload before Friday.",
+            "Please meet us on Market Street.",
+            "Send to legal@example.test."
+        ] {
+            let html = "<div>Current reply.<br>\(instruction)<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>"
+            let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+            XCTAssertTrue(cleaned.contains(instruction), cleaned)
+            XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+            let withPostscript = "<div>Current reply.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212<br>\(instruction)</div>"
+            XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: withPostscript, mode: .quotedAndSignatures)).contains(instruction))
+        }
+    }
+
+    func testContactTableWithColumnHeadingsIsNotASignature() {
+        for tag in ["th", "td"] {
+            let html = "<p>Please use the person listed below to arrange the repairs.</p>" +
+                "<table><tr><\(tag)>Engineer</\(tag)><\(tag)>Role</\(tag)><\(tag)>Email</\(tag)><\(tag)>Phone</\(tag)></tr>" +
+                "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr></table>"
+            let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+            XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+            XCTAssertTrue(cleaned.contains("Partner"), cleaned)
+            XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+            XCTAssertTrue(cleaned.contains("415-555-1212"), cleaned)
+        }
+    }
+
+    func testContactTableWithMultiplePeopleIsNotASignature() {
+        let html = "<p>Use these people.</p><table>" +
+            "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr>" +
+            "<tr><td>Jane Brown</td><td>Partner</td><td>jane@example.test</td><td>212-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+        XCTAssertTrue(cleaned.contains("Jane Brown"), cleaned)
+        XCTAssertTrue(cleaned.contains("jane@example.test"), cleaned)
+    }
+
+    func testSingleContactTableRowRequiresStrongerSignatureEvidence() {
+        let html = "<p>Please use the person listed below to arrange the repairs.</p>" +
+            "<table><tr><td>John Smith</td><td>john@example.test</td><td>415-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+        XCTAssertTrue(cleaned.contains("415-555-1212"), cleaned)
+    }
+
+    func testConfirmedSignatureTablesStillRemoveContactDetails() {
+        for rows in [
+            "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr>",
+            "<tr><td>John Smith<br>john@example.test<br>415-555-1212</td></tr>",
+            "<tr><td><img src='cid:badge'></td><td>John Smith<br>john@example.test<br>415-555-1212</td></tr>"
+        ] {
+            let html = "<p>Current reply.</p><table>\(rows)</table>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Current reply.")
+        }
+    }
+
+    func testHorizontalSignatureWithoutTitlePreservesPersonalSignOff() {
+        let html = "<p>Current reply.</p><table><tr><td>Best,</td><td>John Smith</td>" +
+            "<td>john@example.test</td><td>415-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("Current reply."), cleaned)
+        XCTAssertTrue(cleaned.contains("Best,"), cleaned)
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
     }
 
     func testSignatureSignOffPolicyExcludesTitlesAndCompanyNames() {
