@@ -33,6 +33,13 @@ final class ViewModelTaskManager {
 
 #if DEBUG
     var taskCleanupAttemptObserver: ((String) -> Void)?
+
+    /// Lets tests join the worker instead of polling side effects at a higher
+    /// priority. Awaiting its value also waits for managed-task cleanup.
+    func waitForCompletion(of key: String) async {
+        let task = tasks[key]?.task
+        await task?.value
+    }
 #endif
 
     /// Runs an async operation, cancelling any existing task with the same key.

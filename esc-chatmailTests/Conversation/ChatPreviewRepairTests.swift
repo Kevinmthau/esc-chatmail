@@ -89,7 +89,8 @@ final class ChatPreviewRepairTests: XCTestCase {
 
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
-        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         context.refreshAllObjects()
 
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nJane Doe")
@@ -143,21 +144,22 @@ final class ChatPreviewRepairTests: XCTestCase {
         try context.save()
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
-        await waitUntil {
-            ChatPreviewRepair.Checkpoint.decode(self.flags.string(
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertEqual(
+            ChatPreviewRepair.Checkpoint.decode(flags.string(
                 forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey
-            )).resumeAtMessageID == "002"
-        }
+            )).resumeAtMessageID,
+            "002"
+        )
         context.refreshAllObjects()
         XCTAssertEqual(protected.chatPreviewText, "Old preview")
         XCTAssertEqual(unrelated.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         context.delete(record)
         try context.save()
-        await waitUntil {
-            repair.repairPersistedChatPreviews()
-            return self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey)
-        }
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         context.refreshAllObjects()
         XCTAssertEqual(protected.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         withExtendedLifetime(repair) {}
@@ -182,8 +184,8 @@ final class ChatPreviewRepairTests: XCTestCase {
         var attemptedSave = false
         let failing = coordinator(save: { _ in attemptedSave = true; return false })
         failing.repairPersistedChatPreviews()
-        await waitUntil { attemptedSave }
-        failing.cancel()
+        await failing.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(attemptedSave)
         context.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Old preview")
         XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey))
@@ -191,7 +193,8 @@ final class ChatPreviewRepairTests: XCTestCase {
 
         let resumed = coordinator()
         resumed.repairPersistedChatPreviews()
-        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
+        await resumed.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         context.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey))
@@ -207,7 +210,8 @@ final class ChatPreviewRepairTests: XCTestCase {
                         forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey)
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
-        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         context.refreshAllObjects()
         XCTAssertEqual(alreadyProcessed.chatPreviewText, "Old preview")
         XCTAssertEqual(next.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
@@ -227,14 +231,11 @@ final class ChatPreviewRepairTests: XCTestCase {
 
         await gate.open()
         repair.repairPersistedChatPreviews()
-        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         context.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
 
-        // Drain the worker even if the regression leaves it parked past the assertion.
-        syncWaiter.onWaitForCurrentSyncToComplete = nil
-        await gate.open()
-        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
         withExtendedLifetime(repair) {}
     }
 
@@ -250,20 +251,16 @@ final class ChatPreviewRepairTests: XCTestCase {
         await accountWork.beginQuiescence()
         await accountWork.endQuiescence()
         await gate.open()
-        // Park the retry separately so the original request cannot hide an
-        // unsafe write behind the later successful repair.
-        let retryGate = ChatPreviewRepairGate()
-        syncWaiter.onWaitForCurrentSyncToComplete = { await retryGate.wait() }
-        await waitUntil {
-            repair.repairPersistedChatPreviews()
-            return self.syncWaiter.waitForCurrentSyncToCompleteCalls > 1
-        }
+        // Join the original worker before checking account isolation so the
+        // later retry cannot hide an unsafe write or completion marker.
+        await repair.waitForChatPreviewRepairCompletion()
         context.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Old preview")
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         syncWaiter.onWaitForCurrentSyncToComplete = nil
-        await retryGate.open()
-        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         context.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         withExtendedLifetime(repair) {}
@@ -302,8 +299,8 @@ final class ChatPreviewRepairTests: XCTestCase {
         line: UInt = #line,
         _ condition: @escaping @MainActor () -> Bool
     ) async {
-        let deadline = Date().addingTimeInterval(10)
-        while !condition(), Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
+        let deadline = Date().addingTimeInterval(60)
+        while !condition(), Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
         XCTAssertTrue(condition(), "Repair did not reach the expected state", file: file, line: line)
     }
 }

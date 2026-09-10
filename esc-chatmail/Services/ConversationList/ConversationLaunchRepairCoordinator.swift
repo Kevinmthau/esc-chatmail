@@ -109,6 +109,13 @@ final class ConversationLaunchRepairCoordinator {
 
     static let chatPreviewRepairMigrationKey = "chatPreviewRepair." + CacheVersioning.chatPreviewDerivationVersion
     static let chatPreviewRepairCheckpointKey = chatPreviewRepairMigrationKey + ".checkpoint"
+    private static let chatPreviewRepairTaskKey = "repairPersistedChatPreviews"
+
+#if DEBUG
+    func waitForChatPreviewRepairCompletion() async {
+        await taskManager.waitForCompletion(of: Self.chatPreviewRepairTaskKey)
+    }
+#endif
 
     /// Checkpoint after each saved batch so cancellation or process exit can
     /// resume without re-reading every earlier HTML file. No model migration.
@@ -116,7 +123,7 @@ final class ConversationLaunchRepairCoordinator {
         guard !isChatPreviewRepairRunning,
               !storage.migrationFlags.bool(forKey: Self.chatPreviewRepairMigrationKey) else { return }
         isChatPreviewRepairRunning = true
-        taskManager.run("repairPersistedChatPreviews", priority: .background) { [weak self] in
+        taskManager.run(Self.chatPreviewRepairTaskKey, priority: .background) { [weak self] in
             guard let self else { return }
             defer { isChatPreviewRepairRunning = false }
             guard let request = await accountWorkCoordinator.makeAccountWorkRequest() else { return }
