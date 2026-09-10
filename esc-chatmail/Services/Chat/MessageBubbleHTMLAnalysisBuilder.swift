@@ -945,10 +945,10 @@ enum MessageBubbleHTMLAnalysisBuilder {
         let boundaries = [firstHardSignatureBoundaryOffset(in: lowercasedHTML), replyOffset] +
             standaloneTrailingSignatureStartOffsets(in: lowercasedHTML, before: replyOffset).map(Optional.some)
         guard let firstBoundary = boundaries.compactMap({ $0 }).min() else {
-            return extractReferencedContentIDs(from: lowercasedHTML)
+            return EmailDocument.referencedContentIDs(in: lowercasedHTML)
         }
         let end = lowercasedHTML.index(lowercasedHTML.startIndex, offsetBy: firstBoundary)
-        var bodyIDs = extractReferencedContentIDs(from: String(lowercasedHTML[..<end]))
+        var bodyIDs = EmailDocument.referencedContentIDs(in: String(lowercasedHTML[..<end]))
         EmailDocument.scanReferencedContentIDs(in: lowercasedHTML) { cid, start in
             if hasFollowingBodyProse(in: lowercasedHTML, at: start, before: replyOffset) {
                 bodyIDs.insert(cid)
