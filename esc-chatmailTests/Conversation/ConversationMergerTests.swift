@@ -224,7 +224,7 @@ final class ConversationMergerTests: XCTestCase {
         XCTAssertEqual(winner.snippet, "New loser snippet")
     }
 
-    func testMerge_preservesPinnedStatus() throws {
+    func testMerge_preservesPinnedWithoutChangingMuted() throws {
         let winner = ConversationBuilder()
             .withKeyHash("winner")
             .build(in: context)
@@ -237,11 +237,41 @@ final class ConversationMergerTests: XCTestCase {
         try testStack.saveViewContext()
 
         XCTAssertFalse(winner.pinned)
+        XCTAssertFalse(winner.muted)
         XCTAssertTrue(loser.pinned)
+        XCTAssertFalse(loser.muted)
 
         merger.merge(from: loser, into: winner)
 
         XCTAssertTrue(winner.pinned, "Winner should inherit pinned status from loser")
+        XCTAssertFalse(winner.muted, "Pinned state must not leak into muted state")
+    }
+
+    func testMerge_preservesMutedFromEitherConversation() throws {
+        let mutedWinner = ConversationBuilder()
+            .withKeyHash("muted-winner")
+            .setMuted()
+            .build(in: context)
+        let plainLoser = ConversationBuilder()
+            .withKeyHash("plain-loser")
+            .build(in: context)
+        let plainWinner = ConversationBuilder()
+            .withKeyHash("plain-winner")
+            .build(in: context)
+        let mutedLoser = ConversationBuilder()
+            .withKeyHash("muted-loser")
+            .setMuted()
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        merger.merge(from: plainLoser, into: mutedWinner)
+        merger.merge(from: mutedLoser, into: plainWinner)
+
+        XCTAssertFalse(mutedWinner.pinned)
+        XCTAssertTrue(mutedWinner.muted, "Winner should retain its muted status")
+        XCTAssertFalse(plainWinner.pinned)
+        XCTAssertTrue(plainWinner.muted, "Winner should inherit muted status from loser")
     }
 
     func testMerge_combinatesUnreadCounts() throws {
@@ -366,6 +396,203 @@ final class ConversationMergerTests: XCTestCase {
         let conversations = try context.fetch(Conversation.fetchRequest())
         XCTAssertEqual(conversations.count, 2, "The pending-send conversation must not be merged away")
         XCTAssertNotNil(conversations.first { $0.id == pendingID })
+    }
+
+    func testMergeActiveDuplicates_neverUsesPendingConversationAsWinner() async throws {
+        let hash = calculateParticipantHash(from: ["alice@example.com"])
+        let pending = ConversationBuilder()
+            .withKeyHash("pending-winner-key")
+            .withParticipantHash(hash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 300))
+            .visible()
+            .build(in: context)
+        let pendingID = pending.id
+        for index in 0..<3 {
+            _ = MessageBuilder()
+                .withId("pending-winner-msg-\(index)")
+                .inConversation(pending)
+                .build(in: context)
+        }
+
+        let ordinaryWinner = ConversationBuilder()
+            .withKeyHash("ordinary-winner-key")
+            .withParticipantHash(hash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 200))
+            .visible()
+            .build(in: context)
+        let ordinaryWinnerID = ordinaryWinner.id
+        _ = MessageBuilder()
+            .withId("ordinary-winner-msg")
+            .inConversation(ordinaryWinner)
+            .build(in: context)
+
+        let ordinaryLoser = ConversationBuilder()
+            .withKeyHash("ordinary-loser-key")
+            .withParticipantHash(hash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("ordinary-loser-msg")
+            .inConversation(ordinaryLoser)
+            .build(in: context)
+
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = UUID().uuidString
+        record.createdAt = Date()
+        record.conversationId = pendingID
+        try testStack.saveViewContext()
+
+        await merger.mergeActiveConversationDuplicates(in: context)
+
+        let conversations = try context.fetch(Conversation.fetchRequest())
+        XCTAssertEqual(conversations.count, 2)
+        let untouchedPending = try XCTUnwrap(conversations.first { $0.id == pendingID })
+        XCTAssertEqual(
+            Set(untouchedPending.messages?.map(\.id) ?? []),
+            ["pending-winner-msg-0", "pending-winner-msg-1", "pending-winner-msg-2"]
+        )
+        let mergedOrdinary = try XCTUnwrap(
+            conversations.first { $0.id == ordinaryWinnerID }
+        )
+        XCTAssertEqual(
+            Set(mergedOrdinary.messages?.map(\.id) ?? []),
+            ["ordinary-winner-msg", "ordinary-loser-msg"]
+        )
+    }
+
+    func testMergeActiveDuplicates_retargetsPendingActionFromLoser() async throws {
+        let hash = calculateParticipantHash(from: ["alice@example.com"])
+        let winner = ConversationBuilder()
+            .withKeyHash("pending-action-winner-key")
+            .withParticipantHash(hash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 300))
+            .visible()
+            .build(in: context)
+        let winnerID = winner.id
+        for index in 0..<2 {
+            _ = MessageBuilder()
+                .withId("pending-action-winner-\(index)")
+                .inConversation(winner)
+                .build(in: context)
+        }
+
+        let loser = ConversationBuilder()
+            .withKeyHash("pending-action-loser-key")
+            .withParticipantHash(hash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        let loserID = loser.id
+        _ = MessageBuilder()
+            .withId("pending-action-loser-message")
+            .inConversation(loser)
+            .build(in: context)
+
+        let payload = #"{"messageIds":["pending-action-loser-message"]}"#
+        PendingActionBuilder()
+            .withActionType(PendingAction.ActionType.archiveConversation.rawValue)
+            .forConversation(loserID)
+            .withPayload(payload)
+            .pending()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await merger.mergeActiveConversationDuplicates(in: context)
+
+        let verificationContext = testStack.newBackgroundContext()
+        let state = try await verificationContext.perform {
+            let conversations = try verificationContext.fetch(Conversation.fetchRequest())
+            let action = try XCTUnwrap(
+                verificationContext.fetch(PendingAction.fetchRequest()).first
+            )
+            return (
+                Set(conversations.map(\.id)),
+                Set(conversations.first { $0.id == winnerID }?.messages?.map(\.id) ?? []),
+                action.conversationId,
+                action.payload
+            )
+        }
+
+        XCTAssertEqual(state.0, [winnerID])
+        XCTAssertEqual(
+            state.1,
+            [
+                "pending-action-winner-0",
+                "pending-action-winner-1",
+                "pending-action-loser-message"
+            ]
+        )
+        XCTAssertEqual(state.2, winnerID)
+        XCTAssertEqual(state.3, payload)
+    }
+
+    func testRemoveDuplicateConversations_skipsPendingLoserButMergesOrdinaryLoser() async throws {
+        let sharedKeyHash = "pending-protected-duplicate-key"
+        let winner = ConversationBuilder()
+            .withKeyHash(sharedKeyHash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 300))
+            .visible()
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("pending-protected-winner-1")
+            .inConversation(winner)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("pending-protected-winner-2")
+            .inConversation(winner)
+            .build(in: context)
+
+        let ordinaryLoser = ConversationBuilder()
+            .withKeyHash(sharedKeyHash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 200))
+            .visible()
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("pending-protected-ordinary-loser")
+            .inConversation(ordinaryLoser)
+            .build(in: context)
+
+        let pendingLoser = ConversationBuilder()
+            .withKeyHash(sharedKeyHash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        let winnerID = winner.id
+        let ordinaryLoserID = ordinaryLoser.id
+        let pendingLoserID = pendingLoser.id
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = UUID().uuidString
+        record.createdAt = Date()
+        record.conversationId = pendingLoserID
+        try testStack.saveViewContext()
+
+        await merger.removeDuplicateConversations(in: context)
+
+        let verificationContext = testStack.newBackgroundContext()
+        let state = try await verificationContext.perform {
+            let conversations = try verificationContext.fetch(Conversation.fetchRequest())
+            let records = try verificationContext.fetch(OutboundSendMutationRecord.fetchRequest())
+            let remainingIDs = Set(conversations.map(\.id))
+            let winnerMessageIDs = Set(
+                conversations.first { $0.id == winnerID }?
+                    .messages?
+                    .map(\.id) ?? []
+            )
+            return (remainingIDs, winnerMessageIDs, records.compactMap(\.conversationId))
+        }
+
+        XCTAssertEqual(state.0, [winnerID, pendingLoserID])
+        XCTAssertFalse(state.0.contains(ordinaryLoserID))
+        XCTAssertEqual(
+            state.1,
+            [
+                "pending-protected-winner-1",
+                "pending-protected-winner-2",
+                "pending-protected-ordinary-loser"
+            ]
+        )
+        XCTAssertEqual(state.2, [pendingLoserID])
     }
 
     func testRemoveDuplicates_detectsDuplicateKeyHashes() throws {

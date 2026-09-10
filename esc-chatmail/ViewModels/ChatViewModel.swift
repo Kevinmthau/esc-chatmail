@@ -13,6 +13,7 @@ final class ChatComposerState: ObservableObject {
     @Published var replyingTo: Message?
     @Published var attachments: [Attachment]
     @Published private(set) var isSending = false
+    private var discardsAttachmentsWhenSendFinishes = false
 
     init(
         replyText: String = "",
@@ -59,6 +60,34 @@ final class ChatComposerState: ObservableObject {
 
     func finishSending() {
         isSending = false
+        if discardsAttachmentsWhenSendFinishes {
+            discardsAttachmentsWhenSendFinishes = false
+            discardUnsentAttachments()
+        }
+    }
+
+    func requestUnsentAttachmentDiscard() {
+        guard isSending else {
+            discardUnsentAttachments()
+            return
+        }
+        discardsAttachmentsWhenSendFinishes = true
+    }
+
+    func discardUnsentAttachments() {
+        let discardedAttachments = attachments.filter { attachment in
+            !attachment.isDeleted && attachment.message == nil
+        }
+        attachments.removeAll()
+
+        for attachment in discardedAttachments {
+            if attachment.isLocalAttachment {
+                AttachmentPaths.deleteFile(at: attachment.localURL)
+                AttachmentPaths.deleteFile(at: attachment.previewURL)
+            }
+
+            attachment.managedObjectContext?.delete(attachment)
+        }
     }
 }
 
@@ -285,6 +314,10 @@ final class ChatViewModel: ObservableObject {
         replyingTo = lastMessage
     }
 
+    func discardUnsentReplyAttachments() {
+        composerState.requestUnsentAttachmentDiscard()
+    }
+
     /// Keeps the reply target anchored to this conversation as rows change.
     ///
     /// A legacy message can move to a List-Id conversation while this chat is
@@ -362,11 +395,12 @@ final class ChatViewModel: ObservableObject {
         destination = nil
     }
 
-    /// Creates the optimistic reply and returns its stable local identity.
-    ///
-    /// The caller uses this identity to make the exact row visible before
-    /// requesting any optional post-send scrolling.
-    func sendReply() async -> OutboundMessageResult? {
+    /// Reports the durable optimistic identity as soon as it exists, but keeps
+    /// the draft owned and locked until local preflight reaches transmission
+    /// admission. The returned result represents that later admission point.
+    func sendReply(
+        onOptimisticMessagePersisted: @escaping @MainActor (OutboundMessageResult) -> Void = { _ in }
+    ) async -> OutboundMessageResult? {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachments = composerState.attachments
         guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return nil }
@@ -400,18 +434,20 @@ final class ChatViewModel: ObservableObject {
                         body: trimmedReplyText,
                         attachments: attachmentContexts
                     )
-                )
+                ),
+                onOptimisticMessagePersisted: onOptimisticMessagePersisted
             )
         } catch {
-            Log.error("Failed to create optimistic message for reply", category: .message, error: error)
+            Log.error("Failed to prepare reply send", category: .message, error: error)
             sendErrorAlert = ChatSendErrorAlert(message: error.localizedDescription)
             return nil
         }
         guard let result else { return nil }
 
         // Clear only after local preflight reaches durable transmission admission.
+        // Keep the reply target so another message in this chat retains its
+        // subject and threading headers while the sent-message echo arrives.
         replyText = ""
-        replyingTo = nil
         composerState.attachments = []
         return result
     }

@@ -38,9 +38,9 @@
     },
     {
       "id": "address_keyword_word_boundary_does_not_match_inside_words",
-      "notes": "Address keywords like 'ave' must not match inside words like 'have' (which can cause legitimate body sentences to be stripped as signatures).",
+      "notes": "Address keywords like 'ave' must not match inside words like 'have' (which can cause legitimate body sentences to be stripped as signatures). Revert-check: PlainTextSignatureRemover / web signature.ts preserve bare sign-offs regardless of message length (F25).",
       "input": "Hi Alex,\n\nWe can check and get back to you tomorrow.\n\nHi Sam,\n\nHow many miles does the car have now? Where is it located?\n\nThanks,\nJordan\n\n> On Feb 15, 2026, at 4:36 PM, Alex wrote:\n> Can we turn the car in early?\n> Thank you!",
-      "expected": "Hi Alex,\n\nWe can check and get back to you tomorrow.\n\nHi Sam,\n\nHow many miles does the car have now? Where is it located?"
+      "expected": "Hi Alex,\n\nWe can check and get back to you tomorrow.\n\nHi Sam,\n\nHow many miles does the car have now? Where is it located?\n\nThanks,\n\nJordan"
     },
     {
       "id": "corporate_signature_long_inline_separators_removed",
@@ -77,6 +77,336 @@
       "notes": "Law-firm style 'Notice To Recipient' legal footers should be removed when they survive quote extraction as trailing disclaimer text.",
       "input": "Any word?\n\nNotice To Recipient: This e-mail is meant for only the intended recipient of the transmission, and may be a communication privileged by law. If you received this e-mail in error, any review, use, dissemination, distribution, or copying of this e-mail is strictly prohibited. Please notify us immediately of the error by return e-mail and please delete this message and any and all duplicates of this message from your system. Thank you in advance for your cooperation. For additional policies governing this e-mail, please see http://www.examplelaw.com/about/firm-policies/.",
       "expected": "Any word?"
+    },
+    {
+      "id": "signature_guard_plain_thanks_name",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "That works for me.\n\nThanks,\nAlex",
+      "expected": "That works for me.\n\nThanks,\n\nAlex"
+    },
+    {
+      "id": "signature_guard_plain_best_name",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "See you tomorrow.\n\nBest,\nAlex",
+      "expected": "See you tomorrow.\n\nBest,\n\nAlex"
+    },
+    {
+      "id": "signature_guard_plain_phone_sentence",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Please call me at 415-555-0101 when you arrive.",
+      "expected": "Please call me at 415-555-0101 when you arrive."
+    },
+    {
+      "id": "signature_guard_plain_phone_question",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Can you give me a call? 415-555-0101",
+      "expected": "Can you give me a call? 415-555-0101"
+    },
+    {
+      "id": "signature_guard_plain_hours_in_body",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "We are open Monday - Friday, 9am - 5pm.\n\nPlease come by.",
+      "expected": "We are open Monday - Friday, 9am - 5pm.\n\nPlease come by."
+    },
+    {
+      "id": "signature_guard_plain_single_link",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Here is the link you asked for:\n\nhttps://example.com/report",
+      "expected": "Here is the link you asked for:\n\nhttps://example.com/report"
+    },
+    {
+      "id": "signature_guard_plain_email_sentence",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Please send the draft to alex@example.com for review.",
+      "expected": "Please send the draft to alex@example.com for review."
+    },
+    {
+      "id": "signature_guard_plain_reference_line",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Reference: 12345678\n\nPlease include this on the form.",
+      "expected": "Reference: 12345678\n\nPlease include this on the form."
+    },
+    {
+      "id": "signature_guard_plain_date_line",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Deadline: 08-15-2026\n\nWe can discuss the plan tomorrow.",
+      "expected": "Deadline: 08-15-2026\n\nWe can discuss the plan tomorrow."
+    },
+    {
+      "id": "signature_guard_plain_postscript_after_name",
+      "notes": "HONEST SCOPE: preserves existing personal reply behavior. Revert-check: PlainTextSignatureRemover guards / web removeSignature.",
+      "input": "Sounds good.\n\nThanks,\nAlex\n\nP.S. Bring the printed plan.",
+      "expected": "Sounds good.\n\nThanks,\nAlex\n\nP.S. Bring the printed plan."
+    },
+    {
+      "id": "plain_signature_audit_body_mobile-first",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nMobile-first design is the priority for this release.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nMobile-first design is the priority for this release.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_m",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nM. Smith will join us tomorrow.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nM. Smith will join us tomorrow.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_o-rings",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nO-rings are back in stock.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nO-rings are back in stock.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_f-150",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nF-150 is in the shop this week.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nF-150 is in the shop this week.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_d",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nD. Wong signed off on the plan.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nD. Wong signed off on the plan.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_important",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nImportant: the deadline moved to Monday.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nImportant: the deadline moved to Monday.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_you",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nYou are receiving this because we need your input.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nYou are receiving this because we need your input.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_our",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nOur privacy policy changed this week.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nOur privacy policy changed this week.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_orphan_postscript",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "The delivery is confirmed.\n\nP.S. Please use the side entrance.",
+      "expected": "The delivery is confirmed.\n\nP.S. Please use the side entrance."
+    },
+    {
+      "id": "plain_signature_audit_long_reply_bare_signoff",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nWe have updated the plan.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.\n\nBest,\nKevin",
+      "expected": "Hi team,\n\nThe review is complete.\n\nWe have updated the plan.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.\n\nBest,\n\nKevin"
+    },
+    {
+      "id": "plain_signature_audit_zoom_invite",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Topic: Weekly sync\nTime: September 12, 2026 10:00 AM\nJoin Zoom Meeting\nhttps://zoom.us/j/123456789\nMeeting ID: 123 456 789\nPasscode: 246810",
+      "expected": "Topic: Weekly sync\n\nTime: September 12, 2026 10:00 AM\n\nJoin Zoom Meeting\n\nhttps://zoom.us/j/123456789\n\nMeeting ID: 123 456 789\n\nPasscode: 246810"
+    },
+    {
+      "id": "plain_signature_audit_shipping_block",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Your order is on its way.\n\nShip to:\nJordan Smith\n123 Main Street\nNew York, NY 10013",
+      "expected": "Your order is on its way.\n\nShip to:\n\nJordan Smith 123 Main Street\n\nNew York, NY 10013"
+    },
+    {
+      "id": "plain_signature_audit_calendar_block",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Design review\n\nWednesday, September 16, 2026\n10:00 AM - 11:00 AM\nLocation: Conference Room A",
+      "expected": "Design review\n\nWednesday, September 16, 2026 10:00 AM - 11:00 AM\n\nLocation: Conference Room A"
+    },
+    {
+      "id": "plain_signature_audit_two_link_share",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Here are the links you asked for:\nhttps://example.com/one\nhttps://example.com/two",
+      "expected": "Here are the links you asked for:\n\nhttps://example.com/one\n\nhttps://example.com/two"
+    },
+    {
+      "id": "plain_signature_audit_contact_card_then_body",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Please reach out to our property manager directly:\nJohn Boga\nProperty Manager\njohn@example.com\n914-555-0123\n\nPlease copy me on your reply.",
+      "expected": "Please reach out to our property manager directly:\n\nJohn Boga\n\nProperty Manager john@example.com 914-555-0123\n\nPlease copy me on your reply."
+    },
+    {
+      "id": "plain_signature_audit_contact_list_followed_by_signoff",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "If this matter is urgent, please contact:\n- Shane at shane@example.com or 424-555-0123\n- Victoria at victoria@example.com or 312-555-0123\n\nThank you,\nDominic",
+      "expected": "If this matter is urgent, please contact:\n\n- Shane at shane@example.com or 424-555-0123\n\n- Victoria at victoria@example.com or 312-555-0123\n\nThank you,\nDominic"
+    },
+    {
+      "id": "plain_signature_audit_footer_phrase_followed_by_body",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "The draft is ready.\n\nUnsubscribe from these notifications.\n\nWe should keep that sentence in the new template.",
+      "expected": "The draft is ready.\n\nUnsubscribe from these notifications.\n\nWe should keep that sentence in the new template."
+    },
+    {
+      "id": "plain_signature_audit_signoff_contacts",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "The contract is ready.\n\nSincerely,\nMarcita Threash\nSenior Account Manager\nProtecting what matters most.\nmarcita@example.com\nwww.example.com",
+      "expected": "The contract is ready.\n\nSincerely,\n\nMarcita Threash"
+    },
+    {
+      "id": "plain_signature_audit_mobile_footer",
+      "notes": "HONEST SCOPE: existing removal control that passed before hardening; paired body keepers expose the regression. Revert-check: PlainTextSignatureRemover / web signature.ts trailing footer validation.",
+      "input": "The review is complete.\n\nSent from my iPhone",
+      "expected": "The review is complete."
+    },
+    {
+      "id": "plain_signature_audit_legal_footer",
+      "notes": "HONEST SCOPE: existing removal control that passed before hardening; paired body keepers expose the regression. Revert-check: PlainTextSignatureRemover / web signature.ts trailing footer validation.",
+      "input": "The review is complete.\n\nThis email and any attachments are confidential and intended solely\nfor the use of the individual to whom they are addressed.",
+      "expected": "The review is complete."
+    },
+    {
+      "id": "plain_signature_audit_wire_fraud_footer",
+      "notes": "HONEST SCOPE: existing removal control that passed before hardening; paired body keepers expose the regression. Revert-check: PlainTextSignatureRemover / web signature.ts trailing footer validation.",
+      "input": "Escrow documents are ready for your signature.\n\nWIRE FRAUD IS REAL. Before wiring any money, call the intended\nrecipient at a number you know is valid to confirm the instructions.",
+      "expected": "Escrow documents are ready for your signature."
+    },
+    {
+      "id": "plain_signature_audit_descriptive_phone_signature",
+      "input": "The repair is scheduled.\n\nBest,\nJohn Boga\nProperty Manager\nEmergency line after hours: 914-373-4658\nwww.nycbrownstone.net",
+      "expected": "The repair is scheduled.\n\nBest,\n\nJohn Boga",
+      "notes": "Revert-check: shared descriptive phone line in PlainTextSignatureRemover / web signature.ts; signature removal twin to phone-in-body keepers."
+    },
+    {
+      "id": "plain_signature_audit_legal_words_in_body",
+      "input": "Confidentiality notice: we need to discuss this.\n\nThe account is ready for review.\n\nOur services launch on Monday.",
+      "expected": "Confidentiality notice: we need to discuss this.\n\nThe account is ready for review.\n\nOur services launch on Monday.",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts reject body paragraphs after legal openers and honor explicit contact-list intros even with job titles."
+    },
+    {
+      "id": "plain_signature_audit_body_after_legal_footer",
+      "input": "The document is attached.\n\nThis email and any attachments are confidential.\n\nThe account is ready and the terms are final.\n\nPlease review our services before Monday.",
+      "expected": "The document is attached.\n\nThis email and any attachments are confidential.\n\nThe account is ready and the terms are final.\n\nPlease review our services before Monday.",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts reject body paragraphs after legal openers and honor explicit contact-list intros even with job titles."
+    },
+    {
+      "id": "plain_signature_audit_titled_contact_list",
+      "input": "Here are the contacts:\n- Jane Doe — Account Manager — jane@example.com\n- John Roe — Sales Director — john@example.com\nhttps://example.com/team",
+      "expected": "Here are the contacts:\n\n- Jane Doe — Account Manager — jane@example.com\n\n- John Roe — Sales Director — john@example.com\n\nhttps://example.com/team",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts reject body paragraphs after legal openers and honor explicit contact-list intros even with job titles."
+    },
+    {
+      "id": "plain_signature_audit_title_prose",
+      "input": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nThe manager will call tomorrow.",
+      "expected": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nThe manager will call tomorrow.",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_email_prose",
+      "input": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nPlease send the revised plan to bob@example.com.",
+      "expected": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nPlease send the revised plan to bob@example.com.",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_url_prose",
+      "input": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nPlease review the revised plan at https://example.com/plan.",
+      "expected": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nPlease review the revised plan at https://example.com/plan.",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_authored_tagline_body_sentence",
+      "input": "Please review the plan.\n\nThe homeowner will coordinate with the broker.\nThe estimate changed.\n415-555-1212\njane@example.com",
+      "expected": "Please review the plan.\n\nThe homeowner will coordinate with the broker.\n\nThe estimate changed.\n\n415-555-1212 jane@example.com",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_authored_tagline_personal_name",
+      "input": "Please review the plan.\n\nJane Doe\nThe estimate changed.\n415-555-1212\njane@example.com",
+      "expected": "Please review the plan.\n\nJane Doe\n\nThe estimate changed.\n\n415-555-1212 jane@example.com",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_body_before_legal_footer",
+      "input": "The manager will call tomorrow.\n\nThis email and any attachments are confidential.",
+      "expected": "The manager will call tomorrow.",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_review_legal_sounding_correction",
+      "notes": "A broad footer opener in the final authored paragraph must not remove an instruction.",
+      "input": "The draft is attached.\n\nThis email may contain mistakes. Please check the amounts before signing.",
+      "expected": "The draft is attached.\n\nThis email may contain mistakes. Please check the amounts before signing."
+    },
+    {
+      "id": "plain_signature_review_form_crs_revision",
+      "notes": "A broad footer opener in the final authored paragraph must not remove an instruction.",
+      "input": "The draft is attached.\n\nOur Form CRS needs revision before Friday.",
+      "expected": "The draft is attached.\n\nOur Form CRS needs revision before Friday."
+    },
+    {
+      "id": "plain_signature_review_preferences_instruction",
+      "notes": "A broad footer opener in the final authored paragraph must not remove an instruction.",
+      "input": "The draft is attached.\n\nUpdate your preferences before the deadline.",
+      "expected": "The draft is attached.\n\nUpdate your preferences before the deadline."
+    },
+    {
+      "id": "plain_signature_review_budget_below_name",
+      "notes": "A short authored status sentence between a name/title and contact lines is not a company tagline.",
+      "input": "Please review the plan.\n\nJane Doe\nBudget has doubled.\njane@example.com\nhttps://example.com/project",
+      "expected": "Please review the plan.\n\nJane Doe\n\nBudget has doubled.\n\njane@example.com\n\nhttps://example.com/project"
+    },
+    {
+      "id": "plain_signature_review_budget_below_title",
+      "notes": "A short authored status sentence between a name/title and contact lines is not a company tagline.",
+      "input": "Please review the plan.\n\nProject Manager\nBudget has doubled.\njane@example.com\nhttps://example.com/project",
+      "expected": "Please review the plan.\n\nProject Manager\n\nBudget has doubled.\n\njane@example.com\n\nhttps://example.com/project"
+    },
+    {
+      "id": "plain_signature_review_shared_document_links",
+      "notes": "URL line preservation must not turn an authored heading and shared documents into a signature.",
+      "input": "Please review these before our meeting.\n\nProject Documents\nhttps://example.com/revenue\nhttps://example.com/costs",
+      "expected": "Please review these before our meeting.\n\nProject Documents\n\nhttps://example.com/revenue\n\nhttps://example.com/costs"
+    },
+    {
+      "id": "plain_signature_review_shared_sales_links",
+      "notes": "A shared-link heading containing a title keyword is not sufficient signature evidence.",
+      "input": "Here are the links:\nSales report\nhttps://example.com/revenue\nhttps://example.com/costs",
+      "expected": "Here are the links:\n\nSales report\n\nhttps://example.com/revenue\n\nhttps://example.com/costs"
+    },
+    {
+      "id": "plain_signature_review_specific_confidentiality_footer",
+      "notes": "Removal control: a specific confidentiality warning remains a footer.",
+      "input": "The review is complete.\n\nThis email may contain confidential or privileged information. If you are not the intended recipient, please delete it.",
+      "expected": "The review is complete."
+    },
+    {
+      "id": "plain_signature_review_explicit_signoff_websites",
+      "notes": "Removal control: website-only contacts after an explicit sign-off should still be removed while preserving the personal name.",
+      "input": "The review is complete.\n\nBest,\nJane Doe\nhttps://janedoe.example.com\nhttps://linkedin.com/in/janedoe",
+      "expected": "The review is complete.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "plain_signature_review_emergency_contact_list",
+      "notes": "A capitalized contact-list heading and descriptive phone labels must preserve all authored emergency numbers.",
+      "input": "Please keep these numbers handy.\n\nEmergency Contacts\nEmergency line: 212-555-1234\nCustomer service line: 212-555-5678",
+      "expected": "Please keep these numbers handy.\n\nEmergency Contacts\n\nEmergency line: 212-555-1234\n\nCustomer service line: 212-555-5678"
+    },
+    {
+      "id": "plain_signature_review_support_team_numbers",
+      "notes": "An arbitrary heading and descriptive phone rows need stronger evidence before being removed as a signature.",
+      "input": "Please keep these numbers handy.\n\nSupport Team\nEmergency line: 212-555-1234\nCustomer service line: 212-555-5678",
+      "expected": "Please keep these numbers handy.\n\nSupport Team\n\nEmergency line: 212-555-1234\n\nCustomer service line: 212-555-5678"
+    },
+    {
+      "id": "plain_signature_review_escalation_matrix_numbers",
+      "notes": "Authored contact blocks remain visible without relying on a list of recognized heading words.",
+      "input": "Please keep these numbers handy.\n\nEscalation Matrix\nEmergency line: 212-555-1234\nCustomer service line: 212-555-5678",
+      "expected": "Please keep these numbers handy.\n\nEscalation Matrix\n\nEmergency line: 212-555-1234\n\nCustomer service line: 212-555-5678"
+    },
+    {
+      "id": "plain_signature_review_privileged_attachments_instruction",
+      "notes": "A confidentiality-like opener must not consume an authored instruction in the same paragraph.",
+      "input": "Hi John,\n\nThis email may contain privileged attachments. Please forward them to counsel.",
+      "expected": "Hi John,\n\nThis email may contain privileged attachments. Please forward them to counsel."
+    },
+    {
+      "id": "plain_signature_review_confidential_information_instruction",
+      "notes": "Even a recognized confidentiality sentence must preserve the forwarding instruction that follows on the same line.",
+      "input": "Hi John,\n\nThis email may contain confidential information. Please forward it to counsel.",
+      "expected": "Hi John,\n\nThis email may contain confidential information. Please forward it to counsel."
     }
   ],
   "htmlToBubbleTextCases": [
@@ -133,6 +463,366 @@
       "notes": "When Gmail quote cleanup removes nested blockquotes but leaves a trailing 'Notice To Recipient' paragraph, bubble text should keep only the new user content.",
       "inputHTML": "<div dir=\"ltr\">Any word?</div><br><div class=\"gmail_quote gmail_quote_container\"><div dir=\"ltr\" class=\"gmail_attr\">On Tue, Feb 24, 2026 at 11:27 AM Kevin Thau &lt;kmthau@gmail.com&gt; wrote:<br></div><blockquote class=\"gmail_quote\" style=\"margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex\"><div dir=\"ltr\">Makes sense. Thank you.</div></blockquote><p style=\"font-size:8pt;margin-top:0\">Notice To Recipient: This e-mail is meant for only the intended recipient of the transmission, and may be a communication privileged by law. If you received this e-mail in error, any review, use, dissemination, distribution, or copying of this e-mail is strictly prohibited. Please notify us immediately of the error by return e-mail and please delete this message and any and all duplicates of this message from your system. Thank you in advance for your cooperation. For additional policies governing this e-mail, please see <a href=\"http://www.examplelaw.com/about/firm-policies/\">http://www.examplelaw.com/about/firm-policies/</a>.</p></div>",
       "expected": "Any word?"
+    },
+    {
+      "id": "html_labeled_phone_hours_signature_without_wrapper_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately. Revert-check: shared signoff/name preservation policy.",
+      "inputHTML": "<div>We hope you are happy with our work. Please call or email with any questions.</div><div>Thank you!</div><div>Best,</div><div>John Boga</div><div>Property Manager</div><div>NYC Brownstone Maintenance</div><div>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</div><div>Emergency line after hours: 914-373-4658</div><div>www.nycbrownstone.net</div>",
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,\n\nJohn Boga"
+    },
+    {
+      "id": "html_outlook_paragraph_signature_with_hours_phone_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately. Revert-check: shared signoff/name preservation policy.",
+      "inputHTML": "<p>We hope you are happy with our work. Please call or email with any questions.</p><p>Thank you!</p><p>Best,</p><p>John Boga</p><p>Property Manager</p><p>NYC Brownstone Maintenance</p><p>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</p><p>Emergency line after hours: 914-373-4658</p><p>www.nycbrownstone.net</p>",
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,\n\nJohn Boga"
+    },
+    {
+      "id": "html_body_instruction_before_contact_signature_preserved",
+      "notes": "PR 229 regression: a role keyword in a short instruction must not make it removable signature text.",
+      "inputHTML": "<div>The proposal looks good.</div><div>Do not pay the consultant</div><div>Jane Smith</div><div>jane@example.test</div><div>415-555-1212</div>",
+      "expected": "The proposal looks good.\n\nDo not pay the consultant"
+    },
+    {
+      "id": "html_capitalized_instruction_before_contact_signature_preserved",
+      "notes": "PR 229 regression: capitalization is not evidence that an authored warning is a signature title.",
+      "inputHTML": "<div>The proposal looks good.</div><div>DO NOT PAY THE CONSULTANT</div><div>Jane Smith</div><div>jane@example.test</div><div>415-555-1212</div>",
+      "expected": "The proposal looks good.\n\nDO NOT PAY THE CONSULTANT"
+    },
+    {
+      "id": "html_body_period_before_contact_signature_preserved",
+      "notes": "PR 229 regression: descriptive phone labels must not absorb authored period/date fields.",
+      "inputHTML": "<div>The requested details are below.</div><div>Service period: 2026-2027</div><div>John Smith</div><div>Partner</div><div>john@example.test</div><div>415-555-1212</div>",
+      "expected": "The requested details are below.\n\nService period: 2026-2027"
+    },
+    {
+      "id": "html_pipe_colon_phone_signature_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine separator collapse / web isSignaturePhoneLine.",
+      "inputHTML": "<div>Current reply.</div><div>Jane Doe</div><div>Partner</div><div>jane@example.test</div><div>Office: 770-555-0148 | Fax: 770-555-0149</div>",
+      "expected": "Current reply."
+    },
+    {
+      "id": "html_outlook_contact_signature_before_confidentiality_notice_removed",
+      "notes": "Confirmed contact signatures may include a terminal confidentiality notice; authored legal discussion and the personal signoff/name pair are preserved.",
+      "inputHTML": "<p>Also, please confirm that it will be registered in Georgia.</p><p>Sincerely,</p><p>Marcita Threash</p><p>Senior Account Manager | Threash Insurance Agency</p><p>1234 Peachtree Road NE, Suite 200</p><p>Atlanta, GA 30309</p><p>Phone: 404-555-0142 | Fax: 404-555-0143</p><p>marcita@threashinsurance.com</p><p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive and confidential use of the intended recipient.</p>",
+      "expected": "Also, please confirm that it will be registered in Georgia.\n\nSincerely,\n\nMarcita Threash"
+    },
+    {
+      "id": "html_body_product_list_before_signature_preserved",
+      "notes": "P1 regression: product fillers must not bridge across the signature name/title into authored options.",
+      "inputHTML": "<p>Current reply.</p><p>Available Options</p><p>Basic | Pro | Enterprise</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>",
+      "expected": "Current reply.\n\nAvailable Options\n\nBasic | Pro | Enterprise"
+    },
+    {
+      "id": "html_br_contact_instruction_before_signature_preserved",
+      "notes": "P1 regression: expanded BR lines must distinguish authored contact instructions from signature contact lines.",
+      "inputHTML": "<div>Current reply.<br>Please send the signed document to legal@example.test before Friday.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>",
+      "expected": "Current reply.\n\nPlease send the signed document to legal@example.test before Friday."
+    },
+    {
+      "id": "html_authored_contact_table_preserved",
+      "notes": "P1 regression: splitting table cells must not remove the contact records below column headings.",
+      "inputHTML": "<p>Please use the person listed below to arrange the repairs.</p><table><tr><th>Engineer</th><th>Email</th><th>Phone</th></tr><tr><td>John Smith</td><td>john@example.test</td><td>415-555-1212</td></tr></table>",
+      "expected": "Please use the person listed below to arrange the repairs.\n\nEngineer Email Phone\n\nJohn Smith john@example.test 415-555-1212"
+    },
+    {
+      "id": "html_br_separated_signature_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover signatureLines and scoped truncation / web html.ts sub-line expansion; preserve the personal signoff/name pair.",
+      "inputHTML": "<div>Current reply.<br>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>",
+      "expected": "Current reply.\n\nBest,\n\nJohn Smith"
+    },
+    {
+      "id": "html_table_signature_with_logo_cell_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover signatureLines and scoped truncation / web html.ts sub-line expansion; preserve the personal signoff/name pair.",
+      "inputHTML": "<p>Current reply.</p><table><tr><td><img src=\"cid:badge\"></td><td>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</td></tr></table>",
+      "expected": "Current reply.\n\nBest,\n\nJohn Smith"
+    },
+    {
+      "id": "html_section_lines_contact_signature_removed",
+      "inputHTML": "<section>The repair is scheduled.</section><section>Best,</section><section>John Boga</section><section>Property Manager</section><section>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</section><section>Emergency line after hours: 914-373-4658</section><section>www.nycbrownstone.net</section>",
+      "expected": "The repair is scheduled.\n\nBest,\n\nJohn Boga",
+      "notes": "Revert-check: PlainTextSignatureRemover.removeTrailingContactSignature / web removeTrailingContactSignature. Section blocks become distinct contact lines after extraction, beyond the DOM visible-line projection; no hard-indicator chaining."
+    },
+    {
+      "id": "html_section_lines_contact_list_kept",
+      "inputHTML": "<section>Here are the reviewer contacts:</section><section>Jane Doe</section><section>Account Manager</section><section>jane@example.com</section><section>404-555-0142</section>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nAccount Manager jane@example.com 404-555-0142",
+      "notes": "Revert-check: contact-only second-pass explicit contact-list intro veto in Swift / web. Authored contact list remains visible, including its job title."
+    },
+    {
+      "id": "html_section_lines_contact_card_then_body_kept",
+      "inputHTML": "<section>Please contact our manager:</section><section>Jane Doe</section><section>Property Manager</section><section>jane@example.com</section><section>404-555-0142</section><section>Please copy me on the reply.</section>",
+      "expected": "Please contact our manager:\n\nJane Doe\n\nProperty Manager jane@example.com 404-555-0142\n\nPlease copy me on the reply.",
+      "notes": "Revert-check: end-anchored contact-only second pass in Swift / web. Body prose after a card prevents removal."
+    },
+    {
+      "id": "html_contact_only_document_rescue_preserved",
+      "inputHTML": "<div>Jane Doe</div><div>jane@example.com</div><div>404-555-0142</div>",
+      "expected": "Jane Doe jane@example.com 404-555-0142",
+      "notes": "Revert-check: contact-only second-pass empty-result guard in Swift / web preserves a contact card rescued by quote-only DOM cleanup."
+    },
+    {
+      "id": "html_titled_contact_only_div_preserved",
+      "inputHTML": "<div>Jordan Smith</div><div>Partner</div><div>jordan@example.com</div><div>404-555-0142</div>",
+      "expected": "Jordan Smith\n\nPartner jordan@example.com 404-555-0142",
+      "notes": "Revert-check: empty-result guard of contact-only second pass in Swift / web preserves a full contact card rescued by quote-only DOM cleanup."
+    },
+    {
+      "id": "html_titled_contact_only_pre_preserved",
+      "inputHTML": "<pre>Jordan Smith<br>Partner<br>jordan@example.com<br>404-555-0142</pre>",
+      "expected": "Jordan Smith\n\nPartner jordan@example.com 404-555-0142",
+      "notes": "Revert-check: empty-result guard of contact-only second pass in Swift / web preserves a full contact card rescued by quote-only DOM cleanup. Explicit br boundaries avoid depending on text-node whitespace normalization."
+    },
+    {
+      "id": "html_section_contact_email_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>Please send the revised plan to bob@example.com.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nPlease send the revised plan to bob@example.com.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
+    },
+    {
+      "id": "html_section_contact_url_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>Please review the revised plan at https://example.com/plan.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nPlease review the revised plan at https://example.com/plan.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
+    },
+    {
+      "id": "html_section_contact_title_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>The manager will call tomorrow.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nThe manager will call tomorrow.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
+    },
+    {
+      "id": "authored_instruction_after_contact_signature_preserved",
+      "notes": "PR 230 regression: ambiguous trailing body content must survive the HTML-to-bubble pipeline.",
+      "inputHTML": "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p><p>Do not send the money.</p>",
+      "expected": "Current reply.\n\nJohn Smith\n\nPartner john@example.test 415-555-1212\n\nDo not send the money."
+    },
+    {
+      "id": "authored_registration_sentence_after_contact_signature_preserved",
+      "notes": "PR 230 regression: ambiguous trailing body content must survive the HTML-to-bubble pipeline.",
+      "inputHTML": "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p><p>Registration closes on September 15; send the application by then.</p>",
+      "expected": "Current reply.\n\nJohn Smith\n\nPartner john@example.test 415-555-1212\n\nRegistration closes on September 15; send the application by then."
+    },
+    {
+      "id": "authored_choices_after_contact_signature_preserved",
+      "notes": "PR 230 regression: ambiguous trailing body content must survive the HTML-to-bubble pipeline.",
+      "inputHTML": "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p><p>Approve payment | Sign contract | Request changes</p>",
+      "expected": "Current reply.\n\nJohn Smith\n\nPartner john@example.test 415-555-1212\n\nApprove payment | Sign contract | Request changes"
+    },
+    {
+      "id": "authored_disclaimer_paragraph_preserved",
+      "notes": "PR 230 regression: a legal heading without a confirmed signature must not truncate the message.",
+      "inputHTML": "<p>Here are my concerns.</p><p>Disclaimer: figures are provisional.</p><p>Do not approve yet.</p>",
+      "expected": "Here are my concerns.\n\nDisclaimer: figures are provisional.\n\nDo not approve yet."
+    },
+    {
+      "id": "signature_guard_html_short_reply_best_name",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>See you tomorrow.</div><div>Best,</div><div>Alex</div>",
+      "expected": "See you tomorrow.\n\nBest,\n\nAlex"
+    },
+    {
+      "id": "signature_guard_html_hours_line_in_body",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>We are open: Monday - Friday | 9am - 5pm</div><div>Please come by.</div>",
+      "expected": "We are open: Monday - Friday | 9am - 5pm\n\nPlease come by."
+    },
+    {
+      "id": "signature_guard_html_address_on_own_lines",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please send the samples here:</div><div>123 Main Street</div><div>Atlanta, GA 30309</div><div>We need them by Friday.</div>",
+      "expected": "Please send the samples here:\n\n123 Main Street\n\nAtlanta, GA 30309\n\nWe need them by Friday."
+    },
+    {
+      "id": "signature_guard_html_contact_list_intro",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please contact:</div><div>Alex Example — alex@example.com — 415-555-0101</div><div>Jordan Example — jordan@example.com — 415-555-0102</div>",
+      "expected": "Please contact:\n\nAlex Example — alex@example.com — 415-555-0101\n\nJordan Example — jordan@example.com — 415-555-0102"
+    },
+    {
+      "id": "signature_guard_html_contact_list_intro_followed_by_signoff",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please contact:</div><div>Alex Example — alex@example.com — 415-555-0101</div><div>Jordan Example — jordan@example.com — 415-555-0102</div><div>Thank you,</div><div>Casey</div>",
+      "expected": "Please contact:\n\nAlex Example — alex@example.com — 415-555-0101\n\nJordan Example — jordan@example.com — 415-555-0102\n\nThank you,\nCasey"
+    },
+    {
+      "id": "signature_guard_html_closing_sentence_after_contacts",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please contact:</div><div>Alex Example — alex@example.com — 415-555-0101</div><div>Jordan Example — jordan@example.com — 415-555-0102</div><div>Please pick one.</div>",
+      "expected": "Please contact:\n\nAlex Example — alex@example.com — 415-555-0101\n\nJordan Example — jordan@example.com — 415-555-0102\n\nPlease pick one."
+    },
+    {
+      "id": "signature_guard_html_standalone_phone",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>The gate code is on the form.</div><div>415-555-0101</div><div>Please call when you arrive.</div>",
+      "expected": "The gate code is on the form.\n\n415-555-0101\n\nPlease call when you arrive."
+    },
+    {
+      "id": "signature_guard_html_body_phone_sentence",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Can you give me a call? 415-555-0101</div><div>We should discuss the estimate.</div>",
+      "expected": "Can you give me a call? 415-555-0101\n\nWe should discuss the estimate."
+    },
+    {
+      "id": "signature_guard_html_single_document_link",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Here is the link you asked for:</div><div>https://example.com/report</div>",
+      "expected": "Here is the link you asked for:\n\nhttps://example.com/report"
+    },
+    {
+      "id": "signature_guard_html_midbody_confidentiality",
+      "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
+      "inputHTML": "<div>Please read the confidentiality notice: it changed.</div><div>The revised wording is in the document.</div>",
+      "expected": "Please read the confidentiality notice: it changed.\n\nThe revised wording is in the document."
+    },
+    {
+      "id": "html_contact_fallback_preserves_street_instruction",
+      "inputHTML": "<div>The contract is ready.<br>Best,<br>John Smith<br>Partner<br>john@example.com<br>404-555-0142<br>Market Street is closed</div>",
+      "expected": "The contract is ready.\n\nBest,\nJohn Smith\n\nPartner john@example.com 404-555-0142\n\nMarket Street is closed",
+      "notes": "PR 235 regression: a street keyword in authored prose must not become signature evidence after DOM cleanup."
+    },
+    {
+      "id": "html_contact_fallback_preserves_directory_table",
+      "inputHTML": "<p>Use these people.</p><table><tr><td>John Smith</td><td>Partner<br>john@example.test<br>415-555-1212</td></tr><tr><td>Jane Brown</td><td>Partner<br>jane@example.test<br>212-555-1212</td></tr></table>",
+      "expected": "Use these people.\n\nJohn Smith Partner john@example.test 415-555-1212\n\nJane Brown Partner jane@example.test 212-555-1212",
+      "notes": "PR 235 regression: text fallback must respect the DOM decision to retain a directory with multiple people."
+    },
+    {
+      "id": "html_contact_fallback_preserves_linked_attachment_text",
+      "inputHTML": "<p>Current reply.</p><div><a href=\"cid:damage\">John Smith</a><br>Partner<br>john@example.test<br>415-555-1212</div>",
+      "expected": "Current reply.\n\nJohn Smith\n\nPartner john@example.test 415-555-1212",
+      "notes": "PR 235 regression: retain text protected by the DOM attachment ownership guard."
+    },
+    {
+      "id": "html_contact_fallback_preserves_resource_heading",
+      "inputHTML": "<p>Please keep these handy.</p><h3>Design Reference</h3><ul><li>https://example.com/one</li><li>https://example.com/two</li></ul>",
+      "expected": "Please keep these handy.\n\nDesign Reference\n\nhttps://example.com/one\n\nhttps://example.com/two",
+      "notes": "PR 235 regression: headings and lists convey authored content that the text-only fallback cannot classify safely."
+    },
+    {
+      "id": "html_contact_fallback_preserves_section_referral",
+      "inputHTML": "<section>You can reach the contractor here:</section><section>Jane Doe</section><section>Account Manager</section><section>jane@example.com</section><section>404-555-0142</section>",
+      "expected": "You can reach the contractor here:\n\nJane Doe\n\nAccount Manager jane@example.com 404-555-0142",
+      "notes": "PR 235 regression: name, role and contact details cannot distinguish an authored referral from a signature without a closing."
+    },
+    {
+      "id": "html_contact_fallback_preserves_section_recommendation",
+      "inputHTML": "<section>Here is the plumber I recommend.</section><section>Jane Doe</section><section>Account Manager</section><section>jane@example.com</section><section>404-555-0142</section>",
+      "expected": "Here is the plumber I recommend.\n\nJane Doe\n\nAccount Manager jane@example.com 404-555-0142",
+      "notes": "PR 235 regression: referrals need not contain a contact keyword or end with a colon."
+    },
+    {
+      "id": "f12_long_signature_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature / web html.ts truncateTrailingContactSignature use the 80-slot DOM lookback, including blank separators; 38 contacts put context beyond F1 and the old DOM window.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p>jane0@example.test</p><p>jane1@example.test</p><p>jane2@example.test</p><p>jane3@example.test</p><p>jane4@example.test</p><p>jane5@example.test</p><p>jane6@example.test</p><p>jane7@example.test</p><p>jane8@example.test</p><p>jane9@example.test</p><p>jane10@example.test</p><p>jane11@example.test</p><p>jane12@example.test</p><p>jane13@example.test</p><p>jane14@example.test</p><p>jane15@example.test</p><p>jane16@example.test</p><p>jane17@example.test</p><p>jane18@example.test</p><p>jane19@example.test</p><p>jane20@example.test</p><p>jane21@example.test</p><p>jane22@example.test</p><p>jane23@example.test</p><p>jane24@example.test</p><p>jane25@example.test</p><p>jane26@example.test</p><p>jane27@example.test</p><p>jane28@example.test</p><p>jane29@example.test</p><p>jane30@example.test</p><p>jane31@example.test</p><p>jane32@example.test</p><p>jane33@example.test</p><p>jane34@example.test</p><p>jane35@example.test</p><p>jane36@example.test</p><p>jane37@example.test</p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_long_contact_list_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature / web html.ts truncateTrailingContactSignature must reach and retain the contact-list introduction outside the old window.",
+      "inputHTML": "<p>Here are the reviewer contacts:</p><p>Jane Doe</p><p>Partner</p><p>jane0@example.test</p><p>jane1@example.test</p><p>jane2@example.test</p><p>jane3@example.test</p><p>jane4@example.test</p><p>jane5@example.test</p><p>jane6@example.test</p><p>jane7@example.test</p><p>jane8@example.test</p><p>jane9@example.test</p><p>jane10@example.test</p><p>jane11@example.test</p><p>jane12@example.test</p><p>jane13@example.test</p><p>jane14@example.test</p><p>jane15@example.test</p><p>jane16@example.test</p><p>jane17@example.test</p><p>jane18@example.test</p><p>jane19@example.test</p><p>jane20@example.test</p><p>jane21@example.test</p><p>jane22@example.test</p><p>jane23@example.test</p><p>jane24@example.test</p><p>jane25@example.test</p><p>jane26@example.test</p><p>jane27@example.test</p><p>jane28@example.test</p><p>jane29@example.test</p><p>jane30@example.test</p><p>jane31@example.test</p><p>jane32@example.test</p><p>jane33@example.test</p><p>jane34@example.test</p><p>jane35@example.test</p><p>jane36@example.test</p><p>jane37@example.test</p>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nPartner jane0@example.test jane1@example.test jane2@example.test jane3@example.test jane4@example.test jane5@example.test jane6@example.test jane7@example.test jane8@example.test jane9@example.test jane10@example.test jane11@example.test jane12@example.test jane13@example.test jane14@example.test jane15@example.test jane16@example.test jane17@example.test jane18@example.test jane19@example.test jane20@example.test jane21@example.test jane22@example.test jane23@example.test jane24@example.test jane25@example.test jane26@example.test jane27@example.test jane28@example.test jane29@example.test jane30@example.test jane31@example.test jane32@example.test jane33@example.test jane34@example.test jane35@example.test jane36@example.test jane37@example.test"
+    },
+    {
+      "id": "f12_long_signature_blank_separators",
+      "notes": "Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature / web html.ts truncateTrailingContactSignature use the 80-slot DOM lookback, including blank separators; 38 contacts put context beyond F1 and the old DOM window.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p></p><p>jane0@example.test</p><p></p><p>jane1@example.test</p><p></p><p>jane2@example.test</p><p></p><p>jane3@example.test</p><p></p><p>jane4@example.test</p><p></p><p>jane5@example.test</p><p></p><p>jane6@example.test</p><p></p><p>jane7@example.test</p><p></p><p>jane8@example.test</p><p></p><p>jane9@example.test</p><p></p><p>jane10@example.test</p><p></p><p>jane11@example.test</p><p></p><p>jane12@example.test</p><p></p><p>jane13@example.test</p><p></p><p>jane14@example.test</p><p></p><p>jane15@example.test</p><p></p><p>jane16@example.test</p><p></p><p>jane17@example.test</p><p></p><p>jane18@example.test</p><p></p><p>jane19@example.test</p><p></p><p>jane20@example.test</p><p></p><p>jane21@example.test</p><p></p><p>jane22@example.test</p><p></p><p>jane23@example.test</p><p></p><p>jane24@example.test</p><p></p><p>jane25@example.test</p><p></p><p>jane26@example.test</p><p></p><p>jane27@example.test</p><p></p><p>jane28@example.test</p><p></p><p>jane29@example.test</p><p></p><p>jane30@example.test</p><p></p><p>jane31@example.test</p><p></p><p>jane32@example.test</p><p></p><p>jane33@example.test</p><p></p><p>jane34@example.test</p><p></p><p>jane35@example.test</p><p></p><p>jane36@example.test</p><p></p><p>jane37@example.test</p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_long_contact_list_blank_separators",
+      "notes": "Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature / web html.ts truncateTrailingContactSignature must reach and retain the contact-list introduction outside the old window.",
+      "inputHTML": "<p>Here are the reviewer contacts:</p><p>Jane Doe</p><p>Partner</p><p></p><p>jane0@example.test</p><p></p><p>jane1@example.test</p><p></p><p>jane2@example.test</p><p></p><p>jane3@example.test</p><p></p><p>jane4@example.test</p><p></p><p>jane5@example.test</p><p></p><p>jane6@example.test</p><p></p><p>jane7@example.test</p><p></p><p>jane8@example.test</p><p></p><p>jane9@example.test</p><p></p><p>jane10@example.test</p><p></p><p>jane11@example.test</p><p></p><p>jane12@example.test</p><p></p><p>jane13@example.test</p><p></p><p>jane14@example.test</p><p></p><p>jane15@example.test</p><p></p><p>jane16@example.test</p><p></p><p>jane17@example.test</p><p></p><p>jane18@example.test</p><p></p><p>jane19@example.test</p><p></p><p>jane20@example.test</p><p></p><p>jane21@example.test</p><p></p><p>jane22@example.test</p><p></p><p>jane23@example.test</p><p></p><p>jane24@example.test</p><p></p><p>jane25@example.test</p><p></p><p>jane26@example.test</p><p></p><p>jane27@example.test</p><p></p><p>jane28@example.test</p><p></p><p>jane29@example.test</p><p></p><p>jane30@example.test</p><p></p><p>jane31@example.test</p><p></p><p>jane32@example.test</p><p></p><p>jane33@example.test</p><p></p><p>jane34@example.test</p><p></p><p>jane35@example.test</p><p></p><p>jane36@example.test</p><p></p><p>jane37@example.test</p>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nPartner jane0@example.test jane1@example.test jane2@example.test jane3@example.test jane4@example.test jane5@example.test jane6@example.test jane7@example.test jane8@example.test jane9@example.test jane10@example.test jane11@example.test jane12@example.test jane13@example.test jane14@example.test jane15@example.test jane16@example.test jane17@example.test jane18@example.test jane19@example.test jane20@example.test jane21@example.test jane22@example.test jane23@example.test jane24@example.test jane25@example.test jane26@example.test jane27@example.test jane28@example.test jane29@example.test jane30@example.test jane31@example.test jane32@example.test jane33@example.test jane34@example.test jane35@example.test jane36@example.test jane37@example.test"
+    },
+    {
+      "id": "f12_labeled_links_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.linkedContactEvidence / web html.ts trailingSignatureLinkContact recognize labeled mailto/tel only on their own projected lines, keeping the existing sign-off/name policy.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_labeled_links_br",
+      "notes": "Revert-check: EmailDOMQuoteRemover.linkedContactEvidence / web html.ts trailingSignatureLinkContact recognize labeled mailto/tel only on their own projected lines, keeping the existing sign-off/name policy.",
+      "inputHTML": "<div>Current reply.<br>Best,<br>Jane Doe<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></div>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_labeled_links_cells",
+      "notes": "Revert-check: EmailDOMQuoteRemover.linkedContactEvidence / web html.ts trailingSignatureLinkContact recognize labeled mailto/tel only on their own projected lines, keeping the existing sign-off/name policy.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><table><tr><td>Jane Doe</td><td><a href=\"mailto:jane@example.test\">Email me</a></td><td><a href=\"tel:+14155551212\">Call the office</a></td></tr></table>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_linked_contact_list",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing-pass link evidence must preserve contact-list introductions.",
+      "inputHTML": "<p>Here are the reviewer contacts:</p><p>Jane Doe</p><p>Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_trailing_closing",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable and terminal-tail checks preserve repeated people and a short closing.",
+      "inputHTML": "<p>Current reply.</p><table><tr><td>Jane Doe</td><td><a href=\"mailto:jane@example.test\">Email me</a></td><td><a href=\"tel:+14155551212\">Call the office</a></td></tr><tr><td>John Smith</td><td><a href=\"mailto:john@example.test\">Email me</a></td><td><a href=\"tel:+14155551313\">Call the office</a></td></tr></table><p>Thanks,</p><p>Kevin</p>",
+      "expected": "Current reply.\n\nJane Doe Email me Call the office\n\nJohn Smith Email me Call the office\n\nThanks,\n\nKevin"
+    },
+    {
+      "id": "f12_linked_signature_postscript",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing contact classification must stop for authored content and must not infer contacts from HTTPS targets.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>P.S. Please copy me on the reply.</p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe\n\nEmail me\n\nCall the office\n\nP.S. Please copy me on the reply."
+    },
+    {
+      "id": "f12_linked_signature_instruction",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing contact classification must stop for authored content and must not infer contacts from HTTPS targets.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>Please <a href=\"mailto:jane@example.test\">Email me</a> if the estimate changes.</p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe\n\nEmail me\n\nCall the office\n\nPlease Email me if the estimate changes."
+    },
+    {
+      "id": "f12_linked_signature_document",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing contact classification must stop for authored content and must not infer contacts from HTTPS targets.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p><a href=\"https://example.test/document\">Read the plan</a></p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe\n\nEmail me\n\nCall the office\n\nRead the plan"
+    },
+    {
+      "id": "f12_standalone_labeled_link",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing pass still requires two contact lines and three removable lines.",
+      "inputHTML": "<p>Current reply.</p><p><a href=\"mailto:jane@example.test\">Email me</a></p>",
+      "expected": "Current reply.\n\nEmail me"
+    },
+    {
+      "id": "f12_linked_directory_single_cell_rows",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must find repeated people in BR sublines within a single cell, alongside link-only contacts.",
+      "inputHTML": "<p>Current reply.</p><table><tr><td>Jane Doe<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td></tr><tr><td>John Smith<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td></tr></table>",
+      "expected": "Current reply.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_single_cell_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain repeated people whose names and labeled contacts occupy separate paragraph blocks in each cell.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td><p>Jane Doe</p><p>Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p></td></tr><tr><td><p>John Smith</p><p>Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_single_cell_divs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain repeated people whose names and labeled contacts occupy separate div blocks in each cell.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td><div>Jane Doe</div><div>Partner</div><div><a href=\"mailto:jane@example.test\">Email me</a></div><div><a href=\"tel:+14155551212\">Call the office</a></div></td></tr><tr><td><div>John Smith</div><div>Partner</div><div><a href=\"mailto:john@example.test\">Email me</a></div><div><a href=\"tel:+14155551313\">Call the office</a></div></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_side_by_side_cells",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain complete person records arranged side by side in one table row.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td>Jane Doe<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td><td>John Smith<br>Partner<br><a href=\"mailto:john@example.test\">Email me</a><br><a href=\"tel:+14155551313\">Call the office</a></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office John Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_paragraph_records",
+      "notes": "Revert-check: trailing signature removal must retain multiple complete name/contact records even when the directory uses ordinary paragraphs without a table.",
+      "inputHTML": "<p>The team is listed below.</p><p>Jane Doe</p><p>Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>John Smith</p><p>Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_combined_name_title_records",
+      "notes": "Revert-check: repeated contact records must remain visible when each person's name and role share a paragraph, so the identity line also matches signature support text.",
+      "inputHTML": "<p>The team is listed below.</p><p>Jane Doe, Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>John Smith, Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p>",
+      "expected": "The team is listed below.\n\nJane Doe, Partner\n\nEmail me\n\nCall the office\n\nJohn Smith, Partner\n\nEmail me\n\nCall the office"
     }
   ],
   "rawSourceHTMLRecoveryCases": [
@@ -216,7 +906,8 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "FW: Thau - post-Judgment matter",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_subject_stays_bubble",
@@ -228,7 +919,8 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "Re: [EXTERNAL]Re: Lending Follow up",
-      "expectedShowHTMLPreview": false
+      "expectedShowHTMLPreview": false,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_from_me_stays_bubble",
@@ -240,7 +932,8 @@
       "isFromMe": true,
       "isOneToOneConversation": true,
       "subject": "Re: Anything",
-      "expectedShowHTMLPreview": false
+      "expectedShowHTMLPreview": false,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "group_newsletter_uses_preview",
@@ -252,7 +945,8 @@
       "isFromMe": false,
       "isOneToOneConversation": false,
       "subject": "Weekly Update",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "newsletter_without_html_metadata_uses_preview",
@@ -265,7 +959,8 @@
       "isOneToOneConversation": true,
       "subject": "Tickets Now On Sale for the Margaret Mead Film Festival",
       "senderEmail": "publicprograms@email.amnh.org",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "group_reply_subject_personal_stays_bubble",
@@ -277,7 +972,8 @@
       "isFromMe": false,
       "isOneToOneConversation": false,
       "subject": "Re: Next steps",
-      "expectedShowHTMLPreview": false
+      "expectedShowHTMLPreview": false,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_rich_transactional_uses_preview",
@@ -289,7 +985,8 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "New message: Anything wrong with the phone?",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_trusted_ebay_sender_uses_preview",
@@ -302,7 +999,8 @@
       "isOneToOneConversation": true,
       "subject": "Re: ryfa-7369 sent a message about Item #1234",
       "senderEmail": "ryfa73_izw3749pf@members.ebay.com",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_trusted_amazon_subdomain_uses_preview",
@@ -315,7 +1013,8 @@
       "isOneToOneConversation": true,
       "subject": "Re: New message about your listing",
       "senderEmail": "xyz123@marketplace.amazon.com",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_trusted_bill_sender_uses_preview",
@@ -328,7 +1027,8 @@
       "isOneToOneConversation": true,
       "subject": "Re: Bill approval required",
       "senderEmail": "account-services@inform.bill.com",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_reply_trusted_bill_sender_without_html_metadata_uses_preview",
@@ -341,7 +1041,8 @@
       "isOneToOneConversation": true,
       "subject": "Re: Bill approval required",
       "senderEmail": "BILL <account-services@inform.bill.com>",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
     },
     {
       "id": "one_to_one_rich_fallback_without_html_metadata_uses_preview",
@@ -353,7 +1054,78 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "Your approval is needed",
-      "expectedShowHTMLPreview": true
+      "expectedShowHTMLPreview": true,
+      "isLikelyCalendarInvite": false
+    },
+    {
+      "id": "calendar_invite_preview",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": false,
+      "subject": "Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": true,
+      "expectedShowHTMLPreview": true,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
+    },
+    {
+      "id": "calendar_flag_false",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": false,
+      "subject": "Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": false,
+      "expectedShowHTMLPreview": false,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
+    },
+    {
+      "id": "calendar_invite_requires_source",
+      "hasHTMLSource": false,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": false,
+      "subject": "Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": true,
+      "expectedShowHTMLPreview": false,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
+    },
+    {
+      "id": "calendar_reply_stays_bubble",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Re: Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": true,
+      "expectedShowHTMLPreview": false,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
+    },
+    {
+      "id": "outgoing_calendar_stays_bubble",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": true,
+      "isOneToOneConversation": true,
+      "subject": "Team offsite",
+      "senderEmail": "person@example.com",
+      "isLikelyCalendarInvite": true,
+      "expectedShowHTMLPreview": false,
+      "notes": "Revert-check: calendar invite input must reach the display policy without bypassing earlier source/reply/outgoing gates."
     }
   ],
   "conversationListSnippetCases": [
@@ -364,13 +1136,33 @@
       "latestMessageSnippet": "Latest message snippet",
       "latestMessageCleanedSnippet": "Latest cleaned snippet",
       "expected": "Rollup snippet wins"
+    },
+    {
+      "id": "rollup_without_message",
+      "conversationSnippet": "Stored preview",
+      "expected": "Stored preview"
+    },
+    {
+      "id": "empty_rollup_does_not_scan_messages",
+      "conversationSnippet": "",
+      "latestMessageSnippet": "Raw fallback",
+      "latestMessageCleanedSnippet": "Cleaned fallback",
+      "expected": ""
+    },
+    {
+      "id": "rollup_preserves_paragraphs",
+      "conversationSnippet": "First paragraph.\n\nSecond paragraph.",
+      "latestMessageSnippet": "Flattened fallback",
+      "expected": "First paragraph.\n\nSecond paragraph."
     }
   ],
   "newsletterDetectionCases": [
     {
       "id": "support_reply_not_newsletter",
       "notes": "Typical support reply should not classify as newsletter.",
-      "labelIds": ["INBOX"],
+      "labelIds": [
+        "INBOX"
+      ],
       "from": "Support Team <support@company.com>",
       "subject": "Re: Your ticket #12345",
       "toCount": 1,
@@ -380,7 +1172,9 @@
     {
       "id": "promotions_plus_support_still_not_newsletter",
       "notes": "CATEGORY_PROMOTIONS + support@ should stay below threshold.",
-      "labelIds": ["CATEGORY_PROMOTIONS"],
+      "labelIds": [
+        "CATEGORY_PROMOTIONS"
+      ],
       "from": "support@company.com",
       "expectedIsNewsletter": false,
       "expectedScore": 45
@@ -388,7 +1182,9 @@
     {
       "id": "strong_marketing_newsletter",
       "notes": "Strong corroborating newsletter signals should classify as newsletter.",
-      "labelIds": ["CATEGORY_PROMOTIONS"],
+      "labelIds": [
+        "CATEGORY_PROMOTIONS"
+      ],
       "from": "newsletter@store.com",
       "listUnsubscribe": "<mailto:unsub@store.com>",
       "subject": "Limited time 50% off sale",
@@ -398,13 +1194,415 @@
     {
       "id": "one_click_unsubscribe_membership_email_is_newsletter",
       "notes": "Membership/list mail with both List-Unsubscribe and one-click unsubscribe should classify as newsletter even without Gmail category labels.",
-      "labelIds": ["INBOX"],
+      "labelIds": [
+        "INBOX"
+      ],
       "from": "American Museum of Natural History <RSVP@email.amnh.org>",
       "subject": "Enjoy a Family Scientist Experience All About Earth!",
       "listUnsubscribe": "<https://pages.wordfly.com/americanmuseumofnaturalhistory/pages/Unsubscribe/?sid=example>",
       "listUnsubscribePost": "List-Unsubscribe=One-Click",
       "expectedIsNewsletter": true,
       "expectedScore": 55
+    }
+  ],
+  "conversationIdentityCases": [
+    {
+      "id": "single_participant",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "sorted_group_excludes_self_and_bcc",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Bob <bob@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com, Alice <alice@example.com>"
+        },
+        {
+          "name": "Bcc",
+          "value": "secret@example.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com",
+          "bob@example.com"
+        ],
+        "participantHash": "ec4db5bd2c6b0d995f2b4987e203c26c20ca4d6fd34e88cd49214dd2d8cd3394",
+        "type": "group",
+        "listId": null
+      }
+    },
+    {
+      "id": "gmail_dot_plus_domain",
+      "headers": [
+        {
+          "name": "From",
+          "value": "John <J.o.h.n+news@GoogleMail.com>"
+        }
+      ],
+      "myAliases": [],
+      "expected": {
+        "participants": [
+          "john@gmail.com"
+        ],
+        "participantHash": "a6549f01c8978be46c9196dc8b9bd4ddd293ceca91f2decedcf41e6128b554cd",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "self_only_sorted_alias_fallback",
+      "headers": [
+        {
+          "name": "From",
+          "value": "me@work.com"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@work.com",
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "me@gmail.com"
+        ],
+        "participantHash": "055af9c691b347492db7cb1f4b0840ea753d1c1ab7a20a41a54b2aadfe4cb6ad",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "empty_headers_unknown_fallback",
+      "headers": [],
+      "myAliases": [],
+      "expected": {
+        "participants": [
+          "unknown@email.com"
+        ],
+        "participantHash": "7b6bc9d36f60e002fa5780007ad24370917020b475f2f876feea9f82956d78e3",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "unicode_combining_scalar_sort",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Student <étudiant@x.fr>"
+        },
+        {
+          "name": "To",
+          "value": "Zed <z@x.com>"
+        }
+      ],
+      "myAliases": [],
+      "expected": {
+        "participants": [
+          "z@x.com",
+          "étudiant@x.fr"
+        ],
+        "participantHash": "11a44aa115d87379898b788a2de450d3984f23890b615bb2f26bda3cb6f8e7eb",
+        "type": "group",
+        "listId": null
+      }
+    },
+    {
+      "id": "unicode_astral_scalar_sort",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Astral <😀@x.com>"
+        },
+        {
+          "name": "To",
+          "value": "Replacement <�@x.com>"
+        }
+      ],
+      "myAliases": [],
+      "expected": {
+        "participants": [
+          "�@x.com",
+          "😀@x.com"
+        ],
+        "participantHash": "92cf32b37e62c8e21ba00dc50ca496eed48552ee133a832b11a5dbd9013bd01d",
+        "type": "group",
+        "listId": null
+      }
+    },
+    {
+      "id": "display_name_unbalanced_angle",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Tom <3 Jerry <tom@x.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "tom@x.com"
+        ],
+        "participantHash": "cca4b14d3ceafabab6ca87f5ba62a46efeccc4e684145107a09d24a43474fe8d",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "Revert-check: EmailNormalizer.extractEmail / web extractEmail must exclude nested angle brackets from the captured address."
+    },
+    {
+      "id": "hide_my_email_to",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "Hide My Email <relay@icloud.com>"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "Hide My Email placeholders in To are excluded just like From."
+    },
+    {
+      "id": "hide_my_email_cc",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        },
+        {
+          "name": "Cc",
+          "value": "Hide My Email <relay@icloud.com>"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "Hide My Email placeholders in Cc are excluded just like From."
+    },
+    {
+      "id": "hide_my_email_from",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Hide My Email <relay@icloud.com>"
+        },
+        {
+          "name": "To",
+          "value": "Alice <alice@example.com>"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      }
+    },
+    {
+      "id": "relay_address_with_real_name",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <relay@icloud.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "relay@icloud.com"
+        ],
+        "participantHash": "936a6047a491374d0d975d671c5fbe947af064e7afb78393de7bbc72ec52c966",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "An iCloud address with a real display name remains a participant."
+    },
+    {
+      "id": "all_aliases_excluded_and_duplicate_headers",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <ALICE@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        },
+        {
+          "name": "To",
+          "value": "me@work.com"
+        },
+        {
+          "name": "Cc",
+          "value": "alice@example.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com",
+        "me@work.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com"
+        ],
+        "participantHash": "40a52bc29ccb934b1822f2249662cce17c8dce77dd4c16036141d1ee1a15a5e5",
+        "type": "oneToOne",
+        "listId": null
+      }
+    }
+  ],
+  "cleanedSnippetCases": [
+    {
+      "id": "html_precedes_plain_and_raw",
+      "html": "<div>Visible HTML.</div>",
+      "plainText": "Plain fallback.",
+      "snippet": "Raw fallback.",
+      "isFromMe": false,
+      "expected": "Visible HTML."
+    },
+    {
+      "id": "html_removes_quoted_history",
+      "html": "<div>New content here.</div><div class=\"gmail_quote\"><blockquote>Old quoted</blockquote></div>",
+      "plainText": "Plain fallback.",
+      "snippet": null,
+      "isFromMe": false,
+      "expected": "New content here."
+    },
+    {
+      "id": "hidden_preheader_and_head_metadata",
+      "html": "<html><head><title>Metadata Title</title></head><body><div style=\"display:none\">Preheader teaser</div><div>Visible body.</div></body></html>",
+      "plainText": null,
+      "snippet": null,
+      "isFromMe": false,
+      "expected": "Visible body."
+    },
+    {
+      "id": "plain_precedes_raw",
+      "html": null,
+      "plainText": "Plain body text.",
+      "snippet": "Raw fallback.",
+      "isFromMe": false,
+      "expected": "Plain body text."
+    },
+    {
+      "id": "empty_html_falls_back_to_plain",
+      "html": "",
+      "plainText": "Plain body text.",
+      "snippet": "Raw fallback.",
+      "isFromMe": false,
+      "expected": "Plain body text."
+    },
+    {
+      "id": "raw_snippet_fallback",
+      "html": null,
+      "plainText": null,
+      "snippet": "Gmail snippet.",
+      "isFromMe": false,
+      "expected": "Gmail snippet."
+    },
+    {
+      "id": "empty_plain_falls_back_to_raw",
+      "html": null,
+      "plainText": "",
+      "snippet": "Gmail snippet.",
+      "isFromMe": false,
+      "expected": "Gmail snippet."
+    },
+    {
+      "id": "html_entities_decode",
+      "html": "<p>Fish &amp; chips.</p>",
+      "plainText": null,
+      "snippet": null,
+      "isFromMe": false,
+      "expected": "Fish & chips."
+    },
+    {
+      "id": "outgoing_plain_body",
+      "html": null,
+      "plainText": "I sent the documents.",
+      "snippet": "Raw fallback.",
+      "isFromMe": true,
+      "expected": "I sent the documents."
+    },
+    {
+      "id": "missing_content",
+      "html": null,
+      "plainText": null,
+      "snippet": null,
+      "isFromMe": false,
+      "expected": null
     }
   ]
 }

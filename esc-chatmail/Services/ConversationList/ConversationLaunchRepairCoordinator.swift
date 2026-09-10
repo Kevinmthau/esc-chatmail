@@ -30,6 +30,10 @@ final class ConversationLaunchRepairCoordinator {
     private let conversationManager: ConversationManager
     private let syncWaiter: any ForegroundSyncPerforming
     private let notificationCenter: NotificationCenter
+    private let conversationMutationSerializer: ConversationRollupMutationSerializer
+    private let accountWorkCoordinator: SyncRunCoordinator
+    private let chatPreviewRepair: ChatPreviewRepair
+    private var isChatPreviewRepairRunning = false
     private let taskManager = ViewModelTaskManager()
     private var cancellables = Set<AnyCancellable>()
 
@@ -54,12 +58,18 @@ final class ConversationLaunchRepairCoordinator {
         storage: StorageDependencies,
         conversationManager: ConversationManager,
         syncWaiter: any ForegroundSyncPerforming,
-        notificationCenter: NotificationCenter = .default
+        notificationCenter: NotificationCenter = .default,
+        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        accountWorkCoordinator: SyncRunCoordinator = .shared,
+        htmlContentHandler: HTMLContentHandler = .shared
     ) {
         self.storage = storage
         self.conversationManager = conversationManager
         self.syncWaiter = syncWaiter
         self.notificationCenter = notificationCenter
+        self.conversationMutationSerializer = conversationMutationSerializer
+        self.accountWorkCoordinator = accountWorkCoordinator
+        self.chatPreviewRepair = ChatPreviewRepair(htmlContentHandler: htmlContentHandler)
         bindSyncCompletionRepairRearm()
     }
 
@@ -69,6 +79,7 @@ final class ConversationLaunchRepairCoordinator {
         refreshConversationNames()
         repairListConversationTitles()
         repairMissingConversationPreviews()
+        repairPersistedChatPreviews()
     }
 
     /// Cancels any in-flight pass. An incomplete repair clears its running
@@ -91,8 +102,86 @@ final class ConversationLaunchRepairCoordinator {
                 guard let self else { return }
                 self.hasObservedSyncCompletionThisLaunch = true
                 self.repairMissingConversationPreviews()
+                self.repairPersistedChatPreviews()
             }
             .store(in: &cancellables)
+    }
+
+    static let chatPreviewRepairMigrationKey = "chatPreviewRepair." + CacheVersioning.chatPreviewDerivationVersion
+    static let chatPreviewRepairCheckpointKey = chatPreviewRepairMigrationKey + ".checkpoint"
+
+    /// Checkpoint after each saved batch so cancellation or process exit can
+    /// resume without re-reading every earlier HTML file. No model migration.
+    func repairPersistedChatPreviews() {
+        guard !isChatPreviewRepairRunning,
+              !storage.migrationFlags.bool(forKey: Self.chatPreviewRepairMigrationKey) else { return }
+        isChatPreviewRepairRunning = true
+        taskManager.run("repairPersistedChatPreviews", priority: .background) { [weak self] in
+            guard let self else { return }
+            defer { isChatPreviewRepairRunning = false }
+            guard let request = await accountWorkCoordinator.makeAccountWorkRequest() else { return }
+            var checkpoint = ChatPreviewRepair.Checkpoint.decode(
+                storage.migrationFlags.string(forKey: Self.chatPreviewRepairCheckpointKey)
+            )
+            while !Task.isCancelled {
+                // Never wait for sync while holding a lease: account teardown
+                // waits for leases to drain before replacing the store.
+                await syncWaiter.waitForCurrentSyncToComplete()
+                guard !Task.isCancelled,
+                      let lease = await accountWorkCoordinator.acquireAccountWorkLease(kind: .maintenance, for: request) else { return }
+                let batchCheckpoint = checkpoint
+                let batch = await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
+                    await self.prepareAndSaveChatPreviewBatch(lease: lease, checkpoint: batchCheckpoint)
+                }
+                if let batch {
+                    checkpoint.afterMessageID = batch.lastMessageID
+                    checkpoint.firstDeferredMessageID = checkpoint.firstDeferredMessageID ?? batch.firstDeferredMessageID
+                    let isComplete = batch.didDrain && checkpoint.firstDeferredMessageID == nil
+                    if batch.didDrain, let deferred = checkpoint.firstDeferredMessageID {
+                        checkpoint = ChatPreviewRepair.Checkpoint(resumeAtMessageID: deferred)
+                    }
+                    storage.migrationFlags.setString(checkpoint.encoded, forKey: Self.chatPreviewRepairCheckpointKey)
+                    if isComplete {
+                        storage.migrationFlags.set(true, forKey: Self.chatPreviewRepairMigrationKey)
+                        storage.migrationFlags.setString(nil, forKey: Self.chatPreviewRepairCheckpointKey)
+                    }
+                }
+                await accountWorkCoordinator.endRun(lease)
+                guard let batch, !batch.didDrain else { return }
+                await Task.yield()
+            }
+        }
+    }
+
+    private func prepareAndSaveChatPreviewBatch(
+        lease: SyncRun, checkpoint: ChatPreviewRepair.Checkpoint
+    ) async -> ChatPreviewRepair.Batch? {
+        guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease) else { return nil }
+        let context = storage.makeBackgroundContext()
+        context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
+        do {
+            let batch = try await chatPreviewRepair.prepareBatch(
+                in: context,
+                after: checkpoint.afterMessageID,
+                startingAt: checkpoint.resumeAtMessageID
+            )
+            guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease),
+                  storage.saveIfNeeded(context) else {
+                await context.perform { context.rollback() }
+                return nil
+            }
+            if !batch.changedMessageIDs.isEmpty,
+               let accountContext = CacheCoordinator.shared.captureInvalidationAccountContext() {
+                var plan = CacheCoordinator.CacheInvalidationPlan()
+                plan.messageIdsToInvalidate = batch.changedMessageIDs
+                CacheCoordinator.shared.applyInvalidationPlan(plan, accountContext: accountContext)
+            }
+            return batch
+        } catch {
+            await context.perform { context.rollback() }
+            Log.error("Chat preview repair will retry after an incomplete batch", category: .conversation, error: error)
+            return nil
+        }
     }
 
     func refreshConversationNames() {
@@ -203,15 +292,13 @@ final class ConversationLaunchRepairCoordinator {
             // sync-completion re-arm re-sweeps anything still broken.
             context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
 
-            let archivedCount = await conversationManager.archiveMessagelessConversations(in: context)
+            guard let archivedCount = await conversationMutationSerializer
+                .performCleanupSensitiveMutation(operation: { [self] in
+                    await self.archiveMessagelessConversationsAndSave(in: context)
+                }) else {
+                return
+            }
             if archivedCount > 0 {
-                guard storage.saveIfNeeded(context) else {
-                    Log.error(
-                        "Failed to save \(archivedCount) archived message-less conversations; skipping preview repair",
-                        category: .conversation
-                    )
-                    return
-                }
                 Log.info("Archived \(archivedCount) stranded message-less conversations", category: .conversation)
             }
 
@@ -247,6 +334,43 @@ final class ConversationLaunchRepairCoordinator {
                 await Task.yield()
             }
         }
+    }
+
+    /// The stranded-shell sweep is destructive conversation maintenance. Read
+    /// pending anchors and persist the archive while holding the same gate as
+    /// optimistic graph creation, failing closed if either operation fails.
+    private func archiveMessagelessConversationsAndSave(
+        in context: NSManagedObjectContext
+    ) async -> Int? {
+        let pendingConversationIDs: Set<UUID>? = await context.perform {
+            do {
+                return Set(
+                    try context.fetch(OutboundSendMutationRecord.fetchRequest())
+                        .compactMap(\.conversationId)
+                )
+            } catch {
+                Log.error(
+                    "Failed to fetch pending sends before stranded-shell cleanup",
+                    category: .conversation,
+                    error: error
+                )
+                return nil
+            }
+        }
+        guard let pendingConversationIDs else { return nil }
+
+        let archivedCount = await conversationManager.archiveMessagelessConversations(
+            in: context,
+            excludingConversationIDs: pendingConversationIDs
+        )
+        guard archivedCount == 0 || storage.saveIfNeeded(context) else {
+            Log.error(
+                "Failed to save \(archivedCount) archived message-less conversations; skipping preview repair",
+                category: .conversation
+            )
+            return nil
+        }
+        return archivedCount
     }
 
     /// Whether any conversations exist in the persistent store. Gates the

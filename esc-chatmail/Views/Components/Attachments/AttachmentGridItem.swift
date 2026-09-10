@@ -5,6 +5,8 @@ struct AttachmentGridItem: View {
     @ObservedObject var downloader: AttachmentDownloader
     let showOverlay: Bool
     let overlayCount: Int
+    var imagePresentation: InlineImagePresentationPolicy = .standard
+    @Environment(\.displayScale) private var displayScale
     let onTap: () -> Void
     @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
@@ -18,11 +20,24 @@ struct AttachmentGridItem: View {
             GeometryReader { geometry in
                 ZStack {
                     if let image = thumbnailLoader.image {
-                        Image(uiImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: geometry.size.width, height: geometry.size.height)
-                            .clipped()
+                        if imagePresentation == .compact {
+                            let size = InlineImagePresentationPolicy.fittedSize(
+                                pixelWidth: CGFloat(attachment.width), pixelHeight: CGFloat(attachment.height),
+                                maxWidth: max(0, geometry.size.width - 16), displayScale: displayScale
+                            )
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: size.width, height: min(size.height, max(0, geometry.size.height - 16)))
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .background(MessageBubbleStyle.standard.recipientBubbleColor())
+                        } else {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .clipped()
+                        }
                     } else {
                         Rectangle()
                             .fill(Color.gray.opacity(0.1))
@@ -63,7 +78,10 @@ struct AttachmentGridItem: View {
         .onAppear {
             loadThumbnail()
             // Download if queued, failed, or file is missing from disk
-            if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
+            let waitsForRetry = InlineImagePresentationPolicy.requiresExplicitRetry(
+                attachment: attachment, isFromMe: attachment.message?.isFromMe ?? false
+            )
+            if attachment.state == .queued || (attachment.state == .failed && !waitsForRetry) || attachment.needsRedownload {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }

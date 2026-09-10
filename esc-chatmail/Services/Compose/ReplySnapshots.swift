@@ -1,41 +1,73 @@
 import Foundation
 import CoreData
 
+struct ReplyParticipantEvidence: Sendable {
+    let emails: [String]
+    let hasAddressableRecipientRow: Bool
+    let isComplete: Bool
+
+    func confirmsSelfOnly(in userAddresses: Set<String>) -> Bool {
+        let normalizedEmails = Set(
+            emails.map(EmailNormalizer.normalize).filter { !$0.isEmpty }
+        )
+        return hasAddressableRecipientRow &&
+            isComplete &&
+            !normalizedEmails.isEmpty &&
+            normalizedEmails.isSubset(of: userAddresses)
+    }
+}
+
 struct ReplyConversationSnapshot: Sendable {
     let participantEmails: [String]
     let isListConversation: Bool
     let latestThreadId: String?
     let deliveredToAddress: String?
     let replyFromAddress: String?
+    let latestThreadParticipantEvidence: ReplyParticipantEvidence?
 
     init(
         participantEmails: [String],
         isListConversation: Bool = false,
         latestThreadId: String?,
         deliveredToAddress: String? = nil,
-        replyFromAddress: String? = nil
+        replyFromAddress: String? = nil,
+        latestThreadParticipantEvidence: ReplyParticipantEvidence? = nil
     ) {
         self.participantEmails = participantEmails
         self.isListConversation = isListConversation
         self.latestThreadId = latestThreadId
         self.deliveredToAddress = deliveredToAddress
         self.replyFromAddress = replyFromAddress
+        self.latestThreadParticipantEvidence = latestThreadParticipantEvidence
     }
 
     @MainActor
-    init(conversation: Conversation, sendAsAliases: [SendAsAlias] = []) {
+    init(
+        conversation: Conversation,
+        replyingTo: ReplyTargetSnapshot? = nil,
+        sendAsAliases: [SendAsAlias] = []
+    ) {
         let isListConversation = conversation.conversationType == .list
         let latestListInboundMessage = isListConversation
             ? Self.latestInboundListMessage(in: conversation)
             : nil
-        let nonListMessages = isListConversation
+        let latestNonListReplyAddressHint = !isListConversation && replyingTo != nil
+            ? Self.latestInboundReplyAddressHint(
+                in: conversation,
+                sendAsAliases: sendAsAliases
+            )
+            : nil
+        let nonListMessages = isListConversation || replyingTo != nil
             ? []
             : Array(conversation.messages ?? []).sorted(by: Self.messageSort)
+        let latestNonListReplyAnchor = Self.latestNonListReplyAnchor(in: nonListMessages)
         let latestReplyAddressHint: ReplyAddressHint?
         if isListConversation {
             latestReplyAddressHint = latestListInboundMessage.flatMap {
                 ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases)
             }
+        } else if replyingTo != nil {
+            latestReplyAddressHint = latestNonListReplyAddressHint
         } else {
             latestReplyAddressHint = nonListMessages
                 .filter { !$0.isFromMe }
@@ -53,14 +85,119 @@ struct ReplyConversationSnapshot: Sendable {
             } ?? []
         } else {
             self.participantEmails = Array(conversation.participants ?? [])
-                .compactMap { $0.person?.email }
+                .compactMap { participant in
+                    guard let person = participant.person,
+                          !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
+                        return nil
+                    }
+                    return person.email
+                }
         }
         self.isListConversation = isListConversation
-        self.latestThreadId = (isListConversation
-            ? latestListInboundMessage
-            : nonListMessages.first)?.gmThreadId
+        self.latestThreadId = replyingTo?.threadId ?? (isListConversation
+            ? latestListInboundMessage?.gmThreadId
+            : latestNonListReplyAnchor?.threadId)
         self.deliveredToAddress = latestReplyAddressHint?.deliveredToAddress
         self.replyFromAddress = latestReplyAddressHint?.replyFromAddress
+        self.latestThreadParticipantEvidence = latestNonListReplyAnchor?.participantEvidence
+    }
+
+    private struct NonListReplyAnchor {
+        let threadId: String?
+        let participantEvidence: ReplyParticipantEvidence
+    }
+
+    @MainActor
+    private static func latestNonListReplyAnchor(in messages: [Message]) -> NonListReplyAnchor? {
+        for message in messages {
+            let threadId = message.gmThreadId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if threadId.isEmpty {
+                // Keep a new compose/forward boundary until its row receives the
+                // committed thread, even if its delivery state already reads sent.
+                if OutboundSendDeliveryState.localOptimisticMessageID(for: message) != nil {
+                    return NonListReplyAnchor(
+                        threadId: nil,
+                        participantEvidence: ReplyParticipantSnapshot.evidence(from: message)
+                    )
+                }
+                continue
+            }
+            if OutboundSendDeliveryState.resolve(for: message) == .none {
+                return NonListReplyAnchor(
+                    threadId: threadId,
+                    participantEvidence: ReplyParticipantSnapshot.evidence(from: message)
+                )
+            }
+        }
+        return nil
+    }
+
+    @MainActor
+    private static func latestInboundReplyAddressHint(
+        in conversation: Conversation,
+        sendAsAliases: [SendAsAlias]
+    ) -> ReplyAddressHint? {
+        guard let context = conversation.managedObjectContext else {
+            return Array(conversation.messages ?? [])
+                .sorted(by: messageSort)
+                .filter { !$0.isFromMe }
+                .lazy
+                .compactMap { ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases) }
+                .first
+        }
+
+        let request = Message.fetchRequest()
+        let conversationPredicate = NSPredicate(
+            format: "conversation == %@ AND isFromMe == NO",
+            conversation
+        )
+        request.predicate = conversationPredicate
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
+        let pageSize = 32
+        request.fetchLimit = pageSize
+        request.fetchBatchSize = pageSize
+        request.includesPendingChanges = true
+        request.relationshipKeyPathsForPrefetching = [
+            "participants",
+            "participants.person"
+        ]
+
+        var cursor: (date: Date, id: String)?
+        while true {
+            if let cursor {
+                request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    conversationPredicate,
+                    NSCompoundPredicate(orPredicateWithSubpredicates: [
+                        NSPredicate(
+                            format: "internalDate < %@",
+                            cursor.date as NSDate
+                        ),
+                        NSCompoundPredicate(andPredicateWithSubpredicates: [
+                            NSPredicate(
+                                format: "internalDate == %@",
+                                cursor.date as NSDate
+                            ),
+                            NSPredicate(format: "id < %@", cursor.id)
+                        ])
+                    ])
+                ])
+            }
+            guard let messages = try? context.fetch(request), !messages.isEmpty else {
+                return nil
+            }
+            if let hint = messages.lazy.compactMap({
+                ReplyAddressHint.from(message: $0, sendAsAliases: sendAsAliases)
+            }).first {
+                return hint
+            }
+            guard messages.count == pageSize, let lastMessage = messages.last else {
+                return nil
+            }
+            cursor = (lastMessage.internalDate, lastMessage.id)
+        }
     }
 
     private static func latestInboundListMessage(
@@ -114,6 +251,7 @@ struct ReplyTargetSnapshot: Sendable {
     let deliveredToAddress: String?
     let replyFromAddress: String?
     let originalMessage: QuotedMessage
+    let participantEvidence: ReplyParticipantEvidence?
 
     init(
         participantEmails: [String],
@@ -123,7 +261,8 @@ struct ReplyTargetSnapshot: Sendable {
         references: [String],
         deliveredToAddress: String?,
         replyFromAddress: String?,
-        originalMessage: QuotedMessage
+        originalMessage: QuotedMessage,
+        participantEvidence: ReplyParticipantEvidence? = nil
     ) {
         self.participantEmails = participantEmails
         self.subject = subject
@@ -133,10 +272,16 @@ struct ReplyTargetSnapshot: Sendable {
         self.deliveredToAddress = deliveredToAddress
         self.replyFromAddress = replyFromAddress
         self.originalMessage = originalMessage
+        self.participantEvidence = participantEvidence
     }
 
     @MainActor
-    init(message: Message, sendAsAliases: [SendAsAlias] = [], originalHTML: String? = nil) {
+    init(
+        message: Message,
+        sendAsAliases: [SendAsAlias] = [],
+        originalHTML: String? = nil,
+        deferredOriginalHTML: DeferredReplyQuotedHTML? = nil
+    ) {
         let replyAddressHint = ReplyAddressHint.from(message: message, sendAsAliases: sendAsAliases)
         self.participantEmails = ReplyParticipantSnapshot.recipientEmails(
             from: message,
@@ -152,12 +297,14 @@ struct ReplyTargetSnapshot: Sendable {
             ?? replyAddressHint?.deliveredToAddress
         self.replyFromAddress = message.replyFromAddress.replyAddressValue
             ?? replyAddressHint?.replyFromAddress
+        self.participantEvidence = ReplyParticipantSnapshot.evidence(from: message)
         self.originalMessage = QuotedMessage(
             senderName: message.senderNameValue,
             senderEmail: message.senderEmailValue ?? "",
             date: message.internalDate,
             body: message.bodyTextValue,
-            originalHTML: originalHTML
+            originalHTML: originalHTML,
+            deferredOriginalHTML: deferredOriginalHTML
         )
     }
 
@@ -176,19 +323,79 @@ struct ReplyTargetSnapshot: Sendable {
                 date: originalMessage.date,
                 body: originalMessage.body,
                 originalHTML: originalHTML
-            )
+            ),
+            participantEvidence: participantEvidence
         )
     }
 }
 
 private enum ReplyParticipantSnapshot {
     @MainActor
+    static func evidence(from message: Message) -> ReplyParticipantEvidence {
+        let participants = Array(message.participants ?? []).filter {
+            $0.participantKind != .bcc
+        }
+        var seen = Set<String>()
+        var emails: [String] = []
+        var hasAddressableRecipientRow = false
+        var hasSenderEvidence = false
+        var isComplete = !participants.isEmpty
+
+        for participant in participants {
+            guard let person = participant.person,
+                  !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
+                isComplete = false
+                continue
+            }
+            let normalized = EmailNormalizer.normalize(person.email)
+            guard !normalized.isEmpty else {
+                isComplete = false
+                continue
+            }
+            if participant.participantKind == .from {
+                hasSenderEvidence = true
+            } else {
+                hasAddressableRecipientRow = true
+            }
+            if seen.insert(normalized).inserted {
+                emails.append(person.email)
+            }
+        }
+
+        if let senderEmail = message.senderEmailValue {
+            let normalized = EmailNormalizer.normalize(senderEmail)
+            if normalized.isEmpty || EmailNormalizer.isHideMyEmailDisplayName(message.senderNameValue) {
+                isComplete = false
+            } else {
+                hasSenderEvidence = true
+                if seen.insert(normalized).inserted {
+                    emails.append(senderEmail)
+                }
+            }
+        }
+
+        return ReplyParticipantEvidence(
+            emails: emails,
+            hasAddressableRecipientRow: hasAddressableRecipientRow,
+            isComplete: isComplete && hasSenderEvidence
+        )
+    }
+
+    @MainActor
     static func recipientEmails(
         from message: Message,
         replacingFromWithReplyTo: Bool = false
     ) -> [String] {
         let replyToEmails = replacingFromWithReplyTo
-            ? message.replyTo.map { EmailAddressListParser.emailAddresses(from: $0) } ?? []
+            ? message.replyTo.map { header in
+                EmailAddressListParser.addressTokens(from: header)
+                    .filter { token in
+                        !EmailNormalizer.isHideMyEmailDisplayName(
+                            EmailNormalizer.extractDisplayName(from: token)
+                        )
+                    }
+                    .flatMap { EmailAddressListParser.emailAddresses(from: $0) }
+            } ?? []
             : []
         let participants = Array(message.participants ?? [])
             .filter {
@@ -209,7 +416,11 @@ private enum ReplyParticipantSnapshot {
         }
 
         recipientEmails.append(contentsOf: participants.compactMap { participant in
-            guard let email = participant.person?.email else { return nil }
+            guard let person = participant.person,
+                  !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
+                return nil
+            }
+            let email = person.email
             let normalized = EmailNormalizer.normalize(email)
             guard !normalized.isEmpty, seen.insert(normalized).inserted else {
                 return nil

@@ -78,6 +78,21 @@ extension DataCleanupService {
 
             var mergedCount = 0
             var deletedObjectIDs = [NSManagedObjectID]()
+            let pendingSendConversationIds: Set<UUID>
+            let pendingActionsByConversationID: [UUID: [PendingAction]]
+            do {
+                pendingSendConversationIds = try pendingSendConversationIDs(in: context)
+                pendingActionsByConversationID = try PendingAction.referencesByConversationID(
+                    in: context
+                )
+            } catch {
+                Log.error(
+                    "Failed to fetch protected references before participant hash repair",
+                    category: .coreData,
+                    error: error
+                )
+                return
+            }
 
             // Group conversations by their CORRECT participantHash (excluding user's email)
             var byCorrectHash: [String: [Conversation]] = [:]
@@ -89,17 +104,41 @@ extension DataCleanupService {
                 // participant chat sharing the same row set.
                 if conv.conversationType == .list { continue }
 
-                // Calculate the correct participantHash by excluding user's aliases
-                let currentParticipants = conv.participantsArray
-                let correctParticipants = currentParticipants
-                    .map { normalizedEmail($0) }
-                    .filter { !myAliases.contains($0) }
+                // An in-flight optimistic send can reference this conversation
+                // while its message exists only in the view context. Leave the
+                // shell completely untouched until reconciliation finishes;
+                // deleting its final excluded participant here would make the
+                // following empty-conversation sweep delete the send's anchor.
+                if pendingSendConversationIds.contains(conv.id) { continue }
 
-                if correctParticipants.isEmpty { continue }
+                // Match routing identity by excluding both the user's aliases
+                // and Hide-My-Email placeholder participants.
+                var hasIdentityRow = false
+                let correctParticipants = Array(conv.participants ?? [])
+                    .compactMap { participant -> String? in
+                        guard let person = participant.person else {
+                            return nil
+                        }
+                        hasIdentityRow = true
+                        if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
+                            // Hash parity is not enough: replies read these rows
+                            // directly, so retain no excluded relay recipient.
+                            context.delete(participant)
+                            return nil
+                        }
+                        return normalizedEmail(person.email)
+                    }
+                    .filter { !$0.isEmpty }
+                guard hasIdentityRow else { continue }
 
-                let correctHash = calculateParticipantHash(from: correctParticipants)
+                let correctIdentity = makeParticipantSetIdentity(
+                    normalizedEmails: Set(correctParticipants),
+                    myAliases: myAliases
+                )
+                let correctHash = correctIdentity.participantHash
 
                 byCorrectHash[correctHash, default: []].append(conv)
+                conv.conversationType = correctIdentity.type
 
                 // Update the participantHash if it was wrong
                 if conv.participantHash != correctHash {
@@ -118,6 +157,9 @@ extension DataCleanupService {
                 let losers = group.filter { $0 != winner }
 
                 for loser in losers {
+                    for action in pendingActionsByConversationID[loser.id] ?? [] {
+                        action.conversationId = winner.id
+                    }
                     conversationManager.mergeConversation(from: loser, into: winner)
                     deletedObjectIDs.append(loser.objectID)
                     context.delete(loser)
@@ -126,7 +168,17 @@ extension DataCleanupService {
             }
 
             if mergedCount > 0 || context.hasChanges {
-                coreDataStack.saveIfNeeded(context: context)
+                guard coreDataStack.saveIfNeeded(
+                    context: context,
+                    caller: "DataCleanupService.fixAndMergeIncorrectParticipantHashes"
+                ) else {
+                    context.rollback()
+                    Log.warning(
+                        "Participant hash repair save failed; skipping deletion merge",
+                        category: .coreData
+                    )
+                    return
+                }
 
                 if !deletedObjectIDs.isEmpty {
                     let changes = [NSDeletedObjectsKey: deletedObjectIDs]
@@ -247,12 +299,11 @@ extension DataCleanupService {
 
         let totalChanged = result.personCount + result.messageCount + result.conversationCount
         if totalChanged > 0 {
-            // Cached person rows and message-list snapshots may still carry
-            // the garbled names; drop them so the decoded values publish.
+            // Cached person rows may still carry garbled names; invalidate
+            // them and notify readers so the decoded values publish.
             PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(
                 emails: result.changedPersonEmails
             )
-            await ConversationCache.shared.clearAllCaches()
 
             let duration = CFAbsoluteTimeGetCurrent() - startTime
             Log.info(
@@ -267,7 +318,9 @@ extension DataCleanupService {
 
 extension DataCleanupService {
 
-    static let participantSetSplitMigrationKey = "hasDoneParticipantSetSplitV1"
+    // Bump whenever strict participant extraction changes so stores that already
+    // completed an older pass are re-evaluated with the corrected identity rule.
+    static let participantSetSplitMigrationKey = "hasDoneParticipantSetSplitV2"
 
     /// One-time migration: re-buckets every message into the conversation matching
     /// its strict participant set (From+To+Cc minus the user's aliases). Splits
@@ -307,33 +360,53 @@ extension DataCleanupService {
             return
         }
         let touchedIDs = rehome.touchedConversationIDs
+        let rowRepairCandidateIDs = rehome.participantRowRepairCandidateIDs
 
         // Phase 2: sweep emptied shells, collapse duplicate actives, repair stale
         // participant rows, then recompute rollups for everything the re-home touched.
-        await deleteEmptiedConversations(
+        guard await deleteEmptiedConversations(
             lastDestinationBySource: rehome.lastDestinationBySource,
             in: context
-        )
-        await mergeActiveConversationDuplicates(in: context)
-        await rebuildParticipantRowsForRehomedConversations(
-            touchedIDs: touchedIDs,
+        ) else {
+            Log.warning("Participant-set split migration sweep failed; will retry next cleanup", category: .coreData)
+            return
+        }
+        guard let mergedWinnerIDs = await mergeActiveConversationDuplicates(in: context) else {
+            await context.perform { context.rollback() }
+            Log.warning("Participant-set duplicate merge failed; will retry next cleanup", category: .coreData)
+            return
+        }
+        guard await rebuildParticipantRowsForRehomedConversations(
+            candidateIDs: rowRepairCandidateIDs.union(mergedWinnerIDs),
             myAliases: myAliases,
             in: context
-        )
-        await conversationManager.updateRollupsForModifiedConversations(
+        ) else {
+            Log.warning("Participant-set row rebuild failed; will retry next cleanup", category: .coreData)
+            return
+        }
+        guard await conversationManager.updateRollupsForModifiedConversations(
             conversationIDs: touchedIDs,
             in: context
-        )
+        ) else {
+            await context.perform { context.rollback() }
+            Log.warning("Participant-set rollup refresh failed; will retry next cleanup", category: .coreData)
+            return
+        }
 
         guard await context.performSaveIfNeeded(caller: "DataCleanupService.splitConversationsByParticipantSet") else {
             Log.warning("Participant-set split migration final save failed; will retry next cleanup", category: .coreData)
             return
         }
 
-        migrationFlags.set(true, forKey: Self.participantSetSplitMigrationKey)
+        guard !rehome.blockedByProtectedConversation else {
+            Log.debug(
+                "Participant-set split repaired available conversations but left its flag clear for a protected send anchor",
+                category: .coreData
+            )
+            return
+        }
 
-        // Re-homed message lists must not be served from stale caches.
-        await ConversationCache.shared.clearAllCaches()
+        migrationFlags.set(true, forKey: Self.participantSetSplitMigrationKey)
 
         let duration = CFAbsoluteTimeGetCurrent() - startTime
         Log.info("Participant-set conversation split migration complete in \(String(format: "%.2f", duration))s (touched \(touchedIDs.count) conversation(s))", category: .coreData)
@@ -341,9 +414,16 @@ extension DataCleanupService {
 
     struct RehomeResult {
         let touchedConversationIDs: Set<NSManagedObjectID>
+        /// Every non-protected conversation with a resident, derivable strict
+        /// identity. Unlike `touchedConversationIDs`, this is repopulated on a
+        /// retry after Phase 1 already saved its moves, so a failed Phase 2c
+        /// save cannot permanently skip participant-row repair.
+        let participantRowRepairCandidateIDs: Set<NSManagedObjectID>
         /// Where each source conversation's messages last went, so user state
         /// (pinned/muted) can follow a fully-drained shell to its destination.
         let lastDestinationBySource: [NSManagedObjectID: NSManagedObjectID]
+        /// A retained send anchor still needs re-homing after its record clears.
+        let blockedByProtectedConversation: Bool
     }
 
     /// Phase 1: walks all messages in deterministic order and reassigns any whose
@@ -376,61 +456,192 @@ extension DataCleanupService {
 
             var destinationByHash: [String: Conversation] = [:]
             var touchedConversationIDs: Set<NSManagedObjectID> = []
+            var participantRowRepairCandidateIDs: Set<NSManagedObjectID> = []
             var lastDestinationBySource: [NSManagedObjectID: NSManagedObjectID] = [:]
+            var drainedSourceIDs: Set<NSManagedObjectID> = []
+            var createdDestinationIDs: Set<NSManagedObjectID> = []
             var touchedThisBatch: Set<Conversation> = []
             var movedCount = 0
             var processed = 0
+            var blockedByProtectedConversation = false
+
+            let outboundSendRecords: [OutboundSendMutationRecord]
+            let pendingSendConversationIds: Set<UUID>
+            do {
+                outboundSendRecords = try context.fetch(OutboundSendMutationRecord.fetchRequest())
+                pendingSendConversationIds = Set(outboundSendRecords.compactMap(\.conversationId))
+            } catch {
+                Log.error(
+                    "Failed to fetch pending sends before participant-set re-home",
+                    category: .coreData,
+                    error: error
+                )
+                return nil
+            }
+            let hasRollbackCapableSend = outboundSendRecords.contains { record in
+                record.remoteCommittedThreadId == nil &&
+                    (record.remoteCommittedMessageId == nil ||
+                        record.remoteCommittedMessageId == OutboundSendRemoteState.inFlightMessageID)
+            }
+            guard !hasRollbackCapableSend else {
+                // A send rollback owns the pending conversation's membership and
+                // rollup snapshot while the network request is in flight. This
+                // state is brief; retained failed/ambiguous records are instead
+                // skipped per-anchor below so they cannot starve mailbox repair.
+                Log.debug(
+                    "Deferring participant-set split while a rollback-capable send is pending",
+                    category: .coreData
+                )
+                return nil
+            }
 
             for message in messages {
+                var processingError: Error?
                 autoreleasepool {
-                    // Messages without derivable identity (optimistic in-flight
-                    // sends have no participant rows and no senderEmail) stay put,
-                    // keeping their conversations alive for send reconciliation.
-                    guard let identity = message.strictParticipantSetIdentity(myAliases: myAliases) else { return }
-
-                    let currentHash = message.conversation?.participantHash?
+                    // Messages without derivable identity (including legacy or
+                    // partially imported row-less sends) stay put, keeping their
+                    // conversations alive for send reconciliation.
+                    guard let identity = message.strictParticipantSetIdentity(myAliases: myAliases) else {
+                        return
+                    }
+                    let source = message.conversation
+                    let currentHash = source?.participantHash?
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    // Epoch preservation: any conversation (active or archived)
-                    // already carrying this message's strict hash keeps it.
-                    guard currentHash != identity.participantHash else { return }
-
-                    let destination: Conversation
-                    if let memo = destinationByHash[identity.participantHash] {
-                        destination = memo
-                    } else if let existing = fetchConversationForRehome(
-                        participantHash: identity.participantHash,
-                        in: context
-                    ) {
-                        destination = existing
-                        destinationByHash[identity.participantHash] = existing
-                    } else {
-                        guard let created = try? ConversationFactory.create(
-                            for: makeConversationIdentity(from: identity),
-                            initialLastMessageDate: message.internalDate,
-                            initialSnippet: message.conversationPreviewText,
-                            initialInboxSeed: ConversationInboxSeed(
-                                isInboxArrival: (message.labels ?? []).contains { $0.id == "INBOX" },
-                                isUnread: message.isUnread,
-                                messageDate: message.internalDate
-                            ),
-                            in: context
-                        ) else { return }
-                        // Permanent ID now: temporary IDs recorded in touched sets
-                        // would go stale at the first interim save.
-                        try? context.obtainPermanentIDs(for: [created])
-                        destination = created
-                        destinationByHash[identity.participantHash] = created
+                    if currentHash == identity.participantHash {
+                        if let source {
+                            if pendingSendConversationIds.contains(source.id) {
+                                if conversationNeedsParticipantRowRepair(
+                                    source,
+                                    identity: identity
+                                ) {
+                                    blockedByProtectedConversation = true
+                                }
+                            } else {
+                                participantRowRepairCandidateIDs.insert(source.objectID)
+                            }
+                        }
+                        return
+                    }
+                    // List-Id is persisted on the message and remains an
+                    // independently authoritative destination key.
+                    if let source, identity.type != .list {
+                        // Older persistence retained only the first mailbox
+                        // from a multi-address From header. Without the raw
+                        // header, a missing normal sender is indistinguishable
+                        // from a thread-merged row. Move only when the source's
+                        // validated rows reduce to the same strict identity.
+                        guard let repairedSourceIdentity = validatedConversationIdentity(
+                            source,
+                            myAliases: myAliases
+                        ), repairedSourceIdentity.participantHash == identity.participantHash else {
+                            return
+                        }
+                    }
+                    if let source,
+                       pendingSendConversationIds.contains(source.id) {
+                        blockedByProtectedConversation = true
+                        return
                     }
 
-                    if let previous = message.conversation {
-                        touchedConversationIDs.insert(previous.objectID)
-                        touchedThisBatch.insert(previous)
-                        lastDestinationBySource[previous.objectID] = destination.objectID
+                    do {
+                        let destination: Conversation
+                        if let cached = destinationByHash[identity.participantHash],
+                           !drainedSourceIDs.contains(cached.objectID),
+                           !pendingSendConversationIds.contains(cached.id) {
+                            destination = cached
+                        } else {
+                            let lookup = try fetchConversationForRehome(
+                                participantHash: identity.participantHash,
+                                excluding: drainedSourceIDs,
+                                excludingConversationIDs: pendingSendConversationIds,
+                                in: context
+                            )
+                            if let existing = lookup.conversation {
+                                destinationByHash[identity.participantHash] = existing
+                                destination = existing
+                            } else {
+                                guard !lookup.hasProtectedCandidate else {
+                                    // Creating a parallel same-hash shell would
+                                    // permanently split this chat because the
+                                    // protected anchor cannot participate in the
+                                    // duplicate merge. Retry when its send record
+                                    // clears and use the original destination.
+                                    blockedByProtectedConversation = true
+                                    return
+                                }
+                                let created = try ConversationFactory.create(
+                                    for: makeConversationIdentity(from: identity),
+                                    initialLastMessageDate: message.internalDate,
+                                    initialSnippet: message.conversationPreviewText,
+                                    initialInboxSeed: ConversationInboxSeed(
+                                        isInboxArrival: (message.labels ?? []).contains { $0.id == "INBOX" },
+                                        isUnread: message.isUnread,
+                                        messageDate: message.internalDate
+                                    ),
+                                    in: context
+                                )
+                                // Permanent ID now: temporary IDs recorded in maps and
+                                // touched sets would go stale at an interim save.
+                                try context.obtainPermanentIDs(for: [created])
+                                if let source, let archivedAt = source.archivedAt {
+                                    // Rollup intentionally preserves the current
+                                    // state for sent-only/latest-outgoing chats. A
+                                    // replacement for an archived source must begin
+                                    // archived or old sent mail resurfaces.
+                                    created.archivedAt = archivedAt
+                                    created.hidden = source.hidden
+                                }
+                                createdDestinationIDs.insert(created.objectID)
+                                destinationByHash[identity.participantHash] = created
+                                destination = created
+                            }
+                        }
+
+                        if let previous = source {
+                            if createdDestinationIDs.contains(destination.objectID),
+                               previous.archivedAt == nil {
+                                // Active wins when a newly created destination
+                                // combines rows from active and archived sources.
+                                destination.archivedAt = nil
+                                destination.hidden = false
+                            }
+                            touchedConversationIDs.insert(previous.objectID)
+                            touchedThisBatch.insert(previous)
+                            lastDestinationBySource[previous.objectID] = destination.objectID
+
+                            message.conversation = destination
+
+                            // Transfer user state before the next interim save. A
+                            // drained stale shell cannot become a later destination,
+                            // so the state follows the content that emptied it.
+                            if (previous.messages ?? []).isEmpty,
+                               !pendingSendConversationIds.contains(previous.id) {
+                                destination.pinned = destination.pinned || previous.pinned
+                                destination.muted = destination.muted || previous.muted
+                                previous.pinned = false
+                                previous.muted = false
+                                drainedSourceIDs.insert(previous.objectID)
+                            }
+                        } else {
+                            message.conversation = destination
+                        }
+                        touchedConversationIDs.insert(destination.objectID)
+                        participantRowRepairCandidateIDs.insert(destination.objectID)
+                        touchedThisBatch.insert(destination)
+                        movedCount += 1
+                    } catch {
+                        processingError = error
                     }
-                    message.conversation = destination
-                    touchedConversationIDs.insert(destination.objectID)
-                    touchedThisBatch.insert(destination)
-                    movedCount += 1
+                }
+
+                if let processingError {
+                    Log.error(
+                        "Participant-set re-home failed while processing message",
+                        category: .coreData,
+                        error: processingError
+                    )
+                    context.rollback()
+                    return nil
                 }
 
                 processed += 1
@@ -441,7 +652,15 @@ extension DataCleanupService {
                         for conversation in touchedThisBatch where !conversation.isDeleted {
                             conversationManager.updateConversationRollups(for: conversation, myEmail: myEmail)
                         }
-                        coreDataStack.saveIfNeeded(context: context)
+                    }
+                    if context.hasChanges {
+                        guard coreDataStack.saveIfNeeded(
+                            context: context,
+                            caller: "DataCleanupService.rehomeMessagesByParticipantSet.interim"
+                        ) else {
+                            context.rollback()
+                            return nil
+                        }
                         touchedThisBatch.removeAll()
                     }
                     // Release faulted rows unconditionally: memory grows with
@@ -454,14 +673,22 @@ extension DataCleanupService {
             for conversation in touchedThisBatch where !conversation.isDeleted {
                 conversationManager.updateConversationRollups(for: conversation, myEmail: myEmail)
             }
-            coreDataStack.saveIfNeeded(context: context)
+            guard coreDataStack.saveIfNeeded(
+                context: context,
+                caller: "DataCleanupService.rehomeMessagesByParticipantSet.final"
+            ) else {
+                context.rollback()
+                return nil
+            }
 
             if movedCount > 0 {
                 Log.info("Participant-set split re-homed \(movedCount) message(s) across \(touchedConversationIDs.count) conversation(s)", category: .coreData)
             }
             return RehomeResult(
                 touchedConversationIDs: touchedConversationIDs,
-                lastDestinationBySource: lastDestinationBySource
+                participantRowRepairCandidateIDs: participantRowRepairCandidateIDs,
+                lastDestinationBySource: lastDestinationBySource,
+                blockedByProtectedConversation: blockedByProtectedConversation
             )
         }
     }
@@ -474,21 +701,30 @@ extension DataCleanupService {
     /// carry INBOX.
     private func fetchConversationForRehome(
         participantHash: String,
+        excluding excludedObjectIDs: Set<NSManagedObjectID>,
+        excludingConversationIDs: Set<UUID>,
         in context: NSManagedObjectContext
-    ) -> Conversation? {
+    ) throws -> (conversation: Conversation?, hasProtectedCandidate: Bool) {
         let request = Conversation.fetchRequest()
         request.predicate = NSPredicate(format: "participantHash == %@", participantHash)
         request.includesPendingChanges = true
 
-        guard let candidates = try? context.fetch(request), !candidates.isEmpty else { return nil }
-        return ConversationRoutingPolicy().selectParticipantHashConversation(
-            from: candidates,
-            reactivateArchivedIfNeeded: true
-        )
+        let fetched = try context.fetch(request)
+        let viable = fetched.filter { !excludedObjectIDs.contains($0.objectID) }
+        let selection = viable.isEmpty ? nil : ConversationRoutingPolicy()
+            .selectParticipantHashConversation(
+                from: viable,
+                reactivateArchivedIfNeeded: true
+            )
+        guard let selection else { return (nil, false) }
+        guard !excludingConversationIDs.contains(selection.id) else {
+            return (nil, true)
+        }
+        return (selection, false)
     }
 
-    /// Phase 2a: deletes conversations the re-home emptied. Deferred to the end of
-    /// the pass because a source emptied early can become a destination later.
+    /// Phase 2a: deletes conversations the re-home emptied after all message moves
+    /// and their interim saves have completed.
     ///
     /// Sweeps store-wide rather than only this run's touched set: a crash between
     /// an interim save and this phase leaves fully-drained shells that a re-run
@@ -499,35 +735,80 @@ extension DataCleanupService {
     private func deleteEmptiedConversations(
         lastDestinationBySource: [NSManagedObjectID: NSManagedObjectID],
         in context: NSManagedObjectContext
-    ) async {
-        let deletedObjectIDs: [NSManagedObjectID] = await context.perform { [self] in
+    ) async -> Bool {
+        let result: (deletedObjectIDs: [NSManagedObjectID], succeeded: Bool) = await context.perform { [self] in
             // Conversations referenced by in-flight optimistic sends must survive
             // even when they look empty here: their optimistic message may be
             // unsaved on the view context and invisible to this background context.
-            let recordRequest = OutboundSendMutationRecord.fetchRequest()
-            let pendingSendConversationIds = Set(
-                ((try? context.fetch(recordRequest)) ?? []).compactMap(\.conversationId)
-            )
+            let pendingSendConversationIds: Set<UUID>
+            let pendingActionsByConversationID: [UUID: [PendingAction]]
+            do {
+                pendingSendConversationIds = try pendingSendConversationIDs(in: context)
+                pendingActionsByConversationID = try PendingAction.referencesByConversationID(
+                    in: context
+                )
+            } catch {
+                Log.error(
+                    "Failed to fetch protected references before emptied-conversation sweep",
+                    category: .coreData,
+                    error: error
+                )
+                return ([], false)
+            }
 
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "messages.@count == 0")
-            let emptyConversations = (try? context.fetch(request)) ?? []
+            let emptyConversations: [Conversation]
+            do {
+                emptyConversations = try context.fetch(request)
+            } catch {
+                Log.error(
+                    "Failed to fetch emptied conversations for participant-set sweep",
+                    category: .coreData,
+                    error: error
+                )
+                return ([], false)
+            }
             let creationGrace: TimeInterval = 60 * 60
 
             var deleted: [NSManagedObjectID] = []
             for conversation in emptyConversations {
                 guard !pendingSendConversationIds.contains(conversation.id) else { continue }
-                if let createdAt = conversation.createdAt,
+                let knownDestinationID = lastDestinationBySource[conversation.objectID]
+                if knownDestinationID == nil,
+                   let createdAt = conversation.createdAt,
                    Date().timeIntervalSince(createdAt) < creationGrace {
                     continue
                 }
 
-                // A fully-drained shell's identity effectively moved; carry the
-                // user's pinned/muted state to where its messages went.
-                if conversation.pinned || conversation.muted,
-                   let destinationID = lastDestinationBySource[conversation.objectID],
-                   let destination = try? context.existingObject(with: destinationID) as? Conversation,
-                   !destination.isDeleted {
+                let referencedActions = pendingActionsByConversationID[conversation.id] ?? []
+                let knownDestination = knownDestinationID.flatMap {
+                    try? context.existingObject(with: $0) as? Conversation
+                }
+                if !referencedActions.isEmpty {
+                    guard let knownDestination, !knownDestination.isDeleted else {
+                        // A prior interrupted run may leave no reconstructable
+                        // source-to-destination map. Keep its hidden shell so a
+                        // still-live queued action is never orphaned as debris.
+                        ConversationRollupSnapshot.make(from: []).apply(to: conversation)
+                        continue
+                    }
+                    for action in referencedActions {
+                        action.conversationId = knownDestination.id
+                    }
+                }
+
+                // Never discard conversation-level user state. A fully-drained
+                // shell can transfer it only when this run knows where its
+                // messages went. After a crash, the retry may see the persisted
+                // empty shell but have no source-to-destination map; retain that
+                // shell instead of silently losing pin/mute state.
+                if conversation.pinned || conversation.muted {
+                    guard let destination = knownDestination,
+                          !destination.isDeleted else {
+                        ConversationRollupSnapshot.make(from: []).apply(to: conversation)
+                        continue
+                    }
                     destination.pinned = destination.pinned || conversation.pinned
                     destination.muted = destination.muted || conversation.muted
                 }
@@ -537,11 +818,19 @@ extension DataCleanupService {
             }
 
             if !deleted.isEmpty || context.hasChanges {
-                coreDataStack.saveIfNeeded(context: context)
+                guard coreDataStack.saveIfNeeded(
+                    context: context,
+                    caller: "DataCleanupService.deleteEmptiedConversations"
+                ) else {
+                    context.rollback()
+                    return ([], false)
+                }
             }
-            return deleted
+            return (deleted, true)
         }
 
+        guard result.succeeded else { return false }
+        let deletedObjectIDs = result.deletedObjectIDs
         if !deletedObjectIDs.isEmpty {
             NSManagedObjectContext.mergeChanges(
                 fromRemoteContextSave: [NSDeletedObjectsKey: deletedObjectIDs],
@@ -549,6 +838,7 @@ extension DataCleanupService {
             )
             Log.info("Participant-set split removed \(deletedObjectIDs.count) emptied conversation shell(s)", category: .coreData)
         }
+        return true
     }
 
     /// Phase 2c: conversations that kept their hash through the re-home can still
@@ -558,14 +848,14 @@ extension DataCleanupService {
     /// wrong people and fight the router. Rebuild rows from message-derived
     /// identity wherever they diverge.
     private func rebuildParticipantRowsForRehomedConversations(
-        touchedIDs: Set<NSManagedObjectID>,
+        candidateIDs: Set<NSManagedObjectID>,
         myAliases: Set<String>,
         in context: NSManagedObjectContext
-    ) async {
+    ) async -> Bool {
         await context.perform {
             var rebuiltCount = 0
 
-            for objectID in touchedIDs {
+            for objectID in candidateIDs {
                 guard let conversation = try? context.existingObject(with: objectID) as? Conversation,
                       !conversation.isDeleted,
                       let conversationHash = conversation.participantHash else { continue }
@@ -588,28 +878,111 @@ extension DataCleanupService {
                 let current = Set(
                     (conversation.participants ?? []).compactMap { $0.person }.map { normalizedEmail($0.email) }
                 )
-                guard expected != current else { continue }
+                let rowsNeedRepair = expected != current
+                let typeNeedsRepair = conversation.conversationType != identity.type
+                guard rowsNeedRepair || typeNeedsRepair else { continue }
 
-                for row in conversation.participants ?? [] {
-                    context.delete(row)
-                }
-                for email in identity.participants {
-                    guard let person = try? PersonFactory.findOrCreate(email: email, displayName: nil, in: context) else { continue }
-                    try? ConversationFactory.createParticipant(
-                        person: person,
-                        conversation: conversation,
-                        role: .normal,
-                        in: context
-                    )
+                if rowsNeedRepair {
+                    for row in conversation.participants ?? [] {
+                        context.delete(row)
+                    }
+                    do {
+                        for email in identity.participants {
+                            let person = try PersonFactory.findOrCreate(
+                                email: email,
+                                displayName: nil,
+                                in: context
+                            )
+                            _ = try ConversationFactory.createParticipant(
+                                person: person,
+                                conversation: conversation,
+                                role: .normal,
+                                in: context
+                            )
+                        }
+                    } catch {
+                        Log.error(
+                            "Failed to rebuild participant rows after participant-set split",
+                            category: .coreData,
+                            error: error
+                        )
+                        context.rollback()
+                        return false
+                    }
                 }
                 conversation.conversationType = identity.type
                 rebuiltCount += 1
             }
 
             if rebuiltCount > 0 {
-                self.coreDataStack.saveIfNeeded(context: context)
+                guard self.coreDataStack.saveIfNeeded(
+                    context: context,
+                    caller: "DataCleanupService.rebuildParticipantRowsForRehomedConversations"
+                ) else {
+                    context.rollback()
+                    return false
+                }
                 Log.info("Rebuilt participant rows for \(rebuiltCount) conversation(s) after participant-set split", category: .coreData)
             }
+            return true
         }
+    }
+
+    private func conversationNeedsParticipantRowRepair(
+        _ conversation: Conversation,
+        identity: ParticipantSetIdentity
+    ) -> Bool {
+        // List rows are seeded from list metadata rather than one arbitrary
+        // message and are intentionally not rebuilt by Phase 2c.
+        guard conversation.conversationType != .list else { return false }
+        let expected = Set(identity.participants)
+        let current = Set(
+            (conversation.participants ?? []).compactMap { $0.person }.map { normalizedEmail($0.email) }
+        )
+        return expected != current || conversation.conversationType != identity.type
+    }
+
+    /// Returns the HME/self-filtered identity only when the source rows are
+    /// internally consistent with the source's stored hash. This makes legacy
+    /// one-From-row stores conservative without rejecting known self/HME repair.
+    private func validatedConversationIdentity(
+        _ conversation: Conversation,
+        myAliases: Set<String>
+    ) -> ParticipantSetIdentity? {
+        let rows = Array(conversation.participants ?? [])
+        guard !rows.isEmpty,
+              !rows.contains(where: { $0.participantRole == .listAddress }) else {
+            return nil
+        }
+
+        var rawEmails = Set<String>()
+        var withoutHideMyEmail = Set<String>()
+        for row in rows {
+            guard let person = row.person else { return nil }
+            let email = normalizedEmail(person.email)
+            guard !email.isEmpty else { return nil }
+            rawEmails.insert(email)
+            if !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
+                withoutHideMyEmail.insert(email)
+            }
+        }
+
+        let rawHash = calculateParticipantHash(from: Array(rawEmails))
+        let selfFilteredIdentity = makeParticipantSetIdentity(
+            normalizedEmails: rawEmails,
+            myAliases: myAliases
+        )
+        let repairedIdentity = makeParticipantSetIdentity(
+            normalizedEmails: withoutHideMyEmail,
+            myAliases: myAliases
+        )
+        let sourceHash = conversation.participantHash?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard sourceHash == rawHash ||
+                sourceHash == selfFilteredIdentity.participantHash ||
+                sourceHash == repairedIdentity.participantHash else {
+            return nil
+        }
+        return repairedIdentity
     }
 }

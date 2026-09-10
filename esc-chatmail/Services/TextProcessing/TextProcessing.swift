@@ -475,6 +475,7 @@ enum TextProcessing {
 
                     if !endsWithPunctuation &&
                         !startsWithUppercase &&
+                        nextLine.range(of: #"^(https?://|www\.)"#, options: .caseInsensitive.union(.regularExpression)) == nil &&
                         !currentIsSignatureDelimiter &&
                         !nextIsSignatureDelimiter {
                         // This is a soft wrap across blank lines - skip the blanks and continue joining
@@ -517,6 +518,7 @@ enum TextProcessing {
                 if !endsWithPunctuation &&
                     !endsWithColon &&
                     !startsWithUppercase &&
+                    trimmedLine.range(of: #"^(https?://|www\.)"#, options: .caseInsensitive.union(.regularExpression)) == nil &&
                     !isListItem &&
                     !currentIsSignatureDelimiter &&
                     !nextIsSignatureDelimiter {
@@ -627,17 +629,7 @@ enum TextProcessing {
     }
 
     private static func looksLikeNameLine(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 40 else { return false }
-        guard trimmed.rangeOfCharacter(from: .letters) != nil else { return false }
-        guard trimmed.rangeOfCharacter(from: .decimalDigits) == nil else { return false }
-
-        let lowercased = trimmed.lowercased()
-        let disallowedFragments = ["@", "http", "www.", "|", "tel:", "fax", "mobile", "office", "cell", "phone"]
-        guard !disallowedFragments.contains(where: { lowercased.contains($0) }) else { return false }
-
-        let words = trimmed.split(whereSeparator: \.isWhitespace)
-        return (1...4).contains(words.count)
+        SignatureSignOffPolicy.looksLikeNameLine(line)
     }
 
     private static func isSignatureDelimiterLine(_ line: String) -> Bool {

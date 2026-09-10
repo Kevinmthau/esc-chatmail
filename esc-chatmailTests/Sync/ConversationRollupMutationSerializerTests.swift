@@ -142,6 +142,47 @@ final class ConversationRollupMutationSerializerTests: XCTestCase {
         }
         XCTAssertTrue(didRunNextMutation)
     }
+
+    func testCleanupSensitiveMaintenanceWaitsForOptimisticCreation() async throws {
+        let serializer = ConversationRollupMutationSerializer()
+        let optimisticCreationStarted = SerializerTestGate()
+        let allowOptimisticCreationToFinish = SerializerTestGate()
+        let maintenanceWasEnqueued = SerializerTestGate()
+        let maintenanceProbe = SerializerTestProbe()
+
+        let optimisticCreation = Task {
+            try await serializer.performThrowingCleanupSensitiveMutation {
+                await optimisticCreationStarted.open()
+                await allowOptimisticCreationToFinish.wait()
+                return true
+            }
+        }
+        await optimisticCreationStarted.wait()
+
+        let maintenance = Task {
+            await serializer.performCleanupSensitiveMutation(
+                onEnqueued: {
+                    await maintenanceWasEnqueued.open()
+                }
+            ) {
+                await maintenanceProbe.recordRun()
+            }
+        }
+
+        // The enqueue callback runs only after maintenance has installed its
+        // tail behind the in-flight optimistic transaction. This avoids timing-
+        // based assertions while proving the shared key spans an awaited body.
+        await maintenanceWasEnqueued.wait()
+        let maintenanceRanBeforeOptimisticSave = await maintenanceProbe.didRun()
+        XCTAssertFalse(maintenanceRanBeforeOptimisticSave)
+
+        await allowOptimisticCreationToFinish.open()
+        let optimisticCreationSucceeded = try await optimisticCreation.value
+        XCTAssertTrue(optimisticCreationSucceeded)
+        await maintenance.value
+        let maintenanceEventuallyRan = await maintenanceProbe.didRun()
+        XCTAssertTrue(maintenanceEventuallyRan)
+    }
 }
 
 private actor SerializerTestGate {

@@ -164,6 +164,9 @@ struct ChatView: View {
             isTextFieldFocused = false
             dismiss()
         }
+        .onDisappear {
+            viewModel.discardUnsentReplyAttachments()
+        }
     }
 
     private var navigationDisplayName: String {

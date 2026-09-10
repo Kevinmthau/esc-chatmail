@@ -187,7 +187,9 @@ struct EmailAddressListParser {
                 isInQuotes.toggle()
                 current.append(character)
             } else if character == "<" && !isInQuotes {
-                angleDepth += 1
+                // Mailbox delimiters cannot nest. Restart at the newest '<'
+                // so an unmatched display-name bracket cannot swallow later recipients.
+                angleDepth = 1
                 current.append(character)
             } else if character == ">" && !isInQuotes {
                 angleDepth = max(0, angleDepth - 1)

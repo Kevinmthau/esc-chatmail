@@ -69,14 +69,15 @@ struct ConversationRollupUpdater: Sendable {
     /// Updates rollups only for conversations that were modified.
     /// Much more efficient than updateAllRollups - O(k*m) where k << n.
     @MainActor
+    @discardableResult
     func updateRollupsForModified(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext,
         myEmail: String
-    ) async {
-        guard !conversationIDs.isEmpty else { return }
+    ) async -> Bool {
+        guard !conversationIDs.isEmpty else { return true }
 
-        await context.perform {
+        return await context.perform {
             // Use batch fetch with prefetching instead of individual existingObject calls
             // This avoids N+1 queries when accessing messages/labels/participants
             let request = Conversation.fetchRequest()
@@ -93,12 +94,13 @@ struct ConversationRollupUpdater: Sendable {
                 conversations = try context.fetch(request)
             } catch {
                 Log.error("Failed to batch fetch conversations for rollup update", category: .conversation, error: error)
-                return
+                return false
             }
 
             for conversation in conversations {
                 self.updateRollups(for: conversation, myEmail: myEmail)
             }
+            return true
         }
     }
 
@@ -163,14 +165,15 @@ struct ConversationRollupUpdater: Sendable {
     @MainActor
     func archiveMessagelessConversations(
         in context: NSManagedObjectContext,
-        olderThan cutoff: Date
+        olderThan cutoff: Date,
+        excludingConversationIDs: Set<UUID> = []
     ) async -> Int {
         await context.perform {
             let request = Conversation.fetchRequest()
             // createdAt shields shells created moments ago whose lastMessageDate is
             // historical (sync sets it to the message's internalDate); rows predating
             // the createdAt attribute rely on the lastMessageDate cutoff alone.
-            request.predicate = NSPredicate(
+            let strandedShellPredicate = NSPredicate(
                 format: """
                 archivedAt == nil AND lastMessageDate != nil AND lastMessageDate < %@ \
                 AND (createdAt == nil OR createdAt < %@) AND messages.@count == 0
@@ -178,6 +181,17 @@ struct ConversationRollupUpdater: Sendable {
                 cutoff as NSDate,
                 cutoff as NSDate
             )
+            if excludingConversationIDs.isEmpty {
+                request.predicate = strandedShellPredicate
+            } else {
+                request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    strandedShellPredicate,
+                    NSPredicate(
+                        format: "NOT (id IN %@)",
+                        Array(excludingConversationIDs) as NSArray
+                    )
+                ])
+            }
             request.fetchBatchSize = 50
 
             let conversations: [Conversation]

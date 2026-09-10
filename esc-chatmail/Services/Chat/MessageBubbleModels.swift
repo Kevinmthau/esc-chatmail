@@ -44,6 +44,22 @@ struct MessageBubbleAttachmentSnapshot: Sendable, Equatable {
         stateRaw == Attachment.State.downloaded.rawValue ||
         stateRaw == Attachment.State.uploaded.rawValue
     }
+
+    static func analysisFingerprint(for attachments: [MessageBubbleAttachmentSnapshot]) -> String {
+        guard !attachments.isEmpty else { return "none" }
+
+        return attachments
+            .map { attachment in
+                [
+                    EmailDocument.normalizedContentID(attachment.contentId) ?? "cid:nil",
+                    attachment.filename.lowercased(),
+                    attachment.mimeType.lowercased(),
+                    "\(attachment.width)x\(attachment.height)",
+                    attachment.width == 0 || attachment.height == 0 ? attachment.stateRaw : ""
+                ].joined(separator: "~")
+            }
+            .joined(separator: ";")
+    }
 }
 
 struct MessageBubbleHTMLAnalysis: Sendable, Equatable {
@@ -51,6 +67,21 @@ struct MessageBubbleHTMLAnalysis: Sendable, Equatable {
     let referencedInlineContentIDs: Set<String>
     let nonDisplayableInlineContentIDs: Set<String>
     let supportsCalendarInvitePreviewCard: Bool
+    let bodyInlineContentIDs: Set<String>
+
+    init(
+        hasHTMLSource: Bool,
+        referencedInlineContentIDs: Set<String>,
+        nonDisplayableInlineContentIDs: Set<String>,
+        supportsCalendarInvitePreviewCard: Bool,
+        bodyInlineContentIDs: Set<String> = []
+    ) {
+        self.hasHTMLSource = hasHTMLSource
+        self.referencedInlineContentIDs = referencedInlineContentIDs
+        self.nonDisplayableInlineContentIDs = nonDisplayableInlineContentIDs
+        self.supportsCalendarInvitePreviewCard = supportsCalendarInvitePreviewCard
+        self.bodyInlineContentIDs = bodyInlineContentIDs
+    }
 
     static let empty = MessageBubbleHTMLAnalysis(
         hasHTMLSource: false,
@@ -127,6 +158,24 @@ struct MessageBubbleContentResult: Sendable, Equatable {
     let sharedDocumentLinks: [SharedDocumentLink]
     let forwardedDisplayContent: ForwardedMessageDisplayContent?
     let htmlAnalysis: MessageBubbleHTMLAnalysis
+    /// False when work was invalidated or unavailable, even if the fallback looks like .empty.
+    let isComplete: Bool
+
+    init(
+        fullTextContent: String?,
+        hasRichHTMLContent: Bool,
+        sharedDocumentLinks: [SharedDocumentLink],
+        forwardedDisplayContent: ForwardedMessageDisplayContent?,
+        htmlAnalysis: MessageBubbleHTMLAnalysis,
+        isComplete: Bool = true
+    ) {
+        self.fullTextContent = fullTextContent
+        self.hasRichHTMLContent = hasRichHTMLContent
+        self.sharedDocumentLinks = sharedDocumentLinks
+        self.forwardedDisplayContent = forwardedDisplayContent
+        self.htmlAnalysis = htmlAnalysis
+        self.isComplete = isComplete
+    }
 }
 
 struct MessageBubbleLoadContext: Sendable {

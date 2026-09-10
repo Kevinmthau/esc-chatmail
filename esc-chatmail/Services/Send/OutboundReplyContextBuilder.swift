@@ -5,18 +5,21 @@ import CoreData
 struct OutboundReplyContextBuilder {
     let viewContext: NSManagedObjectContext
     let replyMetadataBuilder: ReplyMetadataBuilder
-    let replyHTMLContentLoader: HTMLContentLoader
+    private let replyQuotedHTMLResolver: ReplyQuotedHTMLResolver
     private let loadUserAliases: @MainActor () async -> Set<String>
 
     init(
         viewContext: NSManagedObjectContext,
         replyMetadataBuilder: ReplyMetadataBuilder,
         replyHTMLContentLoader: HTMLContentLoader,
+        replyQuotedHTMLResolver: ReplyQuotedHTMLResolver? = nil,
         loadUserAliases: (@MainActor () async -> Set<String>)? = nil
     ) {
         self.viewContext = viewContext
         self.replyMetadataBuilder = replyMetadataBuilder
-        self.replyHTMLContentLoader = replyHTMLContentLoader
+        self.replyQuotedHTMLResolver = replyQuotedHTMLResolver ?? ReplyQuotedHTMLResolver(
+            contentLoader: replyHTMLContentLoader
+        )
         self.loadUserAliases = loadUserAliases ?? {
             await AliasManager.shared.getAliases(from: viewContext)
         }
@@ -68,6 +71,7 @@ struct OutboundReplyContextBuilder {
         return try replyMetadataBuilder.buildReplyMetadata(
             conversation: ReplyConversationSnapshot(
                 conversation: conversation,
+                replyingTo: replyingTo,
                 sendAsAliases: sendAsAliases
             ),
             replyingTo: replyingTo,
@@ -137,20 +141,21 @@ struct OutboundReplyContextBuilder {
             }
         }
 
+        let deferredOriginalHTML = DeferredReplyQuotedHTML(
+            source: ReplyQuotedHTMLSource(
+                messageId: message.id,
+                bodyStorageURI: message.bodyStorageURI,
+                bodyText: message.bodyTextValue,
+                senderEmail: message.senderEmailValue,
+                subject: message.subject
+            ),
+            resolver: replyQuotedHTMLResolver
+        )
+
         return ReplyTargetSnapshot(
             message: message,
             sendAsAliases: sendAsAliases,
-            originalHTML: loadOriginalReplyHTML(for: message)
-        )
-    }
-
-    private func loadOriginalReplyHTML(for message: Message) -> String? {
-        replyHTMLContentLoader.loadReplyQuotedOriginalHTML(
-            messageId: message.id,
-            bodyStorageURI: message.bodyStorageURI,
-            bodyText: message.bodyTextValue,
-            senderEmail: message.senderEmailValue,
-            subject: message.subject
+            deferredOriginalHTML: deferredOriginalHTML
         )
     }
 

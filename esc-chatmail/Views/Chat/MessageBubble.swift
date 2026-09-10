@@ -69,7 +69,7 @@ struct MessageBubble: View {
             return false
         }
 
-        return MessageDisplayPolicy.shouldShowHTMLPreview(
+        return MessageDisplayPolicy.shouldShowHTMLPreview(.init(
             hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
@@ -79,7 +79,7 @@ struct MessageBubble: View {
             subject: message.subject,
             senderEmail: message.effectiveSenderEmail,
             isLikelyCalendarInvite: message.isLikelyCalendarInvite
-        )
+        ))
     }
 
     private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {
@@ -162,6 +162,11 @@ struct MessageBubble: View {
                 Spacer()
             }
         }
+        .background {
+            InlineAttachmentDownloadTrigger(
+                attachments: InlineAttachmentDownloadPolicy.pendingImages(in: message.attachments, isFromMe: message.isFromMe)
+            )
+        }
         .task(id: currentLoadSignature) {
             await viewModel.loadIfNeeded(using: loadContext(contentSignature: currentLoadSignature))
         }
@@ -242,7 +247,18 @@ struct MessageBubble: View {
         )
         if !displayable.isEmpty {
             if style.showAttachmentGrid {
-                AttachmentGridView(attachments: displayable)
+                AttachmentGridView(
+                    attachments: displayable,
+                    inlineImagePresentations: Dictionary(uniqueKeysWithValues: displayable.map {
+                        ($0.objectID, InlineImagePresentationPolicy.resolve(
+                            attachment: $0,
+                            isFromMe: message.isFromMe,
+                            isHTMLPreview: showHTMLPreview,
+                            bodyContentIDs: viewModel.htmlAnalysis.bodyInlineContentIDs,
+                            hasLoadedAnalysis: viewModel.hasLoadedContent
+                        ))
+                    })
+                )
                     .frame(maxWidth: style.maxBubbleWidth)
             } else {
                 AttachmentIndicator(count: displayable.count)

@@ -2,13 +2,29 @@ import CryptoKit
 import Foundation
 
 extension MessageBubbleLoader {
+    func loadHTMLAnalysis(
+        for request: MessageBubbleContentRequest,
+        accountContext: MessageBubbleAccountWorkContext
+    ) async -> MessageBubbleHTMLAnalysis? {
+        // Recover inside the row's existing task: an unchanged signature won't start another.
+        // Pin all attempts to the original account context so retries can't revive old-account work.
+        for _ in 0..<3 {
+            guard !Task.isCancelled, await isAccountWorkContextCurrent(accountContext) else {
+                return nil
+            }
+            if let analysis = await cachedHTMLAnalysis(for: request, accountContext: accountContext) {
+                return analysis
+            }
+        }
+        return nil
+    }
+
     func cachedHTMLAnalysis(
         for request: MessageBubbleContentRequest,
         accountContext: MessageBubbleAccountWorkContext
-    ) async -> MessageBubbleHTMLAnalysis {
-        let fallback = MessageBubbleHTMLAnalysis.placeholder(hasHTMLSource: request.hasHTMLSource)
+    ) async -> MessageBubbleHTMLAnalysis? {
         guard await isAccountWorkContextCurrent(accountContext) else {
-            return fallback
+            return nil
         }
         let variantKey = RenderedMessageVariantKey(htmlAnalysisCacheKey(
             for: request,
@@ -36,10 +52,11 @@ extension MessageBubbleLoader {
                 for: request,
                 accountContext: accountContext
             )
-        } ?? fallback
+        }
 
-        guard await isAccountWorkContextCurrent(accountContext) else {
-            return fallback
+        // An invalidated producer is transient; never memoize its placeholder.
+        guard let analysis, await isAccountWorkContextCurrent(accountContext) else {
+            return nil
         }
 
         htmlAnalysisCache.setValue(
@@ -81,6 +98,7 @@ extension MessageBubbleLoader {
             parsedEmail: parsedEmail,
             hasHTMLSourceHint: request.hasHTMLSource,
             isForwardedEmail: request.isForwardedEmail,
+            isFromMe: request.isFromMe,
             isLikelyCalendarInvite: request.isLikelyCalendarInvite,
             bodyText: request.bodyText,
             cleanedSnippet: request.cleanedSnippet,
@@ -150,9 +168,9 @@ extension MessageBubbleLoader {
             "body:\(cacheFingerprint(for: request.bodyText))",
             "snippet:\(cacheFingerprint(for: request.cleanedSnippet))",
             "subject:\(cacheFingerprint(for: request.subject))",
-            "flags:\(request.hasHTMLSource)-\(request.isForwardedEmail)-\(request.isLikelyCalendarInvite)",
+            "flags:\(request.hasHTMLSource)-\(request.isForwardedEmail)-\(request.isLikelyCalendarInvite)-\(request.isFromMe)",
             "hasAttachments:\(request.hasAttachments)",
-            "attachments:\(attachmentFingerprint(for: request.attachmentSnapshots))"
+            "attachments:\(MessageBubbleAttachmentSnapshot.analysisFingerprint(for: request.attachmentSnapshots))"
         ].joined(separator: "|")
     }
 
@@ -180,20 +198,5 @@ extension MessageBubbleLoader {
             .prefix(8)
             .map { String(format: "%02x", $0) }
             .joined()
-    }
-
-    private func attachmentFingerprint(for attachments: [MessageBubbleAttachmentSnapshot]) -> String {
-        guard !attachments.isEmpty else { return "none" }
-
-        return attachments
-            .map { attachment in
-                [
-                    EmailDocument.normalizedContentID(attachment.contentId) ?? "cid:nil",
-                    attachment.filename.lowercased(),
-                    attachment.mimeType.lowercased(),
-                    "\(attachment.width)x\(attachment.height)"
-                ].joined(separator: "~")
-            }
-            .joined(separator: ";")
     }
 }

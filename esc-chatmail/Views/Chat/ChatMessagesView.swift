@@ -311,8 +311,11 @@ struct ChatMessagesView: View {
                 .updating($isScrollGestureActive) { _, isActive, _ in
                     isActive = true
                 }
-                .onChanged { _ in handleUserScrollInteraction() }
         )
+        .onChange(of: isScrollGestureActive) { _, isActive in
+            guard isActive else { return }
+            handleUserScrollInteraction()
+        }
         .overlayPreferenceValue(ChatScrollGeometryPreferenceKey.self) { preference in
             GeometryReader { geometryProxy in
                 let frame = preference.bottomAnchorBounds
@@ -454,9 +457,30 @@ struct ChatMessagesView: View {
             focusBinding: isTextFieldFocused
         ) {
             let anchorIntent = coordinator.capturePostSendAnchorIntent()
-            guard let result = await viewModel.sendReply() else { return false }
+            var persistedOptimisticMessageObjectID: NSManagedObjectID?
+            let result = await viewModel.sendReply(
+                onOptimisticMessagePersisted: { optimisticResult in
+                    persistedOptimisticMessageObjectID =
+                        optimisticResult.optimisticMessageObjectID
+                    coordinator.handleReplyOptimisticMessagePersisted(
+                        targetMessageID: optimisticResult.optimisticMessageObjectID,
+                        anchorIntent: anchorIntent,
+                        messageCount: totalMessageCountForCoordinator(),
+                        totalMessageCount: scrollState.totalMessageCount,
+                        isInitialWindowLoaded: scrollState.isInitialLoadComplete
+                    ) { performBottomAnchor($0, proxy: proxy) }
+                }
+            )
+            guard let result else {
+                if let persistedOptimisticMessageObjectID {
+                    coordinator.handleReplySendFailed(
+                        targetMessageID: persistedOptimisticMessageObjectID
+                    )
+                }
+                return false
+            }
 
-            coordinator.handleReplySendCompleted(
+            coordinator.handleReplySendAdmitted(
                 targetMessageID: result.optimisticMessageObjectID,
                 anchorIntent: anchorIntent,
                 messageCount: totalMessageCountForCoordinator(),

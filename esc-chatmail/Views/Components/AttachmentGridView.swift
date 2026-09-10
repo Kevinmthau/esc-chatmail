@@ -4,6 +4,7 @@ import QuickLook
 
 struct AttachmentGridView: View {
     let attachments: [ChatMessageAttachmentModel]
+    var inlineImagePresentations: [NSManagedObjectID: InlineImagePresentationPolicy] = [:]
     @EnvironmentObject private var deps: Dependencies
     @Environment(\.managedObjectContext) private var viewContext
     @State private var quickLookPresentation: QuickLookPresentation?
@@ -25,13 +26,18 @@ struct AttachmentGridView: View {
     }
 
     var body: some View {
-        let resolvedAttachments = resolveAttachments()
+        // Collapsed queued images still download through MessageBubble's
+        // independent trigger and never reserve a grid cell or overflow count.
+        let resolvedAttachments = resolveAttachments().filter {
+            inlineImagePresentations[$0.objectID] != .collapsed
+        }
 
         Group {
             if resolvedAttachments.count == 1, let attachment = resolvedAttachments.first {
                 SingleAttachmentView(
                     attachment: attachment,
                     downloader: deps.attachmentDownloader,
+                    imagePresentation: inlineImagePresentations[attachment.objectID] ?? .standard,
                     onTap: {
                         presentQuickLook(
                             for: attachment,
@@ -43,6 +49,7 @@ struct AttachmentGridView: View {
                 AttachmentGrid(
                     attachments: resolvedAttachments,
                     downloader: deps.attachmentDownloader,
+                    imagePresentations: inlineImagePresentations,
                     onTap: { attachment in
                         presentQuickLook(
                             for: attachment,
@@ -50,8 +57,8 @@ struct AttachmentGridView: View {
                         )
                     }
                 )
-            } else if !attachments.isEmpty {
-                AttachmentIndicator(count: attachments.count)
+            } else if attachments.contains(where: { inlineImagePresentations[$0.objectID] != .collapsed }) {
+                AttachmentIndicator(count: attachments.filter { inlineImagePresentations[$0.objectID] != .collapsed }.count)
             }
         }
         .sheet(item: $quickLookPresentation) { presentation in

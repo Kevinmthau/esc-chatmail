@@ -35,6 +35,7 @@ struct DataCleanupService: Sendable {
 
     let coreDataStack: CoreDataStack
     let conversationManager: ConversationManager
+    let conversationMutationSerializer: ConversationRollupMutationSerializer
     // Both conformers are thread-safe (UserDefaults; the locked test store), but
     // the protocol itself cannot require Sendable without breaking UserDefaults.
     nonisolated(unsafe) let migrationFlags: MigrationFlagStore
@@ -49,6 +50,7 @@ struct DataCleanupService: Sendable {
     init(
         coreDataStack: CoreDataStack = .shared,
         conversationManager: ConversationManager = ConversationManager(),
+        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared,
         migrationFlags: MigrationFlagStore = UserDefaults.standard,
         identityAliasProvider: @escaping @Sendable (NSManagedObjectContext) async -> Set<String> = { context in
             await AliasManager.shared.getAliases(from: context)
@@ -56,6 +58,7 @@ struct DataCleanupService: Sendable {
     ) {
         self.coreDataStack = coreDataStack
         self.conversationManager = conversationManager
+        self.conversationMutationSerializer = conversationMutationSerializer
         self.migrationFlags = migrationFlags
         self.identityAliasProvider = identityAliasProvider
     }
@@ -65,27 +68,37 @@ struct DataCleanupService: Sendable {
     /// Runs full cleanup including duplicate removal.
     /// - Parameter context: The Core Data context
     func runFullCleanup(in context: NSManagedObjectContext) async {
-        await migrateConversationsToArchiveModel(in: context)
-        await splitConversationsByParticipantSetIfNeeded(in: context)
-        await decodeRFC2047HeaderTextIfNeeded(in: context)
-        await removeDuplicateMessages(in: context)
-        await removeDuplicateConversations(in: context)
-        await mergeActiveConversationDuplicates(in: context)
+        await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
+            await migrateConversationsToArchiveModel(in: context)
+            await splitConversationsByParticipantSetIfNeeded(in: context)
+            await decodeRFC2047HeaderTextIfNeeded(in: context)
+            await removeDuplicateMessages(in: context)
+            await removeDuplicateConversations(in: context)
+            await mergeActiveConversationDuplicates(in: context)
+            _ = await context.performSaveIfNeeded(
+                caller: "DataCleanupService.runFullCleanup"
+            )
+        }
     }
 
     /// Runs incremental cleanup (no duplicate message check).
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
-        await splitConversationsByParticipantSetIfNeeded(in: context)
-        await decodeRFC2047HeaderTextIfNeeded(in: context)
+        await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
+            await splitConversationsByParticipantSetIfNeeded(in: context)
+            await decodeRFC2047HeaderTextIfNeeded(in: context)
 
-        guard IncrementalCleanupSchedule.isDue() else {
-            Log.debug("Skipping incremental cleanup; cadence not due", category: .coreData)
-            return
+            if IncrementalCleanupSchedule.isDue() {
+                await runMaintenanceCleanupWithoutSerialization(in: context)
+                IncrementalCleanupSchedule.markRun()
+            } else {
+                Log.debug("Skipping incremental cleanup; cadence not due", category: .coreData)
+            }
+
+            _ = await context.performSaveIfNeeded(
+                caller: "DataCleanupService.runIncrementalCleanup"
+            )
         }
-
-        await runMaintenanceCleanup(in: context)
-        IncrementalCleanupSchedule.markRun()
     }
 
     /// Runs incremental cleanup in a dedicated background context.
@@ -93,12 +106,22 @@ struct DataCleanupService: Sendable {
     func runIncrementalCleanup() async {
         let context = coreDataStack.newBackgroundContext()
         await runIncrementalCleanup(in: context)
-        _ = await context.performSaveIfNeeded(caller: "DataCleanupService.runIncrementalCleanup")
     }
 
     /// Runs the heavier store-wide maintenance tasks.
     /// Use this for periodic maintenance or one-shot repair passes, not every sync.
     func runMaintenanceCleanup(in context: NSManagedObjectContext) async {
+        await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
+            await runMaintenanceCleanupWithoutSerialization(in: context)
+            _ = await context.performSaveIfNeeded(
+                caller: "DataCleanupService.runMaintenanceCleanup"
+            )
+        }
+    }
+
+    private func runMaintenanceCleanupWithoutSerialization(
+        in context: NSManagedObjectContext
+    ) async {
         await removeDuplicateMessages(in: context)
         await removeDuplicateConversations(in: context)
         await mergeActiveConversationDuplicates(in: context)
@@ -110,5 +133,11 @@ struct DataCleanupService: Sendable {
         // merging is cheaper once those are gone.
         await mergeDuplicatePersons(in: context)
         await mergeDuplicateLabels(in: context)
+    }
+
+    /// Pending optimistic-send anchors are a destructive-cleanup exclusion.
+    /// Callers deliberately fail closed if this fetch throws.
+    func pendingSendConversationIDs(in context: NSManagedObjectContext) throws -> Set<UUID> {
+        Set(try context.fetch(OutboundSendMutationRecord.fetchRequest()).compactMap(\.conversationId))
     }
 }

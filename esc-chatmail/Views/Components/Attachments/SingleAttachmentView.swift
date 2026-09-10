@@ -3,6 +3,7 @@ import SwiftUI
 struct SingleAttachmentView: View {
     let attachment: Attachment
     @ObservedObject var downloader: AttachmentDownloader
+    var imagePresentation: InlineImagePresentationPolicy = .standard
     let onTap: () -> Void
 
     var body: some View {
@@ -11,6 +12,7 @@ struct SingleAttachmentView: View {
                 ImageAttachmentBubble(
                     attachment: attachment,
                     downloader: downloader,
+                    presentation: imagePresentation,
                     onTap: {
                         // Only allow tap if downloaded or uploaded
                         if attachment.isReady {

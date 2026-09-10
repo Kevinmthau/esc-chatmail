@@ -4,7 +4,11 @@
 // unwrapEmailLineBreaks / formatSignOffLineBreaks) and
 // PlainTextQuoteRemover.swift.
 
-import { SIGNATURE_DELIMITER_PATTERN, isUppercaseChar } from './patterns'
+import {
+  SIGNATURE_DELIMITER_PATTERN,
+  SIGNATURE_NAME_CONTACT_WORD_PATTERN,
+  isUppercaseChar,
+} from './patterns'
 import { removeSignature } from './signature'
 
 export interface QuotedPart {
@@ -61,19 +65,9 @@ export function looksLikeNameLine(line: string): boolean {
   if (/\p{Nd}/u.test(trimmed)) return false
 
   const lowercased = trimmed.toLowerCase()
-  const disallowedFragments = [
-    '@',
-    'http',
-    'www.',
-    '|',
-    'tel:',
-    'fax',
-    'mobile',
-    'office',
-    'cell',
-    'phone',
-  ]
+  const disallowedFragments = ['@', 'http', 'www.', '|', 'tel:']
   if (disallowedFragments.some((fragment) => lowercased.includes(fragment))) return false
+  if (SIGNATURE_NAME_CONTACT_WORD_PATTERN.test(trimmed)) return false
 
   const words = trimmed.split(/\s+/).filter((w) => w.length > 0)
   return words.length >= 1 && words.length <= 4
@@ -136,6 +130,7 @@ export function unwrapEmailLineBreaks(text: string): string {
         if (
           !endsWithPunctuation &&
           !startsWithUppercase &&
+          !/^(https?:\/\/|www\.)/i.test(nextLine) &&
           !currentIsSignatureDelimiter &&
           !nextIsSignatureDelimiter
         ) {
@@ -173,6 +168,7 @@ export function unwrapEmailLineBreaks(text: string): string {
         !endsWithPunctuation &&
         !endsWithColon &&
         !startsWithUppercase &&
+        !/^(https?:\/\/|www\.)/i.test(trimmedLine) &&
         !nextIsListItem &&
         !currentIsSignatureDelimiter &&
         !nextIsSignatureDelimiter

@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import corpusJson from '@fixtures/golden_message_corpus.json'
+import { preparePersistPlan } from '@/sync/persist'
+import type { GmailHeader } from '@/gmail/types'
 import { normalizeEmail } from './normalizeEmail'
 import {
   calculateParticipantHash,
@@ -135,6 +138,28 @@ describe('makeRecipientParticipantSetIdentity', () => {
     expect(identity?.participantHash).toBe(VECTORS.gmailNormalized)
   })
 
+  it('excludes raw and cached Hide My Email recipients before keying', () => {
+    const aliases = new Set(['me@example.com'])
+    const cachedRelay = 'cached@privaterelay.appleid.com'
+    const identity = makeRecipientParticipantSetIdentity(
+      ['Alice <alice@example.com>', 'Hide My Email <raw@icloud.com>', cachedRelay],
+      aliases,
+      new Set([cachedRelay]),
+    )
+
+    expect(identity?.participants).toEqual(['alice@example.com'])
+  })
+
+  it('uses the self fallback when every usable recipient is Hide My Email', () => {
+    const identity = makeRecipientParticipantSetIdentity(
+      ['relay@privaterelay.appleid.com'],
+      new Set(['me@example.com']),
+      new Set(['relay@privaterelay.appleid.com']),
+    )
+
+    expect(identity?.participants).toEqual(['me@example.com'])
+  })
+
   it('returns null when nothing normalizes to a usable address', () => {
     expect(makeRecipientParticipantSetIdentity([], new Set())).toBeNull()
     expect(makeRecipientParticipantSetIdentity(['   '], new Set())).toBeNull()
@@ -189,4 +214,63 @@ describe('makeConversationIdentity', () => {
       expect(b.participantHash).toBe(VECTORS.single)
     })
   })
+})
+
+interface ConversationIdentityCase {
+  id: string
+  headers: GmailHeader[]
+  myAliases: string[]
+  expected: {
+    participants: string[]
+    participantHash: string
+    type: 'oneToOne' | 'group'
+    listId: null
+  }
+  notes?: string
+}
+
+const corpus = corpusJson as unknown as {
+  conversationIdentityCases: ConversationIdentityCase[]
+}
+
+// Replay through the production header-to-identity path, so parser, alias,
+// BCC and Hide My Email behavior are pinned alongside the hash bytes.
+// Revert-check: weakening extractEmail's angle-bracket bounds breaks the
+// unbalanced-display-name case; dropping identityParticipants' HME filter
+// breaks the To/Cc relay cases.
+describe('golden corpus: conversationIdentityCases', () => {
+  it('has cases', () => {
+    expect(corpus.conversationIdentityCases.length).toBeGreaterThan(0)
+  })
+
+  it.each(corpus.conversationIdentityCases.map((c) => [c.id, c] as const))(
+    '%s',
+    async (_id, scenario) => {
+      const plan = await preparePersistPlan(
+        {
+          id: scenario.id,
+          threadId: `thread-${scenario.id}`,
+          payload: {
+            mimeType: 'text/plain',
+            headers: scenario.headers,
+          },
+        },
+        {
+          myAliases: new Set(scenario.myAliases.map(normalizeEmail)),
+          hideMyEmailAddresses: new Set(),
+          sendAsAliases: [],
+          knownLabelIds: null,
+        },
+      )
+      expect(plan.kind, scenario.notes).toBe('message')
+      if (plan.kind !== 'message') return
+
+      expect(plan.identity.participants, scenario.notes).toEqual(scenario.expected.participants)
+      expect(plan.identity.participantHash, scenario.notes).toBe(scenario.expected.participantHash)
+      expect(plan.identity.type, scenario.notes).toBe(scenario.expected.type)
+      // Web has no list-conversation model; this shared section only covers
+      // participant identities. Do not silently treat list vectors as parity.
+      expect(scenario.expected.listId).toBeNull()
+    },
+  )
 })

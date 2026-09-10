@@ -965,8 +965,8 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
     }
 
-    func testLoadContent_incomingForwardedMessage_carriesFullForwardedBodyFromBodyText() async {
-        let messageId = "bubble-incoming-forwarded-full-body-\(UUID().uuidString)"
+    func testLoadContent_incomingLongForwardedMessage_returnsCompactStructuredSummary() async {
+        let messageId = "bubble-incoming-long-forward-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
@@ -1006,24 +1006,30 @@ final class MessageBubbleLoaderTests: XCTestCase {
             )
         )
 
-        let fullBodyText = result.forwardedDisplayContent?.fullBodyText ?? ""
-        XCTAssertTrue(fullBodyText.contains("Hi Olga,"), "Unexpected body: \(fullBodyText)")
+        XCTAssertEqual(result.fullTextContent, "FYI")
+        XCTAssertFalse(result.hasRichHTMLContent)
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Brynn Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Weekend plans")
+        let previewSnippet = result.forwardedDisplayContent?.previewSnippet ?? ""
         XCTAssertTrue(
-            fullBodyText.contains("whether Saturday afternoon still works"),
-            "The transcript body must carry the entire forwarded message: \(fullBodyText)"
+            previewSnippet.hasPrefix("Hi Olga, Here is the first paragraph"),
+            "Unexpected preview: \(previewSnippet)"
         )
+        XCTAssertLessThanOrEqual(previewSnippet.count, 183)
+        XCTAssertTrue(previewSnippet.hasSuffix("..."))
+        XCTAssertFalse(previewSnippet.contains("whether Saturday afternoon still works"))
     }
 
-    func testLoadContent_structuredChatPreviewForward_prefersRawBodyForFullBodyText() async {
-        let messageId = "bubble-forwarded-structured-preview-full-body-\(UUID().uuidString)"
+    func testLoadContent_structuredChatPreviewForward_keepsPreviewSnippetOverRawBodyTail() async {
+        let messageId = "bubble-forwarded-structured-preview-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
         )
 
-        // The persisted preview parses with full header fields but carries a
-        // stripped, truncated body; the raw bodyText has the complete email.
+        // The persisted preview is already the bounded transcript source. A
+        // longer raw body must not be injected into the forwarded card.
         let result = await loader.loadContent(
             from: MessageBubbleContentRequest(
                 messageID: messageId,
@@ -1066,12 +1072,10 @@ final class MessageBubbleLoaderTests: XCTestCase {
             )
         )
 
+        XCTAssertEqual(result.fullTextContent, "FYI")
         XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Brynn Example")
-        let fullBodyText = result.forwardedDisplayContent?.fullBodyText ?? ""
-        XCTAssertTrue(
-            fullBodyText.contains("complete second paragraph"),
-            "fullBodyText must come from the raw bodyText, not the truncated preview: \(fullBodyText)"
-        )
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Weekend plans")
+        XCTAssertEqual(result.forwardedDisplayContent?.previewSnippet, "Hi Olga,")
     }
 
     func testLoadContent_incomingForwardedMessageWithOutlookHeaders_returnsStructuredForwardPreview() async {
@@ -1394,7 +1398,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.hasRichHTMLContent)
         XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
         XCTAssertTrue(
-            MessageDisplayPolicy.shouldShowHTMLPreview(
+            MessageDisplayPolicy.shouldShowHTMLPreview(.init(
                 hasHTMLSource: result.htmlAnalysis.hasHTMLSource,
                 isForwardedEmail: true,
                 isNewsletter: false,
@@ -1403,7 +1407,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 isOneToOneConversation: true,
                 subject: "Fwd: Dinner reservation",
                 senderEmail: "alice@example.com"
-            )
+            ))
         )
     }
 
@@ -2075,6 +2079,137 @@ final class MessageBubbleLoaderTests: XCTestCase {
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
     }
 
+    @MainActor
+    func testBubble_recoversInvalidatedAnalysisWithinSameLoadAndSignature() async throws {
+        let fixture = try BubbleRetryFixture()
+        defer { fixture.removeFiles() }
+        let viewModel = MessageBubbleViewModel(loader: fixture.loader)
+        // Mirrors MessageBubble's single .task(id:) invocation: recovery must happen before
+        // this call returns, without a second task, signature change, or view-model recreation.
+        let load = Task { await viewModel.loadIfNeeded(using: fixture.context) }
+        guard await fixture.parsedProvider.waitForEntry() else {
+            await fixture.parsedProvider.resume()
+            await load.value
+            return XCTFail("Analysis producer did not reach the parser")
+        }
+        await fixture.renderedCache.invalidate(messageId: fixture.context.messageID)
+        await fixture.parsedProvider.resume()
+        await load.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.fullTextContent, "Hello")
+        XCTAssertEqual(viewModel.htmlAnalysis.referencedInlineContentIDs, ["hero"])
+
+        await viewModel.loadIfNeeded(using: fixture.context)
+        XCTAssertEqual(viewModel.htmlAnalysis.referencedInlineContentIDs, ["hero"])
+        let parserCallCount = await fixture.parsedProvider.callCount()
+        XCTAssertEqual(parserCallCount, 2)
+    }
+
+    @MainActor
+    func testBubble_exhaustedAnalysisRetriesRemainEligibleForSameSignature() async throws {
+        let fixture = try BubbleRetryFixture(invalidatedProductionCount: 3)
+        defer { fixture.removeFiles() }
+        let viewModel = MessageBubbleViewModel(loader: fixture.loader)
+        await fixture.parsedProvider.resume()
+
+        await viewModel.loadIfNeeded(using: fixture.context)
+
+        let exhaustedCallCount = await fixture.parsedProvider.callCount()
+        XCTAssertEqual(exhaustedCallCount, 3, "One visible load must bound its analysis attempts")
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertNil(viewModel.fullTextContent)
+        XCTAssertTrue(viewModel.htmlAnalysis.referencedInlineContentIDs.isEmpty)
+
+        await viewModel.loadIfNeeded(using: fixture.context)
+
+        let recoveredCallCount = await fixture.parsedProvider.callCount()
+        XCTAssertEqual(recoveredCallCount, 4)
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.fullTextContent, "Hello")
+        XCTAssertEqual(viewModel.htmlAnalysis.referencedInlineContentIDs, ["hero"])
+    }
+
+    @MainActor
+    func testBubble_cancelledInvalidatedAnalysisDoesNotRetryUntilNextLoad() async throws {
+        let fixture = try BubbleRetryFixture()
+        defer { fixture.removeFiles() }
+        let viewModel = MessageBubbleViewModel(loader: fixture.loader)
+        let load = Task { await viewModel.loadIfNeeded(using: fixture.context) }
+        guard await fixture.parsedProvider.waitForEntry() else {
+            await fixture.parsedProvider.resume()
+            await load.value
+            return XCTFail("Analysis producer did not reach the parser")
+        }
+        await fixture.renderedCache.invalidate(messageId: fixture.context.messageID)
+        load.cancel()
+        await fixture.parsedProvider.resume()
+        await load.value
+
+        let cancelledCallCount = await fixture.parsedProvider.callCount()
+        XCTAssertEqual(cancelledCallCount, 1, "A cancelled bubble task must not start another analysis")
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertNil(viewModel.fullTextContent)
+
+        await viewModel.loadIfNeeded(using: fixture.context)
+
+        let recoveredCallCount = await fixture.parsedProvider.callCount()
+        XCTAssertEqual(recoveredCallCount, 2)
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.htmlAnalysis.referencedInlineContentIDs, ["hero"])
+    }
+
+    func testCachedHTMLAnalysis_invalidatedProducerDoesNotCachePlaceholder() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BubbleAnalysisInvalidation-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        let renderedCache = RenderedMessageCache()
+        let parsedProvider = SuspendedParsedEmailProvider()
+        let recovery = MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:])
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            processedTextCache: ProcessedTextCache(),
+            htmlContentHandler: handler,
+            htmlContentLoader: HTMLContentLoader(contentHandler: handler, recoveryService: recovery),
+            htmlContentRecoveryService: recovery,
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache(),
+            parsedEmailProvider: parsedProvider,
+            renderedMessageCache: renderedCache
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let messageID = UUID().uuidString
+        XCTAssertNotNil(handler.saveHTML("<html><body><img src=\"cid:hero\">Hello</body></html>", for: messageID))
+        let request = MessageBubbleContentRequest(
+            messageID: messageID, bodyText: nil, bodyStorageURI: nil,
+            cleanedSnippet: "Hello", snippet: "Hello", subject: "Hello", senderName: nil,
+            hasHTMLSource: true, hasAttachments: true, isFromMe: false,
+            isForwardedEmail: false, isLikelyCalendarInvite: false,
+            effectiveSenderEmail: "alice@example.com", attachmentSnapshots: []
+        )
+        let capturedContext = await loader.captureAccountWorkContext()
+        let context = try XCTUnwrap(capturedContext)
+        let firstLoad = Task { await loader.cachedHTMLAnalysis(for: request, accountContext: context) }
+        let deadline = Date().addingTimeInterval(5)
+        while !(await parsedProvider.hasEntered()), Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let entered = await parsedProvider.hasEntered()
+        guard entered else {
+            await parsedProvider.resume()
+            _ = await firstLoad.value
+            return XCTFail("Analysis producer did not reach the parser")
+        }
+        await renderedCache.invalidate(messageId: messageID)
+        await parsedProvider.resume()
+        let dropped = await firstLoad.value
+        XCTAssertNil(dropped)
+
+        // Revert-check: caching the nil producer's fallback in cachedHTMLAnalysis
+        // makes this same-key retry return the placeholder instead of real analysis.
+        let retried = await loader.cachedHTMLAnalysis(for: request, accountContext: context)
+        XCTAssertEqual(retried?.referencedInlineContentIDs, ["hero"])
+    }
+
     func testLoadContent_accountTransitionWhileAnalysisIsSuspendedDoesNotRecoverOrRepopulateCaches() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MessageBubbleLoaderAccountBoundary-\(UUID().uuidString)", isDirectory: true)
@@ -2150,9 +2285,12 @@ final class MessageBubbleLoaderTests: XCTestCase {
         await renderedMessageCache.reopenAccountWork()
 
         let result = await loadTask.value
+        XCTAssertFalse(result.isComplete)
         XCTAssertNil(result.fullTextContent)
         XCTAssertFalse(result.hasRichHTMLContent)
         XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
+        let parserCallCount = await parsedEmailProvider.callCount()
+        XCTAssertEqual(parserCallCount, 1, "An account transition must not retry the old request")
         let recoveryCallCount = await recoveryService.recoveryCallCount()
         XCTAssertEqual(recoveryCallCount, 0)
 
@@ -2216,11 +2354,66 @@ private actor CountingHTMLContentRecoverer: HTMLContentRecovering {
     }
 }
 
+private struct BubbleRetryFixture {
+    let directory: URL
+    let renderedCache: RenderedMessageCache
+    let parsedProvider: SuspendedParsedEmailProvider
+    let loader: MessageBubbleLoader
+    let context: MessageBubbleLoadContext
+
+    init(invalidatedProductionCount: Int = 0) throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BubbleRetry-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        renderedCache = RenderedMessageCache()
+        parsedProvider = SuspendedParsedEmailProvider(
+            renderedCache: renderedCache,
+            invalidatedProductionCount: invalidatedProductionCount
+        )
+        let recovery = MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:])
+        loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            processedTextCache: ProcessedTextCache(),
+            htmlContentHandler: handler,
+            htmlContentLoader: HTMLContentLoader(contentHandler: handler, recoveryService: recovery),
+            htmlContentRecoveryService: recovery,
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache(),
+            parsedEmailProvider: parsedProvider,
+            renderedMessageCache: renderedCache
+        )
+        let messageID = UUID().uuidString
+        _ = try XCTUnwrap(handler.saveHTML("<html><body><img src=\"cid:hero\">Hello</body></html>", for: messageID))
+        let request = MessageBubbleContentRequest(
+            messageID: messageID, bodyText: nil, chatPreviewText: "Hello", bodyStorageURI: nil,
+            cleanedSnippet: "Hello", snippet: "Hello", subject: "Hello", senderName: nil,
+            hasHTMLSource: true, hasAttachments: true, isFromMe: false,
+            isForwardedEmail: false, isLikelyCalendarInvite: false,
+            effectiveSenderEmail: "alice@example.com", attachmentSnapshots: []
+        )
+        context = MessageBubbleLoadContext(
+            messageID: messageID, contentSignature: "unchanged", prefetchedSenderName: nil,
+            senderRequest: nil, contentRequest: request
+        )
+    }
+
+    func removeFiles() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
 private actor SuspendedParsedEmailProvider: ParsedEmailProviding {
+    private let renderedCache: RenderedMessageCache?
+    private let invalidatedProductionCount: Int
+    private var calls = 0
     private var entered = false
     private var enteredContinuations: [CheckedContinuation<Void, Never>] = []
     private var releaseContinuation: CheckedContinuation<Void, Never>?
     private var shouldRelease = false
+
+    init(renderedCache: RenderedMessageCache? = nil, invalidatedProductionCount: Int = 0) {
+        self.renderedCache = renderedCache
+        self.invalidatedProductionCount = invalidatedProductionCount
+    }
 
     func parsedEmail(
         messageId: String,
@@ -2229,6 +2422,8 @@ private actor SuspendedParsedEmailProvider: ParsedEmailProviding {
         includeRenderQuality: Bool,
         includePreviewImages: Bool
     ) async -> ParsedEmail? {
+        calls += 1
+        let callIndex = calls
         entered = true
         let continuations = enteredContinuations
         enteredContinuations.removeAll()
@@ -2238,6 +2433,10 @@ private actor SuspendedParsedEmailProvider: ParsedEmailProviding {
             await withCheckedContinuation { continuation in
                 releaseContinuation = continuation
             }
+        }
+
+        if callIndex <= invalidatedProductionCount {
+            await renderedCache?.invalidate(messageId: messageId)
         }
 
         return try? ParsedEmail.parse(
@@ -2268,6 +2467,18 @@ private actor SuspendedParsedEmailProvider: ParsedEmailProviding {
     }
 
     func invalidate(messageId: String) async {}
+
+    func callCount() -> Int { calls }
+
+    func hasEntered() -> Bool { entered }
+
+    func waitForEntry(timeout: TimeInterval = 5) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !entered, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return entered
+    }
 
     func waitUntilEntered() async {
         guard !entered else { return }

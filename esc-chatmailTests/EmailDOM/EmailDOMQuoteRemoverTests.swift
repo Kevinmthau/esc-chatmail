@@ -1,4 +1,5 @@
 import XCTest
+import SwiftSoup
 @testable import esc_chatmail
 
 /// Tests for the DOM-based quote remover. These intentionally cover the
@@ -15,6 +16,262 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
     private func plainText(_ html: String?) -> String {
         guard let html else { return "" }
         return EmailDocument.tryParse(html)?.plainText(preserveParagraphs: true) ?? ""
+    }
+
+    // MARK: - F12 longer signatures and labeled contact links
+
+    private func trailingContactHTML(_ html: String) throws -> String {
+        let document = try SwiftSoup.parse(html)
+        document.outputSettings().prettyPrint(pretty: false)
+        try EmailDOMQuoteRemover.truncateTrailingContactSignature(in: document)
+        return try document.body()?.html() ?? ""
+    }
+
+    func testF12LongSignatureUsesDOMLookbackIncludingBlankSlots() throws {
+        // Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature's 80-slot DOM lookback.
+        for separator in ["", "<p></p>"] {
+            let contacts = Array(repeating: "<p>john@example.test</p>", count: 40).joined(separator: separator)
+            let html = "<p>Current reply.</p><p>Best,</p><p>John Smith</p>" + contacts
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), "Current reply.\n\nBest,\nJohn Smith", cleaned)
+
+            let authored = "<p>Here are the contacts:</p><p>Partner</p>" + contacts
+            XCTAssertEqual(plainText(try trailingContactHTML(authored)), plainText(authored))
+        }
+    }
+
+    func testF12DOMLookbackBoundaryStaysBounded() throws {
+        // Revert-check: the signoff is exactly lastNonEmpty - 80, with inclusive indexing.
+        let prefix = "<p>Current reply.</p><p>Best,</p><p>John Smith</p>"
+        let boundary = prefix + Array(repeating: "<p>john@example.test</p>", count: 79).joined()
+        XCTAssertEqual(plainText(try trailingContactHTML(boundary)), "Current reply.\n\nBest,\nJohn Smith")
+        let beyond = prefix + Array(repeating: "<p>john@example.test</p>", count: 82).joined()
+        XCTAssertEqual(plainText(try trailingContactHTML(beyond)), plainText(beyond))
+    }
+
+    func testF12LabeledLinksRemoveOnlyCorroboratedSignatureAcrossLineShapes() throws {
+        // Revert-check: signatureLines / trailing link-contact evidence, independent of wrapper and F1 cleanup.
+        let email = "<a href='MAILTO:john@example.test'>Email me</a>"
+        let phone = "<a href='tel:+14155551212'>Call the office</a>"
+        let lines = ["Best,", "John Smith", "Partner", email, phone]
+        let shapes = [
+            "<p>Current reply.</p>" + lines.map { "<p>\($0)</p>" }.joined(),
+            "<div>Current reply.<br>" + lines.joined(separator: "<br>") + "</div>",
+            "<table><tr><td>Current reply.<br>Best,<br>John Smith<br>Partner</td><td>\(email)</td><td>\(phone)</td></tr></table>",
+            // Revert-check: removeSignatureLines invalidates every removed row's table, even with an earlier paragraph boundary.
+            "<p>Current reply.</p><p>Best,</p><table><tr><td>John Smith</td><td>\(email)</td><td>\(phone)</td></tr></table>",
+            // Revert-check: shouldPreserveContactTable must not count contact labels as repeated people.
+            "<p>Current reply.</p><p>Best,</p><p>John Smith</p><table><tr><td><a href='mailto:john@example.test'>Email</a></td></tr><tr><td><a href='tel:+14155551212'>Telephone</a></td></tr></table>"
+        ]
+        for html in shapes {
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertTrue(plainText(cleaned).contains("Current reply."), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("Best,"), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("John Smith"), cleaned)
+            XCTAssertFalse(cleaned.lowercased().contains("mailto:"), cleaned)
+            XCTAssertFalse(cleaned.lowercased().contains("tel:"), cleaned)
+            XCTAssertFalse(plainText(cleaned).contains("Partner"), cleaned)
+
+            let authored = html + "<p>P.S. Please email me if the estimate changes.</p>"
+            XCTAssertEqual(plainText(try trailingContactHTML(authored)), plainText(authored))
+        }
+    }
+
+    func testF12LinkContactListsAndDirectoriesRemainIntact() throws {
+        let email = "<a href='mailto:john@example.test'>Email me</a>"
+        let phone = "<a href='tel:+14155551212'>Call the office</a>"
+        let directory = "<table><tr><td>John Smith</td><td>\(email)</td></tr><tr><td>Jane Smith</td><td>\(phone)</td></tr></table>"
+        let stackedDirectory = "<table><tr><td>John Smith<br>Partner<br>\(email)<br>\(phone)</td></tr>" +
+            "<tr><td>Jane Smith<br>Partner<br>\(email)<br>\(phone)</td></tr></table>"
+        for html in [
+            "<p>Here are the contacts:</p><p>Partner</p><p>John Smith</p><p>\(email)</p><p>\(phone)</p>",
+            "<p>Best,</p>" + directory,
+            directory + "<p>Best,</p><p>Alex</p>",
+            "<p>Current reply.</p>" + stackedDirectory
+        ] {
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), plainText(html))
+            let originalDocument = try SwiftSoup.parse(html)
+            let cleanedDocument = try SwiftSoup.parse(cleaned)
+            for selector in ["table", "tr", "td", "a[href]"] {
+                XCTAssertEqual(try cleanedDocument.select(selector).size(), try originalDocument.select(selector).size())
+            }
+        }
+    }
+
+    func testF12LinkedContactDirectoriesPreserveBlockSeparatedRecords() throws {
+        for block in ["p", "div"] {
+            for wrapsName in [true, false] {
+                let rows = ["Jane Doe", "John Smith"].map { name in
+                    let nameHTML = wrapsName ? "<\(block)>\(name)</\(block)>" : name
+                    return "<tr><td>" + nameHTML +
+                        "<\(block)>Partner</\(block)>" +
+                        "<\(block)><a href='mailto:person@example.test'>Email me</a></\(block)>" +
+                        "<\(block)><a href='tel:+14155551212'>Call the office</a></\(block)>" +
+                        "</td></tr>"
+                }.joined()
+                let html = "<p>The team is listed below.</p><table>\(rows)</table>"
+                let cleaned = try trailingContactHTML(html)
+                XCTAssertEqual(plainText(cleaned), plainText(html), html)
+                let document = try SwiftSoup.parse(cleaned)
+                XCTAssertEqual(try document.select("tr").size(), 2, html)
+                XCTAssertEqual(try document.select("a[href]").size(), 4, html)
+            }
+        }
+    }
+
+    func testF12LinkedContactDirectoriesPreserveSideBySideRecords() throws {
+        for block in ["p", "div", "br"] {
+            for wrapsName in block == "br" ? [false] : [true, false] {
+                let cells = ["Jane Doe", "John Smith"].map { name in
+                    let lines = ["Partner",
+                                 "<a href='mailto:person@example.test'>Email me</a>",
+                                 "<a href='tel:+14155551212'>Call the office</a>"]
+                    let nameHTML = wrapsName ? "<\(block)>\(name)</\(block)>" : name
+                    let content = block == "br" ? ([name] + lines).joined(separator: "<br>") :
+                        nameHTML + lines.map { "<\(block)>\($0)</\(block)>" }.joined()
+                    return "<td>\(content)</td>"
+                }.joined()
+                let html = "<p>The team is listed below.</p><table><tr>\(cells)</tr></table>"
+                let cleaned = try trailingContactHTML(html)
+                XCTAssertEqual(plainText(cleaned), plainText(html), html)
+                let document = try SwiftSoup.parse(cleaned)
+                XCTAssertEqual(try document.select("td").size(), 2, html)
+                XCTAssertEqual(try document.select("a[href]").size(), 4, html)
+            }
+        }
+    }
+
+    func testF12LinkedContactDirectoriesPreserveSequentialRecordsOutsideTables() throws {
+        let lines = ["Jane Doe", "Partner",
+                     "<a href='mailto:jane@example.test'>Email me</a>",
+                     "<a href='tel:+14155551212'>Call the office</a>",
+                     "John Smith", "Partner",
+                     "<a href='mailto:john@example.test'>Email me</a>",
+                     "<a href='tel:+14155551213'>Call the office</a>"]
+        for block in ["p", "div", "br"] {
+            let content = block == "br" ? "<div>\(lines.joined(separator: "<br>"))</div>" :
+                lines.map { "<\(block)>\($0)</\(block)>" }.joined()
+            let html = "<p>The team is listed below.</p>" + content
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), plainText(html), html)
+            XCTAssertEqual(try SwiftSoup.parse(cleaned).select("a[href]").size(), 4, html)
+        }
+    }
+
+    func testF12LinkedContactDirectoriesPreserveCombinedNamesAndTitles() throws {
+        let lines = ["Jane Doe, Partner",
+                     "<a href='mailto:jane@example.test'>Email me</a>",
+                     "<a href='tel:+14155551212'>Call the office</a>",
+                     "John Smith, Partner",
+                     "<a href='mailto:john@example.test'>Email me</a>",
+                     "<a href='tel:+14155551213'>Call the office</a>"]
+        for block in ["p", "div", "br"] {
+            let content = block == "br" ? "<div>\(lines.joined(separator: "<br>"))</div>" :
+                lines.map { "<\(block)>\($0)</\(block)>" }.joined()
+            let html = "<p>The team is listed below.</p>" + content
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), plainText(html), html)
+            XCTAssertEqual(try SwiftSoup.parse(cleaned).select("a[href]").size(), 4, html)
+        }
+    }
+
+    func testF12LinkedSinglePersonSignatureKeepsNameAndCompanyInOneRecord() throws {
+        let lines = ["The estimate is ready.", "Best,", "Jane Doe", "Example Ventures",
+                     "<a href='mailto:jane@example.test'>Email me</a>",
+                     "<a href='tel:+14155551212'>Call the office</a>"]
+        let html = lines.map { "<p>\($0)</p>" }.joined()
+        let cleaned = try trailingContactHTML(html)
+        XCTAssertEqual(plainText(cleaned), "The estimate is ready.\n\nBest,\nJane Doe", cleaned)
+        XCTAssertTrue(try SwiftSoup.parse(cleaned).select("a[href]").isEmpty(), cleaned)
+    }
+
+    func testF12LabeledLinksRejectInstructionsMalformedTargetsAndAdjacentEvidence() throws {
+        let validPhone = "<a href='tel:+14155551212'>Call the office</a>"
+        let invalidEmailLines = [
+            "<a href='mailto:john@example.test'>Please email me if the estimate changes.</a>",
+            "Please <a href='mailto:john@example.test'>Email me</a> if the estimate changes.",
+            "<a href='https://example.test/estimate'>Email me</a>",
+            "<a href='mailto:'>Email me</a>",
+            "<a href='mailto:john'>Email me</a>",
+            "<a href='mailto:.@example.test'>Email me</a>",
+            "<a href='mailto:a..b@example.test'>Email me</a>",
+            "<a href='mailto:a.@example.test'>Email me</a>",
+            "<a href='mailto:?body=john@example.test'>Email me</a>",
+            "<a href='mailto:john@example.test\n'>Email me</a>",
+            "<a href=' mailto:john@example.test'>Email me</a>",
+            "<a href='x-mailto:john@example.test'>Email me</a>",
+            "<a href='mailto:john@example.test'>Call the office</a>",
+            "<a href='tel:+14155551212'>Email me</a>",
+            "Phone: <a href='mailto:john@example.test'>Email me</a>",
+            "Email: <a href='tel:+14155551212'>Call the office</a>",
+            "<a href='mailto:john@example.test' hidden>Email me</a>Reference",
+            "<a href='mailto:john@example.test'><img src='cid:badge'></a>Email me",
+            "<a href='mailto:john@example.test'>Email me<img src='cid:badge'></a>",
+            "<a href='mailto:john@example.test'>Email me</a> <a href='https://example.test/estimate'>Read the estimate</a>",
+            "<a href='mailto:john@example.test'>Email me<br>Read the estimate</a>",
+            "<a href='mailto:john@example.test'><span hidden>Email me</span>Read the estimate</a>"
+        ]
+        for email in invalidEmailLines {
+            let html = "<p>Current reply.</p><div>Best,<br>John Smith<br>Partner<br>\(email)<br>\(validPhone)</div>"
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), plainText(html), html)
+            XCTAssertEqual(cleaned.contains("cid:badge"), html.contains("cid:badge"), html)
+        }
+        for target in ["tel:", "tel:123", "tel:+14155551212abc", "tel:+14155551212\n", "https://example.test/phone", "x-tel:+14155551212"] {
+            let html = "<p>Current reply.</p><p>Best,</p><p>John Smith</p><p>Partner</p>" +
+                "<p><a href='mailto:john@example.test'>Email me</a></p><p><a href='\(target)'>Call the office</a></p>"
+            XCTAssertEqual(plainText(try trailingContactHTML(html)), plainText(html), target)
+        }
+        for block in [
+            "<p><a href='mailto:john@example.test'>Email me</a> | \(validPhone)</p>",
+            "<p><a href='mailto:john@example.test'>Email me</a></p>",
+            "<table><tr><td><a href='mailto:john@example.test'>Email me</a></td><td>Call the office</td></tr></table>"
+        ] {
+            let html = "<p>Current reply.</p><p>Best,</p><p>John Smith</p><p>Partner</p>" + block
+            XCTAssertEqual(plainText(try trailingContactHTML(html)), plainText(html), html)
+        }
+    }
+
+    func testF12LinkEvidenceCountsLinesAndDistinguishesTelephoneFromEmail() throws {
+        let email = "<a href='mailto:john@example.test?subject=Estimate'>E<b>mail</b> me</a>"
+        let secondEmail = "<a href='mailto:office@example.test'><b>Email</b> <i>us</i></a>"
+        let phone = "<a href='TEL:+1 (415) 555-1212'><span hidden>Ignore this</span>Call the <b>office</b></a>"
+        let body = "<p>Current reply.</p>"
+        for contacts in [
+            "<p>\(email)</p><p></p><p>\(phone)</p>",
+            "<p>\(email) | \(phone)</p><p>\(secondEmail)</p>",
+            "<p>Email: \(email)</p><p>Phone: \(phone)</p>"
+        ] {
+            // Revert-check: linkedContactEvidence feeds blank lookback, one-count-per-line, and non-email accounting.
+            let html = body + "<p>John Smith</p>" + contacts
+            XCTAssertEqual(plainText(try trailingContactHTML(html)), "Current reply.", html)
+        }
+        let emailOnly = body + "<p>John Smith</p><p>\(email)</p><p>\(secondEmail)</p>"
+        XCTAssertEqual(plainText(try trailingContactHTML(emailOnly)), plainText(emailOnly))
+    }
+
+    func testF12InlineProjectionKeepsAnchorSlicesAndExistingTextOffsets() throws {
+        // Revert-check: inlineHeaderLines associates link metadata during traversal, never by ancestor text.
+        let document = try SwiftSoup.parse("""
+        <div id='lines'>  😀 Reply.<br><a href='mailto:john@example.test'>E<b>mail</b> me<br><span hidden>Hidden label</span>Email us</a><br>Call the office<a href='tel:+14155551212' hidden>Call me</a><a href='mailto:john@example.test'><img src='cid:badge'></a></div>
+        <table><tr><td id='email'><a href='mailto:john@example.test'>Email me</a></td><td id='plain'>Call the office</td></tr></table>
+        """)
+        let element = try XCTUnwrap(document.getElementById("lines"))
+        let lines = EmailDOMQuoteRemover.inlineHeaderLines(in: element)
+        XCTAssertEqual(lines.map(\.text), ["😀 Reply.", "E mail me", "Email us", "Call the office"])
+        XCTAssertEqual(lines[0].startUTF16Offset, 2)
+        XCTAssertEqual(lines[1].startTextNode?.getWholeText(), "E")
+        XCTAssertEqual(lines[1].startUTF16Offset, 0)
+        XCTAssertEqual(lines[1].links.map(\.text), ["Email me"])
+        XCTAssertEqual(lines[2].links.map(\.text), ["Email us"])
+        XCTAssertEqual(lines[1].links.map(\.rawTarget), ["mailto:john@example.test"])
+        XCTAssertTrue(lines[3].links.isEmpty)
+        XCTAssertEqual(lines[3].nonLinkText, "Call the office")
+        let emailCell = try XCTUnwrap(document.getElementById("email"))
+        let plainCell = try XCTUnwrap(document.getElementById("plain"))
+        XCTAssertEqual(EmailDOMQuoteRemover.inlineHeaderLines(in: emailCell).first?.links.count, 1)
+        XCTAssertEqual(EmailDOMQuoteRemover.inlineHeaderLines(in: plainCell).first?.links.count, 0)
     }
 
     // MARK: - Nil / empty
@@ -451,6 +708,36 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
 
     func testRemoveQuotes_signatureMode_preservesReferenceBeforeContactSignature() {
         let referenceLines = [
+            "Do not pay the consultant",
+            "DO NOT PAY THE CONSULTANT",
+            "PLEASE CHECK WITH YOUR ATTORNEY",
+            "DO NOT PAY THE CONSULTANT UNTIL APPROVED",
+            "ATTORNEY APPROVAL IS REQUIRED BEFORE PAYMENT",
+            "Consultant Approval Required Before You Pay",
+            "STOP WORK UNTIL COUNSEL REVIEWS",
+            "HOLD FUNDS UNTIL ATTORNEY CONFIRMS",
+            "ESCALATE THIS TO THE ATTORNEY",
+            "Hold Funds Until Attorney Confirms",
+            "COMPANY CLOSED UNTIL FURTHER NOTICE",
+            "Company Closed Until Further Notice",
+            "GROUP DISCOUNTS AVAILABLE THROUGH FRIDAY",
+            "Please check with your attorney",
+            "I will check with counsel",
+            "We need a new engineer",
+            "The analyst will follow up",
+            "Payment pending attorney approval",
+            "Approval pending from counsel",
+            "Service period: 2026-2027",
+            "Service date: 2026-0815",
+            "Office hours: 0900-1700",
+            "Phone model: 1234-5678",
+            "Emergency line: 08-15-2026 (office)",
+            "Emergency line: 2026-0815",
+            "After hours: 0900-1700",
+            "After hours: 09.00-17.00",
+            "After hours: 9.00-17.00",
+            "After hours: 0900-2400",
+            "Emergency line: 08 - 15 - 2026",
             "P2026-0815",
             "Deadline: 2026-08-15",
             "Case: 2026-0815",
@@ -512,7 +799,20 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
     }
 
     func testIsContactSignatureLine_phoneFormatsDistinguishesStandaloneLinesFromProse() {
+        // Revert-check: separator collapse, labelled business-hours modifiers, descriptive phone labels.
         let signatureLines = [
+            "Office: 770-555-0148 | Fax: 770-555-0149",
+            "T: 415-555-1212 | F: 650-555-1213",
+            "P: 415-555-1212 | M: 650-555-1213",
+            "Cell: 415-555-1212 | Office: 650-555-1213",
+            "Office: 914-564-1325 | Monday - Friday | 9am - 5pm",
+            "Office: 914-564-1325 | Mon–Fri 9am–5pm",
+            "Phone: 914-564-1325 | 24/7",
+            "Emergency line after hours: 914-373-4658",
+            "After hours: 914-373-4658",
+            "Emergency line: 555-1212 x112",
+            "Toll-free number: +1 800-555-1212",
+
             "415-555-1212",
             "(415) 555-1212",
             "+1 415 555 1212",
@@ -547,6 +847,26 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             "John Smith | 415-555-1212"
         ]
         let proseLines = [
+            "Office: 914-564-1325 | call me anytime",
+            "Phone: 914-564-1325 | Invoice 12345",
+            "914-564-1325 | Mon-Fri 9am-5pm",
+            "Call the emergency line: 914-373-4658.",
+            "Reference line: 12345678",
+            "Office reference: 914-373-4658",
+            "Emergency line: 08-15-2026",
+            "Emergency line: 12345678",
+            "Service period: 2026-2027",
+            "Service date: 2026-0815",
+            "Office hours: 0900-1700",
+            "Phone model: 1234-5678",
+            "Emergency line: 08-15-2026 (office)",
+            "Emergency line: 2026-0815",
+            "After hours: 0900-1700",
+            "After hours: 09.00-17.00",
+            "After hours: 9.00-17.00",
+            "After hours: 0900-2400",
+            "Emergency line: 08 - 15 - 2026",
+
             "Can you give me a call? 415-283-6379",
             "Call me at (415) 555-1212 when you are free.",
             "My mobile is +1 415 555 1212; text me first.",
@@ -574,6 +894,366 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         for line in proseLines {
             XCTAssertFalse(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected prose line: \(line)")
         }
+    }
+
+    func testBRAndTableSignaturesPreserveAuthoredPrefixAndSignOffName() {
+        // Revert-check: sub-line expansion, ancestor raw-HTML invalidation, bounded surgery, sign-off/name policy.
+        let contact = "Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        let shapes = [
+            "<div>Current reply.<br>\(contact)</div>",
+            "<p>Current reply.</p><p>\(contact)</p>",
+            "<table><tr><td>Current reply.<br>\(contact)</td></tr></table>",
+            "<p>Current reply.</p><table><tr><td><img src='cid:badge'></td><td>\(contact)</td></tr></table>"
+        ]
+        for html in shapes {
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            let text = plainText(cleaned)
+            XCTAssertTrue(text.contains("Current reply."))
+            XCTAssertTrue(text.contains("Best,"))
+            XCTAssertTrue(text.contains("John Smith"))
+            XCTAssertFalse(text.contains("Partner"), cleaned)
+            XCTAssertFalse(text.contains("john@example.test"))
+            // Leading media has no reliable signature ownership; retain it during inferred cleanup.
+            XCTAssertEqual(cleaned.contains("cid:badge"), html.contains("cid:badge"))
+        }
+    }
+
+    func testInferredSignaturePreservesLeadingMedia() {
+        let contact = "Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        for media in ["<img src='cid:floorplan'>", "<svg><image href='cid:floorplan'></image></svg>"] {
+            for block in [
+                "<div>\(media)<br>\(contact)</div>",
+                "<div>\(media)\(contact)</div>",
+                "<table><tr><td>\(media)<br>\(contact)</td></tr></table>",
+                "<table><tr><td>\(media)</td><td>\(contact)</td></tr></table>"
+            ] {
+                let html = "<p>The floorplan is attached below.</p>" + block
+                let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+                XCTAssertTrue(cleaned.contains("cid:floorplan"), cleaned)
+                XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+                XCTAssertTrue(plainText(cleaned).contains("John Smith"), cleaned)
+            }
+        }
+    }
+
+    func testInferredSignaturePreservesTrailingMediaInsideSharedBlock() {
+        let contact = "John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        for block in [
+            "<div>Current reply.<br>\(contact)<br><img src='cid:damage'></div>",
+            "<table><tr><td>Current reply.<br>\(contact)<br><img src='cid:damage'></td></tr></table>",
+            "<table><tr><td>Current reply.<br>\(contact)</td><td><img src='cid:damage'></td></tr></table>"
+        ] {
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: block, mode: .quotedAndSignatures) ?? block
+            XCTAssertTrue(cleaned.contains("cid:damage"), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("Current reply."), cleaned)
+        }
+    }
+
+    func testInferredSignaturePreservesMediaOnBoundaryAncestors() {
+        let contacts = "Partner<br>john@example.test<br>415-555-1212"
+        for block in [
+            "<div><a href='cid:damage'>John Smith</a><br>\(contacts)</div>",
+            "<div><a xlink:href='cid:damage'>John Smith</a><br>\(contacts)</div>",
+            "<div style='background-image:url (cid:damage)'>John Smith<br>\(contacts)</div>",
+            "<div><span style='background-image:url (cid:damage)'>John Smith</span><br>\(contacts)</div>"
+        ] {
+            let html = "<p>Current reply.</p>" + block
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertTrue(cleaned.contains("cid:damage"), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("Current reply."), cleaned)
+        }
+    }
+
+    func testInferredSignaturePreservesLeadingCIDLinks() {
+        let contact = "Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        for attribute in ["href", "xlink:href"] {
+            let html = "<p>Current reply.</p><div><a \(attribute)='cid:damage'></a><br>\(contact)</div>"
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertTrue(cleaned.contains("cid:damage"), cleaned)
+            XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("John Smith"), cleaned)
+        }
+    }
+
+    func testInferredSignatureDoesNotTruncateInsideDiagramText() {
+        for tag in ["text", "title"] {
+            let html = "<p>The floorplan is below.</p><div><svg><\(tag)>Floorplan</\(tag)>" +
+                "<rect width='200' height='200'></rect></svg><br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>"
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertTrue(cleaned.contains("Floorplan"), cleaned)
+            XCTAssertTrue(cleaned.contains("<rect"), cleaned)
+        }
+    }
+
+    func testSubLineTruncationPreservesAllUnmarkedTrailingImages() {
+        // Revert-check: stoppingAt bounds text-node surgery to the shared block, preserving all later unmarked images.
+        let html = "<div>Current reply.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>" +
+            (1...4).map { "<p><img src='cid:photo\($0)'></p>" }.joined()
+        let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+        for index in 1...4 {
+            XCTAssertTrue(cleaned.contains("cid:photo\(index)"), cleaned)
+        }
+        XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+        XCTAssertTrue(plainText(cleaned).contains("Current reply."))
+    }
+
+    func testBRContactListAndReferenceGuardsSurviveSubLineExpansion() {
+        // Revert-check: sub-lines must retain the contact-list veto and stop at reference/body lines.
+        let list = "<div>Please contact:<br>Alice: alice@example.test<br>Bob: bob@example.test<br>415-555-1212</div>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: list, mode: .quotedAndSignatures)), plainText(list))
+        let reference = "<div>Current reply.<br>Invoice | 12345678<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: reference, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("Invoice | 12345678"))
+        XCTAssertFalse(cleaned.contains("John Smith"))
+    }
+
+    func testBoundedProductFillersDoNotAbsorbBodySentencesOrPostscripts() {
+        // Revert-check: product fillers count only inside a confirmed signature; prose remains a boundary.
+        let html = "<p>Current reply.</p><p>Best,</p><p>John Smith</p><p>Partner</p><p>Auto | Home | Life | Business</p><p>john@example.test</p><p>415-555-1212</p>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("John Smith"))
+        XCTAssertFalse(cleaned.contains("Auto"))
+        for tail in ["P.S. Bring the draft.", "Please bring the draft."] {
+            let withTail = html + "<p>\(tail)</p>"
+            XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: withTail, mode: .quotedAndSignatures)).contains(tail))
+        }
+    }
+
+    func testProductListBeforeSignaturePreservesAuthoredHeadingAndOptions() {
+        let html = "<p>Current reply.</p><p>Available Options</p><p>Basic | Pro | Enterprise</p>" +
+            "<p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("Available Options"), cleaned)
+        XCTAssertTrue(cleaned.contains("Basic | Pro | Enterprise"), cleaned)
+        XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+    }
+
+    func testBRSignaturePreservesAuthoredContactInstructions() {
+        for instruction in [
+            "Please send the signed document to legal@example.test before Friday.",
+            "Please upload the signed document to https://example.test/upload before Friday.",
+            "Please meet us on Market Street.",
+            "Send to legal@example.test."
+        ] {
+            let html = "<div>Current reply.<br>\(instruction)<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>"
+            let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+            XCTAssertTrue(cleaned.contains(instruction), cleaned)
+            XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+            let withPostscript = "<div>Current reply.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212<br>\(instruction)</div>"
+            XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: withPostscript, mode: .quotedAndSignatures)).contains(instruction))
+        }
+    }
+
+    func testContactTableWithColumnHeadingsIsNotASignature() {
+        for tag in ["th", "td"] {
+            let html = "<p>Please use the person listed below to arrange the repairs.</p>" +
+                "<table><tr><\(tag)>Engineer</\(tag)><\(tag)>Role</\(tag)><\(tag)>Email</\(tag)><\(tag)>Phone</\(tag)></tr>" +
+                "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr></table>"
+            let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+            XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+            XCTAssertTrue(cleaned.contains("Partner"), cleaned)
+            XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+            XCTAssertTrue(cleaned.contains("415-555-1212"), cleaned)
+        }
+    }
+
+    func testContactTableWithMultiplePeopleIsNotASignature() {
+        let html = "<p>Use these people.</p><table>" +
+            "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr>" +
+            "<tr><td>Jane Brown</td><td>Partner</td><td>jane@example.test</td><td>212-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+        XCTAssertTrue(cleaned.contains("Jane Brown"), cleaned)
+        XCTAssertTrue(cleaned.contains("jane@example.test"), cleaned)
+    }
+
+    func testSingleContactTableRowRequiresStrongerSignatureEvidence() {
+        let html = "<p>Please use the person listed below to arrange the repairs.</p>" +
+            "<table><tr><td>John Smith</td><td>john@example.test</td><td>415-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+        XCTAssertTrue(cleaned.contains("415-555-1212"), cleaned)
+    }
+
+    func testConfirmedSignatureTablesStillRemoveContactDetails() {
+        for rows in [
+            "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr>",
+            "<tr><td>John Smith<br>john@example.test<br>415-555-1212</td></tr>",
+            "<tr><td><img src='cid:badge'></td><td>John Smith<br>john@example.test<br>415-555-1212</td></tr>"
+        ] {
+            let html = "<p>Current reply.</p><table>\(rows)</table>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Current reply.")
+        }
+    }
+
+    func testHorizontalSignatureWithoutTitlePreservesPersonalSignOff() {
+        let html = "<p>Current reply.</p><table><tr><td>Best,</td><td>John Smith</td>" +
+            "<td>john@example.test</td><td>415-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("Current reply."), cleaned)
+        XCTAssertTrue(cleaned.contains("Best,"), cleaned)
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+    }
+
+    func testSignatureSignOffPolicyExcludesTitlesAndCompanyNames() {
+        // Revert-check: the wrapper and inferred block use the same personal-name exclusion.
+        for name in ["Partner", "Threash Insurance Agency"] {
+            for signature in ["<div class='gmail_signature'>Best,<br>\(name)<br>john@example.test<br>415-555-1212</div>", "<p>Best,</p><p>\(name)</p><p>john@example.test</p><p>415-555-1212</p>"] {
+                let html = "<p>Current reply.</p>" + signature
+                XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Current reply.")
+            }
+        }
+    }
+
+    func testSignatureMetadataTailsAreRemovedWithoutClaimingLooseImages() {
+        // Remove only recognized metadata after a confirmed contact block.
+        for tail in ["NPN 1234567", "License number: AB-1234", "Registration #12345", "Licensed in GA, AL and TN - NPN 1234567"] {
+            let html = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><p>\(tail)</p><p><img src='cid:badge'></p>"
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertEqual(plainText(cleaned), "Current reply.", tail)
+            XCTAssertTrue(cleaned.contains("cid:badge"))
+        }
+        let contactList = "<p>Please contact:</p><p>Jane Doe</p><p>jane@example.test</p><p>415-555-1212</p><p>Please pick one.</p>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: contactList, mode: .quotedAndSignatures)), plainText(contactList))
+    }
+
+    func testSignatureTailSkipPreservesPostscriptsAndAuthoredInstructions() {
+        // Revert-check: short authored sentences are not branding taglines.
+        let signature = "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>"
+        for tail in [
+            "P.S. Bring the draft.", "Please bring the draft.", "The estimate changed.",
+            "Do not send the money.", "Deadline moved to Friday.",
+            "Licensed driver needed for 2 days.",
+            "Registration closes on September 15; send the application by then.",
+            "Approve payment | Sign contract | Request changes",
+            "Protecting what matters most.", "Auto | Home | Life | Business"
+        ] {
+            XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + "<p>\(tail)</p>", mode: .quotedAndSignatures)).contains(tail))
+        }
+    }
+
+    func testLegalFooterOpenersAreAnchoredToVisibleLineStart() {
+        // Legal boilerplate is removed only as the tail of a confirmed contact signature.
+        let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
+        let footer = "<p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient.</p>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + footer, mode: .quotedAndSignatures)), "Current reply.")
+        for body in ["<p>Please read the confidentiality notice: it changed.</p>", "<p>Please read the <b>confidentiality notice:</b> it changed.</p>"] {
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: body, mode: .quotedAndSignatures)), plainText(body))
+        }
+    }
+
+    func testLegalFooterRequiresSignatureContextAndPreservesQuotedOnlyMode() {
+        let footer = "<p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient.</p>"
+        let body = "<p>Here is the proposed template.</p>" + footer
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: body)), plainText(body))
+        let signed = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>" + footer
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: signed, mode: .quotedOnly)), plainText(signed))
+        let postscript = signed + "<p>Do not approve yet.</p>"
+        XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: postscript)).contains("Do not approve yet."))
+    }
+
+    func testSignatureMetadataTailScanIsBounded() {
+        let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
+        let tail = "<p>NPN 1234567</p>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + String(repeating: tail, count: 3))), "Current reply.")
+        XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + String(repeating: tail, count: 4))).contains("jane@example.test"))
+    }
+
+    func testExplicitSignatureImageFeedsBubbleSuppressionWithoutIdentityOrDimensions() {
+        // Explicit signature ownership suppresses a logo without filename or dimension clues.
+        let html = "<p>Current reply.</p><div class='gmail_signature'><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><p><img src='cid:arbitrary'></p></div>"
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html, hasHTMLSourceHint: true, isForwardedEmail: false,
+            isLikelyCalendarInvite: false, bodyText: nil, cleanedSnippet: "Current reply.", subject: "Review",
+            attachmentSnapshots: [MessageBubbleAttachmentSnapshot(
+                contentId: "arbitrary", filename: "asset.png", mimeType: "image/png",
+                stateRaw: Attachment.State.queued.rawValue, localURL: nil, byteSize: 0,
+                pageCount: 0, width: 0, height: 0
+            )]
+        )
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("arbitrary"))
+    }
+
+    func testAuthoredLegalParagraphsDoNotTruncateTheMessage() {
+        for line in [
+            "Disclaimer: figures are provisional.",
+            "This email may contain errors.",
+            "This email and any attachments need your approval.",
+            "Confidentiality notice: can we remove this from the template?"
+        ] {
+            let html = "<p>Here are my concerns.</p><p>\(line)</p><p>Do not approve yet.</p>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html)), plainText(html))
+        }
+    }
+
+    func testAuthoredImageAfterContactSignatureRemainsDisplayable() {
+        let html = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><section>These are the latest pictures.</section><p><img src='cid:damage' width='1600' height='1200' alt='Cracked pipe'></p>"
+        XCTAssertTrue((EmailDOMQuoteRemover.removeQuotes(from: html) ?? "").contains("cid:damage"))
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html, hasHTMLSourceHint: true, isForwardedEmail: false,
+            isLikelyCalendarInvite: false, bodyText: nil, cleanedSnippet: "Current reply.", subject: "Review",
+            attachmentSnapshots: [MessageBubbleAttachmentSnapshot(
+                contentId: "damage", filename: "photo.png", mimeType: "image/png",
+                stateRaw: Attachment.State.queued.rawValue, localURL: nil, byteSize: 0,
+                pageCount: 0, width: 1600, height: 1200
+            )]
+        )
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("damage"))
+    }
+
+    func testSignatureTailExpansionPreservesBodyMedia() {
+        let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
+        let notice = "CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient."
+        for tail in [
+            "<p><img src='cid:damage'></p><p>NPN 1234567</p>",
+            "<p><a href='cid:damage'>License #AB-1234</a></p>",
+            "<p><a xlink:href='cid:damage'>License #AB-1234</a></p>",
+            "<div style='background-image:url(cid:damage);width:1200px;height:800px'></div><p>NPN 1234567</p>",
+            "<p>NPN 1234567<span style='background-image:url(cid:damage)'></span></p>",
+            "<div background='cid:damage'></div><p>NPN 1234567</p>",
+            "<p>NPN 1234567<img src='cid:damage'></p>",
+            "<p><img src='cid:damage'></p><p>\(notice)</p>",
+            "<p>\(notice)<img src='cid:damage'></p>"
+        ] {
+            let html = signature + tail
+            XCTAssertTrue((EmailDOMQuoteRemover.removeQuotes(from: html) ?? "").contains("cid:damage"))
+            let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+                canonicalHTML: html, hasHTMLSourceHint: true, isForwardedEmail: false,
+                isLikelyCalendarInvite: false, bodyText: nil, cleanedSnippet: "Current reply.", subject: "Review",
+                attachmentSnapshots: [MessageBubbleAttachmentSnapshot(
+                    contentId: "damage", filename: "photo.png", mimeType: "image/png",
+                    stateRaw: Attachment.State.queued.rawValue, localURL: nil, byteSize: 0,
+                    pageCount: 0, width: 1600, height: 1200
+                )]
+            )
+            XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("damage"))
+        }
+    }
+
+    func testLegalSignatureTailPreservesAuthoredDiscussionAndPostscripts() {
+        let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
+        for tail in [
+            "CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient.<br><br>P.S. Do not send the money.",
+            "Confidentiality notice: remove the intended recipient clause and the word confidential."
+        ] {
+            let html = signature + "<p>\(tail)</p>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html)), plainText(html))
+        }
+    }
+
+    func testSignatureNamesAndTitlesUseWordBoundaries() {
+        // Revert-check: shared name/contact word boundaries and strong-support prose guard.
+        for name in ["Marcella Ruiz", "Persephone Lee"] {
+            XCTAssertTrue(SignatureSignOffPolicy.shouldPreserveNameLine(name))
+        }
+        for title in ["Loan Officer", "Chief Executive Officer", "Fairfax Insurance Agency", "Acme Inc.", "Co-Founder", "Director of Sales", "consultant", "Senior Financial Analyst", "software engineer"] {
+            XCTAssertTrue(SignatureSignOffPolicy.isStrongSupportLine(title), title)
+        }
+        XCTAssertFalse(SignatureSignOffPolicy.isStrongSupportLine("The homeowner will coordinate with the broker."))
+        XCTAssertFalse(SignatureSignOffPolicy.shouldPreserveNameLine("Partner"))
     }
 
     func testRemoveQuotes_signatureMode_preservesBodyLineBeforeContactSignatureWithoutBlank() {

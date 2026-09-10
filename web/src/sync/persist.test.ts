@@ -3,6 +3,7 @@ import type { ChatmailDB } from '@/db/schema'
 import type { AttachmentRow } from '@/db/types'
 import type { GmailMessage } from '@/gmail/types'
 import { calculateParticipantHash } from '@/identity/participantSet'
+import { strictParticipantSetIdentity } from '@/identity/strictIdentity'
 import { convoRow, msgRow, storableBlob } from '@/outbox/testSupport'
 import {
   applyPersist,
@@ -28,6 +29,7 @@ afterEach(async () => {
 
 const ctx: PersistContext = {
   myAliases: new Set([ME]),
+  hideMyEmailAddresses: new Set(),
   sendAsAliases: [
     {
       email: ME,
@@ -106,6 +108,55 @@ describe('preparePersistPlan', () => {
     expect(plan.participants.some((p) => p.email.includes('privaterelay'))).toBe(false)
   })
 
+  it('drops an unnamed address whose cached Person is Hide My Email', async () => {
+    const relay = 'relay@privaterelay.appleid.com'
+    const plan = (await preparePersistPlan(
+      textMessage({
+        id: 'cached-hme',
+        from: relay,
+        to: [ME, 'Alice <alice@example.com>'],
+      }),
+      { ...ctx, hideMyEmailAddresses: new Set([relay]) },
+    )) as MessagePersistPlan
+
+    expect(plan.identity.participants).toEqual(['alice@example.com'])
+    expect(plan.participants.some((participant) => participant.email === relay)).toBe(false)
+  })
+
+  it.each(['to', 'cc'] as const)(
+    'matches header identity when legacy rows still contain a Hide-My-Email %s recipient',
+    async (kind) => {
+      // Revert-check: the strict row derivation must exclude HME To/Cc rows
+      // just as preparePersistPlan's real header path does.
+      const plan = (await preparePersistPlan(
+        textMessage({
+          id: 'hme-parity',
+          from: 'alice@example.com',
+          to: [ME],
+          [kind]: [ME, 'Hide My Email <relay@icloud.com>'],
+        }),
+        ctx,
+      )) as MessagePersistPlan
+      // Current persistence already excludes HME recipients. Model the
+      // legacy/enriched row set consumed by migration and repair instead.
+      const legacyRows = [
+        ...plan.participants.map((participant) => ({ ...participant, messageId: plan.message.id })),
+        { messageId: plan.message.id, email: 'relay@icloud.com', displayName: '', kind },
+      ]
+      const rowIdentity = strictParticipantSetIdentity(
+        legacyRows,
+        plan.message.senderEmail,
+        ctx.myAliases,
+        new Map([['relay@icloud.com', 'Hide My Email']]),
+      )
+
+      expect(plan.identity.participants).toEqual(['alice@example.com'])
+      expect(rowIdentity?.participants).toEqual(plan.identity.participants)
+      expect(rowIdentity?.participantHash).toBe(plan.identity.participantHash)
+      expect(rowIdentity?.type).toBe(plan.identity.type)
+    },
+  )
+
   it('includes every mailbox of a multi-address From header in identity (iOS parity)', async () => {
     // Rare but valid RFC 5322 shape; iOS makeConversationIdentity splits the
     // whole raw From value and inserts BOTH addresses.
@@ -121,9 +172,77 @@ describe('preparePersistPlan', () => {
     expect(plan.identity.participantHash).toBe(
       calculateParticipantHash(['alice@x.com', 'bob@y.com']),
     )
+    expect(plan.participants.filter(({ kind }) => kind === 'from')).toEqual([
+      { email: 'alice@x.com', displayName: 'Alice', kind: 'from' },
+      { email: 'bob@y.com', displayName: 'Bob', kind: 'from' },
+    ])
+    const persistedIdentity = strictParticipantSetIdentity(
+      plan.participants.map((participant) => ({
+        ...participant,
+        messageId: plan.message.id,
+      })),
+      plan.message.senderEmail,
+      ctx.myAliases,
+      new Map(),
+    )
+    expect(persistedIdentity?.participants).toEqual(plan.identity.participants)
+    expect(persistedIdentity?.participantHash).toBe(plan.identity.participantHash)
     // The message row still keeps the first mailbox as the sender.
     expect(plan.message.senderEmail).toBe('alice@x.com')
   })
+
+  it.each(['From', 'To', 'Cc'])(
+    'preserves quoted local-part brackets in %s participants and identity',
+    async (headerName) => {
+      const email = '"a<b"@example.com'
+      const mailbox = `Display <${email}>`
+      const plan = (await preparePersistPlan(
+        textMessage({
+          id: 'quoted-local-part',
+          from: headerName === 'From' ? mailbox : ME,
+          to: headerName === 'To' ? [ME, mailbox] : [ME],
+          cc: headerName === 'Cc' ? [mailbox] : [],
+        }),
+        ctx,
+      )) as MessagePersistPlan
+
+      expect(plan.identity.participants).toEqual([email])
+      expect(plan.identity.participantHash).toBe(calculateParticipantHash([email]))
+      expect(plan.participants).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: headerName.toLowerCase(), email }),
+        ]),
+      )
+    },
+  )
+
+  it.each(['From', 'To', 'Cc'])(
+    'preserves later %s recipients after a display name with an unbalanced angle bracket',
+    async (headerName) => {
+      const mailboxes = 'Tom <3 Jerry <tom@x.com>, Alice <alice@example.com>'
+      const plan = (await preparePersistPlan(
+        textMessage({
+          id: 'nested-display-name-group',
+          from: headerName === 'From' ? mailboxes : ME,
+          to: headerName === 'To' ? [ME, mailboxes] : [ME],
+          cc: headerName === 'Cc' ? [mailboxes] : [],
+        }),
+        ctx,
+      )) as MessagePersistPlan
+
+      const participants = ['alice@example.com', 'tom@x.com']
+      expect(plan.identity.participants).toEqual(participants)
+      expect(plan.identity.participantHash).toBe(calculateParticipantHash(participants))
+      expect(plan.identity.type).toBe('group')
+      if (headerName !== 'From') {
+        const recipientEmails = plan.participants
+          .filter((p) => p.kind === headerName.toLowerCase() && p.email !== ME)
+          .map((p) => p.email)
+          .sort()
+        expect(recipientEmails).toEqual(participants)
+      }
+    },
+  )
 
   it('marks own sent mail isFromMe and resolves reply-from', async () => {
     const plan = (await preparePersistPlan(

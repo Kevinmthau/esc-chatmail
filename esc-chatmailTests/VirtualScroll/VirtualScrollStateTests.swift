@@ -3952,6 +3952,49 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    // Revert-check: attachment-change observation must invalidate the cached row,
+    // and its new dimensions must change the bubble load/analysis signature.
+    func testAttachmentDimensionsRefreshCachedRowAndRestoreLargeInlinePhoto() async throws {
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: viewContext)
+        let message = MessageBuilder().withId("inline-dimension-refresh").withAttachments()
+            .withDate(Date(timeIntervalSince1970: 1)).inConversation(conversation).build(in: viewContext)
+        let attachment = AttachmentBuilder().withId("inline-image").withFilename("image001.png")
+            .withContentId("image001").asImage(width: 0, height: 0).withByteSize(50_000)
+            .queued().forMessage(message).build(in: viewContext)
+        try viewContext.save()
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: VirtualScrollConfiguration(visibleItemCount: 1, bufferSize: 0, pageSize: 1, preloadThreshold: 1),
+            viewContext: viewContext, makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+        await waitUntil { state.visibleMessages.count == 1 && !state.isLoadingMore }
+        let oldRow = try XCTUnwrap(state.row(atAbsoluteIndex: 0))
+        let oldSnapshot = try XCTUnwrap(oldRow.attachments.first).bubbleSnapshot
+        let html = "<p>The application is ready.</p><p>Thanks,<o:p></o:p></p><p>Jane</p><p>Account Manager</p><p><img src='cid:image001'></p>"
+        func analysis(_ snapshot: MessageBubbleAttachmentSnapshot) -> MessageBubbleHTMLAnalysis {
+            MessageBubbleHTMLAnalysisBuilder.build(canonicalHTML: html, hasHTMLSourceHint: true,
+                isForwardedEmail: false, isLikelyCalendarInvite: false, bodyText: nil,
+                cleanedSnippet: nil, subject: nil, attachmentSnapshots: [snapshot])
+        }
+        XCTAssertTrue(analysis(oldSnapshot).nonDisplayableInlineContentIDs.contains("image001"))
+
+        // Only dimensions change: no state/path update can accidentally drive the refresh.
+        attachment.width = 1400
+        attachment.height = 1000
+        try viewContext.save()
+        await waitUntil {
+            state.row(atAbsoluteIndex: 0)?.attachments.first?.width == 1400 &&
+                state.visibleMessages.first?.attachments.first?.height == 1000
+        }
+        let newRow = try XCTUnwrap(state.row(atAbsoluteIndex: 0))
+        let newSnapshot = try XCTUnwrap(newRow.attachments.first).bubbleSnapshot
+        XCTAssertNotEqual(oldRow.loadSignatureComponents, newRow.loadSignatureComponents)
+        XCTAssertTrue(analysis(newSnapshot).nonDisplayableInlineContentIDs.isEmpty)
+        XCTAssertEqual(newRow.displayableAttachments(using: analysis(newSnapshot), hidingInlineReferencedInHTML: false).count, 1)
+    }
+
     func testVisibleMessages_refreshWhenOutboundDeliveryMarkerChanges() async throws {
         let optimisticID = UUID().uuidString
         let conversation = ConversationBuilder()

@@ -14,18 +14,12 @@ final class ComposeViewModel: ObservableObject {
         case newMessage
         case newEmail // includes subject field
         case forward(ComposeForwardModeContext)
-        case reply(ComposeReplyModeContext)
 
         static func == (lhs: Mode, rhs: Mode) -> Bool {
             switch (lhs, rhs) {
             case (.newMessage, .newMessage): return true
             case (.newEmail, .newEmail): return true
             case (.forward(let c1), .forward(let c2)): return c1.id == c2.id
-            case (.reply(let c1), .reply(let c2)):
-                return c1.initialRecipients == c2.initialRecipients &&
-                    c1.outboundRequestContext.conversationObjectID == c2.outboundRequestContext.conversationObjectID &&
-                    c1.outboundRequestContext.replyingToMessageObjectID == c2.outboundRequestContext.replyingToMessageObjectID &&
-                    c1.outboundRequestContext.optimisticConversation?.existingConversationReference == c2.outboundRequestContext.optimisticConversation?.existingConversationReference
             default: return false
             }
         }
@@ -107,7 +101,7 @@ final class ComposeViewModel: ObservableObject {
         switch mode {
         case .forward:
             return true
-        case .newMessage, .newEmail, .reply:
+        case .newMessage, .newEmail:
             return !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
@@ -115,7 +109,7 @@ final class ComposeViewModel: ObservableObject {
     var showSubjectField: Bool {
         switch mode {
         case .newEmail, .forward: return true
-        case .newMessage, .reply: return false
+        case .newMessage: return false
         }
     }
 
@@ -123,7 +117,6 @@ final class ComposeViewModel: ObservableObject {
         switch mode {
         case .newMessage, .newEmail: return "New Message"
         case .forward: return "Forward"
-        case .reply: return "Reply"
         }
     }
 
@@ -182,8 +175,6 @@ final class ComposeViewModel: ObservableObject {
                 }
             }
             skippedForwardAttachmentCount = skipped
-        case .reply(let context):
-            recipientManager.setupRecipients(context.initialRecipients)
         case .newMessage, .newEmail:
             break
         }
@@ -336,14 +327,6 @@ final class ComposeViewModel: ObservableObject {
                 )
             )
 
-        case .reply(let context):
-            return .reply(
-                .init(
-                    context: context.outboundRequestContext,
-                    body: body,
-                    attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments)
-                )
-            )
         }
     }
 

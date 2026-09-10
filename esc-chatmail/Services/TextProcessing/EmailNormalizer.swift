@@ -31,7 +31,9 @@ class EmailNormalizer {
     }
 
     static func extractEmail(from string: String) -> String? {
-        let pattern = #"<([^>]+@[^>]+)>"#
+        // Quoted local parts can contain brackets and escaped quotes. Consume
+        // them as a unit, but never capture an unquoted nested '<' from a name.
+        let pattern = #"<((?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+)>"#
         if let regex = try? NSRegularExpression(pattern: pattern),
            let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
            let range = Range(match.range(at: 1), in: string) {

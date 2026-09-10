@@ -29,9 +29,10 @@ struct AttachmentPicker: View {
     @State private var showDocumentPicker = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var photoProcessingTask: Task<Void, Never>?
+    @State private var documentProcessingTask: Task<Void, Never>?
     @State private var photoProcessingID: UUID?
-    
-    let maxAttachmentSize: Int64 = 25 * 1024 * 1024 // 25 MB
+
+    private let maxAttachmentSize: Int64 = 25 * 1024 * 1024 // 25 MB
     
     var body: some View {
         HStack(spacing: 16) {
@@ -61,14 +62,18 @@ struct AttachmentPicker: View {
             guard !newValue.isEmpty else { return }
             photoProcessingTask?.cancel()
             let processingID = UUID()
+            let attachmentSizeLimit = maxAttachmentSize
             photoProcessingID = processingID
             isProcessing = true
-            photoProcessingTask = AttachmentAccountWorkRegistry.shared.startOperation { generation in
+            // Image decoding, resizing, thumbnailing, and file writes must not
+            // occupy MainActor while the user continues typing a reply.
+            photoProcessingTask = AttachmentAccountWorkRegistry.shared.startDetachedOperation { generation in
                 await processPhotoSelections(
                     newValue,
                     generation: generation,
-                    processingID: processingID
+                    maxAttachmentSize: attachmentSizeLimit
                 )
+                await finishPhotoProcessing(processingID: processingID)
             }
             if photoProcessingTask == nil {
                 finishPhotoProcessing(processingID: processingID)
@@ -76,21 +81,22 @@ struct AttachmentPicker: View {
         }
         .onDisappear {
             photoProcessingTask?.cancel()
+            documentProcessingTask?.cancel()
         }
         .sheet(isPresented: $showDocumentPicker) {
             DocumentPicker(
                 attachments: $attachments,
-                onProcessingChanged: { isProcessing = $0 }
+                onProcessingChanged: { isProcessing = $0 },
+                onOperationChanged: { documentProcessingTask = $0 }
             )
         }
     }
     
-    private func processPhotoSelections(
+    private nonisolated func processPhotoSelections(
         _ items: [PhotosPickerItem],
         generation: AttachmentAccountWorkGeneration,
-        processingID: UUID
+        maxAttachmentSize: Int64
     ) async {
-        defer { finishPhotoProcessing(processingID: processingID) }
         guard generation.isActive else { return }
         var pendingWrites: [String: PickerPendingAttachmentWrite] = [:]
         
@@ -139,6 +145,7 @@ struct AttachmentPicker: View {
             }
             
             // Create attachment entity
+            let finalizedPreviewPath = savedPreviewPath
             let didAppend = await MainActor.run { () -> Bool in
                 guard generation.isActive else { return false }
                 let attachment = Attachment(context: viewContext)
@@ -147,7 +154,7 @@ struct AttachmentPicker: View {
                 attachment.setValue("image/jpeg", forKey: "mimeType")
                 attachment.setValue(Int64(finalData.count), forKey: "byteSize")
                 attachment.setValue(originalPath, forKey: "localURL")
-                attachment.setValue(savedPreviewPath, forKey: "previewURL")
+                attachment.setValue(finalizedPreviewPath, forKey: "previewURL")
                 attachment.setValue("queued", forKey: "stateRaw")
                 
                 if let size = size {
@@ -171,10 +178,13 @@ struct AttachmentPicker: View {
         }
         
         if generation.isActive {
-            selectedPhotoItems = []
+            await MainActor.run {
+                selectedPhotoItems = []
+            }
         }
     }
 
+    @MainActor
     private func finishPhotoProcessing(processingID: UUID) {
         guard photoProcessingID == processingID else { return }
         photoProcessingID = nil
@@ -188,13 +198,16 @@ struct DocumentPicker: UIViewControllerRepresentable {
     @Environment(\.presentationMode) var presentationMode
     @Environment(\.managedObjectContext) private var viewContext
     let onProcessingChanged: @MainActor (Bool) -> Void
+    let onOperationChanged: @MainActor (Task<Void, Never>?) -> Void
 
     init(
         attachments: Binding<[Attachment]>,
-        onProcessingChanged: @escaping @MainActor (Bool) -> Void = { _ in }
+        onProcessingChanged: @escaping @MainActor (Bool) -> Void = { _ in },
+        onOperationChanged: @escaping @MainActor (Task<Void, Never>?) -> Void = { _ in }
     ) {
         self._attachments = attachments
         self.onProcessingChanged = onProcessingChanged
+        self.onOperationChanged = onOperationChanged
     }
     
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
@@ -234,10 +247,14 @@ struct DocumentPicker: UIViewControllerRepresentable {
                 await processDocuments(urls, generation: generation)
                 await MainActor.run {
                     parent.onProcessingChanged(false)
+                    parent.onOperationChanged(nil)
                 }
             }
-            if operation == nil {
+            if let operation {
+                parent.onOperationChanged(operation)
+            } else {
                 parent.onProcessingChanged(false)
+                parent.onOperationChanged(nil)
             }
             parent.presentationMode.wrappedValue.dismiss()
         }

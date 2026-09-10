@@ -79,7 +79,10 @@ extension DataCleanupService {
     }
 
     /// Merges active conversation duplicates by delegating to ConversationManager.
-    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async {
+    @discardableResult
+    func mergeActiveConversationDuplicates(
+        in context: NSManagedObjectContext
+    ) async -> Set<NSManagedObjectID>? {
         await conversationManager.mergeActiveConversationDuplicates(in: context)
     }
 }

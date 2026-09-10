@@ -12,10 +12,9 @@ extension Message {
     ///
     /// Returns nil when the message has no MessageParticipant rows at all. A
     /// row-less message's recipient set is unknowable — `senderEmail` alone
-    /// cannot reconstruct To/Cc, and for the user's own sent messages (whose
-    /// rows were never written on the optimistic-send reconciliation path) it
-    /// would collapse them into the note-to-self chat. Such messages must not
-    /// be re-homed.
+    /// cannot reconstruct To/Cc. Current optimistic sends persist their known
+    /// participant rows, but legacy or partially imported rows may still lack
+    /// them and must not be re-homed.
     func strictParticipantSetIdentity(myAliases: Set<String>) -> ParticipantSetIdentity? {
         var emails = Set<String>()
         var hasFromRow = false
@@ -28,14 +27,14 @@ extension Message {
             hasIdentityRow = true
             if kind == .from {
                 hasFromRow = true
-                // The header path drops a From whose display name is a
-                // Hide-My-Email placeholder; mirror it here (best effort — the
-                // stored display name can have been enriched since) so both
-                // derivations key HME mail the same way.
-                if let name = participant.person?.displayName,
-                   EmailNormalizer.isHideMyEmailDisplayName(name) {
-                    continue
-                }
+            }
+            // The header path drops Hide-My-Email entries from From, To, and
+            // Cc; mirror that exclusion for every identity row (best effort —
+            // the stored display name can have been enriched since) so both
+            // derivations key HME mail the same way.
+            if let name = participant.person?.displayName,
+               EmailNormalizer.isHideMyEmailDisplayName(name) {
+                continue
             }
             guard let person = participant.person else { continue }
             // Person.email is normalized at write time; re-normalizing is idempotent

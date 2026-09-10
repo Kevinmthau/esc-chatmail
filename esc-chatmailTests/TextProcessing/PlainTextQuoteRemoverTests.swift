@@ -357,11 +357,12 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         john@example.com
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
-        // Should truncate because "Mobile:" is a strong signature indicator
-        XCTAssertEqual(result, "I'll send that over now.")
+        // Strip the contact suffix while preserving the personal closing.
+        // Revert-check: shared SignatureSignOffPolicy / web signature.ts keeps the closing pair.
+        XCTAssertEqual(result, "I'll send that over now.\n\nThanks,\nJohn Doe")
     }
 
-    func testRemoveSignature_multiParagraphBodyWithThanksAndName_stripsClosingButPreservesBody() {
+    func testRemoveSignature_multiParagraphBodyWithThanksAndName_preservesClosingAndBody() {
         let text = """
         Hi Kevin,
 
@@ -401,8 +402,9 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         www.example.com
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
-        // Should truncate because URL is a strong indicator
-        XCTAssertEqual(result, "Let me know if you need anything else.")
+        // The sign-off corroborates this trailing URL; keep the closing pair.
+        // Revert-check: shared SignatureSignOffPolicy / web signature.ts keeps the closing pair.
+        XCTAssertEqual(result, "Let me know if you need anything else.\n\nBest regards,\nJane Doe")
     }
 
     func testRemoveSignature_signOffWithPostscript_preserved() {
@@ -527,8 +529,9 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         This email and any attachments are confidential.
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
-        // Should truncate because disclaimer is a strong indicator
-        XCTAssertEqual(result, "Sounds great!")
+        // The disclaimer is removed while the closing pair remains.
+        // Revert-check: shared SignatureSignOffPolicy / web signature.ts keeps the closing pair.
+        XCTAssertEqual(result, "Sounds great!\n\nCheers,\nBob")
     }
 
     func testRemoveSignature_contactBlockWithAddressAndPhone_removes() {
@@ -544,7 +547,8 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         212-925-3380
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
-        XCTAssertEqual(result, "Let me know.\n\nThanks!")
+        // Revert-check: shared SignatureSignOffPolicy / web signature.ts keeps the closing pair.
+        XCTAssertEqual(result, "Let me know.\n\nThanks!\n\nKatie McGee")
     }
 
     func testRemoveSignature_delimiterAfterThankYouPreservesSignOffAndBody() {
@@ -660,8 +664,9 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         T: 555-123-4567
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
-        // Should truncate because phone prefix is a strong indicator
-        XCTAssertEqual(result, "Please review at your earliest convenience.")
+        // A labeled phone under a sign-off is contact information.
+        // Revert-check: shared SignatureSignOffPolicy / web signature.ts keeps the closing pair.
+        XCTAssertEqual(result, "Please review at your earliest convenience.\n\nSincerely,\nDr. Smith")
     }
 
     func testRemoveSignature_multipleOccurrencesOfSameSignOff_findsLaterOneWithIndicator() {
@@ -679,8 +684,9 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
         // First "Thanks," has no strong indicator, so it's preserved
-        // Second "Thanks," has phone number indicator, so it triggers truncation
-        XCTAssertEqual(result, "First section content.\n\nThanks,\nAlice\n\nSecond section content.")
+        // The second closing also survives; only its contact suffix is removed.
+        // Revert-check: shared SignatureSignOffPolicy / web signature.ts keeps the closing pair.
+        XCTAssertEqual(result, "First section content.\n\nThanks,\nAlice\n\nSecond section content.\n\nThanks,\nBob")
     }
 
     // MARK: - Signature Removal - Mobile Signatures
@@ -904,8 +910,8 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         > Previous message
         """
         let result = PlainTextQuoteRemover.removeQuotes(from: text)
-        // Should remove both the signature (has phone indicator) and the quote
-        XCTAssertEqual(result, "Thanks for the update!")
+        // Revert-check: shared sign-off policy preserves the closing after quote removal.
+        XCTAssertEqual(result, "Thanks for the update!\n\nBest regards,\nJane")
     }
 
     func testRemoveQuotes_quoteWithSimpleSignOff_preservesSignOff() {
@@ -1027,8 +1033,9 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         > Would tomorrow afternoon work for a quick call?
         """
         let result = PlainTextQuoteRemover.removeQuotes(from: text)
-        // "Thanks,\nJane" with phone number IS a signature
-        XCTAssertEqual(result, "Hi John,\n\nYes, that works for me. Let's schedule the call for 2pm tomorrow.")
+        // Remove the phone suffix, preserving the personal closing.
+        // Revert-check: shared SignatureSignOffPolicy / web signature.ts keeps the closing pair.
+        XCTAssertEqual(result, "Hi John,\n\nYes, that works for me. Let's schedule the call for 2pm tomorrow.\n\nThanks,\nJane")
     }
 
     func testRemoveQuotes_forwardedChain_cleansCorrectly() {

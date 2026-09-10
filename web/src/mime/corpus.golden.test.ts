@@ -1,5 +1,5 @@
 // Golden-corpus replay for the MIME text-processing pipeline. Mirrors the
-// iOS GoldenCorpusReplayTests entry points for the four sections owned by
+// iOS GoldenCorpusReplayTests entry points for the text-processing sections owned by
 // this module. The corpus JSON is imported from the iOS test fixtures — it is
 // the single source of truth and must never be weakened.
 
@@ -8,6 +8,7 @@ import corpusJson from '@fixtures/golden_message_corpus.json'
 import { processChatBubbleText } from './bubble'
 import { calculateNewsletterScore } from './newsletter'
 import { extractHtmlFromRawSource } from './rawSource'
+import { createCleanedSnippet } from './preview'
 
 interface PlainTextQuoteCleanupCase {
   id: string
@@ -49,11 +50,22 @@ interface NewsletterDetectionCase {
   notes?: string
 }
 
+interface CleanedSnippetCase {
+  id: string
+  html: string | null
+  plainText: string | null
+  snippet: string | null
+  isFromMe: boolean
+  expected: string | null
+  notes?: string
+}
+
 interface GoldenCorpus {
   plainTextQuoteCleanupCases: PlainTextQuoteCleanupCase[]
   htmlToBubbleTextCases: HtmlToBubbleTextCase[]
   rawSourceHTMLRecoveryCases: RawSourceHtmlRecoveryCase[]
   newsletterDetectionCases: NewsletterDetectionCase[]
+  cleanedSnippetCases: CleanedSnippetCase[]
 }
 
 const corpus = corpusJson as unknown as GoldenCorpus
@@ -135,5 +147,21 @@ describe('golden corpus: newsletterDetectionCases', () => {
     if (scenario.expectedScore !== undefined) {
       expect(result.score, scenario.notes).toBe(scenario.expectedScore)
     }
+  })
+})
+
+// This is the persisted snippet pipeline, independently pinned from the
+// conversation-list display projection. isFromMe is retained in the shared
+// schema; neither platform's snippet cleaner currently branches on it.
+describe('golden corpus: cleanedSnippetCases', () => {
+  it('has cases', () => {
+    expect(corpus.cleanedSnippetCases.length).toBeGreaterThan(0)
+  })
+
+  it.each(corpus.cleanedSnippetCases.map((c) => [c.id, c] as const))('%s', (_id, scenario) => {
+    expect(
+      createCleanedSnippet(scenario.html, scenario.plainText, scenario.snippet),
+      scenario.notes,
+    ).toBe(scenario.expected)
   })
 })

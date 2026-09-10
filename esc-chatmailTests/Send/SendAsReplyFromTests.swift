@@ -16,6 +16,58 @@ final class SendAsReplyFromTests: XCTestCase {
         super.tearDown()
     }
 
+    func testAddressTokens_unbalancedDisplayNameBracket_preservesFollowingRecipient() {
+        for first in ["Tom <3 Jerry <tom@x.com>", "Tom <<3 Jerry <tom@x.com>"] {
+            XCTAssertEqual(
+                EmailAddressListParser.addressTokens(from: "\(first), Alice <alice@example.com>"),
+                [first, "Alice <alice@example.com>"]
+            )
+        }
+    }
+
+    func testAddressTokens_quotedDelimitersAndEscapes_preserveRecipientBoundaries() {
+        let firstRecipients = [
+            #""Smith, Alice <Team>" <alice@example.com>"#,
+            #"<"a<,b>"@example.com>"#,
+            #""Alice \"<lead>, Team\"" <alice@example.com>"#,
+            #""Alice \\" <alice@example.com>"#
+        ]
+
+        for first in firstRecipients {
+            XCTAssertEqual(
+                EmailAddressListParser.addressTokens(from: "\(first), bob@example.com"),
+                [first, "bob@example.com"]
+            )
+        }
+    }
+
+    func testProcessMessage_unbalancedRecipientBracket_preservesFollowingAlias() async throws {
+        for headerName in ["To", "Cc"] {
+            let message = makeGmailMessage(
+                id: "unbalanced-recipient-\(headerName)",
+                headers: [
+                    MessageHeader(name: "From", value: "Jane Example <jane@example.com>"),
+                    MessageHeader(
+                        name: headerName,
+                        value: "Tom <3 Jerry <tom@x.com>, \"Alias, Kevin\" <alias@customdomain.com>"
+                    )
+                ]
+            )
+
+            let processed = try await MessageProcessor().processGmailMessage(
+                message,
+                myAliases: myAliases,
+                sendAsAliases: sendAsAliases
+            )
+            let headers = try XCTUnwrap(processed?.headers)
+            let recipients = headerName == "To" ? headers.to : headers.cc
+
+            XCTAssertEqual(recipients.map(\.email), ["tom@x.com", "alias@customdomain.com"], headerName)
+            XCTAssertEqual(headers.deliveredToAddress, "alias@customdomain.com", headerName)
+            XCTAssertEqual(headers.replyFromAddress, "alias@customdomain.com", headerName)
+        }
+    }
+
     func testProcessMessage_toAliasDeliveredToPrimary_resolvesReplyFromAlias() async throws {
         let message = makeGmailMessage(
             id: "to-alias",

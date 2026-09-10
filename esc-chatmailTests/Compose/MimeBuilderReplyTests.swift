@@ -2,6 +2,54 @@ import XCTest
 @testable import esc_chatmail
 
 final class MimeBuilderReplyTests: XCTestCase {
+    func testResolvedDeferredHTMLIsSanitizedBeforeReplyMIMEFormatting() async throws {
+        let messagesDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MimeBuilderReplyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: messagesDirectory) }
+        let contentHandler = HTMLContentHandler(messagesDirectory: messagesDirectory)
+        let contentLoader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared
+        )
+        let messageID = "deferred-mime-message"
+        XCTAssertNotNil(
+            contentHandler.saveHTML(
+                """
+                <html><body>
+                <script>UNSAFE_SCRIPT_TOKEN</script>
+                <p>SAFE_ORIGINAL_HTML_TOKEN</p>
+                </body></html>
+                """,
+                for: messageID
+            )
+        )
+        let originalMessage = QuotedMessage(
+            senderName: "Friend",
+            senderEmail: "friend@example.com",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            body: "Original fallback body",
+            deferredOriginalHTML: DeferredReplyQuotedHTML(
+                source: ReplyQuotedHTMLSource(
+                    messageId: messageID,
+                    bodyStorageURI: nil,
+                    bodyText: "Original fallback body",
+                    senderEmail: "friend@example.com",
+                    subject: "Original subject"
+                ),
+                resolver: ReplyQuotedHTMLResolver(contentLoader: contentLoader)
+            )
+        )
+
+        let resolvedOriginal = await originalMessage.resolvingOriginalHTML()
+        let result = MimeBuilder.formatReplyHTMLBody(
+            body: "Thanks!",
+            originalMessage: resolvedOriginal
+        )
+
+        XCTAssertTrue(result.contains("SAFE_ORIGINAL_HTML_TOKEN"))
+        XCTAssertFalse(result.contains("UNSAFE_SCRIPT_TOKEN"))
+    }
+
     func testFormatReplyHTMLBody_withOriginalHTMLPreservesOriginalDocumentStyling() {
         let originalMessage = QuotedMessage(
             senderName: "Friend",

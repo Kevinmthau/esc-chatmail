@@ -105,6 +105,101 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
+    func testDiscardUnsentAttachmentsDeletesDraftObjectsAndFiles() throws {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        AttachmentPaths.setupDirectories()
+        let attachmentID = "local_\(UUID().uuidString)"
+        let originalPath = AttachmentPaths.originalPath(
+            idOrUUID: attachmentID,
+            ext: "jpg"
+        )
+        let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentID)
+        XCTAssertTrue(AttachmentPaths.saveData(Data("original".utf8), to: originalPath))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("preview".utf8), to: previewPath))
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = attachmentID
+        attachment.filename = "draft.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.localURL = originalPath
+        attachment.previewURL = previewPath
+        attachment.state = .queued
+        let composerState = ChatComposerState(attachments: [attachment])
+
+        composerState.discardUnsentAttachments()
+
+        XCTAssertTrue(composerState.attachments.isEmpty)
+        XCTAssertTrue(attachment.isDeleted)
+        XCTAssertNil(AttachmentPaths.loadData(from: originalPath))
+        XCTAssertNil(AttachmentPaths.loadData(from: previewPath))
+    }
+
+    func testDiscardUnsentAttachmentsDoesNotDeleteAttachmentAdoptedByMessage() {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let message = MessageBuilder()
+            .withId("optimistic-reply")
+            .build(in: context)
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "sent.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.state = .queued
+        attachment.message = message
+        let composerState = ChatComposerState(attachments: [attachment])
+
+        composerState.discardUnsentAttachments()
+
+        XCTAssertTrue(composerState.attachments.isEmpty)
+        XCTAssertFalse(attachment.isDeleted)
+        XCTAssertEqual(attachment.message, message)
+    }
+
+    func testAttachmentDiscardRequestedDuringSendRunsAfterSendFinishes() {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "draft.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.state = .queued
+        let composerState = ChatComposerState(attachments: [attachment])
+        XCTAssertTrue(composerState.beginSending())
+
+        composerState.requestUnsentAttachmentDiscard()
+
+        XCTAssertEqual(composerState.attachments, [attachment])
+        XCTAssertFalse(attachment.isDeleted)
+
+        composerState.finishSending()
+
+        XCTAssertTrue(composerState.attachments.isEmpty)
+        XCTAssertTrue(attachment.isDeleted)
+    }
+
+    func testAttachmentDiscardRequestedDuringSendPreservesAdoptedAttachment() {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let message = MessageBuilder()
+            .withId("optimistic-reply")
+            .build(in: context)
+        let attachment = context.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "sent.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.state = .queued
+        let composerState = ChatComposerState(attachments: [attachment])
+        XCTAssertTrue(composerState.beginSending())
+        composerState.requestUnsentAttachmentDiscard()
+
+        attachment.message = message
+        composerState.attachments = []
+        composerState.finishSending()
+
+        XCTAssertFalse(attachment.isDeleted)
+        XCTAssertEqual(attachment.message, message)
+    }
+
     func testListConversationNeverBecomesEffectivelyOneToOneAfterParticipantLoad() {
         let deps = makeDependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com")
@@ -907,7 +1002,7 @@ final class ChatViewModelTests: XCTestCase {
         )
         XCTAssertEqual(request.body, "Reply body")
         XCTAssertEqual(viewModel.replyText, "")
-        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.replyingTo, replyTarget)
     }
 
     func testSendReply_usesStableReplyTargetIdentifierAfterSelection() async {
@@ -973,10 +1068,11 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(request.context.replyingToMessageObjectID, replyTarget.objectID)
     }
 
-    func testSendReply_reportsFailureWithoutClearingDraftState() async {
+    func testSendReply_preflightFailureAfterOptimisticPublicationRetainsDraftState() async {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let coordinator = MockChatOutboundMessageCoordinator()
-        coordinator.sendError = MockChatSendError.optimisticCreationFailed
+        coordinator.suspendsSend = true
+        coordinator.sendError = MockChatSendError.preflightFailed
         let tokenManager = MockTokenManager()
         let deps = Dependencies(
             authSession: authSession,
@@ -990,18 +1086,52 @@ final class ChatViewModelTests: XCTestCase {
             .visible()
             .recentlyActive()
             .build(in: context)
+        let replyTarget = MessageBuilder()
+            .withId("retryable-reply-target")
+            .inConversation(conversation)
+            .build(in: context)
+        let attachmentID = "local_retryable-draft-attachment"
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("draft.txt")
+            .withLocalURL(AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "txt"))
+            .build(in: context)
 
         let viewModel = ChatViewModel(
             conversation: conversation,
             chatDependencies: deps.makeChatDependencies()
         )
         viewModel.replyText = "Retryable reply"
+        viewModel.replyingTo = replyTarget
+        viewModel.composerState.attachments = [attachment]
+        defer { coordinator.resumeSend() }
+        var persistedOptimisticResult: OutboundMessageResult?
 
-        let result = await viewModel.sendReply()
+        let sendTask = Task {
+            await viewModel.sendReply { result in
+                persistedOptimisticResult = result
+            }
+        }
+        await waitUntil { persistedOptimisticResult != nil }
+
+        XCTAssertEqual(
+            persistedOptimisticResult?.optimisticMessageID,
+            coordinator.sendResult?.optimisticMessageID
+        )
+        XCTAssertTrue(viewModel.composerState.isSending)
+        XCTAssertEqual(viewModel.replyText, "Retryable reply")
+        XCTAssertEqual(viewModel.replyingTo, replyTarget)
+        XCTAssertEqual(viewModel.composerState.attachments, [attachment])
+
+        coordinator.resumeSend()
+        let result = await sendTask.value
 
         XCTAssertNil(result)
         XCTAssertEqual(viewModel.replyText, "Retryable reply")
+        XCTAssertEqual(viewModel.replyingTo, replyTarget)
+        XCTAssertEqual(viewModel.composerState.attachments, [attachment])
         XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertNotNil(viewModel.sendErrorAlert)
     }
 
     func testSendReply_freezesReplyTargetAndRejectsDuplicateSendDuringPreflight() async {
@@ -1038,11 +1168,21 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.replyText = "Captured reply"
         viewModel.replyingTo = capturedTarget
         defer { coordinator.resumeSend() }
+        var persistedOptimisticResult: OutboundMessageResult?
 
-        let sendTask = Task { await viewModel.sendReply() }
-        await waitUntil { coordinator.lastRequest != nil }
+        let sendTask = Task {
+            await viewModel.sendReply { result in
+                persistedOptimisticResult = result
+            }
+        }
+        await waitUntil { persistedOptimisticResult != nil }
 
         XCTAssertTrue(viewModel.composerState.isSending)
+        XCTAssertEqual(viewModel.replyText, "Captured reply")
+        XCTAssertEqual(
+            persistedOptimisticResult?.optimisticMessageID,
+            coordinator.sendResult?.optimisticMessageID
+        )
         viewModel.setReplyingTo(laterTarget)
         viewModel.updateReplyingToIfNewSubject(lastMessage: laterTarget)
         XCTAssertEqual(viewModel.replyingTo, capturedTarget)
@@ -1052,9 +1192,10 @@ final class ChatViewModelTests: XCTestCase {
         coordinator.resumeSend()
         let result = await sendTask.value
         XCTAssertNotNil(result)
+        XCTAssertEqual(result?.optimisticMessageID, persistedOptimisticResult?.optimisticMessageID)
         XCTAssertFalse(viewModel.composerState.isSending)
         XCTAssertEqual(viewModel.replyText, "")
-        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.replyingTo, capturedTarget)
     }
 
     func testSendReply_drainedConversationPreservesTextAndAttachments() async {
@@ -1138,10 +1279,14 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
 
     func send(
         preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
-        reconciliationHooks: OutboundMessageReconciliationHooks
+        reconciliationHooks: OutboundMessageReconciliationHooks,
+        onOptimisticMessagePersisted: (@MainActor (OutboundMessageResult) -> Void)?
     ) async throws -> OutboundMessageResult? {
         let request = try await requestBuilder()
         lastRequest = request
+        if let sendResult {
+            onOptimisticMessagePersisted?(sendResult)
+        }
         if suspendsSend {
             await withCheckedContinuation { continuation in
                 sendContinuation = continuation
@@ -1160,5 +1305,5 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
 }
 
 private enum MockChatSendError: Error {
-    case optimisticCreationFailed
+    case preflightFailed
 }
