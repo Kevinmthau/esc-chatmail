@@ -43,6 +43,14 @@ extension EmailDOMQuoteRemover {
         let text: String
         let startTextNode: TextNode?
         let startUTF16Offset: Int
+        let links: [VisibleLineLink]
+        let nonLinkText: String
+    }
+
+    /// Visible anchor text belongs to its projected line, including anchors that span a BR.
+    struct VisibleLineLink {
+        let rawTarget: String
+        var text: String
     }
 
     private static let visibleLineElementTags: Set<String> = [
@@ -117,9 +125,23 @@ extension EmailDOMQuoteRemover {
         var currentText = ""
         var currentStartTextNode: TextNode?
         var currentStartUTF16Offset = 0
+        var currentLinks: [VisibleLineLink] = []
+        var currentAnchorIndices: [ObjectIdentifier: Int] = [:]
+        var currentNonLinkText = ""
 
-        func appendText(_ rawText: String, from textNode: TextNode) {
+        func appendText(_ rawText: String, from textNode: TextNode, anchor: Element?) {
             let normalized = rawText.replacingOccurrences(of: "\u{00a0}", with: " ")
+            if let anchor {
+                let identifier = ObjectIdentifier(anchor)
+                if let index = currentAnchorIndices[identifier] {
+                    currentLinks[index].text += normalized
+                } else {
+                    currentAnchorIndices[identifier] = currentLinks.count
+                    currentLinks.append(VisibleLineLink(rawTarget: (try? anchor.attr("href")) ?? "", text: normalized))
+                }
+            } else {
+                currentNonLinkText.append(normalized)
+            }
             guard let firstTextIndex = normalized.firstIndex(where: { !$0.isWhitespace }) else {
                 return
             }
@@ -142,16 +164,24 @@ extension EmailDOMQuoteRemover {
             result.append(InlineHeaderLine(
                 text: normalizedVisibleLineText(currentText),
                 startTextNode: currentStartTextNode,
-                startUTF16Offset: currentStartUTF16Offset
+                startUTF16Offset: currentStartUTF16Offset,
+                links: currentLinks.compactMap {
+                    let text = normalizedVisibleLineText($0.text)
+                    return text.isEmpty ? nil : VisibleLineLink(rawTarget: $0.rawTarget, text: text)
+                },
+                nonLinkText: normalizedVisibleLineText(currentNonLinkText)
             ))
             currentText = ""
             currentStartTextNode = nil
             currentStartUTF16Offset = 0
+            currentLinks = []
+            currentAnchorIndices = [:]
+            currentNonLinkText = ""
         }
 
-        func walk(_ node: Node) {
+        func walk(_ node: Node, anchor: Element? = nil) {
             if let textNode = node as? TextNode {
-                appendText(textNode.getWholeText(), from: textNode)
+                appendText(textNode.getWholeText(), from: textNode, anchor: anchor)
                 return
             }
 
@@ -162,8 +192,9 @@ extension EmailDOMQuoteRemover {
                 return
             }
 
+            let childAnchor = element.tagNameNormal() == "a" ? element : anchor
             for child in element.getChildNodes() {
-                walk(child)
+                walk(child, anchor: childAnchor)
             }
         }
 

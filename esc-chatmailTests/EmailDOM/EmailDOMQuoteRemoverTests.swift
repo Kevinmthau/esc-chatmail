@@ -1,4 +1,5 @@
 import XCTest
+import SwiftSoup
 @testable import esc_chatmail
 
 /// Tests for the DOM-based quote remover. These intentionally cover the
@@ -15,6 +16,175 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
     private func plainText(_ html: String?) -> String {
         guard let html else { return "" }
         return EmailDocument.tryParse(html)?.plainText(preserveParagraphs: true) ?? ""
+    }
+
+    // MARK: - F12 longer signatures and labeled contact links
+
+    private func trailingContactHTML(_ html: String) throws -> String {
+        let document = try SwiftSoup.parse(html)
+        document.outputSettings().prettyPrint(pretty: false)
+        try EmailDOMQuoteRemover.truncateTrailingContactSignature(in: document)
+        return try document.body()?.html() ?? ""
+    }
+
+    func testF12LongSignatureUsesDOMLookbackIncludingBlankSlots() throws {
+        // Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature's 80-slot DOM lookback.
+        for separator in ["", "<p></p>"] {
+            let contacts = Array(repeating: "<p>john@example.test</p>", count: 40).joined(separator: separator)
+            let html = "<p>Current reply.</p><p>Best,</p><p>John Smith</p>" + contacts
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), "Current reply.\n\nBest,\nJohn Smith", cleaned)
+
+            let authored = "<p>Here are the contacts:</p><p>Partner</p>" + contacts
+            XCTAssertEqual(plainText(try trailingContactHTML(authored)), plainText(authored))
+        }
+    }
+
+    func testF12DOMLookbackBoundaryStaysBounded() throws {
+        // Revert-check: the signoff is exactly lastNonEmpty - 80, with inclusive indexing.
+        let prefix = "<p>Current reply.</p><p>Best,</p><p>John Smith</p>"
+        let boundary = prefix + Array(repeating: "<p>john@example.test</p>", count: 79).joined()
+        XCTAssertEqual(plainText(try trailingContactHTML(boundary)), "Current reply.\n\nBest,\nJohn Smith")
+        let beyond = prefix + Array(repeating: "<p>john@example.test</p>", count: 82).joined()
+        XCTAssertEqual(plainText(try trailingContactHTML(beyond)), plainText(beyond))
+    }
+
+    func testF12LabeledLinksRemoveOnlyCorroboratedSignatureAcrossLineShapes() throws {
+        // Revert-check: signatureLines / trailing link-contact evidence, independent of wrapper and F1 cleanup.
+        let email = "<a href='MAILTO:john@example.test'>Email me</a>"
+        let phone = "<a href='tel:+14155551212'>Call the office</a>"
+        let lines = ["Best,", "John Smith", "Partner", email, phone]
+        let shapes = [
+            "<p>Current reply.</p>" + lines.map { "<p>\($0)</p>" }.joined(),
+            "<div>Current reply.<br>" + lines.joined(separator: "<br>") + "</div>",
+            "<table><tr><td>Current reply.<br>Best,<br>John Smith<br>Partner</td><td>\(email)</td><td>\(phone)</td></tr></table>",
+            // Revert-check: removeSignatureLines invalidates every removed row's table, even with an earlier paragraph boundary.
+            "<p>Current reply.</p><p>Best,</p><table><tr><td>John Smith</td><td>\(email)</td><td>\(phone)</td></tr></table>",
+            // Revert-check: shouldPreserveContactTable must not count contact labels as repeated people.
+            "<p>Current reply.</p><p>Best,</p><p>John Smith</p><table><tr><td><a href='mailto:john@example.test'>Email</a></td></tr><tr><td><a href='tel:+14155551212'>Telephone</a></td></tr></table>"
+        ]
+        for html in shapes {
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertTrue(plainText(cleaned).contains("Current reply."), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("Best,"), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("John Smith"), cleaned)
+            XCTAssertFalse(cleaned.lowercased().contains("mailto:"), cleaned)
+            XCTAssertFalse(cleaned.lowercased().contains("tel:"), cleaned)
+            XCTAssertFalse(plainText(cleaned).contains("Partner"), cleaned)
+
+            let authored = html + "<p>P.S. Please email me if the estimate changes.</p>"
+            XCTAssertEqual(plainText(try trailingContactHTML(authored)), plainText(authored))
+        }
+    }
+
+    func testF12LinkContactListsAndDirectoriesRemainIntact() throws {
+        let email = "<a href='mailto:john@example.test'>Email me</a>"
+        let phone = "<a href='tel:+14155551212'>Call the office</a>"
+        let directory = "<table><tr><td>John Smith</td><td>\(email)</td></tr><tr><td>Jane Smith</td><td>\(phone)</td></tr></table>"
+        let stackedDirectory = "<table><tr><td>John Smith<br>Partner<br>\(email)<br>\(phone)</td></tr>" +
+            "<tr><td>Jane Smith<br>Partner<br>\(email)<br>\(phone)</td></tr></table>"
+        for html in [
+            "<p>Here are the contacts:</p><p>Partner</p><p>John Smith</p><p>\(email)</p><p>\(phone)</p>",
+            "<p>Best,</p>" + directory,
+            directory + "<p>Best,</p><p>Alex</p>",
+            "<p>Current reply.</p>" + stackedDirectory
+        ] {
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), plainText(html))
+            let originalDocument = try SwiftSoup.parse(html)
+            let cleanedDocument = try SwiftSoup.parse(cleaned)
+            for selector in ["table", "tr", "td", "a[href]"] {
+                XCTAssertEqual(try cleanedDocument.select(selector).size(), try originalDocument.select(selector).size())
+            }
+        }
+    }
+
+    func testF12LabeledLinksRejectInstructionsMalformedTargetsAndAdjacentEvidence() throws {
+        let validPhone = "<a href='tel:+14155551212'>Call the office</a>"
+        let invalidEmailLines = [
+            "<a href='mailto:john@example.test'>Please email me if the estimate changes.</a>",
+            "Please <a href='mailto:john@example.test'>Email me</a> if the estimate changes.",
+            "<a href='https://example.test/estimate'>Email me</a>",
+            "<a href='mailto:'>Email me</a>",
+            "<a href='mailto:john'>Email me</a>",
+            "<a href='mailto:.@example.test'>Email me</a>",
+            "<a href='mailto:a..b@example.test'>Email me</a>",
+            "<a href='mailto:a.@example.test'>Email me</a>",
+            "<a href='mailto:?body=john@example.test'>Email me</a>",
+            "<a href='mailto:john@example.test\n'>Email me</a>",
+            "<a href=' mailto:john@example.test'>Email me</a>",
+            "<a href='x-mailto:john@example.test'>Email me</a>",
+            "<a href='mailto:john@example.test'>Call the office</a>",
+            "<a href='tel:+14155551212'>Email me</a>",
+            "Phone: <a href='mailto:john@example.test'>Email me</a>",
+            "Email: <a href='tel:+14155551212'>Call the office</a>",
+            "<a href='mailto:john@example.test' hidden>Email me</a>Reference",
+            "<a href='mailto:john@example.test'><img src='cid:badge'></a>Email me",
+            "<a href='mailto:john@example.test'>Email me<img src='cid:badge'></a>",
+            "<a href='mailto:john@example.test'>Email me</a> <a href='https://example.test/estimate'>Read the estimate</a>",
+            "<a href='mailto:john@example.test'>Email me<br>Read the estimate</a>",
+            "<a href='mailto:john@example.test'><span hidden>Email me</span>Read the estimate</a>"
+        ]
+        for email in invalidEmailLines {
+            let html = "<p>Current reply.</p><div>Best,<br>John Smith<br>Partner<br>\(email)<br>\(validPhone)</div>"
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), plainText(html), html)
+            XCTAssertEqual(cleaned.contains("cid:badge"), html.contains("cid:badge"), html)
+        }
+        for target in ["tel:", "tel:123", "tel:+14155551212abc", "tel:+14155551212\n", "https://example.test/phone", "x-tel:+14155551212"] {
+            let html = "<p>Current reply.</p><p>Best,</p><p>John Smith</p><p>Partner</p>" +
+                "<p><a href='mailto:john@example.test'>Email me</a></p><p><a href='\(target)'>Call the office</a></p>"
+            XCTAssertEqual(plainText(try trailingContactHTML(html)), plainText(html), target)
+        }
+        for block in [
+            "<p><a href='mailto:john@example.test'>Email me</a> | \(validPhone)</p>",
+            "<p><a href='mailto:john@example.test'>Email me</a></p>",
+            "<table><tr><td><a href='mailto:john@example.test'>Email me</a></td><td>Call the office</td></tr></table>"
+        ] {
+            let html = "<p>Current reply.</p><p>Best,</p><p>John Smith</p><p>Partner</p>" + block
+            XCTAssertEqual(plainText(try trailingContactHTML(html)), plainText(html), html)
+        }
+    }
+
+    func testF12LinkEvidenceCountsLinesAndDistinguishesTelephoneFromEmail() throws {
+        let email = "<a href='mailto:john@example.test?subject=Estimate'>E<b>mail</b> me</a>"
+        let secondEmail = "<a href='mailto:office@example.test'><b>Email</b> <i>us</i></a>"
+        let phone = "<a href='TEL:+1 (415) 555-1212'><span hidden>Ignore this</span>Call the <b>office</b></a>"
+        let body = "<p>Current reply.</p>"
+        for contacts in [
+            "<p>\(email)</p><p></p><p>\(phone)</p>",
+            "<p>\(email) | \(phone)</p><p>\(secondEmail)</p>",
+            "<p>Email: \(email)</p><p>Phone: \(phone)</p>"
+        ] {
+            // Revert-check: linkedContactEvidence feeds blank lookback, one-count-per-line, and non-email accounting.
+            let html = body + "<p>John Smith</p>" + contacts
+            XCTAssertEqual(plainText(try trailingContactHTML(html)), "Current reply.", html)
+        }
+        let emailOnly = body + "<p>John Smith</p><p>\(email)</p><p>\(secondEmail)</p>"
+        XCTAssertEqual(plainText(try trailingContactHTML(emailOnly)), plainText(emailOnly))
+    }
+
+    func testF12InlineProjectionKeepsAnchorSlicesAndExistingTextOffsets() throws {
+        // Revert-check: inlineHeaderLines associates link metadata during traversal, never by ancestor text.
+        let document = try SwiftSoup.parse("""
+        <div id='lines'>  😀 Reply.<br><a href='mailto:john@example.test'>E<b>mail</b> me<br><span hidden>Hidden label</span>Email us</a><br>Call the office<a href='tel:+14155551212' hidden>Call me</a><a href='mailto:john@example.test'><img src='cid:badge'></a></div>
+        <table><tr><td id='email'><a href='mailto:john@example.test'>Email me</a></td><td id='plain'>Call the office</td></tr></table>
+        """)
+        let element = try XCTUnwrap(document.getElementById("lines"))
+        let lines = EmailDOMQuoteRemover.inlineHeaderLines(in: element)
+        XCTAssertEqual(lines.map(\.text), ["😀 Reply.", "E mail me", "Email us", "Call the office"])
+        XCTAssertEqual(lines[0].startUTF16Offset, 2)
+        XCTAssertEqual(lines[1].startTextNode?.getWholeText(), "E")
+        XCTAssertEqual(lines[1].startUTF16Offset, 0)
+        XCTAssertEqual(lines[1].links.map(\.text), ["Email me"])
+        XCTAssertEqual(lines[2].links.map(\.text), ["Email us"])
+        XCTAssertEqual(lines[1].links.map(\.rawTarget), ["mailto:john@example.test"])
+        XCTAssertTrue(lines[3].links.isEmpty)
+        XCTAssertEqual(lines[3].nonLinkText, "Call the office")
+        let emailCell = try XCTUnwrap(document.getElementById("email"))
+        let plainCell = try XCTUnwrap(document.getElementById("plain"))
+        XCTAssertEqual(EmailDOMQuoteRemover.inlineHeaderLines(in: emailCell).first?.links.count, 1)
+        XCTAssertEqual(EmailDOMQuoteRemover.inlineHeaderLines(in: plainCell).first?.links.count, 0)
     }
 
     // MARK: - Nil / empty

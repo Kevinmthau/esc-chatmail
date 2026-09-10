@@ -125,7 +125,14 @@ interface VisibleLineElement {
   text: string
 }
 
+interface VisibleLineLink {
+  rawTarget: string
+  visibleText: string
+}
+
 interface InlineHeaderLine {
+  links: VisibleLineLink[]
+  nonLinkText: string
   text: string
   startTextNode: Text | null
   startOffset: number
@@ -226,11 +233,25 @@ function inlineHeaderBlockElements(rootElement: Element): Element[] {
 function inlineHeaderLines(element: Element): InlineHeaderLine[] {
   const result: InlineHeaderLine[] = []
   let currentText = ''
+  let currentNonLinkText = ''
+  let currentLinks = new Map<Element, VisibleLineLink>()
   let currentStartTextNode: Text | null = null
   let currentStartOffset = 0
 
-  const appendText = (rawText: string, textNode: Text): void => {
+  const appendText = (rawText: string, textNode: Text, anchor: Element | null): void => {
     const normalized = rawText.replace(/\u00A0/g, ' ')
+    // Keep actual anchor fragments together, including formatting inside a word.
+    // Shared line text/offsets below retain their existing whitespace contract.
+    if (anchor) {
+      const link = currentLinks.get(anchor) ?? {
+        rawTarget: anchor.getAttribute('href') ?? '',
+        visibleText: '',
+      }
+      link.visibleText += normalized
+      currentLinks.set(anchor, link)
+    } else {
+      currentNonLinkText += normalized
+    }
     const firstTextIndex = normalized.search(/\S/)
     if (firstTextIndex === -1) {
       return
@@ -253,17 +274,23 @@ function inlineHeaderLines(element: Element): InlineHeaderLine[] {
   const finishLine = (): void => {
     result.push({
       text: normalizedVisibleLineText(currentText),
+      links: [...currentLinks.values()]
+        .map((link) => ({ ...link, visibleText: normalizedVisibleLineText(link.visibleText) }))
+        .filter((link) => link.visibleText.length > 0),
+      nonLinkText: normalizedVisibleLineText(currentNonLinkText),
       startTextNode: currentStartTextNode,
       startOffset: currentStartOffset,
     })
     currentText = ''
+    currentNonLinkText = ''
+    currentLinks = new Map()
     currentStartTextNode = null
     currentStartOffset = 0
   }
 
-  const walkNode = (node: Node): void => {
+  const walkNode = (node: Node, anchor: Element | null = null): void => {
     if (node.nodeType === NODE_TEXT) {
-      appendText((node as Text).data, node as Text)
+      appendText((node as Text).data, node as Text, anchor)
       return
     }
     if (node.nodeType !== NODE_ELEMENT) return
@@ -275,7 +302,7 @@ function inlineHeaderLines(element: Element): InlineHeaderLine[] {
     }
 
     for (const child of Array.from(element.childNodes)) {
-      walkNode(child)
+      walkNode(child, tagName(element) === 'a' ? element : anchor)
     }
   }
 
@@ -1304,6 +1331,8 @@ const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
 const CONTACT_LIST_INTRO_KEYWORDS = ['contact', 'email', 'reviewer', 'recipient']
 
 interface SignatureLine extends VisibleLineElement {
+  links: VisibleLineLink[]
+  nonLinkText: string
   startTextNode: Text | null
   startOffset: number
 }
@@ -1321,9 +1350,21 @@ function signatureLines(body: Element): SignatureLine[] {
         inlineHeaderLines(cell).map((subline) => ({ ...subline, element })),
       )
     }
-    return [{ ...line, startTextNode: null, startOffset: 0 }]
+    const projected = inlineHeaderLines(element)[0]!
+    return [
+      {
+        ...line,
+        links: projected.links,
+        nonLinkText: projected.nonLinkText,
+        startTextNode: null,
+        startOffset: 0,
+      },
+    ]
   })
 }
+
+// Inclusive backward distance: the terminal line plus 80 prior slots; blanks consume slots.
+const DOM_SIGNATURE_LOOKBACK = 80
 
 function truncateTrailingContactSignature(document: Document): void {
   const body = document.body
@@ -1339,7 +1380,7 @@ function truncateTrailingContactSignature(document: Document): void {
   if (lastNonEmpty === -1) return
   let lastContact = lastNonEmpty
   let tailCount = 0
-  while (!isTrailingSignatureContactLine(lines[lastContact]!.text)) {
+  while (!isTrailingSignatureContact(lines[lastContact]!)) {
     if (
       isContactSignatureLine(lines[lastContact]!.text) ||
       tailCount >= 3 ||
@@ -1352,7 +1393,7 @@ function truncateTrailingContactSignature(document: Document): void {
     lastContact = previous
   }
 
-  const scanStart = Math.max(0, lastNonEmpty - 32)
+  const scanStart = Math.max(0, lastNonEmpty - DOM_SIGNATURE_LOOKBACK)
   let contactLineCount = 0
   let fillerCount = 0
   let signatureStart = lastContact
@@ -1374,6 +1415,7 @@ function truncateTrailingContactSignature(document: Document): void {
       const previousText = lines[previousNonEmptyIndex]!.text
       if (
         !isContactSignatureLine(previousText) &&
+        !trailingSignatureLinkContact(lines[previousNonEmptyIndex]!) &&
         !isSignatureSupportLine(previousText) &&
         !isLikelySignOffLine(previousText) &&
         !isSignatureProductList(previousText)
@@ -1391,13 +1433,16 @@ function truncateTrailingContactSignature(document: Document): void {
       break
     }
 
-    if (isContactSignatureLine(text)) {
-      if (!isTrailingSignatureContactLine(text)) {
+    if (isContactSignatureLine(text) || trailingSignatureLinkContact(lines[scanIndex]!)) {
+      if (!isTrailingSignatureContact(lines[scanIndex]!)) {
         precedingBodyLine = text
         break
       }
       contactLineCount += 1
-      if (hasNonEmailContactSignal(text)) {
+      if (
+        hasNonEmailContactSignal(text) ||
+        trailingSignatureLinkContact(lines[scanIndex]!) === 'phone'
+      ) {
         nonEmailContactLineCount += 1
       }
       signatureStart = scanIndex
@@ -1466,7 +1511,8 @@ function truncateTrailingContactSignature(document: Document): void {
   if (sawSignOffBeforeSignature) {
     if (
       shouldPreserveSignatureNameLine(lines[signatureStart]!.text) &&
-      !isContactSignatureLine(lines[signatureStart]!.text)
+      !isContactSignatureLine(lines[signatureStart]!.text) &&
+      !trailingSignatureLinkContact(lines[signatureStart]!)
     ) {
       preservedHTML = `<div>${escapedHTML(lines[scanIndex]!.text)}<br>${escapedHTML(lines[signatureStart]!.text)}</div>`
     }
@@ -1509,8 +1555,9 @@ function shouldPreserveContactTable(lines: SignatureLine[], hasStrongSignal: boo
         ['td', 'th'].includes(tagName(cell)),
       )
       if (rowCells.some((cell) => tagName(cell) === 'th')) return true
-      const texts = rowCells.map((cell) =>
-        inlineHeaderLines(cell)
+      const cellLines = rowCells.map(inlineHeaderLines)
+      const texts = cellLines.map((lines) =>
+        lines
           .map((line) => line.text)
           .join(' ')
           .trim(),
@@ -1520,12 +1567,23 @@ function shouldPreserveContactTable(lines: SignatureLine[], hasStrongSignal: boo
       ) {
         return true
       }
+      // An explicit contact label can resemble a name; it cannot also establish a person row.
+      const nameCandidates = [
+        ...texts.filter(
+          (_, index) => !cellLines[index]!.some((line) => trailingSignatureLinkContact(line)),
+        ),
+        ...cellLines
+          .flat()
+          .filter((line) => !trailingSignatureLinkContact(line))
+          .map((line) => line.text),
+      ]
       if (
-        texts.some(
+        nameCandidates.some(
           (text) =>
             looksLikeSignatureNameSupportLine(text) && shouldPreserveSignatureNameLine(text),
         ) &&
-        texts.some(isContactSignatureLine)
+        (texts.some(isContactSignatureLine) ||
+          cellLines.some((lines) => lines.some((line) => trailingSignatureLinkContact(line))))
       ) {
         personRows += 1
         if (personRows > 1) return true
@@ -1652,6 +1710,63 @@ function hasMediaBeforeSignature(boundary: Text | null, root: Element): boolean 
     stack.push(...Array.from(node.childNodes).reverse())
   }
   return false
+}
+
+// Link targets are evidence only for this pass; quote/header and extracted text stay unchanged.
+function trailingSignatureLinkContact(
+  line: Pick<InlineHeaderLine, 'links' | 'nonLinkText'>,
+): 'email' | 'phone' | null {
+  if (line.links.length === 0) return null
+  const surrounding = line.nonLinkText.replace(
+    /^[\s|•│┃¦:;,.()[\]–—-]+|[\s|•│┃¦:;,.()[\]–—-]+$/gu,
+    '',
+  )
+  if (
+    surrounding &&
+    !/^(?:email|e-mail|e|tel|telephone|phone|t|office|work|direct|mobile|cell|fax)$/i.test(
+      surrounding,
+    )
+  ) {
+    return null
+  }
+  const surroundingIsEmail = /^(?:email|e-mail|e)$/i.test(surrounding)
+  let kind: 'email' | 'phone' = 'email'
+  for (const link of line.links) {
+    if (/[\r\n\u2028\u2029]/.test(link.rawTarget)) return null
+    if (/^mailto:/i.test(link.rawTarget)) {
+      const target = /^mailto:([^?]+)(?:\?[^\s]*)?$/i.exec(link.rawTarget)?.[1]
+      const local = target?.split('@')[0] ?? ''
+      if (
+        (surrounding && !surroundingIsEmail) ||
+        !target ||
+        local.startsWith('.') ||
+        local.endsWith('.') ||
+        local.includes('..') ||
+        !/^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)+$/i.test(
+          target,
+        ) ||
+        !/^(?:email|e-mail)(?: me| us)?$/i.test(link.visibleText)
+      )
+        return null
+    } else if (/^tel:\+?[0-9(). -]+$/i.test(link.rawTarget)) {
+      const digits = link.rawTarget.replace(/\D/g, '').length
+      if (
+        (surrounding && surroundingIsEmail) ||
+        digits < 7 ||
+        digits > 15 ||
+        !/^(?:tel|telephone|phone|call(?: me| us| the office)?)$/i.test(link.visibleText)
+      )
+        return null
+      kind = 'phone'
+    } else {
+      return null
+    }
+  }
+  return kind
+}
+
+function isTrailingSignatureContact(line: SignatureLine): boolean {
+  return isTrailingSignatureContactLine(line.text) || trailingSignatureLinkContact(line) !== null
 }
 
 // Contact tokens may have labels or a name, but must not swallow an authored instruction.
