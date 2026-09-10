@@ -13,6 +13,11 @@ import {
   STANDALONE_CONTACT_LABEL_PATTERN,
   WEB_URL_PATTERN,
 } from './patterns'
+import {
+  isContactSignatureLine,
+  isSignatureSupportLine,
+  isTrailingSignatureContactLine,
+} from './html'
 import { isListItem, normalizeLineEndings } from './text'
 
 const TRAILING_SCAN_LINE_LIMIT = 80
@@ -350,6 +355,50 @@ export function removeSignature(text: string): string {
   }
 
   return trimmed
+}
+
+/** Requires a sign-off: extracted text cannot distinguish signatures from kept referrals. */
+export function removeTrailingContactSignature(text: string): string {
+  const normalized = normalizeLineEndings(text)
+  const trimmed = normalized.trim()
+  const lines = normalized.split('\n')
+  let last = lines.length - 1
+  while (last >= 0 && lines[last]!.trim().length === 0) last--
+  if (last < 0 || !isTrailingSignatureContactLine(lines[last]!.trim())) return trimmed
+
+  let start = last
+  let contacts = 0
+  let signOffIndex: number | null = null
+  for (let index = last; index >= Math.max(0, last - 32); index--) {
+    const line = lines[index]!.trim()
+    if (line.length === 0) continue
+    if (isSignOffLineForSignatureContext(line)) {
+      signOffIndex = index
+      break
+    }
+    // Email addresses and titles inside instructions are still body prose.
+    if (
+      isBodyProseLine(line) ||
+      ((EMAIL_ADDRESS_PATTERN.test(line) || WEB_URL_PATTERN.test(line)) &&
+        !isStrictContactLine(line))
+    ) {
+      break
+    }
+    if (isContactSignatureLine(line)) {
+      if (!isTrailingSignatureContactLine(line)) {
+        break
+      }
+      contacts++
+    } else if (!isSignatureSupportLine(line)) {
+      break
+    }
+    start = index
+  }
+  const removalCount = lines.slice(start, last + 1).filter((line) => line.trim().length > 0).length
+  if (signOffIndex === null || contacts < 2 || removalCount < 3) return trimmed
+  const result = joinLines(lines, preservingSignOff(signOffIndex, last, lines))
+  // Never erase the entire extracted message.
+  return result.length > 0 ? result : trimmed
 }
 
 // Markers in a reply are footers only when their entire tail is signature-like.

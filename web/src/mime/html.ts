@@ -1656,7 +1656,7 @@ function hasMediaBeforeSignature(boundary: Text | null, root: Element): boolean 
 
 // Contact tokens may have labels or a name, but must not swallow an authored instruction.
 // Keep the broader contact predicate unchanged for quote/header detection.
-function isTrailingSignatureContactLine(text: string): boolean {
+export function isTrailingSignatureContactLine(text: string): boolean {
   if (!isContactSignatureLine(text)) return false
   const hasLink = EMAIL_ADDRESS_PATTERN.test(text) || WEB_URL_PATTERN.test(text)
   if (!hasLink) {
@@ -1759,7 +1759,7 @@ function previousNonEmptyLineIndex(
   return null
 }
 
-function isContactSignatureLine(text: string): boolean {
+export function isContactSignatureLine(text: string): boolean {
   if (text.length === 0) return false
   if (EMAIL_ADDRESS_PATTERN.test(text)) return true
   if (WEB_URL_PATTERN.test(text)) return true
@@ -1940,7 +1940,7 @@ function isAllowedSignaturePhoneSuffix(rawSuffix: string): boolean {
   )
 }
 
-function isSignatureSupportLine(text: string): boolean {
+export function isSignatureSupportLine(text: string): boolean {
   if (text.length === 0) return false
   if (isStrongSignatureSupportLine(text)) {
     return true

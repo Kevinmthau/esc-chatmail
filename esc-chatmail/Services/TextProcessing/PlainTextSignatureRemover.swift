@@ -328,6 +328,49 @@ enum PlainTextSignatureRemover {
         return trimmed
     }
 
+    /// Contact-only second pass for text extracted from successfully cleaned HTML.
+    /// Requires a sign-off because extracted text no longer distinguishes a
+    /// signature from authored referrals or contact lists that DOM cleanup kept.
+    static func removeTrailingContactSignature(from text: String) -> String {
+        let normalized = TextProcessing.normalizeLineEndings(text)
+        let lines = normalized.components(separatedBy: "\n")
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = lines.indices.last(where: { !lines[$0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+              EmailDOMQuoteRemover.isTrailingSignatureContactLine(lines[last].trimmingCharacters(in: .whitespacesAndNewlines)) else { return trimmed }
+
+        var start = last
+        var contacts = 0
+        var signOffIndex: Int?
+        for index in stride(from: last, through: max(0, last - 32), by: -1) {
+            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+            if isSignOffLineForSignatureContext(line) {
+                signOffIndex = index
+                break
+            }
+            // An email address or title inside an instruction is still body prose.
+            if isBodyProseLine(line) ||
+                ((matchesRegex(emailPattern, in: line) || matchesRegex(urlPattern, in: line)) && !isStrictContactLine(line)) {
+                break
+            }
+            if EmailDOMQuoteRemover.isContactSignatureLine(line) {
+                guard EmailDOMQuoteRemover.isTrailingSignatureContactLine(line) else {
+                    break
+                }
+                contacts += 1
+            } else if !EmailDOMQuoteRemover.isSignatureSupportLine(line) {
+                break
+            }
+            start = index
+        }
+
+        let removalCount = lines[start...last].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+        guard let signOffIndex, contacts >= 2, removalCount >= 3 else { return trimmed }
+        let result = joinLines(lines, upTo: preservingSignOff(startingAt: signOffIndex, through: last, lines: lines))
+        // Never erase the entire extracted message.
+        return result.isEmpty ? trimmed : result
+    }
+
     /// A marker inside a reply is not a footer when ordinary body text follows it.
     /// Soft-wrapped legal paragraphs may continue onto a lowercase line without a
     /// paragraph break; a later body paragraph must still stop the truncation.

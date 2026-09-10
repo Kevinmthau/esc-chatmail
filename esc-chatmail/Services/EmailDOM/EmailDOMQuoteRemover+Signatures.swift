@@ -535,7 +535,7 @@ extension EmailDOMQuoteRemover {
 
     /// Contact tokens may have labels or a name, but must not swallow an authored instruction.
     /// Keep the broader contact predicate unchanged for quote/header detection.
-    private static func isTrailingSignatureContactLine(_ text: String) -> Bool {
+    static func isTrailingSignatureContactLine(_ text: String) -> Bool {
         guard isContactSignatureLine(text) else { return false }
         var remainder = text
         var hasLink = false
@@ -847,7 +847,8 @@ extension EmailDOMQuoteRemover {
         return pattern?.firstMatch(in: text, options: [], range: range)?.range == range
     }
 
-    private static func isSignatureSupportLine(_ text: String) -> Bool {
+    // Shared with the contact-only fallback after DOM text extraction.
+    static func isSignatureSupportLine(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
         if isStrongSignatureSupportLine(text) {
             return true

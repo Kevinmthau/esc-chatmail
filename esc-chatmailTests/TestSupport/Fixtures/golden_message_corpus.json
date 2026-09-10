@@ -537,6 +537,60 @@
       "expected": "Current reply.\n\nBest,\n\nJohn Smith"
     },
     {
+      "id": "html_section_lines_contact_signature_removed",
+      "inputHTML": "<section>The repair is scheduled.</section><section>Best,</section><section>John Boga</section><section>Property Manager</section><section>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</section><section>Emergency line after hours: 914-373-4658</section><section>www.nycbrownstone.net</section>",
+      "expected": "The repair is scheduled.\n\nBest,\n\nJohn Boga",
+      "notes": "Revert-check: PlainTextSignatureRemover.removeTrailingContactSignature / web removeTrailingContactSignature. Section blocks become distinct contact lines after extraction, beyond the DOM visible-line projection; no hard-indicator chaining."
+    },
+    {
+      "id": "html_section_lines_contact_list_kept",
+      "inputHTML": "<section>Here are the reviewer contacts:</section><section>Jane Doe</section><section>Account Manager</section><section>jane@example.com</section><section>404-555-0142</section>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nAccount Manager jane@example.com 404-555-0142",
+      "notes": "Revert-check: contact-only second-pass explicit contact-list intro veto in Swift / web. Authored contact list remains visible, including its job title."
+    },
+    {
+      "id": "html_section_lines_contact_card_then_body_kept",
+      "inputHTML": "<section>Please contact our manager:</section><section>Jane Doe</section><section>Property Manager</section><section>jane@example.com</section><section>404-555-0142</section><section>Please copy me on the reply.</section>",
+      "expected": "Please contact our manager:\n\nJane Doe\n\nProperty Manager jane@example.com 404-555-0142\n\nPlease copy me on the reply.",
+      "notes": "Revert-check: end-anchored contact-only second pass in Swift / web. Body prose after a card prevents removal."
+    },
+    {
+      "id": "html_contact_only_document_rescue_preserved",
+      "inputHTML": "<div>Jane Doe</div><div>jane@example.com</div><div>404-555-0142</div>",
+      "expected": "Jane Doe jane@example.com 404-555-0142",
+      "notes": "Revert-check: contact-only second-pass empty-result guard in Swift / web preserves a contact card rescued by quote-only DOM cleanup."
+    },
+    {
+      "id": "html_titled_contact_only_div_preserved",
+      "inputHTML": "<div>Jordan Smith</div><div>Partner</div><div>jordan@example.com</div><div>404-555-0142</div>",
+      "expected": "Jordan Smith\n\nPartner jordan@example.com 404-555-0142",
+      "notes": "Revert-check: empty-result guard of contact-only second pass in Swift / web preserves a full contact card rescued by quote-only DOM cleanup."
+    },
+    {
+      "id": "html_titled_contact_only_pre_preserved",
+      "inputHTML": "<pre>Jordan Smith<br>Partner<br>jordan@example.com<br>404-555-0142</pre>",
+      "expected": "Jordan Smith\n\nPartner jordan@example.com 404-555-0142",
+      "notes": "Revert-check: empty-result guard of contact-only second pass in Swift / web preserves a full contact card rescued by quote-only DOM cleanup. Explicit br boundaries avoid depending on text-node whitespace normalization."
+    },
+    {
+      "id": "html_section_contact_email_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>Please send the revised plan to bob@example.com.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nPlease send the revised plan to bob@example.com.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
+    },
+    {
+      "id": "html_section_contact_url_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>Please review the revised plan at https://example.com/plan.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nPlease review the revised plan at https://example.com/plan.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
+    },
+    {
+      "id": "html_section_contact_title_instruction_preserved",
+      "inputHTML": "<section>Please review the plan.</section><section>Jane Doe</section><section>Partner</section><section>jane@example.com</section><section>415-555-1212</section><section>The manager will call tomorrow.</section>",
+      "expected": "Please review the plan.\n\nJane Doe\n\nPartner jane@example.com 415-555-1212\n\nThe manager will call tomorrow.",
+      "notes": "Revert-check: contact-only fallback prose veto and strict email/URL contact classification in Swift / web preserve instructions after a contact block."
+    },
+    {
       "id": "authored_instruction_after_contact_signature_preserved",
       "notes": "PR 230 regression: ambiguous trailing body content must survive the HTML-to-bubble pipeline.",
       "inputHTML": "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p><p>Do not send the money.</p>",
@@ -619,6 +673,42 @@
       "notes": "HONEST SCOPE: passing preservation fixture before signature fixes. Revert-check: EmailDOMQuoteRemover trailing-contact guards / web removeQuotedContent.",
       "inputHTML": "<div>Please read the confidentiality notice: it changed.</div><div>The revised wording is in the document.</div>",
       "expected": "Please read the confidentiality notice: it changed.\n\nThe revised wording is in the document."
+    },
+    {
+      "id": "html_contact_fallback_preserves_street_instruction",
+      "inputHTML": "<div>The contract is ready.<br>Best,<br>John Smith<br>Partner<br>john@example.com<br>404-555-0142<br>Market Street is closed</div>",
+      "expected": "The contract is ready.\n\nBest,\nJohn Smith\n\nPartner john@example.com 404-555-0142\n\nMarket Street is closed",
+      "notes": "PR 235 regression: a street keyword in authored prose must not become signature evidence after DOM cleanup."
+    },
+    {
+      "id": "html_contact_fallback_preserves_directory_table",
+      "inputHTML": "<p>Use these people.</p><table><tr><td>John Smith</td><td>Partner<br>john@example.test<br>415-555-1212</td></tr><tr><td>Jane Brown</td><td>Partner<br>jane@example.test<br>212-555-1212</td></tr></table>",
+      "expected": "Use these people.\n\nJohn Smith Partner john@example.test 415-555-1212\n\nJane Brown Partner jane@example.test 212-555-1212",
+      "notes": "PR 235 regression: text fallback must respect the DOM decision to retain a directory with multiple people."
+    },
+    {
+      "id": "html_contact_fallback_preserves_linked_attachment_text",
+      "inputHTML": "<p>Current reply.</p><div><a href=\"cid:damage\">John Smith</a><br>Partner<br>john@example.test<br>415-555-1212</div>",
+      "expected": "Current reply.\n\nJohn Smith\n\nPartner john@example.test 415-555-1212",
+      "notes": "PR 235 regression: retain text protected by the DOM attachment ownership guard."
+    },
+    {
+      "id": "html_contact_fallback_preserves_resource_heading",
+      "inputHTML": "<p>Please keep these handy.</p><h3>Design Reference</h3><ul><li>https://example.com/one</li><li>https://example.com/two</li></ul>",
+      "expected": "Please keep these handy.\n\nDesign Reference\n\nhttps://example.com/one\n\nhttps://example.com/two",
+      "notes": "PR 235 regression: headings and lists convey authored content that the text-only fallback cannot classify safely."
+    },
+    {
+      "id": "html_contact_fallback_preserves_section_referral",
+      "inputHTML": "<section>You can reach the contractor here:</section><section>Jane Doe</section><section>Account Manager</section><section>jane@example.com</section><section>404-555-0142</section>",
+      "expected": "You can reach the contractor here:\n\nJane Doe\n\nAccount Manager jane@example.com 404-555-0142",
+      "notes": "PR 235 regression: name, role and contact details cannot distinguish an authored referral from a signature without a closing."
+    },
+    {
+      "id": "html_contact_fallback_preserves_section_recommendation",
+      "inputHTML": "<section>Here is the plumber I recommend.</section><section>Jane Doe</section><section>Account Manager</section><section>jane@example.com</section><section>404-555-0142</section>",
+      "expected": "Here is the plumber I recommend.\n\nJane Doe\n\nAccount Manager jane@example.com 404-555-0142",
+      "notes": "PR 235 regression: referrals need not contain a contact keyword or end with a colon."
     }
   ],
   "rawSourceHTMLRecoveryCases": [

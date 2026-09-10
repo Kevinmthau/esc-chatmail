@@ -153,7 +153,8 @@ enum ChatBubbleTextProcessor {
             decodeHTMLEntities: decodeHTMLEntities,
             formatSignOffLineBreaks: formatSignOffLineBreaks,
             applyPlainTextQuoteRemoval: cleanup.applyPlainTextQuoteRemoval,
-            stripStandaloneQuoteAttributionLines: cleanup.stripStandaloneQuoteAttributionLines
+            stripStandaloneQuoteAttributionLines: cleanup.stripStandaloneQuoteAttributionLines,
+            applyTrailingContactSignatureRemoval: cleanup.applyTrailingContactSignatureRemoval
         )
 
         if plainText == nil {
@@ -216,6 +217,8 @@ enum ChatBubbleTextProcessor {
 fileprivate struct HTMLProcessingCleanupResult {
     let html: String
     let applyPlainTextQuoteRemoval: Bool
+    /// Rescue modes must retain content that signature cleanup removed.
+    let applyTrailingContactSignatureRemoval: Bool
     /// True only for the containers-only rescue: that mode skips marker
     /// truncation, so a leftover attribution line must be dropped at the
     /// text level. The fuller modes already truncate attributions in the DOM,
@@ -1048,12 +1051,20 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return nil
     }
 
+    // Retained tables, headings, lists and media carry context lost by text extraction.
+    // Leave those documents to DOM cleanup, including its content-preservation guards.
+    private static let textSignatureProtectedStructurePattern = try? NSRegularExpression(
+        pattern: #"<\s*(?:table|thead|tbody|tfoot|tr|td|th|h[1-6]|ul|ol|li|dl|dt|dd|figure|figcaption|img|picture|svg|video|audio|object|embed|iframe|canvas)\b|\b(?:src|srcset|background|poster)\s*=|cid:|url\s*\("#,
+        options: [.caseInsensitive]
+    )
+
     nonisolated fileprivate static func extractPlainTextFromHTML(
         from html: String,
         decodeHTMLEntities: Bool = false,
         formatSignOffLineBreaks: Bool = true,
         applyPlainTextQuoteRemoval: Bool = false,
-        stripStandaloneQuoteAttributionLines: Bool = false
+        stripStandaloneQuoteAttributionLines: Bool = false,
+        applyTrailingContactSignatureRemoval: Bool = false
     ) -> String? {
         // HTML compatibility fallback for records missing chatPreviewText. The
         // extraction itself is DOM-backed; the plain-text quote cleanup below is
@@ -1065,7 +1076,14 @@ actor ProcessedTextCache: MemoryWarningHandler {
         let textBeforeUnwrap = applyPlainTextQuoteRemoval
             ? decoded
             : removeConsecutivePlainTextQuoteLines(from: decoded)
-        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: textBeforeUnwrap)
+        let hasProtectedStructure = textSignatureProtectedStructurePattern?.firstMatch(
+            in: html,
+            range: NSRange(html.startIndex..., in: html)
+        ) != nil
+        let contactCleaned = applyTrailingContactSignatureRemoval && !hasProtectedStructure
+            ? PlainTextSignatureRemover.removeTrailingContactSignature(from: textBeforeUnwrap)
+            : textBeforeUnwrap
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: contactCleaned)
         let quoteRemoved: String
         if applyPlainTextQuoteRemoval {
             quoteRemoved = PlainTextQuoteRemover.extractQuotes(from: unwrapped).mainContent
@@ -1273,6 +1291,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return HTMLProcessingCleanupResult(
             html: fallback.html,
             applyPlainTextQuoteRemoval: fallback.appliedMode == nil,
+            applyTrailingContactSignatureRemoval: fallback.appliedMode == .quotedAndSignatures,
             stripStandaloneQuoteAttributionLines: fallback.appliedMode == .quotedContainersOnly
         )
     }

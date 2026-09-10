@@ -419,6 +419,42 @@ final class ProcessedTextCacheTests: XCTestCase {
         XCTAssertFalse(result.mainText?.contains("Are you free for lunch tomorrow?") ?? true)
     }
 
+    func testChatBubbleTextProcessor_htmlDiagram_preservesSignatureLikeText() {
+        let html = """
+        <p>Project organization:</p><svg><text>Best,</text>
+        <text>John Smith</text>
+        <text>Partner</text>
+        <text>john@example.test</text>
+        <text>415-555-1212</text></svg>
+        """
+        let result = ChatBubbleTextProcessor.htmlCompatibilityFallback(from: html, classifyRichContent: false)
+        let visibleText = (result.mainText ?? "").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertEqual(visibleText, "Project organization: Best, John Smith Partner john@example.test 415-555-1212")
+    }
+
+    func testChatBubbleTextProcessor_htmlBottomPostedContactCard_preservesRescuedContact() {
+        let html = """
+        <html><body>
+        <div>On Aug 1, 2026, at 9:00 AM, Olga Smith &lt;olga@example.com&gt; wrote:</div>
+        <blockquote type="cite"><div>Please send the engineer's contact.</div></blockquote>
+        <div>Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>
+        </body></html>
+        """
+
+        let result = ChatBubbleTextProcessor.htmlCompatibilityFallback(
+            from: html,
+            classifyRichContent: false
+        )
+
+        // The contact card is the entire reply. Its attribution is removed
+        // after the containers-only rescue and must not serve as body evidence
+        // for a second signature pass that would discard the card.
+        let visibleText = (result.mainText ?? "")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        XCTAssertEqual(visibleText, "Best, John Smith Partner john@example.test 415-555-1212")
+    }
+
     /// Prose that merely ends with "wrote:" is not an attribution. The
     /// standalone-attribution filter only runs for the containers-only rescue
     /// and requires a genuine attribution shape, so ordinary lines survive.
