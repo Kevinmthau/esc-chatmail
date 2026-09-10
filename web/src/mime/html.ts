@@ -1207,10 +1207,7 @@ function preservedSignOffHTML(element: Element): string {
   if (!isLikelySignOffLine(lines[0]!)) return ''
 
   if (lines.length <= 1 || !shouldPreserveSignatureNameLine(lines[1]!)) return ''
-  const preserved = [lines[0]!]
-  if (lines.length > 1 && shouldPreserveSignatureNameLine(lines[1]!)) {
-    preserved.push(lines[1]!)
-  }
+  const preserved = [lines[0]!, lines[1]!]
 
   return `<div>${preserved.map(escapedHTML).join('<br>')}</div>`
 }

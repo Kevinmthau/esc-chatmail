@@ -61,10 +61,7 @@ extension EmailDOMQuoteRemover {
         guard isLikelySignOffLine(lines[0]) else { return "" }
 
         guard lines.count > 1, SignatureSignOffPolicy.shouldPreserveNameLine(lines[1]) else { return "" }
-        var preserved = [lines[0]]
-        if lines.count > 1, SignatureSignOffPolicy.shouldPreserveNameLine(lines[1]) {
-            preserved.append(lines[1])
-        }
+        let preserved = [lines[0], lines[1]]
 
         return "<div>\(preserved.map(escapedHTML).joined(separator: "<br>"))</div>"
     }
@@ -377,6 +374,13 @@ extension EmailDOMQuoteRemover {
         _ lines: [SignatureLine], from start: Int, through end: Int, preserving html: String
     ) throws {
         let first = lines[start]
+        // SwiftSoup can reuse an ancestor's raw table HTML after a previously dirty child changes.
+        // Reassigning the unchanged tag invalidates that snapshot without changing markup or attributes.
+        var ancestor = first.element.parent()
+        while let element = ancestor, element.tagNameNormal() != "body" {
+            try element.tagName(element.tagName())
+            ancestor = element.parent()
+        }
         let hasPrefix = lines[..<start].contains { $0.element === first.element && !$0.text.isEmpty }
         if hasPrefix, let node = first.startTextNode {
             try truncateAtTextNode(node, matchStartUTF16: first.startUTF16Offset,

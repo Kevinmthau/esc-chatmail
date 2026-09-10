@@ -597,7 +597,7 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
     }
 
     func testBRAndTableSignaturesPreserveAuthoredPrefixAndSignOffName() {
-        // Revert-check: signature sub-line expansion, bounded surgery, shared sign-off/name policy.
+        // Revert-check: sub-line expansion, ancestor raw-HTML invalidation, bounded surgery, sign-off/name policy.
         let contact = "Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212"
         let shapes = [
             "<div>Current reply.<br>\(contact)</div>",
@@ -611,7 +611,7 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             XCTAssertTrue(text.contains("Current reply."))
             XCTAssertTrue(text.contains("Best,"))
             XCTAssertTrue(text.contains("John Smith"))
-            XCTAssertFalse(text.contains("Partner"))
+            XCTAssertFalse(text.contains("Partner"), cleaned)
             XCTAssertFalse(text.contains("john@example.test"))
             XCTAssertFalse(cleaned.contains("cid:badge"))
         }
