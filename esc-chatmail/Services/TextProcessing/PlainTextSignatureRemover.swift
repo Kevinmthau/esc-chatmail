@@ -901,7 +901,7 @@ enum PlainTextSignatureRemover {
         return nil
     }
 
-    private static func isPostscriptLine(_ lowercased: String) -> Bool {
+    static func isPostscriptLine(_ lowercased: String) -> Bool {
         let trimmed = lowercased.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("p.s.") ||
             trimmed.hasPrefix("p.s:") ||

@@ -166,6 +166,16 @@ enum ChatBubbleTextProcessor {
             )
         }
 
+        if cleanup.applyTrailingContactSignatureRemoval, let currentText = plainText {
+            plainText = RepeatedSignatureRemover.removeSignature(from: currentText) {
+                // Only project the source for a surviving, corroborated contact block.
+                // History is evidence for preview cleanup; canonical HTML remains untouched.
+                let sourceText = TextProcessing.extractPlainText(from: html)
+                return PlainTextQuoteRemover.extractQuotes(from: sourceText, removingSignature: false)
+                    .quotedParts.map(\.text).joined(separator: "\n")
+            }
+        }
+
         let hasRichContent = classifyRichContent ? ProcessedTextCache.hasGenuineRichContent(cleanup.html) : false
         return ChatBubbleTextProcessingResult(
             mainText: plainText,
