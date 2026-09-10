@@ -99,6 +99,93 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         }
     }
 
+    func testF12LinkedContactDirectoriesPreserveBlockSeparatedRecords() throws {
+        for block in ["p", "div"] {
+            for wrapsName in [true, false] {
+                let rows = ["Jane Doe", "John Smith"].map { name in
+                    let nameHTML = wrapsName ? "<\(block)>\(name)</\(block)>" : name
+                    return "<tr><td>" + nameHTML +
+                        "<\(block)>Partner</\(block)>" +
+                        "<\(block)><a href='mailto:person@example.test'>Email me</a></\(block)>" +
+                        "<\(block)><a href='tel:+14155551212'>Call the office</a></\(block)>" +
+                        "</td></tr>"
+                }.joined()
+                let html = "<p>The team is listed below.</p><table>\(rows)</table>"
+                let cleaned = try trailingContactHTML(html)
+                XCTAssertEqual(plainText(cleaned), plainText(html), html)
+                let document = try SwiftSoup.parse(cleaned)
+                XCTAssertEqual(try document.select("tr").size(), 2, html)
+                XCTAssertEqual(try document.select("a[href]").size(), 4, html)
+            }
+        }
+    }
+
+    func testF12LinkedContactDirectoriesPreserveSideBySideRecords() throws {
+        for block in ["p", "div", "br"] {
+            for wrapsName in block == "br" ? [false] : [true, false] {
+                let cells = ["Jane Doe", "John Smith"].map { name in
+                    let lines = ["Partner",
+                                 "<a href='mailto:person@example.test'>Email me</a>",
+                                 "<a href='tel:+14155551212'>Call the office</a>"]
+                    let nameHTML = wrapsName ? "<\(block)>\(name)</\(block)>" : name
+                    let content = block == "br" ? ([name] + lines).joined(separator: "<br>") :
+                        nameHTML + lines.map { "<\(block)>\($0)</\(block)>" }.joined()
+                    return "<td>\(content)</td>"
+                }.joined()
+                let html = "<p>The team is listed below.</p><table><tr>\(cells)</tr></table>"
+                let cleaned = try trailingContactHTML(html)
+                XCTAssertEqual(plainText(cleaned), plainText(html), html)
+                let document = try SwiftSoup.parse(cleaned)
+                XCTAssertEqual(try document.select("td").size(), 2, html)
+                XCTAssertEqual(try document.select("a[href]").size(), 4, html)
+            }
+        }
+    }
+
+    func testF12LinkedContactDirectoriesPreserveSequentialRecordsOutsideTables() throws {
+        let lines = ["Jane Doe", "Partner",
+                     "<a href='mailto:jane@example.test'>Email me</a>",
+                     "<a href='tel:+14155551212'>Call the office</a>",
+                     "John Smith", "Partner",
+                     "<a href='mailto:john@example.test'>Email me</a>",
+                     "<a href='tel:+14155551213'>Call the office</a>"]
+        for block in ["p", "div", "br"] {
+            let content = block == "br" ? "<div>\(lines.joined(separator: "<br>"))</div>" :
+                lines.map { "<\(block)>\($0)</\(block)>" }.joined()
+            let html = "<p>The team is listed below.</p>" + content
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), plainText(html), html)
+            XCTAssertEqual(try SwiftSoup.parse(cleaned).select("a[href]").size(), 4, html)
+        }
+    }
+
+    func testF12LinkedContactDirectoriesPreserveCombinedNamesAndTitles() throws {
+        let lines = ["Jane Doe, Partner",
+                     "<a href='mailto:jane@example.test'>Email me</a>",
+                     "<a href='tel:+14155551212'>Call the office</a>",
+                     "John Smith, Partner",
+                     "<a href='mailto:john@example.test'>Email me</a>",
+                     "<a href='tel:+14155551213'>Call the office</a>"]
+        for block in ["p", "div", "br"] {
+            let content = block == "br" ? "<div>\(lines.joined(separator: "<br>"))</div>" :
+                lines.map { "<\(block)>\($0)</\(block)>" }.joined()
+            let html = "<p>The team is listed below.</p>" + content
+            let cleaned = try trailingContactHTML(html)
+            XCTAssertEqual(plainText(cleaned), plainText(html), html)
+            XCTAssertEqual(try SwiftSoup.parse(cleaned).select("a[href]").size(), 4, html)
+        }
+    }
+
+    func testF12LinkedSinglePersonSignatureKeepsNameAndCompanyInOneRecord() throws {
+        let lines = ["The estimate is ready.", "Best,", "Jane Doe", "Example Ventures",
+                     "<a href='mailto:jane@example.test'>Email me</a>",
+                     "<a href='tel:+14155551212'>Call the office</a>"]
+        let html = lines.map { "<p>\($0)</p>" }.joined()
+        let cleaned = try trailingContactHTML(html)
+        XCTAssertEqual(plainText(cleaned), "The estimate is ready.\n\nBest,\nJane Doe", cleaned)
+        XCTAssertTrue(try SwiftSoup.parse(cleaned).select("a[href]").isEmpty(), cleaned)
+    }
+
     func testF12LabeledLinksRejectInstructionsMalformedTargetsAndAdjacentEvidence() throws {
         let validPhone = "<a href='tel:+14155551212'>Call the office</a>"
         let invalidEmailLines = [

@@ -120,7 +120,7 @@ extension EmailDOMQuoteRemover {
         return result
     }
 
-    static func inlineHeaderLines(in element: Element) -> [InlineHeaderLine] {
+    static func inlineHeaderLines(in element: Element, splitBlockLines: Bool = false) -> [InlineHeaderLine] {
         var result: [InlineHeaderLine] = []
         var currentText = ""
         var currentStartTextNode: TextNode?
@@ -192,10 +192,13 @@ extension EmailDOMQuoteRemover {
                 return
             }
 
+            let splitsLine = splitBlockLines && visibleLineElementTags.contains(element.tagNameNormal())
+            if splitsLine, !currentText.isEmpty { finishLine() }
             let childAnchor = element.tagNameNormal() == "a" ? element : anchor
             for child in element.getChildNodes() {
                 walk(child, anchor: childAnchor)
             }
+            if splitsLine, !currentText.isEmpty { finishLine() }
         }
 
         for child in element.getChildNodes() {

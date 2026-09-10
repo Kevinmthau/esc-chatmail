@@ -348,6 +348,12 @@ extension EmailDOMQuoteRemover {
 
         guard contactLineCount >= 2, !isSignatureProductList(lines[signatureStart].text) else { return }
 
+        if hasRepeatedContactRecords(lines[signatureStart...lastNonEmpty].map {
+            (text: $0.text, isContact: isTrailingSignatureContactLine($0))
+        }) {
+            return
+        }
+
         if try shouldPreserveContactTable(
             Array(lines[signatureStart...lastNonEmpty]),
             hasStrongSignal: sawSignOffBeforeSignature || strongSupportLineCount > 0
@@ -385,6 +391,25 @@ extension EmailDOMQuoteRemover {
         try removeSignatureLines(lines, from: signatureStart, through: lastNonEmpty, preserving: preservedHTML)
     }
 
+    /// Consecutive name/title/company lines share one record until contact details complete it.
+    private static func hasRepeatedContactRecords(_ lines: [(text: String, isContact: Bool)]) -> Bool {
+        var hasPendingName = false
+        var completedRecords = 0
+        for line in lines {
+            if line.isContact {
+                if hasPendingName {
+                    completedRecords += 1
+                    if completedRecords > 1 { return true }
+                    hasPendingName = false
+                }
+            } else if isStrongSignatureSupportLine(line.text) ||
+                        (looksLikeSignatureNameSupportLine(line.text) && SignatureSignOffPolicy.shouldPreserveNameLine(line.text)) {
+                hasPendingName = true
+            }
+        }
+        return false
+    }
+
     /// Column headings and repeated person records distinguish directories from signatures.
     private static func shouldPreserveContactTable(_ lines: [SignatureLine], hasStrongSignal: Bool) throws -> Bool {
         var tables: [Element] = []
@@ -410,7 +435,9 @@ extension EmailDOMQuoteRemover {
                 guard signatureAncestor(of: row, tags: ["table"]) === table else { continue }
                 let rowCells = row.children().array().filter { ["td", "th"].contains($0.tagNameNormal()) }
                 if rowCells.contains(where: { $0.tagNameNormal() == "th" }) { return true }
-                let cellLines = rowCells.map { inlineHeaderLines(in: $0) }
+                // Contact records may use block children instead of BRs, including
+                // an unwrapped name before those blocks inside the same cell.
+                let cellLines = rowCells.map { inlineHeaderLines(in: $0, splitBlockLines: true) }
                 let texts = cellLines.map { lines in
                     lines.map(\.text).joined(separator: " ")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -418,6 +445,11 @@ extension EmailDOMQuoteRemover {
                 if texts.filter({ fieldHeadings.contains($0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ":"))) }).count >= 2 {
                     return true
                 }
+                // Also include direct cell names that the signature scan may not project.
+                if hasRepeatedContactRecords(cellLines.joined().map {
+                    (text: $0.text, isContact: isTrailingSignatureContactLine($0.text) ||
+                        linkedContactEvidence(links: $0.links, nonLinkText: $0.nonLinkText) != nil)
+                }) { return true }
                 // Explicit contact labels such as "Email" and "Telephone" are not person names.
                 let nameCandidates = zip(texts, cellLines).compactMap { text, lines in
                     lines.contains(where: { linkedContactEvidence(links: $0.links, nonLinkText: $0.nonLinkText) != nil }) ? nil : text

@@ -793,6 +793,36 @@
       "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must find repeated people in BR sublines within a single cell, alongside link-only contacts.",
       "inputHTML": "<p>Current reply.</p><table><tr><td>Jane Doe<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td></tr><tr><td>John Smith<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td></tr></table>",
       "expected": "Current reply.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_single_cell_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain repeated people whose names and labeled contacts occupy separate paragraph blocks in each cell.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td><p>Jane Doe</p><p>Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p></td></tr><tr><td><p>John Smith</p><p>Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_single_cell_divs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain repeated people whose names and labeled contacts occupy separate div blocks in each cell.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td><div>Jane Doe</div><div>Partner</div><div><a href=\"mailto:jane@example.test\">Email me</a></div><div><a href=\"tel:+14155551212\">Call the office</a></div></td></tr><tr><td><div>John Smith</div><div>Partner</div><div><a href=\"mailto:john@example.test\">Email me</a></div><div><a href=\"tel:+14155551313\">Call the office</a></div></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_side_by_side_cells",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain complete person records arranged side by side in one table row.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td>Jane Doe<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td><td>John Smith<br>Partner<br><a href=\"mailto:john@example.test\">Email me</a><br><a href=\"tel:+14155551313\">Call the office</a></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office John Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_paragraph_records",
+      "notes": "Revert-check: trailing signature removal must retain multiple complete name/contact records even when the directory uses ordinary paragraphs without a table.",
+      "inputHTML": "<p>The team is listed below.</p><p>Jane Doe</p><p>Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>John Smith</p><p>Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_combined_name_title_records",
+      "notes": "Revert-check: repeated contact records must remain visible when each person's name and role share a paragraph, so the identity line also matches signature support text.",
+      "inputHTML": "<p>The team is listed below.</p><p>Jane Doe, Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>John Smith, Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p>",
+      "expected": "The team is listed below.\n\nJane Doe, Partner\n\nEmail me\n\nCall the office\n\nJohn Smith, Partner\n\nEmail me\n\nCall the office"
     }
   ],
   "rawSourceHTMLRecoveryCases": [

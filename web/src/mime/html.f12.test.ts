@@ -175,6 +175,91 @@ describe('F12 labeled signature links', () => {
     expect(text(html)).toContain('Jane Doe Partner Email me Call the office John Smith')
     expect(removeQuotesFromHtml(html)).toContain('<table>')
   })
+  it.each(['p', 'div'])('preserves repeated directory records in %s blocks', (tag) => {
+    for (const signoff of ['', '<p>Best,</p>']) {
+      for (const inlineName of [false, true]) {
+        const html =
+          '<p>The team is listed below.</p>' +
+          signoff +
+          '<table>' +
+          ['Jane Doe', 'John Smith']
+            .map((name) => {
+              const lines = inlineName ? ['Partner', email, phone] : [name, 'Partner', email, phone]
+              return (
+                '<tr><td>' +
+                (inlineName ? name : '') +
+                lines.map((line) => `<${tag}>${line}</${tag}>`).join('') +
+                '</td></tr>'
+              )
+            })
+            .join('') +
+          '</table>'
+        expect(text(html)).toContain('Jane Doe Partner Email me Call the office John Smith')
+        expect(removeQuotesFromHtml(html)).toContain('<table>')
+      }
+    }
+  })
+  it.each(['p', 'div', 'br'])('preserves side-by-side directory cards using %s', (tag) => {
+    for (const inlineName of tag === 'br' ? [false] : [false, true]) {
+      const html =
+        '<p>The team is listed below.</p><table><tr>' +
+        ['Jane Doe', 'John Smith']
+          .map((name) => {
+            const lines = inlineName ? ['Partner', email, phone] : [name, 'Partner', email, phone]
+            return (
+              '<td>' +
+              (inlineName ? name : '') +
+              lines
+                .map((line) => (tag === 'br' ? `${line}<br>` : `<${tag}>${line}</${tag}>`))
+                .join('') +
+              '</td>'
+            )
+          })
+          .join('') +
+        '</tr></table>'
+      expect(text(html)).toContain('Jane Doe Partner Email me Call the office John Smith')
+      expect(removeQuotesFromHtml(html)).toContain('<table>')
+    }
+  })
+  it.each(['p', 'div', 'br'])('preserves successive person records using %s', (tag) => {
+    const lines = [
+      'The team is listed below.',
+      'Jane Doe',
+      'Partner',
+      email,
+      phone,
+      'John Smith',
+      'Partner',
+      email,
+      phone,
+    ]
+    const html =
+      tag === 'br'
+        ? `<div>${lines.join('<br>')}</div>`
+        : lines.map((line) => `<${tag}>${line}</${tag}>`).join('')
+    expect(text(html)).toContain('Jane Doe Partner Email me Call the office John Smith')
+  })
+  it('treats name and company lines above one contact group as one person', () => {
+    expect(text(signed(['Example Ventures', email, phone]))).toBe(
+      'The estimate is ready. Best, Jane Doe',
+    )
+  })
+  it.each(['p', 'div', 'br'])('preserves combined name and role records using %s', (tag) => {
+    const lines = [
+      'The team is listed below.',
+      'Jane Doe, Partner',
+      email,
+      phone,
+      'John Smith, Partner',
+      email,
+      phone,
+    ]
+    const html =
+      tag === 'br'
+        ? `<div>${lines.join('<br>')}</div>`
+        : lines.map((line) => `<${tag}>${line}</${tag}>`).join('')
+    expect(text(html)).toContain('Jane Doe, Partner Email me Call the office John Smith, Partner')
+  })
   it('preserves unmarked body media beside or after the signature', () => {
     const image = '<img src="https://example.test/diagram.png">'
     const beside = signed([email, `${phone}${image}`])

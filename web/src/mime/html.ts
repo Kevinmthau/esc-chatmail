@@ -230,7 +230,7 @@ function inlineHeaderBlockElements(rootElement: Element): Element[] {
   return result
 }
 
-function inlineHeaderLines(element: Element): InlineHeaderLine[] {
+function inlineHeaderLines(element: Element, splitBlockLines = false): InlineHeaderLine[] {
   const result: InlineHeaderLine[] = []
   let currentText = ''
   let currentNonLinkText = ''
@@ -301,9 +301,14 @@ function inlineHeaderLines(element: Element): InlineHeaderLine[] {
       return
     }
 
+    // Table directory records may use paragraphs instead of <br> sublines.
+    // Only the signature table guard opts into these boundaries.
+    const isBlockLine = splitBlockLines && VISIBLE_LINE_ELEMENT_TAGS.has(tagName(element))
+    if (isBlockLine && currentText) finishLine()
     for (const child of Array.from(element.childNodes)) {
       walkNode(child, tagName(element) === 'a' ? element : anchor)
     }
+    if (isBlockLine && currentText) finishLine()
   }
 
   for (const child of Array.from(element.childNodes)) {
@@ -1476,9 +1481,11 @@ function truncateTrailingContactSignature(document: Document): void {
 
   if (contactLineCount < 2 || isSignatureProductList(lines[signatureStart]!.text)) return
 
+  const candidateLines = lines.slice(signatureStart, lastNonEmpty + 1)
+  if (hasRepeatedPersonContactRecords(candidateLines)) return
   if (
     shouldPreserveContactTable(
-      lines.slice(signatureStart, lastNonEmpty + 1),
+      candidateLines,
       sawSignOffBeforeSignature || strongSupportLineCount > 0,
     )
   ) {
@@ -1522,6 +1529,29 @@ function truncateTrailingContactSignature(document: Document): void {
   removeSignatureLines(lines, signatureStart, lastNonEmpty, preservedHTML)
 }
 
+function hasRepeatedPersonContactRecords(
+  lines: Pick<InlineHeaderLine, 'text' | 'links' | 'nonLinkText'>[],
+): boolean {
+  let pendingName = false
+  let personRecords = 0
+  for (const line of lines) {
+    if (isTrailingSignatureContactLine(line.text) || trailingSignatureLinkContact(line)) {
+      if (pendingName) {
+        personRecords += 1
+        if (personRecords > 1) return true
+        pendingName = false
+      }
+    } else if (
+      isStrongSignatureSupportLine(line.text) ||
+      (looksLikeSignatureNameSupportLine(line.text) && shouldPreserveSignatureNameLine(line.text))
+    ) {
+      // Multiple name/company lines before one contact group still form one record.
+      pendingName = true
+    }
+  }
+  return false
+}
+
 // Column headings and repeated person records distinguish directories from signatures.
 function shouldPreserveContactTable(lines: SignatureLine[], hasStrongSignal: boolean): boolean {
   const tables = new Set<Element>()
@@ -1555,7 +1585,7 @@ function shouldPreserveContactTable(lines: SignatureLine[], hasStrongSignal: boo
         ['td', 'th'].includes(tagName(cell)),
       )
       if (rowCells.some((cell) => tagName(cell) === 'th')) return true
-      const cellLines = rowCells.map(inlineHeaderLines)
+      const cellLines = rowCells.map((cell) => inlineHeaderLines(cell, true))
       const texts = cellLines.map((lines) =>
         lines
           .map((line) => line.text)
@@ -1567,6 +1597,8 @@ function shouldPreserveContactTable(lines: SignatureLine[], hasStrongSignal: boo
       ) {
         return true
       }
+      // Direct cell names can be absent from the outer scan when child blocks follow them.
+      if (hasRepeatedPersonContactRecords(cellLines.flat())) return true
       // An explicit contact label can resemble a name; it cannot also establish a person row.
       const nameCandidates = [
         ...texts.filter(
