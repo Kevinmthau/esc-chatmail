@@ -108,8 +108,10 @@ export const LEGAL_FOOTER_OPENERS = [
   String.raw`^\s*disclaimer\s*:`,
 ]
 
-const DESCRIPTIVE_PHONE_LABEL = String.raw`(?!(?:call|please|use|dial|contact)\b)(?![^:]*\b(?:reference|account|invoice|case|order|ticket)\b)(?=[^:]*\b(?:line|phone|office|cell|mobile|tel|fax|hours|emergency|direct|desk|toll|dispatch|service)\b)[a-z]+(?:[ /&-]+[a-z]+){0,3}\s*:`
-const DESCRIPTIVE_PHONE_NUMBER = String.raw`(?=(?:[\s().+-]*\d){7})(?!(?:(?:19|20)\d{2}[-.]\d{1,2}[-.]\d{1,2}|\d{1,2}[-.]\d{1,2}[-.](?:19|20)\d{2})\s*$)\+?\(?\d{1,4}\)?(?:[\s.-]+\(?\d{1,4}\)?){1,4}`
+// Explicit phone-label phrases avoid treating fields such as "Service period" as contact details.
+// Callers also apply the normal phone-candidate/date and suffix validation.
+const DESCRIPTIVE_PHONE_LABEL = String.raw`(?:after[ -]hours|(?:emergency|after[ -]hours|toll[ -]free|customer service|service|dispatch)[ -]+(?:phone|line|number)(?:[ -]+after[ -]hours)?)\s*:`
+const DESCRIPTIVE_PHONE_NUMBER = String.raw`(?=(?:[\s().+-]*\d){7})\+?\(?\d{1,4}\)?(?:[\s.-]+\(?\d{1,4}\)?){1,4}`
 const DESCRIPTIVE_PHONE_SUFFIX = String.raw`(?:\s*(?:x|ext\.?|extension|#)\s*:?\s*\d+|\s*\((?:mobile|cell|office|work|home|direct|desk|main|fax)\))?`
 export const DESCRIPTIVE_PHONE_LINE_PATTERN = new RegExp(
   '^' +
@@ -123,13 +125,47 @@ export const DESCRIPTIVE_PHONE_LINE_PATTERN = new RegExp(
 
 export const SIGNATURE_NAME_CONTACT_WORD_PATTERN = /\b(?:fax|mobile|office|cell|phone)\b/i
 const SIGNATURE_SUPPORT_KEYWORD_PATTERN =
-  /\b(?:director|manager|vp|vice president|president|founder|ceo|cfo|cto|coo|realtor|broker|associate|sales|agent|partner|principal|owner|specialist|officer|chief|advisor|consultant|engineer|attorney|counsel|analyst|coordinator|agency|inc|llc|ltd|corp|corporation|company|co|partners|group|llp|lp)\b/i
+  /\b(?:director|manager|vp|vice president|president|founder|ceo|cfo|cto|coo|realtor|broker|associate|sales|agent|partner|principal|owner|specialist)\b|\s(?:inc|llc|ltd|corp|corporation|company|partners|group|llp|lp)\b|\sco\./i
+// Added roles require a complete title phrase, not a keyword anywhere in a sentence.
+const SIGNATURE_ADDITIONAL_SUPPORT_TITLE_PATTERN =
+  /^(?:(?:(?:chief|executive|senior|junior|lead|staff|loan|financial|investment|legal|technical|software|systems|project|account|marketing|operations|general|assistant)\s+){0,2}(?:officer|chief|advisor|consultant|engineer|attorney|counsel|analyst|coordinator)|[a-z][a-z'’.-]+\s+(?:insurance|travel|real estate|staffing|marketing|advertising|creative)\s+agency)$/i
+const SIGNATURE_SUPPORT_PROSE_PATTERN =
+  /\b(?:please|not|never|no|without|must|shall|should|will|would|could|cannot|is|are|was|were|be|been|being|pending|awaiting|required|approval|pay|payment|fees|due|my|our|your|their)\b|^(?:i|we|you|he|she|it|they|do|check|ask|ensure|remember|confirm|send|wait|get|need|call|contact|use)\b/i
+const SIGNATURE_TITLE_JOINERS = new Set([
+  'and',
+  'of',
+  'at',
+  'for',
+  'the',
+  'in',
+  'de',
+  'van',
+  'von',
+  '&',
+  '/',
+  '|',
+  '-',
+  '–',
+])
 
 export function isStrongSignatureSupportLine(line: string): boolean {
   const trimmed = line.trim()
-  if (trimmed.split(/\s+/).length >= 8) return false
+  const words = trimmed.split(/\s+/)
+  if (words.length >= 8) return false
+  // Capitalization does not make an instruction a title (e.g. "DO NOT PAY THE CONSULTANT").
+  if (SIGNATURE_SUPPORT_PROSE_PATTERN.test(trimmed)) return false
   if (/[.?!]$/.test(trimmed) && !/\b(?:inc|co|corp)\.$/i.test(trimmed)) return false
-  return SIGNATURE_SUPPORT_KEYWORD_PATTERN.test(trimmed)
+  if (SIGNATURE_ADDITIONAL_SUPPORT_TITLE_PATTERN.test(trimmed)) return true
+  if (!SIGNATURE_SUPPORT_KEYWORD_PATTERN.test(trimmed)) return false
+
+  // A role mentioned in an instruction is not a removable title. Unknown
+  // lowercase phrases stay visible; standalone roles still work in any case.
+  if (words.length === 1) return true
+  return words.every((word) => {
+    if (SIGNATURE_TITLE_JOINERS.has(word.toLowerCase())) return true
+    const firstLetter = word.match(/\p{L}/u)?.[0]
+    return firstLetter !== undefined && isUppercaseChar(firstLetter)
+  })
 }
 
 export function shouldPreserveSignatureNameLine(line: string): boolean {

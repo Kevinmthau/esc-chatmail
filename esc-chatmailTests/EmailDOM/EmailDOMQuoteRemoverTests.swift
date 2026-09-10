@@ -451,6 +451,36 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
 
     func testRemoveQuotes_signatureMode_preservesReferenceBeforeContactSignature() {
         let referenceLines = [
+            "Do not pay the consultant",
+            "DO NOT PAY THE CONSULTANT",
+            "PLEASE CHECK WITH YOUR ATTORNEY",
+            "DO NOT PAY THE CONSULTANT UNTIL APPROVED",
+            "ATTORNEY APPROVAL IS REQUIRED BEFORE PAYMENT",
+            "Consultant Approval Required Before You Pay",
+            "STOP WORK UNTIL COUNSEL REVIEWS",
+            "HOLD FUNDS UNTIL ATTORNEY CONFIRMS",
+            "ESCALATE THIS TO THE ATTORNEY",
+            "Hold Funds Until Attorney Confirms",
+            "COMPANY CLOSED UNTIL FURTHER NOTICE",
+            "Company Closed Until Further Notice",
+            "GROUP DISCOUNTS AVAILABLE THROUGH FRIDAY",
+            "Please check with your attorney",
+            "I will check with counsel",
+            "We need a new engineer",
+            "The analyst will follow up",
+            "Payment pending attorney approval",
+            "Approval pending from counsel",
+            "Service period: 2026-2027",
+            "Service date: 2026-0815",
+            "Office hours: 0900-1700",
+            "Phone model: 1234-5678",
+            "Emergency line: 08-15-2026 (office)",
+            "Emergency line: 2026-0815",
+            "After hours: 0900-1700",
+            "After hours: 09.00-17.00",
+            "After hours: 9.00-17.00",
+            "After hours: 0900-2400",
+            "Emergency line: 08 - 15 - 2026",
             "P2026-0815",
             "Deadline: 2026-08-15",
             "Case: 2026-0815",
@@ -523,6 +553,8 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             "Phone: 914-564-1325 | 24/7",
             "Emergency line after hours: 914-373-4658",
             "After hours: 914-373-4658",
+            "Emergency line: 555-1212 x112",
+            "Toll-free number: +1 800-555-1212",
 
             "415-555-1212",
             "(415) 555-1212",
@@ -566,6 +598,17 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             "Office reference: 914-373-4658",
             "Emergency line: 08-15-2026",
             "Emergency line: 12345678",
+            "Service period: 2026-2027",
+            "Service date: 2026-0815",
+            "Office hours: 0900-1700",
+            "Phone model: 1234-5678",
+            "Emergency line: 08-15-2026 (office)",
+            "Emergency line: 2026-0815",
+            "After hours: 0900-1700",
+            "After hours: 09.00-17.00",
+            "After hours: 9.00-17.00",
+            "After hours: 0900-2400",
+            "Emergency line: 08 - 15 - 2026",
 
             "Can you give me a call? 415-283-6379",
             "Call me at (415) 555-1212 when you are free.",
@@ -613,17 +656,87 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             XCTAssertTrue(text.contains("John Smith"))
             XCTAssertFalse(text.contains("Partner"), cleaned)
             XCTAssertFalse(text.contains("john@example.test"))
-            XCTAssertFalse(cleaned.contains("cid:badge"))
+            // Leading media has no reliable signature ownership; retain it during inferred cleanup.
+            XCTAssertEqual(cleaned.contains("cid:badge"), html.contains("cid:badge"))
         }
     }
 
-    func testSubLineTruncationHonorsTrailingImageLimit() {
-        // Revert-check: stoppingAt bounds text-node surgery to the shared block, preserving a fourth image.
+    func testInferredSignaturePreservesLeadingMedia() {
+        let contact = "Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        for media in ["<img src='cid:floorplan'>", "<svg><image href='cid:floorplan'></image></svg>"] {
+            for block in [
+                "<div>\(media)<br>\(contact)</div>",
+                "<div>\(media)\(contact)</div>",
+                "<table><tr><td>\(media)<br>\(contact)</td></tr></table>",
+                "<table><tr><td>\(media)</td><td>\(contact)</td></tr></table>"
+            ] {
+                let html = "<p>The floorplan is attached below.</p>" + block
+                let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+                XCTAssertTrue(cleaned.contains("cid:floorplan"), cleaned)
+                XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+                XCTAssertTrue(plainText(cleaned).contains("John Smith"), cleaned)
+            }
+        }
+    }
+
+    func testInferredSignaturePreservesTrailingMediaInsideSharedBlock() {
+        let contact = "John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        for block in [
+            "<div>Current reply.<br>\(contact)<br><img src='cid:damage'></div>",
+            "<table><tr><td>Current reply.<br>\(contact)<br><img src='cid:damage'></td></tr></table>",
+            "<table><tr><td>Current reply.<br>\(contact)</td><td><img src='cid:damage'></td></tr></table>"
+        ] {
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: block, mode: .quotedAndSignatures) ?? block
+            XCTAssertTrue(cleaned.contains("cid:damage"), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("Current reply."), cleaned)
+        }
+    }
+
+    func testInferredSignaturePreservesMediaOnBoundaryAncestors() {
+        let contacts = "Partner<br>john@example.test<br>415-555-1212"
+        for block in [
+            "<div><a href='cid:damage'>John Smith</a><br>\(contacts)</div>",
+            "<div><a xlink:href='cid:damage'>John Smith</a><br>\(contacts)</div>",
+            "<div style='background-image:url (cid:damage)'>John Smith<br>\(contacts)</div>",
+            "<div><span style='background-image:url (cid:damage)'>John Smith</span><br>\(contacts)</div>"
+        ] {
+            let html = "<p>Current reply.</p>" + block
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertTrue(cleaned.contains("cid:damage"), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("Current reply."), cleaned)
+        }
+    }
+
+    func testInferredSignaturePreservesLeadingCIDLinks() {
+        let contact = "Best,<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212"
+        for attribute in ["href", "xlink:href"] {
+            let html = "<p>Current reply.</p><div><a \(attribute)='cid:damage'></a><br>\(contact)</div>"
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertTrue(cleaned.contains("cid:damage"), cleaned)
+            XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+            XCTAssertTrue(plainText(cleaned).contains("John Smith"), cleaned)
+        }
+    }
+
+    func testInferredSignatureDoesNotTruncateInsideDiagramText() {
+        for tag in ["text", "title"] {
+            let html = "<p>The floorplan is below.</p><div><svg><\(tag)>Floorplan</\(tag)>" +
+                "<rect width='200' height='200'></rect></svg><br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>"
+            let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            XCTAssertTrue(cleaned.contains("Floorplan"), cleaned)
+            XCTAssertTrue(cleaned.contains("<rect"), cleaned)
+        }
+    }
+
+    func testSubLineTruncationPreservesAllUnmarkedTrailingImages() {
+        // Revert-check: stoppingAt bounds text-node surgery to the shared block, preserving all later unmarked images.
         let html = "<div>Current reply.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>" +
             (1...4).map { "<p><img src='cid:photo\($0)'></p>" }.joined()
         let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
-        XCTAssertTrue(cleaned.contains("cid:photo4"))
-        XCTAssertFalse(cleaned.contains("cid:photo3"))
+        for index in 1...4 {
+            XCTAssertTrue(cleaned.contains("cid:photo\(index)"), cleaned)
+        }
+        XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
         XCTAssertTrue(plainText(cleaned).contains("Current reply."))
     }
 
@@ -649,6 +762,85 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         }
     }
 
+    func testProductListBeforeSignaturePreservesAuthoredHeadingAndOptions() {
+        let html = "<p>Current reply.</p><p>Available Options</p><p>Basic | Pro | Enterprise</p>" +
+            "<p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("Available Options"), cleaned)
+        XCTAssertTrue(cleaned.contains("Basic | Pro | Enterprise"), cleaned)
+        XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+    }
+
+    func testBRSignaturePreservesAuthoredContactInstructions() {
+        for instruction in [
+            "Please send the signed document to legal@example.test before Friday.",
+            "Please upload the signed document to https://example.test/upload before Friday.",
+            "Please meet us on Market Street.",
+            "Send to legal@example.test."
+        ] {
+            let html = "<div>Current reply.<br>\(instruction)<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212</div>"
+            let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+            XCTAssertTrue(cleaned.contains(instruction), cleaned)
+            XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+            let withPostscript = "<div>Current reply.<br>John Smith<br>Partner<br>john@example.test<br>415-555-1212<br>\(instruction)</div>"
+            XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: withPostscript, mode: .quotedAndSignatures)).contains(instruction))
+        }
+    }
+
+    func testContactTableWithColumnHeadingsIsNotASignature() {
+        for tag in ["th", "td"] {
+            let html = "<p>Please use the person listed below to arrange the repairs.</p>" +
+                "<table><tr><\(tag)>Engineer</\(tag)><\(tag)>Role</\(tag)><\(tag)>Email</\(tag)><\(tag)>Phone</\(tag)></tr>" +
+                "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr></table>"
+            let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+            XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+            XCTAssertTrue(cleaned.contains("Partner"), cleaned)
+            XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+            XCTAssertTrue(cleaned.contains("415-555-1212"), cleaned)
+        }
+    }
+
+    func testContactTableWithMultiplePeopleIsNotASignature() {
+        let html = "<p>Use these people.</p><table>" +
+            "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr>" +
+            "<tr><td>Jane Brown</td><td>Partner</td><td>jane@example.test</td><td>212-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+        XCTAssertTrue(cleaned.contains("Jane Brown"), cleaned)
+        XCTAssertTrue(cleaned.contains("jane@example.test"), cleaned)
+    }
+
+    func testSingleContactTableRowRequiresStrongerSignatureEvidence() {
+        let html = "<p>Please use the person listed below to arrange the repairs.</p>" +
+            "<table><tr><td>John Smith</td><td>john@example.test</td><td>415-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertTrue(cleaned.contains("john@example.test"), cleaned)
+        XCTAssertTrue(cleaned.contains("415-555-1212"), cleaned)
+    }
+
+    func testConfirmedSignatureTablesStillRemoveContactDetails() {
+        for rows in [
+            "<tr><td>John Smith</td><td>Partner</td><td>john@example.test</td><td>415-555-1212</td></tr>",
+            "<tr><td>John Smith<br>john@example.test<br>415-555-1212</td></tr>",
+            "<tr><td><img src='cid:badge'></td><td>John Smith<br>john@example.test<br>415-555-1212</td></tr>"
+        ] {
+            let html = "<p>Current reply.</p><table>\(rows)</table>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Current reply.")
+        }
+    }
+
+    func testHorizontalSignatureWithoutTitlePreservesPersonalSignOff() {
+        let html = "<p>Current reply.</p><table><tr><td>Best,</td><td>John Smith</td>" +
+            "<td>john@example.test</td><td>415-555-1212</td></tr></table>"
+        let cleaned = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertTrue(cleaned.contains("Current reply."), cleaned)
+        XCTAssertTrue(cleaned.contains("Best,"), cleaned)
+        XCTAssertTrue(cleaned.contains("John Smith"), cleaned)
+        XCTAssertFalse(cleaned.contains("john@example.test"), cleaned)
+    }
+
     func testSignatureSignOffPolicyExcludesTitlesAndCompanyNames() {
         // Revert-check: the wrapper and inferred block use the same personal-name exclusion.
         for name in ["Partner", "Threash Insurance Agency"] {
@@ -659,13 +851,13 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         }
     }
 
-    func testSignatureTailAndTrailingImagesAreRemovedOnlyAfterConfirmedContacts() {
-        // Revert-check: bounded signature-tail scan and image-only extension after accepted contact block.
-        for tail in ["Protecting what matters most.", "Auto | Home | Life | Business", "Licensed in GA, AL and TN - NPN 1234567"] {
+    func testSignatureMetadataTailsAreRemovedWithoutClaimingLooseImages() {
+        // Remove only recognized metadata after a confirmed contact block.
+        for tail in ["NPN 1234567", "License number: AB-1234", "Registration #12345", "Licensed in GA, AL and TN - NPN 1234567"] {
             let html = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><p>\(tail)</p><p><img src='cid:badge'></p>"
             let cleaned = EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
             XCTAssertEqual(plainText(cleaned), "Current reply.", tail)
-            XCTAssertFalse(cleaned.contains("cid:badge"))
+            XCTAssertTrue(cleaned.contains("cid:badge"))
         }
         let contactList = "<p>Please contact:</p><p>Jane Doe</p><p>jane@example.test</p><p>415-555-1212</p><p>Please pick one.</p>"
         XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: contactList, mode: .quotedAndSignatures)), plainText(contactList))
@@ -674,13 +866,20 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
     func testSignatureTailSkipPreservesPostscriptsAndAuthoredInstructions() {
         // Revert-check: short authored sentences are not branding taglines.
         let signature = "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>"
-        for tail in ["P.S. Bring the draft.", "Please bring the draft.", "The estimate changed."] {
+        for tail in [
+            "P.S. Bring the draft.", "Please bring the draft.", "The estimate changed.",
+            "Do not send the money.", "Deadline moved to Friday.",
+            "Licensed driver needed for 2 days.",
+            "Registration closes on September 15; send the application by then.",
+            "Approve payment | Sign contract | Request changes",
+            "Protecting what matters most.", "Auto | Home | Life | Business"
+        ] {
             XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + "<p>\(tail)</p>", mode: .quotedAndSignatures)).contains(tail))
         }
     }
 
     func testLegalFooterOpenersAreAnchoredToVisibleLineStart() {
-        // Revert-check: legal openers remove the full notice, not just a later disclaimer sentence.
+        // Legal boilerplate is removed only as the tail of a confirmed contact signature.
         let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
         let footer = "<p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient.</p>"
         XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + footer, mode: .quotedAndSignatures)), "Current reply.")
@@ -689,9 +888,26 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         }
     }
 
-    func testRemovedTrailingImageFeedsBubbleSuppressionWithoutIdentityOrDimensions() {
-        // Revert-check: DOM cleanup CID difference, not generated-name or dimension heuristics.
-        let html = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><p><img src='cid:arbitrary'></p>"
+    func testLegalFooterRequiresSignatureContextAndPreservesQuotedOnlyMode() {
+        let footer = "<p>CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient.</p>"
+        let body = "<p>Here is the proposed template.</p>" + footer
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: body)), plainText(body))
+        let signed = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>" + footer
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: signed, mode: .quotedOnly)), plainText(signed))
+        let postscript = signed + "<p>Do not approve yet.</p>"
+        XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: postscript)).contains("Do not approve yet."))
+    }
+
+    func testSignatureMetadataTailScanIsBounded() {
+        let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
+        let tail = "<p>NPN 1234567</p>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + String(repeating: tail, count: 3))), "Current reply.")
+        XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + String(repeating: tail, count: 4))).contains("jane@example.test"))
+    }
+
+    func testExplicitSignatureImageFeedsBubbleSuppressionWithoutIdentityOrDimensions() {
+        // Explicit signature ownership suppresses a logo without filename or dimension clues.
+        let html = "<p>Current reply.</p><div class='gmail_signature'><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><p><img src='cid:arbitrary'></p></div>"
         let analysis = MessageBubbleHTMLAnalysisBuilder.build(
             canonicalHTML: html, hasHTMLSourceHint: true, isForwardedEmail: false,
             isLikelyCalendarInvite: false, bodyText: nil, cleanedSnippet: "Current reply.", subject: "Review",
@@ -704,12 +920,79 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("arbitrary"))
     }
 
+    func testAuthoredLegalParagraphsDoNotTruncateTheMessage() {
+        for line in [
+            "Disclaimer: figures are provisional.",
+            "This email may contain errors.",
+            "This email and any attachments need your approval.",
+            "Confidentiality notice: can we remove this from the template?"
+        ] {
+            let html = "<p>Here are my concerns.</p><p>\(line)</p><p>Do not approve yet.</p>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html)), plainText(html))
+        }
+    }
+
+    func testAuthoredImageAfterContactSignatureRemainsDisplayable() {
+        let html = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p><section>These are the latest pictures.</section><p><img src='cid:damage' width='1600' height='1200' alt='Cracked pipe'></p>"
+        XCTAssertTrue((EmailDOMQuoteRemover.removeQuotes(from: html) ?? "").contains("cid:damage"))
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html, hasHTMLSourceHint: true, isForwardedEmail: false,
+            isLikelyCalendarInvite: false, bodyText: nil, cleanedSnippet: "Current reply.", subject: "Review",
+            attachmentSnapshots: [MessageBubbleAttachmentSnapshot(
+                contentId: "damage", filename: "photo.png", mimeType: "image/png",
+                stateRaw: Attachment.State.queued.rawValue, localURL: nil, byteSize: 0,
+                pageCount: 0, width: 1600, height: 1200
+            )]
+        )
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("damage"))
+    }
+
+    func testSignatureTailExpansionPreservesBodyMedia() {
+        let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
+        let notice = "CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient."
+        for tail in [
+            "<p><img src='cid:damage'></p><p>NPN 1234567</p>",
+            "<p><a href='cid:damage'>License #AB-1234</a></p>",
+            "<p><a xlink:href='cid:damage'>License #AB-1234</a></p>",
+            "<div style='background-image:url(cid:damage);width:1200px;height:800px'></div><p>NPN 1234567</p>",
+            "<p>NPN 1234567<span style='background-image:url(cid:damage)'></span></p>",
+            "<div background='cid:damage'></div><p>NPN 1234567</p>",
+            "<p>NPN 1234567<img src='cid:damage'></p>",
+            "<p><img src='cid:damage'></p><p>\(notice)</p>",
+            "<p>\(notice)<img src='cid:damage'></p>"
+        ] {
+            let html = signature + tail
+            XCTAssertTrue((EmailDOMQuoteRemover.removeQuotes(from: html) ?? "").contains("cid:damage"))
+            let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+                canonicalHTML: html, hasHTMLSourceHint: true, isForwardedEmail: false,
+                isLikelyCalendarInvite: false, bodyText: nil, cleanedSnippet: "Current reply.", subject: "Review",
+                attachmentSnapshots: [MessageBubbleAttachmentSnapshot(
+                    contentId: "damage", filename: "photo.png", mimeType: "image/png",
+                    stateRaw: Attachment.State.queued.rawValue, localURL: nil, byteSize: 0,
+                    pageCount: 0, width: 1600, height: 1200
+                )]
+            )
+            XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("damage"))
+        }
+    }
+
+    func testLegalSignatureTailPreservesAuthoredDiscussionAndPostscripts() {
+        let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"
+        for tail in [
+            "CONFIDENTIALITY NOTICE: This e-mail and any attachments are for the exclusive use of the intended recipient.<br><br>P.S. Do not send the money.",
+            "Confidentiality notice: remove the intended recipient clause and the word confidential."
+        ] {
+            let html = signature + "<p>\(tail)</p>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html)), plainText(html))
+        }
+    }
+
     func testSignatureNamesAndTitlesUseWordBoundaries() {
         // Revert-check: shared name/contact word boundaries and strong-support prose guard.
         for name in ["Marcella Ruiz", "Persephone Lee"] {
             XCTAssertTrue(SignatureSignOffPolicy.shouldPreserveNameLine(name))
         }
-        for title in ["Loan Officer", "Chief Executive Officer", "Fairfax Insurance Agency", "Acme Inc.", "Co-Founder"] {
+        for title in ["Loan Officer", "Chief Executive Officer", "Fairfax Insurance Agency", "Acme Inc.", "Co-Founder", "Director of Sales", "consultant", "Senior Financial Analyst", "software engineer"] {
             XCTAssertTrue(SignatureSignOffPolicy.isStrongSupportLine(title), title)
         }
         XCTAssertFalse(SignatureSignOffPolicy.isStrongSupportLine("The homeowner will coordinate with the broker."))

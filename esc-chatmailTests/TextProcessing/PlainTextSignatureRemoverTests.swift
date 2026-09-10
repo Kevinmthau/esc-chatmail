@@ -251,6 +251,101 @@ final class PlainTextSignatureRemoverTests: XCTestCase {
         }
     }
 
+    func testFooterLikeAuthoredFinalParagraphs_arePreserved() {
+        let paragraphs = [
+            "This email may contain a mistake; please check the totals.",
+            "This email may contain errors; please check the totals.",
+            "This email may contain privileged attachments. Please forward them to counsel.",
+            "This email may contain confidential information. Please forward it to counsel.",
+            "Our Form CRS needs revision before we can send it.",
+            "Update your preferences before the deadline.",
+        ]
+
+        for paragraph in paragraphs {
+            let text = "Hi Kevin,\n\n\(paragraph)"
+            XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text, paragraph)
+            let processed = ChatBubbleTextProcessor.process(
+                content: text,
+                options: ChatBubbleTextProcessorOptions(inputKind: .plainText)
+            )
+            XCTAssertEqual(processed.mainText, text, paragraph)
+        }
+    }
+
+    func testEmergencyContactList_preservesHeadingAndAllNumbers() {
+        for heading in [
+            "Emergency Contacts", "Support Team", "Emergency Numbers", "Emergency Contact Numbers",
+            "Support Numbers", "Escalation Matrix", "On-Call Roster", "Building Support"
+        ] {
+            let text = """
+            Please keep these numbers handy.
+
+            \(heading)
+            Emergency line: 212-555-1234
+            Customer service line: 212-555-5678
+            """
+            XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text, heading)
+
+            let processed = ChatBubbleTextProcessor.process(
+                content: text,
+                options: ChatBubbleTextProcessorOptions(inputKind: .plainText)
+            )
+            XCTAssertEqual(
+                processed.mainText,
+                "Please keep these numbers handy.\n\n\(heading)\n\nEmergency line: 212-555-1234\n\nCustomer service line: 212-555-5678",
+                heading
+            )
+        }
+    }
+
+    func testKnownConfidentialityFooter_isStillRemoved() {
+        for footer in [
+            "This email may contain confidential or privileged information.",
+            "This e-mail may contain confidential information intended only for the recipient.",
+        ] {
+            let text = "The contract is attached for your review.\n\n\(footer)"
+            XCTAssertEqual(
+                PlainTextSignatureRemover.removeSignature(from: text),
+                "The contract is attached for your review.",
+                footer
+            )
+        }
+    }
+
+    func testAuthoredSentenceBelowNameOrTitle_isNotConsumedAsTagline() {
+        for heading in ["Jane Doe", "Senior Account Manager"] {
+            for sentence in ["Budget has doubled.", "Do not send the contract."] {
+                let text = "Please review the plan.\n\n\(heading)\n\(sentence)\n415-555-1212\nhttps://example.com/plan"
+                let removed = PlainTextSignatureRemover.removeSignature(from: text)
+                XCTAssertTrue(removed.contains(sentence), "Authored sentence lost: \(text)")
+                let processed = ChatBubbleTextProcessor.process(
+                    content: text,
+                    options: ChatBubbleTextProcessorOptions(inputKind: .plainText)
+                )
+                XCTAssertTrue(processed.mainText?.contains(sentence) == true, "Authored sentence lost after processing: \(text)")
+            }
+        }
+    }
+
+    func testTitledLinkShare_preservesLinksThroughPlainTextProcessing() {
+        let text = """
+        Here are the links you asked for:
+        Design Reference
+        https://example.com/one
+        https://example.com/two
+        """
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text)
+
+        let processed = ChatBubbleTextProcessor.process(
+            content: text,
+            options: ChatBubbleTextProcessorOptions(inputKind: .plainText)
+        )
+        XCTAssertEqual(
+            processed.mainText,
+            "Here are the links you asked for:\n\nDesign Reference\n\nhttps://example.com/one\n\nhttps://example.com/two"
+        )
+    }
+
     func testUnwrapKeepsLeadingURLLineBreak() {
         // Revert-check: TextProcessing leading URL guard / web text.ts.
         for separator in ["\n", "\n\n"] {

@@ -15,6 +15,7 @@ protocol DisplayFilterableAttachment {
     var localURL: String? { get }
     var objectID: NSManagedObjectID { get }
     var isReady: Bool { get }
+    var state: Attachment.State { get }
     var isLikelySignatureImage: Bool { get }
     var isCalendarInviteAttachment: Bool { get }
 }
@@ -51,6 +52,12 @@ enum AttachmentDisplayFilter {
                 return true
             }
 
+            // A failed unknown-size received image must keep a reachable retry.
+            // Its real dimensions may later prove it was a body photo.
+            if !hidingInlineReferencedInHTML &&
+                InlineImagePresentationPolicy.requiresExplicitRetry(attachment: attachment, isFromMe: isFromMe) {
+                return true
+            }
             return !htmlAnalysis.nonDisplayableInlineContentIDs.contains(contentId)
         })
 

@@ -37,11 +37,11 @@ enum SignaturePatterns {
         #"^\s*disclaimer\s*:"#
     ]
 
-    /// Descriptive labels must name a phone context, never reference/account metadata.
-    /// A formatted number (7+ digits) is required; an unformatted ID or date is not a phone.
+    /// Explicit phone-label phrases avoid treating fields such as "Service period" as contact details.
+    /// Callers also apply the normal phone-candidate/date and suffix validation.
     static let descriptivePhoneLine: NSRegularExpression? = {
-        let label = #"(?!(?:call|please|use|dial|contact)\b)(?![^:]*\b(?:reference|account|invoice|case|order|ticket)\b)(?=[^:]*\b(?:line|phone|office|cell|mobile|tel|fax|hours|emergency|direct|desk|toll|dispatch|service)\b)[a-z]+(?:[ /&-]+[a-z]+){0,3}\s*:"#
-        let number = #"(?=(?:[\s().+-]*\d){7})(?!(?:(?:19|20)\d{2}[-.]\d{1,2}[-.]\d{1,2}|\d{1,2}[-.]\d{1,2}[-.](?:19|20)\d{2})\s*$)\+?\(?\d{1,4}\)?(?:[\s.-]+\(?\d{1,4}\)?){1,4}"#
+        let label = #"(?:after[ -]hours|(?:emergency|after[ -]hours|toll[ -]free|customer service|service|dispatch)[ -]+(?:phone|line|number)(?:[ -]+after[ -]hours)?)\s*:"#
+        let number = #"(?=(?:[\s().+-]*\d){7})\+?\(?\d{1,4}\)?(?:[\s.-]+\(?\d{1,4}\)?){1,4}"#
         let suffix = #"(?:\s*(?:x|ext\.?|extension|#)\s*:?\s*\d+|\s*\((?:mobile|cell|office|work|home|direct|desk|main|fax)\))?"#
         return try? NSRegularExpression(pattern: "^" + label + #"\s*"# + number + suffix + "$", options: [.caseInsensitive])
     }()
@@ -52,7 +52,22 @@ enum SignaturePatterns {
 
     static let supportKeyword: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"\b(?:director|manager|vp|vice president|president|founder|ceo|cfo|cto|coo|realtor|broker|associate|sales|agent|partner|principal|owner|specialist|officer|chief|advisor|consultant|engineer|attorney|counsel|analyst|coordinator|agency|inc|llc|ltd|corp|corporation|company|co|partners|group|llp|lp)\b"#,
+            pattern: #"\b(?:director|manager|vp|vice president|president|founder|ceo|cfo|cto|coo|realtor|broker|associate|sales|agent|partner|principal|owner|specialist)\b|\s(?:inc|llc|ltd|corp|corporation|company|partners|group|llp|lp)\b|\sco\."#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    /// Added roles require a complete title phrase, not a keyword anywhere in a sentence.
+    static let additionalSupportTitle: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"^(?:(?:(?:chief|executive|senior|junior|lead|staff|loan|financial|investment|legal|technical|software|systems|project|account|marketing|operations|general|assistant)\s+){0,2}(?:officer|chief|advisor|consultant|engineer|attorney|counsel|analyst|coordinator)|[a-z][a-z'’.-]+\s+(?:insurance|travel|real estate|staffing|marketing|advertising|creative)\s+agency)$"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    static let supportProse: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"\b(?:please|not|never|no|without|must|shall|should|will|would|could|cannot|is|are|was|were|be|been|being|pending|awaiting|required|approval|pay|payment|fees|due|my|our|your|their)\b|^(?:i|we|you|he|she|it|they|do|check|ask|ensure|remember|confirm|send|wait|get|need|call|contact|use)\b"#,
             options: [.caseInsensitive]
         )
     }()
@@ -140,14 +155,30 @@ enum SignatureSignOffPolicy {
 
     static func isStrongSupportLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.split(whereSeparator: \.isWhitespace).count < 8 else { return false }
+        let words = trimmed.split(whereSeparator: \.isWhitespace)
+        guard words.count < 8 else { return false }
+        let range = NSRange(location: 0, length: trimmed.utf16.count)
+        // Capitalization does not make an instruction a title (e.g. "DO NOT PAY THE CONSULTANT").
+        guard SignaturePatterns.supportProse?.firstMatch(in: trimmed, range: range) == nil else { return false }
         if let last = trimmed.last, ".?!".contains(last),
            trimmed.range(of: #"\b(?:inc|co|corp)\.$"#, options: [.regularExpression, .caseInsensitive]) == nil {
             return false
         }
-        return SignaturePatterns.supportKeyword?.firstMatch(
-            in: trimmed, range: NSRange(location: 0, length: trimmed.utf16.count)
-        ) != nil
+        if SignaturePatterns.additionalSupportTitle?.firstMatch(in: trimmed, range: range)?.range == range {
+            return true
+        }
+        guard SignaturePatterns.supportKeyword?.firstMatch(
+            in: trimmed, range: range
+        ) != nil else { return false }
+
+        // A role mentioned in an instruction is not a removable title. Unknown
+        // lowercase phrases stay visible; standalone roles still work in any case.
+        if words.count == 1 { return true }
+        let joiners: Set<String> = ["and", "of", "at", "for", "the", "in", "de", "van", "von", "&", "/", "|", "-", "–"]
+        return words.allSatisfy { word in
+            if joiners.contains(word.lowercased()) { return true }
+            return word.first(where: \.isLetter)?.isUppercase == true
+        }
     }
 
     static func shouldPreserveNameLine(_ line: String) -> Bool {
