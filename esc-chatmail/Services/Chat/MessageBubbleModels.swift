@@ -54,7 +54,8 @@ struct MessageBubbleAttachmentSnapshot: Sendable, Equatable {
                     EmailDocument.normalizedContentID(attachment.contentId) ?? "cid:nil",
                     attachment.filename.lowercased(),
                     attachment.mimeType.lowercased(),
-                    "\(attachment.width)x\(attachment.height)"
+                    "\(attachment.width)x\(attachment.height)",
+                    attachment.width == 0 || attachment.height == 0 ? attachment.stateRaw : ""
                 ].joined(separator: "~")
             }
             .joined(separator: ";")

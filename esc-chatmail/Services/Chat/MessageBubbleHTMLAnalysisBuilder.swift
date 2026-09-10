@@ -6,6 +6,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         parsedEmail: ParsedEmail? = nil,
         hasHTMLSourceHint: Bool,
         isForwardedEmail: Bool,
+        isFromMe: Bool = false,
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
@@ -19,6 +20,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
             parsedEmail: parsedEmail,
             hasHTMLSource: hasHTMLSourceHint || canonicalHTML != nil,
             isForwardedEmail: isForwardedEmail,
+            isFromMe: isFromMe,
             isLikelyCalendarInvite: isLikelyCalendarInvite,
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
@@ -34,6 +36,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         bodyStorageURI: String?,
         hasHTMLSourceHint: Bool,
         isForwardedEmail: Bool,
+        isFromMe: Bool = false,
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
@@ -55,6 +58,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
             parsedEmail: nil,
             hasHTMLSource: hasHTMLSource,
             isForwardedEmail: isForwardedEmail,
+            isFromMe: isFromMe,
             isLikelyCalendarInvite: isLikelyCalendarInvite,
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
@@ -94,7 +98,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
     private static func extractNonDisplayableInlineContentIDs(
         from html: String?,
         parsedEmail: ParsedEmail?,
-        attachments: [MessageBubbleAttachmentSnapshot]
+        attachments: [MessageBubbleAttachmentSnapshot],
+        usesExpandedHeuristics: Bool
     ) -> Set<String> {
         guard let html else { return [] }
 
@@ -122,7 +127,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
         let likelySignatureInline = extractLikelySignatureInlineContentIDs(
             from: html,
-            attachments: attachments
+            attachments: attachments,
+            usesExpandedHeuristics: usesExpandedHeuristics
         )
 
         return removedByHTMLCleanup
@@ -161,7 +167,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
     private static func extractLikelySignatureInlineContentIDs(
         from html: String,
-        attachments: [MessageBubbleAttachmentSnapshot]
+        attachments: [MessageBubbleAttachmentSnapshot],
+        usesExpandedHeuristics: Bool
     ) -> Set<String> {
         let lowercasedHTML = html.lowercased()
         guard lowercasedHTML.contains("cid:") else {
@@ -174,45 +181,59 @@ enum MessageBubbleHTMLAnalysisBuilder {
             in: lowercasedHTML,
             before: replyBoundaryOffset
         )
-        let hasTrailingSignatureSignals =
-            !trailingSignatureStartOffsets.isEmpty
-        let hasSignatureSectionSignals =
-            hardSignatureBoundaryOffset != nil ||
-            replyBoundaryOffset != nil ||
-            hasTrailingSignatureSignals
+        // Branding-only evidence still needs an asset-like identity. A sign-off
+        // corroborated by contact/role text is strong enough to judge dimensions
+        // without guessing which mail client's filename produced the image.
+        let corroboratedOffsets = standaloneSignOffContactOrRoleRanges(
+            in: lowercasedHTML,
+            range: signatureSignalSearchRange(in: lowercasedHTML, before: replyBoundaryOffset)
+        ).map { lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: $0.lowerBound) }
 
-        guard hasSignatureSectionSignals else {
-            return []
+        let firstSignOffOffset = standaloneSignOffRanges(in: lowercasedHTML).first.map {
+            lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: $0.lowerBound)
         }
-
         var nonDisplayable = Set<String>()
-        EmailDocument.scanReferencedContentIDs(in: html) { normalizedCID, valueStart in
-            let cidOffset = html.distance(from: html.startIndex, to: valueStart)
-
-            let isAfterHardSignatureBoundary = hardSignatureBoundaryOffset.map { cidOffset >= $0 } ?? false
+        var bodyReferenced = Set<String>()
+        EmailDocument.scanReferencedContentIDs(in: lowercasedHTML) { normalizedCID, valueStart in
+            let cidOffset = lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: valueStart)
+            let isAfterHardBoundary = hardSignatureBoundaryOffset.map { cidOffset >= $0 } ?? false
             let isAfterReplyBoundary = replyBoundaryOffset.map { cidOffset >= $0 } ?? false
-            let isAfterStandaloneSignatureBoundary = trailingSignatureStartOffsets.contains { cidOffset >= $0 }
-            let hasStrongGeneratedBadgeContext =
-                isAfterHardSignatureBoundary ||
-                isAfterReplyBoundary ||
-                isAfterStandaloneSignatureBoundary
+            let isAfterCorroboratedSignOff = corroboratedOffsets.contains { cidOffset >= $0 }
+            let isAfterBrandingSignOff = trailingSignatureStartOffsets.contains { cidOffset >= $0 }
 
-            guard isAfterHardSignatureBoundary ||
-                    isAfterReplyBoundary ||
-                    isAfterStandaloneSignatureBoundary else {
+            // Inspect this occurrence, not the document's first CID. A logo
+            // mockup followed by body instructions remains real message content.
+            let occurrenceStart = isInsideHTMLTag(in: lowercasedHTML, at: valueStart)
+                ? lowercasedHTML[..<valueStart].lastIndex(of: "<") ?? valueStart
+                : lowercasedHTML.index(valueStart, offsetBy: -4)
+            let occurrenceEnd = replyBoundaryOffset.flatMap { offset in
+                offset > cidOffset ? lowercasedHTML.index(lowercasedHTML.startIndex, offsetBy: offset) : nil
+            } ?? lowercasedHTML.endIndex
+            let occurrenceHTML = String(lowercasedHTML[occurrenceStart..<occurrenceEnd])
+            let followingHTML = htmlAfterFirstCIDBeforeNextSignOff(in: occurrenceHTML) ?? ""
+            let hasFollowingBodyProse = signatureContactOrRoleLines(in: followingHTML).contains(where: isBodyProseLine)
+            let isBeforeSignOff = firstSignOffOffset.map { cidOffset < $0 } ?? false
+            if usesExpandedHeuristics && (hasFollowingBodyProse || isBeforeSignOff) &&
+                !isAfterReplyBoundary && !isAfterHardBoundary {
+                bodyReferenced.insert(normalizedCID)
                 return
             }
 
             guard isLikelySignatureInlineAttachment(
                 contentID: normalizedCID,
                 attachments: attachments,
-                allowGeneratedBadgeDimensions: hasStrongGeneratedBadgeContext
+                htmlImageDimensions: imageDimensions(in: lowercasedHTML, at: valueStart),
+                hasCorroboratedRegion: isAfterHardBoundary || isAfterReplyBoundary || isAfterCorroboratedSignOff,
+                hasBrandingRegion: isAfterBrandingSignOff,
+                usesExpandedHeuristics: usesExpandedHeuristics
             ) else {
+                bodyReferenced.insert(normalizedCID)
                 return
             }
 
             nonDisplayable.insert(normalizedCID)
         }
+        nonDisplayable.subtract(bodyReferenced)
 
         return nonDisplayable
     }
@@ -837,59 +858,73 @@ enum MessageBubbleHTMLAnalysisBuilder {
         }
     }
 
+    private static func imageDimensions(in html: String, at cidStart: String.Index) -> (width: Int, height: Int)? {
+        guard isInsideHTMLTag(in: html, at: cidStart),
+              let tagStart = html[..<cidStart].lastIndex(of: "<"),
+              let tagEnd = html[cidStart...].firstIndex(of: ">") else { return nil }
+        let tag = String(html[tagStart...tagEnd])
+        guard tag.hasPrefix("<img") else { return nil }
+
+        func dimension(_ name: String) -> Int? {
+            let pattern = #"\s\#(name)\s*=\s*["']?(\d+)(?:["'\s>])"#
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
+                  let range = Range(match.range(at: 1), in: tag),
+                  let value = Int(tag[range]), value > 0 else { return nil }
+            return value
+        }
+        guard let width = dimension("width"), let height = dimension("height") else { return nil }
+        return (width, height)
+    }
+
     private static func isLikelySignatureInlineAttachment(
         contentID: String,
         attachments: [MessageBubbleAttachmentSnapshot],
-        allowGeneratedBadgeDimensions: Bool
+        htmlImageDimensions: (width: Int, height: Int)?,
+        hasCorroboratedRegion: Bool,
+        hasBrandingRegion: Bool,
+        usesExpandedHeuristics: Bool
     ) -> Bool {
-        guard let attachment = attachments.first(where: { EmailDocument.normalizedContentID($0.contentId) == contentID }) else {
-            return false
-        }
-
-        guard attachment.mimeType.hasPrefix("image/") else {
-            return false
-        }
+        guard let attachment = attachments.first(where: { EmailDocument.normalizedContentID($0.contentId) == contentID }),
+              attachment.mimeType.hasPrefix("image/") else { return false }
 
         let filename = attachment.filename.lowercased()
-        let contentIDLocalPart = contentID
-            .split(separator: "@", maxSplits: 1, omittingEmptySubsequences: true)
-            .first
-            .map(String.init) ?? contentID
-        let searchableIdentity = [filename, contentID, contentIDLocalPart].joined(separator: " ")
-        let hasSignatureKeyword = signatureImageIdentityMarkers.contains { searchableIdentity.contains($0) }
-
-        let isGeneratedInlineName = filename.range(
-            of: generatedInlineAssetPattern,
-            options: .regularExpression
-        ) != nil
-
-        let isGeneratedInlineContentID = contentIDLocalPart.range(
-            of: generatedInlineAssetPattern,
-            options: .regularExpression
-        ) != nil
-
-        let hasSmallLogoLikeDimensions =
-            attachment.width > 0 &&
-            attachment.height > 0 &&
-            attachment.width >= attachment.height &&
-            attachment.width <= 420 &&
-            attachment.height <= 160
-
-        let hasBadgeLikeDimensions =
-            attachment.width > 0 &&
-            attachment.height > 0 &&
-            attachment.width <= 900 &&
-            attachment.height <= 900
-
-        let looksLikeGeneratedInlineAsset = isGeneratedInlineName || isGeneratedInlineContentID
-        return hasSignatureKeyword ||
-            (
-                looksLikeGeneratedInlineAsset &&
-                (
-                    hasSmallLogoLikeDimensions ||
-                    (allowGeneratedBadgeDimensions && hasBadgeLikeDimensions)
-                )
-            )
+        let contentIDLocalPart = contentID.split(separator: "@", maxSplits: 1).first.map(String.init) ?? contentID
+        let identity = [filename, contentID, contentIDLocalPart].joined(separator: " ")
+        let hasSignatureKeyword = signatureImageIdentityMarkers.contains { identity.contains($0) }
+        let isGenerated = [filename, contentIDLocalPart].contains {
+            $0.range(of: generatedInlineAssetPattern, options: .regularExpression) != nil
+        }
+        if !usesExpandedHeuristics {
+            let hasRegion = hasCorroboratedRegion || hasBrandingRegion
+            let wasGenerated = [filename, contentIDLocalPart].contains {
+                $0.range(of: #"^(?:image|img|inline|cid)(?=[0-9a-f_-]*[0-9])[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#, options: .regularExpression) != nil
+            }
+            return hasRegion && (hasSignatureKeyword || (wasGenerated &&
+                attachment.width > 0 && attachment.height > 0 &&
+                attachment.width <= 900 && attachment.height <= 900))
+        }
+        if attachment.stateRaw == Attachment.State.failed.rawValue &&
+            (attachment.width == 0 || attachment.height == 0) {
+            return false // Preserve the existing retry affordance after a failed download.
+        }
+        let dimensions: (width: Int, height: Int)?
+        if attachment.width > 0 && attachment.height > 0 {
+            dimensions = (Int(attachment.width), Int(attachment.height))
+        } else {
+            dimensions = htmlImageDimensions
+        }
+        guard let dimensions else {
+            // Unknown-size candidates still download through the bubble's
+            // independent download trigger; large content reappears on update.
+            return hasSignatureKeyword || (hasCorroboratedRegion && isGenerated)
+        }
+        let isBadge = dimensions.width <= 900 && dimensions.height <= 900
+        // Keep the existing photo ceiling. Wide signature strips get a separate
+        // height bound; a 1200 × 400 content photo does not qualify.
+        let isBanner = dimensions.height <= 300 && dimensions.width / dimensions.height >= 3
+        guard isBadge || isBanner else { return false }
+        return hasSignatureKeyword || hasCorroboratedRegion || (hasBrandingRegion && isGenerated)
     }
 
     private static func supportsCalendarInvitePreviewCard(
@@ -919,6 +954,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         parsedEmail: ParsedEmail?,
         hasHTMLSource: Bool,
         isForwardedEmail: Bool,
+        isFromMe: Bool,
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
@@ -940,7 +976,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
             nonDisplayableInlineContentIDs: extractNonDisplayableInlineContentIDs(
                 from: canonicalHTML,
                 parsedEmail: parsedEmail,
-                attachments: attachmentSnapshots
+                attachments: attachmentSnapshots,
+                usesExpandedHeuristics: !isFromMe
             ),
             supportsCalendarInvitePreviewCard: supportsCalendarInvitePreviewCard(
                 canonicalHTML: canonicalHTML,
@@ -1053,8 +1090,10 @@ enum MessageBubbleHTMLAnalysisBuilder {
     private static let inlineSignOffNameBlockedWordsPattern =
         #"please|review|here|this|that|can|could|would|i|we|you|for|the|a|an|to|see|check|take|look|let|just|following|follow|all"#
 
+    /// Word appends empty o:p paragraph marks after visible sign-off text.
+    /// Match them in place so CID offsets remain in the original coordinate space.
     private static let htmlSignatureWhitespacePattern =
-        #"(?:\s|&nbsp;|&#160;)*"#
+        #"(?:\s|&nbsp;|&#160;|<o:p\b[^>]*>|</o:p>)*"#
 
     private static let requiredHTMLSignatureWhitespacePattern =
         #"(?:\s|&nbsp;|&#160;)+"#
@@ -1074,20 +1113,25 @@ enum MessageBubbleHTMLAnalysisBuilder {
     private static let standaloneSignOffTailPattern =
         #"(?:[,.!]?\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffBoundaryPattern)|[,.!]\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(inlineSignOffNamePattern)\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffBoundaryPattern))"#
 
+    private static let signOffAlternation = SignaturePatterns.signOffPhrases
+        .sorted { $0.count == $1.count ? $0 < $1 : $0.count > $1.count }
+        .map(NSRegularExpression.escapedPattern(for:))
+        .joined(separator: "|")
+
     private static let standaloneSignOffBeforeBrandingPattern =
-        #"(?:^|[\r\n]|<[^>]+>)\s*(?:warmly|best regards|kind regards|regards|sincerely|thanks|thank you|cheers)\#(standaloneSignOffTailPattern)[\s\S]{0,\#(signatureSignalTrailingHTMLLimit)}(?:\#(signatureBrandingMarkers.joined(separator: "|")))"#
+        #"(?:^|[\r\n]|<[^>]+>)\s*(?:\#(signOffAlternation))\#(standaloneSignOffTailPattern)[\s\S]{0,\#(signatureSignalTrailingHTMLLimit)}(?:\#(signatureBrandingMarkers.joined(separator: "|")))"#
 
     private static let standaloneSignOffWithInlineNamePattern =
-        #"(?:warmly|best regards|kind regards|regards|sincerely|thanks|thank you|cheers)[,.!]\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(inlineSignOffNamePattern)"#
+        #"(?:\#(signOffAlternation))[,.!]\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(inlineSignOffNamePattern)"#
 
     private static let standaloneSignOffPattern =
-        #"(?:^|[\r\n]|<[^>]+>)\s*(?:warmly|best regards|kind regards|regards|sincerely|thanks|thank you|cheers)\#(standaloneSignOffTailPattern)"#
+        #"(?:^|[\r\n]|<[^>]+>)\s*(?:\#(signOffAlternation))\#(standaloneSignOffTailPattern)"#
 
     // Generated inline asset names (Outlook/Word image001.png, hex content-IDs).
     // Require at least one digit so hex-letter words like "imageface.png" are
     // not misread as generated assets.
     private static let generatedInlineAssetPattern =
-        #"^(?:image|img|inline|cid)(?=[0-9a-f_-]*[0-9])[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#
+        #"^(?:(?:image|inline|cid)(?=[0-9a-f_-]*[0-9])[0-9a-f_-]{1,}|ii_[0-9a-z]{6,}|pastedgraphic-\d+|outlook-[0-9a-z]{6,}|part\d+\.[0-9a-f]+\.[0-9a-f]+)(?:\.[a-z0-9]{2,5})?$"#
 
     private static let signatureImageIdentityMarkers = [
         "logo",

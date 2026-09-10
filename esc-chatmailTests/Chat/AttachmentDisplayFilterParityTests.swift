@@ -261,4 +261,26 @@ final class AttachmentDisplayFilterParityTests: XCTestCase {
         XCTAssertEqual(Set(messageResultIDs(fixture, hidingInline: true, hidingCalendar: false)), withInvite)
         XCTAssertEqual(Set(rowResultIDs(fixture, hidingInline: true, hidingCalendar: false)), withInvite)
     }
+    // Revert-check: download selection uses the unfiltered row, including hidden candidates.
+    func testQueuedUnknownInlineDownloadsSurviveSignatureSuppression() throws {
+        let message = MessageBuilder().withId("hidden-inline-download").withAttachments().build(in: context)
+        _ = AttachmentBuilder().withId("queued-logo").withContentId("image001")
+            .asImage(width: 0, height: 0).withByteSize(50_000).queued()
+            .forMessage(message).build(in: context)
+        _ = AttachmentBuilder().withId("known-image").withContentId("known")
+            .asImage(width: 1200, height: 800).withByteSize(50_000).queued()
+            .forMessage(message).build(in: context)
+        _ = AttachmentBuilder().withId("regular-file").asImage(width: 0, height: 0)
+            .withByteSize(50_000).queued().forMessage(message).build(in: context)
+        let row = ChatMessageRowModelMapper.map(message)
+        let analysis = MessageBubbleHTMLAnalysis(hasHTMLSource: true,
+            referencedInlineContentIDs: ["image001"], nonDisplayableInlineContentIDs: ["image001"],
+            supportsCalendarInvitePreviewCard: false)
+        XCTAssertFalse(row.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: false)
+            .contains { $0.attachmentID == "queued-logo" })
+        XCTAssertEqual(InlineAttachmentDownloadPolicy.pendingImages(in: row.attachments, isFromMe: false)
+            .compactMap(\.attachmentID), ["queued-logo"])
+        XCTAssertTrue(InlineAttachmentDownloadPolicy.pendingImages(in: row.attachments, isFromMe: true).isEmpty)
+    }
+
 }
