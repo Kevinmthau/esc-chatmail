@@ -43,7 +43,6 @@ enum PlainTextSignatureRemover {
         // Unsubscribe and preference links
         "unsubscribe",
         "update your email preferences",
-        "update your preferences",
         "manage your subscription",
         "click here to unsubscribe",
         "opt out of future",
@@ -58,8 +57,8 @@ enum PlainTextSignatureRemover {
         "this message is intended",
         "this e-mail is meant for only the intended recipient",
         "this communication is confidential",
-        "this communication is provided for informational purposes",
-        "our form crs",
+        "this communication is provided for informational purposes and is not an account statement",
+        "our form crs and guide to investment services contain important information",
         "this message contains confidential",
         "this e-mail is confidential",
         "this electronic mail transmission may contain confidential",
@@ -228,6 +227,7 @@ enum PlainTextSignatureRemover {
         var signatureSupportSignals = 0
         var affiliationSupportSignals = 0
         var sawSignOffLine = false
+        var hasDirectContactInfo = false
         var bridgedTagline = false
         var sawSeparator = false
 
@@ -265,6 +265,9 @@ enum PlainTextSignatureRemover {
             let evaluation = evaluateLine(line)
             if evaluation.hasContactInfo {
                 contactSignals += 1
+                hasDirectContactInfo = hasDirectContactInfo || matchesRegex(emailPattern, in: line) ||
+                    matchesRegex(contactPrefixPattern, in: line) ||
+                    (matchesRegex(phonePattern, in: line) && looksLikeStandalonePhoneLine(line, lowercased: line.lowercased()))
             }
 
             // Preserve a standalone first-name sign-off above a separated signature block:
@@ -310,6 +313,9 @@ enum PlainTextSignatureRemover {
                 return trimmed
             }
             guard signatureLineCount >= 3,
+                  // Links or descriptive phone labels can be an authored resource list.
+                  // Require a closing, email address or conventional phone row too.
+                  sawSignOffLine || hasDirectContactInfo,
                   contactSignals >= 2 || (contactSignals == 1 && (affiliationSupportSignals > 0 || sawSignOffLine)),
                   sawSignOffLine || affiliationSupportSignals > 0 ||
                     lines[startLine...lastNonEmpty].contains(where: { matchesRegex(multiWordNamePattern, in: $0) }) else {
@@ -323,22 +329,18 @@ enum PlainTextSignatureRemover {
     }
 
     /// Contact-only second pass for text extracted from successfully cleaned HTML.
-    /// It shares the DOM classifiers and thresholds, and never consults hard footer
-    /// indicators or crosses body prose, so it cannot strip newsletter paragraphs.
+    /// Requires a sign-off because extracted text no longer distinguishes a
+    /// signature from authored referrals or contact lists that DOM cleanup kept.
     static func removeTrailingContactSignature(from text: String) -> String {
         let normalized = TextProcessing.normalizeLineEndings(text)
         let lines = normalized.components(separatedBy: "\n")
         let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let last = lines.indices.last(where: { !lines[$0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
-              EmailDOMQuoteRemover.isContactSignatureLine(lines[last].trimmingCharacters(in: .whitespacesAndNewlines)) else { return trimmed }
+              EmailDOMQuoteRemover.isTrailingSignatureContactLine(lines[last].trimmingCharacters(in: .whitespacesAndNewlines)) else { return trimmed }
 
         var start = last
         var contacts = 0
-        var nonEmailContacts = 0
-        var supportLines = 0
-        var strongSupport = false
         var signOffIndex: Int?
-        var precedingBody: String?
         for index in stride(from: last, through: max(0, last - 32), by: -1) {
             let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
             if line.isEmpty { continue }
@@ -349,28 +351,23 @@ enum PlainTextSignatureRemover {
             // An email address or title inside an instruction is still body prose.
             if isBodyProseLine(line) ||
                 ((matchesRegex(emailPattern, in: line) || matchesRegex(urlPattern, in: line)) && !isStrictContactLine(line)) {
-                precedingBody = line
                 break
             }
             if EmailDOMQuoteRemover.isContactSignatureLine(line) {
+                guard EmailDOMQuoteRemover.isTrailingSignatureContactLine(line) else {
+                    break
+                }
                 contacts += 1
-                if EmailDOMQuoteRemover.hasNonEmailContactSignal(line) { nonEmailContacts += 1 }
-            } else if EmailDOMQuoteRemover.isSignatureSupportLine(line) {
-                supportLines += 1
-                strongSupport = strongSupport || SignatureSignOffPolicy.isStrongSupportLine(line)
-            } else {
-                precedingBody = line
+            } else if !EmailDOMQuoteRemover.isSignatureSupportLine(line) {
                 break
             }
             start = index
         }
 
         let removalCount = lines[start...last].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
-        guard contacts >= 2, removalCount >= 3,
-              signOffIndex != nil || strongSupport || (supportLines == 1 && nonEmailContacts > 0),
-              precedingBody.map({ !isContactListIntroLine($0) }) ?? true else { return trimmed }
-        let result = joinLines(lines, upTo: preservingSignOff(startingAt: signOffIndex ?? start, through: last, lines: lines))
-        // Keep contact-only documents rescued by quote-only DOM cleanup.
+        guard let signOffIndex, contacts >= 2, removalCount >= 3 else { return trimmed }
+        let result = joinLines(lines, upTo: preservingSignOff(startingAt: signOffIndex, through: last, lines: lines))
+        // Never erase the entire extracted message.
         return result.isEmpty ? trimmed : result
     }
 
@@ -431,10 +428,9 @@ enum PlainTextSignatureRemover {
     }
 
     private static func isTaglineBetweenAffiliationAndContacts(_ line: String, at index: Int, lines: [String]) -> Bool {
-        guard !hasAuthoredProsePrefix(line), !isPostscriptLine(line.lowercased()),
-              line.count <= 100, line.split(whereSeparator: \.isWhitespace).count <= 7,
-              line.last == "." || line.last == "!",
-              line.rangeOfCharacter(from: .decimalDigits) == nil,
+        // Only bridge known branding copy. Unknown short sentences can be authored
+        // updates even inside a contact block.
+        guard line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "protecting what matters most.",
               let previousIndex = previousNonEmptyLineIndex(before: index, in: lines) else { return false }
         let previous = lines[previousIndex].trimmingCharacters(in: .whitespacesAndNewlines)
         return SignatureSignOffPolicy.isStrongSupportLine(previous) ||
@@ -493,10 +489,18 @@ enum PlainTextSignatureRemover {
 
         let isDelimiter = matchesRegex(delimiterLinePattern, in: trimmed)
         let isCidLine = lowercased.hasPrefix("[cid:")
-        let hasLegalOpener = SignaturePatterns.legalFooterOpeners.contains {
-            trimmed.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
-        }
-        let hasHardFragment = hasLegalOpener || hardIndicatorFragments.contains { fragment in
+        // DOM opener vocabulary relies on surrounding structure. Plain text needs
+        // a complete boilerplate statement; an opener cannot swallow instructions
+        // in the same paragraph.
+        let hasLegalOpener = trimmed.range(
+            of: #"^this e-?mail (?:is confidential|may contain (?:confidential(?: or privileged)?|privileged(?: or confidential)?) information)(?: intended (?:only|solely) for the (?:intended )?recipient)?\.?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        let isPreferenceFooter = trimmed.range(
+            of: #"^update your preferences(?:\s*:?\s+(?:https?://|www\.)\S+)?[.!]?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        let hasHardFragment = hasLegalOpener || isPreferenceFooter || hardIndicatorFragments.contains { fragment in
             lowercased.hasPrefix(fragment) ||
                 lowercased.range(of: #"[.!?]\s+"# + NSRegularExpression.escapedPattern(for: fragment), options: .regularExpression) != nil
         }

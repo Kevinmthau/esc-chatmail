@@ -251,6 +251,101 @@ final class PlainTextSignatureRemoverTests: XCTestCase {
         }
     }
 
+    func testFooterLikeAuthoredFinalParagraphs_arePreserved() {
+        let paragraphs = [
+            "This email may contain a mistake; please check the totals.",
+            "This email may contain errors; please check the totals.",
+            "This email may contain privileged attachments. Please forward them to counsel.",
+            "This email may contain confidential information. Please forward it to counsel.",
+            "Our Form CRS needs revision before we can send it.",
+            "Update your preferences before the deadline.",
+        ]
+
+        for paragraph in paragraphs {
+            let text = "Hi Kevin,\n\n\(paragraph)"
+            XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text, paragraph)
+            let processed = ChatBubbleTextProcessor.process(
+                content: text,
+                options: ChatBubbleTextProcessorOptions(inputKind: .plainText)
+            )
+            XCTAssertEqual(processed.mainText, text, paragraph)
+        }
+    }
+
+    func testEmergencyContactList_preservesHeadingAndAllNumbers() {
+        for heading in [
+            "Emergency Contacts", "Support Team", "Emergency Numbers", "Emergency Contact Numbers",
+            "Support Numbers", "Escalation Matrix", "On-Call Roster", "Building Support"
+        ] {
+            let text = """
+            Please keep these numbers handy.
+
+            \(heading)
+            Emergency line: 212-555-1234
+            Customer service line: 212-555-5678
+            """
+            XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text, heading)
+
+            let processed = ChatBubbleTextProcessor.process(
+                content: text,
+                options: ChatBubbleTextProcessorOptions(inputKind: .plainText)
+            )
+            XCTAssertEqual(
+                processed.mainText,
+                "Please keep these numbers handy.\n\n\(heading)\n\nEmergency line: 212-555-1234\n\nCustomer service line: 212-555-5678",
+                heading
+            )
+        }
+    }
+
+    func testKnownConfidentialityFooter_isStillRemoved() {
+        for footer in [
+            "This email may contain confidential or privileged information.",
+            "This e-mail may contain confidential information intended only for the recipient.",
+        ] {
+            let text = "The contract is attached for your review.\n\n\(footer)"
+            XCTAssertEqual(
+                PlainTextSignatureRemover.removeSignature(from: text),
+                "The contract is attached for your review.",
+                footer
+            )
+        }
+    }
+
+    func testAuthoredSentenceBelowNameOrTitle_isNotConsumedAsTagline() {
+        for heading in ["Jane Doe", "Senior Account Manager"] {
+            for sentence in ["Budget has doubled.", "Do not send the contract."] {
+                let text = "Please review the plan.\n\n\(heading)\n\(sentence)\n415-555-1212\nhttps://example.com/plan"
+                let removed = PlainTextSignatureRemover.removeSignature(from: text)
+                XCTAssertTrue(removed.contains(sentence), "Authored sentence lost: \(text)")
+                let processed = ChatBubbleTextProcessor.process(
+                    content: text,
+                    options: ChatBubbleTextProcessorOptions(inputKind: .plainText)
+                )
+                XCTAssertTrue(processed.mainText?.contains(sentence) == true, "Authored sentence lost after processing: \(text)")
+            }
+        }
+    }
+
+    func testTitledLinkShare_preservesLinksThroughPlainTextProcessing() {
+        let text = """
+        Here are the links you asked for:
+        Design Reference
+        https://example.com/one
+        https://example.com/two
+        """
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text)
+
+        let processed = ChatBubbleTextProcessor.process(
+            content: text,
+            options: ChatBubbleTextProcessorOptions(inputKind: .plainText)
+        )
+        XCTAssertEqual(
+            processed.mainText,
+            "Here are the links you asked for:\n\nDesign Reference\n\nhttps://example.com/one\n\nhttps://example.com/two"
+        )
+    }
+
     func testUnwrapKeepsLeadingURLLineBreak() {
         // Revert-check: TextProcessing leading URL guard / web text.ts.
         for separator in ["\n", "\n\n"] {
@@ -266,8 +361,48 @@ final class PlainTextSignatureRemoverTests: XCTestCase {
         XCTAssertEqual(TextProcessing.unwrapEmailLineBreaks(from: "Best,\nMobile Office"), "Best,\n\nMobile Office")
     }
 
+    func testContactOnlyHTMLFallbackPreservesResourceListsWithoutSignOff() {
+        for resources in [
+            "Design Reference\nhttps://example.com/one\nhttps://example.com/two",
+            "Emergency Contacts\nEmergency line: 212-555-1234\nCustomer service line: 212-555-5678"
+        ] {
+            let text = "Please keep these handy.\n\(resources)"
+            XCTAssertEqual(PlainTextSignatureRemover.removeTrailingContactSignature(from: text), text)
+        }
+    }
+
+    func testContactOnlyHTMLFallbackPreservesTitledContactBlocksWithoutSignOff() {
+        for introduction in [
+            "The contract is ready.",
+            "You can reach the contractor here:",
+            "Here is her information:",
+            "Here is the plumber I recommend."
+        ] {
+            let text = "\(introduction)\nJohn Smith\nPartner\njohn@example.com\n404-555-0142"
+            XCTAssertEqual(PlainTextSignatureRemover.removeTrailingContactSignature(from: text), text)
+        }
+    }
+
+    func testContactOnlyHTMLFallbackPreservesAddressKeywordProse() {
+        let signature = "John Smith\nPartner\njohn@example.com\n404-555-0142"
+        for instruction in ["Market Street is closed", "Meet on Market Street tomorrow", "Drive Carefully"] {
+            let trailingInstruction = "The contract is ready.\nBest,\n\(signature)\n\(instruction)"
+            XCTAssertEqual(
+                PlainTextSignatureRemover.removeTrailingContactSignature(from: trailingInstruction),
+                trailingInstruction,
+                instruction
+            )
+            let precedingInstruction = "The contract is ready.\nBest,\n\(instruction)\n\(signature)"
+            XCTAssertEqual(
+                PlainTextSignatureRemover.removeTrailingContactSignature(from: precedingInstruction),
+                precedingInstruction,
+                instruction
+            )
+        }
+    }
+
     func testContactOnlyHTMLFallbackDoesNotApplyHardIndicators() {
-        // Revert-check: contact-only second pass thresholds/body stop/intro veto / web twin.
+        // Revert-check: contact-only second pass thresholds/body stop/required sign-off / web twin.
         let cases: [(String, String, String)] = [
             ("email_instruction", "Please review the plan.\nJane Doe\nPartner\njane@example.com\n415-555-1212\nPlease send the revised plan to bob@example.com.", "Please review the plan.\nJane Doe\nPartner\njane@example.com\n415-555-1212\nPlease send the revised plan to bob@example.com."),
             ("url_instruction", "Please review the plan.\nJane Doe\nPartner\njane@example.com\n415-555-1212\nPlease review the revised plan at https://example.com/plan.", "Please review the plan.\nJane Doe\nPartner\njane@example.com\n415-555-1212\nPlease review the revised plan at https://example.com/plan."),
@@ -279,7 +414,7 @@ final class PlainTextSignatureRemoverTests: XCTestCase {
             ("contact_only_document", "Jane Doe\njane@example.com\n404-555-0142", "Jane Doe\njane@example.com\n404-555-0142"),
             ("corporate_contact_tail", "The repair is scheduled.\n\nBest,\nJohn Boga\nProperty Manager\nOffice: 914-564-1325 | Monday - Friday | 9am - 5pm\nEmergency line after hours: 914-373-4658\nwww.nycbrownstone.net", "The repair is scheduled.\n\nBest,\nJohn Boga"),
             ("minimal_two_contacts", "The contract is ready.\n\nSincerely,\nMarcita Threash\nmarcita@example.com\n404-555-0142", "The contract is ready.\n\nSincerely,\nMarcita Threash"),
-            ("contact_without_signoff", "The contract is ready.\n\nMarcita Threash\nmarcita@example.com\n404-555-0142", "The contract is ready."),
+            ("contact_without_signoff", "The contract is ready.\n\nMarcita Threash\nmarcita@example.com\n404-555-0142", "The contract is ready.\n\nMarcita Threash\nmarcita@example.com\n404-555-0142"),
             ("one_contact_below_name", "The contract is ready.\n\nBest,\nJane Doe\njane@example.com", "The contract is ready.\n\nBest,\nJane Doe\njane@example.com"),
             ("two_contacts_without_name", "The contract is ready.\n\njane@example.com\n404-555-0142", "The contract is ready.\n\njane@example.com\n404-555-0142"),
             ("contact_list_with_title", "Here are the reviewer contacts:\nJane Doe\nAccount Manager\njane@example.com\n404-555-0142", "Here are the reviewer contacts:\nJane Doe\nAccount Manager\njane@example.com\n404-555-0142"),

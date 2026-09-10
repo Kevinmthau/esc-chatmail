@@ -4,7 +4,6 @@
 import {
   ADDRESS_KEYWORD_PATTERN,
   DESCRIPTIVE_PHONE_LINE_PATTERN,
-  LEGAL_FOOTER_OPENERS,
   SIGN_OFF_PHRASES,
   shouldPreserveSignatureNameLine,
   isStrongSignatureSupportLine,
@@ -14,7 +13,11 @@ import {
   STANDALONE_CONTACT_LABEL_PATTERN,
   WEB_URL_PATTERN,
 } from './patterns'
-import { hasNonEmailContactSignal, isContactSignatureLine, isSignatureSupportLine } from './html'
+import {
+  isContactSignatureLine,
+  isSignatureSupportLine,
+  isTrailingSignatureContactLine,
+} from './html'
 import { isListItem, normalizeLineEndings } from './text'
 
 const TRAILING_SCAN_LINE_LIMIT = 80
@@ -52,7 +55,6 @@ const HARD_INDICATOR_FRAGMENTS: string[] = [
   // Unsubscribe and preference links
   'unsubscribe',
   'update your email preferences',
-  'update your preferences',
   'manage your subscription',
   'click here to unsubscribe',
   'opt out of future',
@@ -67,8 +69,8 @@ const HARD_INDICATOR_FRAGMENTS: string[] = [
   'this message is intended',
   'this e-mail is meant for only the intended recipient',
   'this communication is confidential',
-  'this communication is provided for informational purposes',
-  'our form crs',
+  'this communication is provided for informational purposes and is not an account statement',
+  'our form crs and guide to investment services contain important information',
   'this message contains confidential',
   'this e-mail is confidential',
   'this electronic mail transmission may contain confidential',
@@ -234,6 +236,7 @@ export function removeSignature(text: string): string {
   let signatureSupportSignals = 0
   let affiliationSupportSignals = 0
   let sawSignOffLine = false
+  let hasDirectContactInfo = false
   let bridgedTagline = false
   let sawSeparator = false
 
@@ -278,6 +281,11 @@ export function removeSignature(text: string): string {
     const evaluation = evaluateLine(line)
     if (evaluation.hasContactInfo) {
       contactSignals += 1
+      hasDirectContactInfo =
+        hasDirectContactInfo ||
+        EMAIL_ADDRESS_PATTERN.test(line) ||
+        CONTACT_PREFIX_PATTERN.test(line) ||
+        (PHONE_PATTERN.test(line) && looksLikeStandalonePhoneLine(line, line.toLowerCase()))
     }
 
     if (
@@ -325,6 +333,9 @@ export function removeSignature(text: string): string {
     }
     if (
       signatureLineCount < 3 ||
+      // Links or descriptive phone labels can be an authored resource list.
+      // Require a closing, email address or conventional phone row too.
+      !(sawSignOffLine || hasDirectContactInfo) ||
       !(
         contactSignals >= 2 ||
         (contactSignals === 1 && (affiliationSupportSignals > 0 || sawSignOffLine))
@@ -346,22 +357,18 @@ export function removeSignature(text: string): string {
   return trimmed
 }
 
-/** Contact-only fallback after DOM cleanup, using the same classifiers and thresholds. */
+/** Requires a sign-off: extracted text cannot distinguish signatures from kept referrals. */
 export function removeTrailingContactSignature(text: string): string {
   const normalized = normalizeLineEndings(text)
   const trimmed = normalized.trim()
   const lines = normalized.split('\n')
   let last = lines.length - 1
   while (last >= 0 && lines[last]!.trim().length === 0) last--
-  if (last < 0 || !isContactSignatureLine(lines[last]!.trim())) return trimmed
+  if (last < 0 || !isTrailingSignatureContactLine(lines[last]!.trim())) return trimmed
 
   let start = last
   let contacts = 0
-  let nonEmailContacts = 0
-  let supportLines = 0
-  let strongSupport = false
   let signOffIndex: number | null = null
-  let precedingBody: string | null = null
   for (let index = last; index >= Math.max(0, last - 32); index--) {
     const line = lines[index]!.trim()
     if (line.length === 0) continue
@@ -375,31 +382,22 @@ export function removeTrailingContactSignature(text: string): string {
       ((EMAIL_ADDRESS_PATTERN.test(line) || WEB_URL_PATTERN.test(line)) &&
         !isStrictContactLine(line))
     ) {
-      precedingBody = line
       break
     }
     if (isContactSignatureLine(line)) {
+      if (!isTrailingSignatureContactLine(line)) {
+        break
+      }
       contacts++
-      if (hasNonEmailContactSignal(line)) nonEmailContacts++
-    } else if (isSignatureSupportLine(line)) {
-      supportLines++
-      strongSupport ||= isStrongSignatureSupportLine(line)
-    } else {
-      precedingBody = line
+    } else if (!isSignatureSupportLine(line)) {
       break
     }
     start = index
   }
   const removalCount = lines.slice(start, last + 1).filter((line) => line.trim().length > 0).length
-  if (
-    contacts < 2 ||
-    removalCount < 3 ||
-    !(signOffIndex !== null || strongSupport || (supportLines === 1 && nonEmailContacts > 0)) ||
-    (precedingBody !== null && isContactListIntroLine(precedingBody))
-  )
-    return trimmed
-  const result = joinLines(lines, preservingSignOff(signOffIndex ?? start, last, lines))
-  // Keep contact-only documents rescued by quote-only DOM cleanup.
+  if (signOffIndex === null || contacts < 2 || removalCount < 3) return trimmed
+  const result = joinLines(lines, preservingSignOff(signOffIndex, last, lines))
+  // Never erase the entire extracted message.
   return result.length > 0 ? result : trimmed
 }
 
@@ -477,15 +475,9 @@ function isTaglineBetweenAffiliationAndContacts(
   index: number,
   lines: string[],
 ): boolean {
-  if (
-    hasAuthoredProsePrefix(line) ||
-    isPostscriptLine(line.toLowerCase()) ||
-    line.length > 100 ||
-    line.split(/\s+/).length > 7 ||
-    !/[.!]$/.test(line) ||
-    /\d/.test(line)
-  )
-    return false
+  // Only bridge known branding copy. Unknown short sentences can be authored
+  // updates even inside a contact block.
+  if (line.trim().toLowerCase() !== 'protecting what matters most.') return false
   const previousIndex = previousNonEmptyLineIndex(index, lines)
   if (previousIndex === null) return false
   const previous = lines[previousIndex]!.trim()
@@ -552,11 +544,18 @@ function evaluateLine(line: string): LineEvaluation {
 
   const isDelimiter = SIGNATURE_DELIMITER_PATTERN.test(trimmed)
   const isCidLine = lowercased.startsWith('[cid:')
-  const hasLegalOpener = LEGAL_FOOTER_OPENERS.some((pattern) =>
-    new RegExp(pattern, 'i').test(trimmed),
-  )
+  // DOM opener vocabulary relies on surrounding structure. Plain text needs
+  // a complete boilerplate statement; an opener cannot swallow instructions
+  // in the same paragraph.
+  const hasLegalOpener =
+    /^this e-?mail (?:is confidential|may contain (?:confidential(?: or privileged)?|privileged(?: or confidential)?) information)(?: intended (?:only|solely) for the (?:intended )?recipient)?\.?$/i.test(
+      trimmed,
+    )
+  const isPreferenceFooter =
+    /^update your preferences(?:\s*:?\s+(?:https?:\/\/|www\.)\S+)?[.!]?$/i.test(trimmed)
   const hasHardFragment =
     hasLegalOpener ||
+    isPreferenceFooter ||
     HARD_INDICATOR_FRAGMENTS.some(
       (fragment) =>
         lowercased.startsWith(fragment) ||

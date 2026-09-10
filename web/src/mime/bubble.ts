@@ -133,6 +133,7 @@ function processHtml(
     decodeEntities,
     formatSignOffs,
     cleanup.applyPlainTextQuoteRemoval,
+    cleanup.applyTrailingContactSignatureRemoval,
   )
 
   if (plainText === null) {
@@ -178,11 +179,17 @@ function processPlainText(
 
 // MARK: - HTML → bubble text (ProcessedTextCache.extractPlainTextFromHTML)
 
+// Retained tables, headings, lists and media carry context lost by text extraction.
+// Leave those documents to DOM cleanup, including its content-preservation guards.
+const TEXT_SIGNATURE_PROTECTED_STRUCTURE_PATTERN =
+  /<\s*(?:table|thead|tbody|tfoot|tr|td|th|h[1-6]|ul|ol|li|dl|dt|dd|figure|figcaption|img|picture|svg|video|audio|object|embed|iframe|canvas)\b|\b(?:src|srcset|background|poster)\s*=|cid:|url\s*\(/i
+
 function extractPlainTextFromHtmlForBubble(
   html: string,
   decodeEntities: boolean,
   formatSignOffs: boolean,
   applyPlainTextQuoteRemoval: boolean,
+  applyTrailingContactSignatureRemoval = false,
 ): string | null {
   const extracted = extractPlainTextFromHtml(html)
   if (extracted.length === 0) return null
@@ -191,10 +198,10 @@ function extractPlainTextFromHtmlForBubble(
   const textBeforeUnwrap = applyPlainTextQuoteRemoval
     ? decoded
     : removeConsecutivePlainTextQuoteLines(decoded)
-  // Only a successful DOM cleanup gets the contact-only second pass.
-  const contactCleaned = applyPlainTextQuoteRemoval
-    ? textBeforeUnwrap
-    : removeTrailingContactSignature(textBeforeUnwrap)
+  const contactCleaned =
+    applyTrailingContactSignatureRemoval && !TEXT_SIGNATURE_PROTECTED_STRUCTURE_PATTERN.test(html)
+      ? removeTrailingContactSignature(textBeforeUnwrap)
+      : textBeforeUnwrap
   const unwrapped = unwrapEmailLineBreaks(contactCleaned)
   let quoteRemoved: string
   if (applyPlainTextQuoteRemoval) {

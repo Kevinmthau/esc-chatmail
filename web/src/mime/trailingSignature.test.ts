@@ -1,7 +1,49 @@
 import { expect, it } from 'vitest'
+import { processChatBubbleText } from './bubble'
 import { removeTrailingContactSignature } from './signature'
 
-// Revert-check: contact-only second-pass thresholds, body stop and intro veto / Swift twin.
+it('preserves signature-like text inside a diagram after DOM cleanup', () => {
+  const html = `<p>Project organization:</p><svg><text>Best,</text>
+<text>John Smith</text>
+<text>Partner</text>
+<text>john@example.test</text>
+<text>415-555-1212</text></svg>`
+  const result = processChatBubbleText(html, { inputKind: 'html' })
+  expect(result.mainText?.replace(/\s+/g, ' ').trim()).toBe(
+    'Project organization: Best, John Smith Partner john@example.test 415-555-1212',
+  )
+})
+
+it.each([
+  'Design Reference\nhttps://example.com/one\nhttps://example.com/two',
+  'Emergency Contacts\nEmergency line: 212-555-1234\nCustomer service line: 212-555-5678',
+])('preserves a resource list without a sign-off: %s', (resources) => {
+  const text = `Please keep these handy.\n${resources}`
+  expect(removeTrailingContactSignature(text)).toBe(text)
+})
+
+it.each([
+  'The contract is ready.',
+  'You can reach the contractor here:',
+  'Here is her information:',
+  'Here is the plumber I recommend.',
+])('preserves a titled contact block without a sign-off: %s', (introduction) => {
+  const text = `${introduction}\nJohn Smith\nPartner\njohn@example.com\n404-555-0142`
+  expect(removeTrailingContactSignature(text)).toBe(text)
+})
+
+it.each(['Market Street is closed', 'Meet on Market Street tomorrow', 'Drive Carefully'])(
+  'preserves address-keyword prose before or after contacts: %s',
+  (instruction) => {
+    const signature = 'John Smith\nPartner\njohn@example.com\n404-555-0142'
+    const trailingInstruction = `The contract is ready.\nBest,\n${signature}\n${instruction}`
+    expect(removeTrailingContactSignature(trailingInstruction)).toBe(trailingInstruction)
+    const precedingInstruction = `The contract is ready.\nBest,\n${instruction}\n${signature}`
+    expect(removeTrailingContactSignature(precedingInstruction)).toBe(precedingInstruction)
+  },
+)
+
+// Revert-check: contact-only second-pass thresholds, body stop and required sign-off / Swift twin.
 const cases = [
   [
     'email_instruction',
@@ -48,7 +90,7 @@ const cases = [
   [
     'contact_without_signoff',
     'The contract is ready.\n\nMarcita Threash\nmarcita@example.com\n404-555-0142',
-    'The contract is ready.',
+    'The contract is ready.\n\nMarcita Threash\nmarcita@example.com\n404-555-0142',
   ],
   [
     'one_contact_below_name',

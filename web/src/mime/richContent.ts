@@ -77,6 +77,8 @@ export interface HtmlProcessingCleanupResult {
   html: string
   /** True when every cleanup mode wiped the content and the original was kept. */
   applyPlainTextQuoteRemoval: boolean
+  /** Rescue modes must retain content that signature cleanup removed. */
+  applyTrailingContactSignatureRemoval: boolean
 }
 
 export function cleanedHtmlForCleanupModes(
@@ -102,6 +104,7 @@ export function cleanedHtmlForProcessing(html: string): HtmlProcessingCleanupRes
   return {
     html: fallback.html,
     applyPlainTextQuoteRemoval: fallback.appliedMode === null,
+    applyTrailingContactSignatureRemoval: fallback.appliedMode === 'quotedAndSignatures',
   }
 }
 

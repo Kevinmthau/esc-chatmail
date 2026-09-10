@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { processChatBubbleText } from './bubble'
 import { removeSignature } from './signature'
 import { unwrapEmailLineBreaks } from './text'
 
@@ -177,4 +178,97 @@ it('keeps contact words inside personal names', () => {
   // Revert-check: shared name classifier in TextProcessing / web text.ts.
   expect(unwrapEmailLineBreaks('Best,\nMarcella Rossi')).toBe('Best,\nMarcella Rossi')
   expect(unwrapEmailLineBreaks('Best,\nMobile Office')).toBe('Best,\n\nMobile Office')
+})
+
+describe('authored content at inferred signature boundaries', () => {
+  const preservedCases = [
+    ...[
+      'Emergency Contacts',
+      'Support Team',
+      'Emergency Numbers',
+      'Emergency Contact Numbers',
+      'Support Numbers',
+      'Escalation Matrix',
+      'On-Call Roster',
+      'Building Support',
+    ].map(
+      (heading) =>
+        [
+          `${heading} contact list`,
+          `Please keep these numbers handy.\n\n${heading}\nEmergency line: 212-555-1234\nCustomer service line: 212-555-5678`,
+          `Please keep these numbers handy.\n\n${heading}\n\nEmergency line: 212-555-1234\n\nCustomer service line: 212-555-5678`,
+        ] as const,
+    ),
+    [
+      'privileged attachments instruction',
+      'Hi John,\n\nThis email may contain privileged attachments. Please forward them to counsel.',
+      'Hi John,\n\nThis email may contain privileged attachments. Please forward them to counsel.',
+    ],
+    [
+      'confidential information instruction',
+      'Hi John,\n\nThis email may contain confidential information. Please forward it to counsel.',
+      'Hi John,\n\nThis email may contain confidential information. Please forward it to counsel.',
+    ],
+    [
+      'legal-sounding correction',
+      'Hello,\n\nThis email may contain mistakes. Please check the amounts before signing.',
+      'Hello,\n\nThis email may contain mistakes. Please check the amounts before signing.',
+    ],
+    [
+      'Form CRS revision request',
+      'The draft is attached.\n\nOur Form CRS needs revision before Friday.',
+      'The draft is attached.\n\nOur Form CRS needs revision before Friday.',
+    ],
+    [
+      'preferences instruction',
+      'Your account is ready.\n\nUpdate your preferences before the deadline.',
+      'Your account is ready.\n\nUpdate your preferences before the deadline.',
+    ],
+    [
+      'budget update below a name',
+      'Please review the plan.\n\nJane Doe\nBudget has doubled.\njane@example.com\nhttps://example.com/project',
+      'Please review the plan.\n\nJane Doe\n\nBudget has doubled.\n\njane@example.com\n\nhttps://example.com/project',
+    ],
+    [
+      'budget update below a title',
+      'Please review the plan.\n\nProject Manager\nBudget has doubled.\njane@example.com\nhttps://example.com/project',
+      'Please review the plan.\n\nProject Manager\n\nBudget has doubled.\n\njane@example.com\n\nhttps://example.com/project',
+    ],
+    [
+      'shared documents under a heading',
+      'Please review these before our meeting.\n\nProject Documents\nhttps://example.com/revenue\nhttps://example.com/costs',
+      'Please review these before our meeting.\n\nProject Documents\n\nhttps://example.com/revenue\n\nhttps://example.com/costs',
+    ],
+    [
+      'shared links below a sales heading',
+      'Here are the links:\nSales report\nhttps://example.com/revenue\nhttps://example.com/costs',
+      'Here are the links:\n\nSales report\n\nhttps://example.com/revenue\n\nhttps://example.com/costs',
+    ],
+  ] as const
+
+  it.each(preservedCases)('preserves %s in raw plain text', (_name, input) => {
+    expect(removeSignature(input)).toBe(input)
+  })
+
+  it.each(preservedCases)('preserves %s through bubble processing', (_name, input, expected) => {
+    expect(processChatBubbleText(input, { inputKind: 'plainText' }).mainText).toBe(expected)
+  })
+
+  it('still removes a specific confidentiality footer', () => {
+    const input =
+      'The review is complete.\n\nThis email may contain confidential or privileged information. If you are not the intended recipient, please delete it.'
+    expect(removeSignature(input)).toBe('The review is complete.')
+    expect(processChatBubbleText(input, { inputKind: 'plainText' }).mainText).toBe(
+      'The review is complete.',
+    )
+  })
+
+  it('still removes website links after an explicit personal sign-off', () => {
+    const input =
+      'The review is complete.\n\nBest,\nJane Doe\nhttps://janedoe.example.com\nhttps://linkedin.com/in/janedoe'
+    expect(removeSignature(input)).toBe('The review is complete.\n\nBest,\nJane Doe')
+    expect(processChatBubbleText(input, { inputKind: 'plainText' }).mainText).toBe(
+      'The review is complete.\n\nBest,\n\nJane Doe',
+    )
+  })
 })

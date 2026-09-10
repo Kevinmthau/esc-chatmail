@@ -82,6 +82,7 @@ extension MessageBubbleLoader {
             parsedEmail: parsedEmail,
             hasHTMLSourceHint: request.hasHTMLSource,
             isForwardedEmail: request.isForwardedEmail,
+            isFromMe: request.isFromMe,
             isLikelyCalendarInvite: request.isLikelyCalendarInvite,
             bodyText: request.bodyText,
             cleanedSnippet: request.cleanedSnippet,
@@ -151,7 +152,7 @@ extension MessageBubbleLoader {
             "body:\(cacheFingerprint(for: request.bodyText))",
             "snippet:\(cacheFingerprint(for: request.cleanedSnippet))",
             "subject:\(cacheFingerprint(for: request.subject))",
-            "flags:\(request.hasHTMLSource)-\(request.isForwardedEmail)-\(request.isLikelyCalendarInvite)",
+            "flags:\(request.hasHTMLSource)-\(request.isForwardedEmail)-\(request.isLikelyCalendarInvite)-\(request.isFromMe)",
             "hasAttachments:\(request.hasAttachments)",
             "attachments:\(MessageBubbleAttachmentSnapshot.analysisFingerprint(for: request.attachmentSnapshots))"
         ].joined(separator: "|")
