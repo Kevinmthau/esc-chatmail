@@ -107,7 +107,7 @@ extension EmailDOMQuoteRemover {
     // MARK: - Signature text markers
 
     private static let signatureTextMarkers: [NSRegularExpression] = {
-        let raw = SignaturePatterns.legalFooterOpeners + [
+        let raw = [
             "^\\s*--\\s*$",                  // line containing only --
             "Sent from my (?:iPhone|iPad|Android|Galaxy|Pixel|Samsung)",
             "Sent from (?:Outlook|Mail for Windows|Spark|ProtonMail|BlueMail|Gmail|Yahoo Mail)",
@@ -142,26 +142,11 @@ extension EmailDOMQuoteRemover {
             for pattern in signatureTextMarkers {
                 let range = NSRange(location: 0, length: text.utf16.count)
                 if let match = pattern.firstMatch(in: text, options: [], range: range) {
-                    if SignaturePatterns.legalFooterOpeners.contains(pattern.pattern),
-                       !isAtSignatureLineStart(textNode) {
-                        continue
-                    }
                     try truncateAtTextNode(textNode, matchStartUTF16: match.range.location, in: text)
                     return
                 }
             }
         }
-    }
-
-    private static func isAtSignatureLineStart(_ textNode: TextNode) -> Bool {
-        var ancestor = textNode.parent() as? Element
-        while let element = ancestor {
-            if ["p", "div", "li", "td", "body"].contains(element.tagNameNormal()) {
-                return inlineHeaderLines(in: element).contains { $0.startTextNode === textNode }
-            }
-            ancestor = element.parent()
-        }
-        return false
     }
 
     private static let signatureEmailPattern = EmailPatterns.address
@@ -213,6 +198,14 @@ extension EmailDOMQuoteRemover {
     }()
 
     private static let signatureAddressPattern = SignaturePatterns.addressKeyword
+
+    private static let signatureTimeRangePattern = try? NSRegularExpression(
+        pattern: #"^(?:[01]?\d|2[0-3])[.:]?[0-5]\d-(?:(?:[01]?\d|2[0-3])[.:]?[0-5]\d|24[.:]?00)$"#
+    )
+
+    private static let signatureBareHoursLabelPattern = try? NSRegularExpression(
+        pattern: #"^after[ -]hours\s*:$"#, options: [.caseInsensitive]
+    )
 
     private static let signatureCityStateZipPattern: NSRegularExpression? = {
         try? NSRegularExpression(
@@ -364,16 +357,12 @@ extension EmailDOMQuoteRemover {
             return
         }
 
-        // A logo below a confirmed contact block is signature chrome. Bound image-only tails.
-        var removalEnd = lastNonEmpty
-        var imageCount = 0
-        for index in (lastNonEmpty + 1)..<lines.count {
-            guard lines[index].text.isEmpty else { break }
-            if (try? lines[index].element.select("img").isEmpty()) == false {
-                guard imageCount < 3 else { break }
-                imageCount += 1
+        // Widening the range for metadata must not claim unmarked body media,
+        // including images between the contacts and footer or inside a footer line.
+        if tailCount > 0 {
+            for index in signatureStart...lastNonEmpty {
+                guard try !containsSignatureTailMedia(lines[index].element) else { return }
             }
-            removalEnd = index
         }
         var preservedHTML = ""
         if sawSignOffBeforeSignature {
@@ -383,7 +372,8 @@ extension EmailDOMQuoteRemover {
             }
             signatureStart = scanIndex
         }
-        try removeSignatureLines(lines, from: signatureStart, through: removalEnd, preserving: preservedHTML)
+        // Preserve unmarked media after the signature; only explicit wrappers own their images.
+        try removeSignatureLines(lines, from: signatureStart, through: lastNonEmpty, preserving: preservedHTML)
     }
 
     /// Column headings and repeated person records distinguish directories from signatures.
@@ -447,6 +437,23 @@ extension EmailDOMQuoteRemover {
            signatureAncestor(of: parent, tags: ["svg", "video", "audio", "object", "iframe", "canvas"]) != nil {
             return
         }
+        // A CID link or background on the boundary's ancestor owns content too.
+        var parent = first.startTextNode?.parent() as? Element
+        while let element = parent {
+            if hasSignatureMediaAttributes(element) { return }
+            if element === first.element { break }
+            parent = element.parent()
+        }
+        // Sub-line truncation must preserve the same unmarked trailing media as whole-block cleanup.
+        if let boundary = first.startTextNode {
+            if try containsMediaAfterSignature(boundary, in: first.element) { return }
+        } else if try containsSignatureTailMedia(first.element) {
+            return
+        }
+        var checked = Set<ObjectIdentifier>([ObjectIdentifier(first.element)])
+        for line in lines[start...end] where checked.insert(ObjectIdentifier(line.element)).inserted {
+            if try containsSignatureTailMedia(line.element) { return }
+        }
         // SwiftSoup can reuse an ancestor's raw table HTML after a previously dirty child changes.
         // Reassigning the unchanged tag invalidates that snapshot without changing markup or attributes.
         var ancestor = first.element.parent()
@@ -482,6 +489,34 @@ extension EmailDOMQuoteRemover {
         }
     }
 
+    private static func containsMediaAfterSignature(_ boundary: TextNode, in root: Element) throws -> Bool {
+        var reachedBoundary = false
+        var stack: [Node] = [root]
+        while let node = stack.popLast() {
+            if node === boundary {
+                reachedBoundary = true
+                continue
+            }
+            if reachedBoundary, let element = node as? Element {
+                if try containsSignatureTailMedia(element) { return true }
+                // The subtree was checked as a whole.
+                continue
+            }
+            stack.append(contentsOf: node.getChildNodes().reversed())
+        }
+        return false
+    }
+
+    private static func hasSignatureMediaAttributes(_ element: Element) -> Bool {
+        if ["src", "srcset", "background", "poster"].contains(where: element.hasAttr) { return true }
+        if ["href", "xlink:href"].contains(where: {
+            ((try? element.attr($0)) ?? "").range(of: "cid:", options: .caseInsensitive) != nil
+        }) { return true }
+        return ((try? element.attr("style")) ?? "").range(
+            of: #"url\s*\("#, options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
     private static func hasMediaBeforeSignature(_ boundary: TextNode?, in root: Element) -> Bool {
         guard let boundary else { return false }
         var stack: [Node] = [root]
@@ -489,7 +524,7 @@ extension EmailDOMQuoteRemover {
             if node === boundary { return false }
             if let element = node as? Element {
                 if ["img", "picture", "svg", "video", "audio", "object", "embed", "iframe", "canvas"].contains(element.tagNameNormal()) ||
-                    element.hasAttr("background") || ((try? element.attr("style")) ?? "").lowercased().contains("url(") {
+                    hasSignatureMediaAttributes(element) {
                     return true
                 }
             }
@@ -535,15 +570,35 @@ extension EmailDOMQuoteRemover {
             signatureAddressPattern?.firstMatch(in: text, range: NSRange(location: 0, length: text.utf16.count)) != nil
     }
 
+    private static func containsSignatureTailMedia(_ element: Element) throws -> Bool {
+        let mediaSelector = "img, picture, svg, video, audio, object, embed, iframe, [src], [srcset], [background], [poster]"
+        if try !element.select(mediaSelector).isEmpty() { return true }
+        // CID references also include linked attachments (href/xlink:href).
+        if try element.outerHtml().range(of: "cid:", options: .caseInsensitive) != nil { return true }
+        let styledElements = [element] + (try element.select("[style]")).array()
+        return styledElements.contains { candidate in
+            let style = (try? candidate.attr("style")) ?? ""
+            return style.range(of: #"url\s*\("#, options: [.regularExpression, .caseInsensitive]) != nil
+        }
+    }
+
     private static func isSignatureTailLine(_ text: String) -> Bool {
-        let words = text.split(whereSeparator: \.isWhitespace)
-        if text.range(of: #"^(?:licensed|licen[cs]e|registration|registered|npn)\b[^.!?]*\d"#, options: [.regularExpression, .caseInsensitive]) != nil {
+        // Match the entire known boilerplate sentence. A heading or keyword match
+        // would also swallow authored discussion or a postscript in the same block.
+        if text.range(
+            of: #"^(?:(?:confidentiality notice|disclaimer)\s*:\s*)?this e-?mail and any attachments are for the exclusive(?: and confidential)? use of the intended recipients?\.?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
             return true
         }
-        if isSignatureProductList(text) { return true }
-        guard text.range(of: #"^(?:p\.?\s*s\.?|please|the|i|we|you|your|also|let|can|could|will)\b"#, options: [.regularExpression, .caseInsensitive]) == nil else { return false }
-        return words.count <= 7 && text.rangeOfCharacter(from: .decimalDigits) == nil &&
-            text.last.map { ".!".contains($0) } == true
+
+        // A whole license/registration identifier is metadata. Sentences containing
+        // a number, short slogans, and pipe-separated choices are ambiguous body text.
+        guard text.utf16.count <= 160 else { return false }
+        return text.range(
+            of: #"^(?:(?:licen[cs]e|registration|npn)\b(?:\s+(?:number|no\.?))?\s*[:#]?\s*[A-Z0-9-]*\d[A-Z0-9-]*|licensed in [A-Z]{2}(?:\s*(?:,|&|\band\b)\s*[A-Z]{2})*\s*[-–—]\s*NPN\s*[:#]?\s*\d[\d-]*)\.?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
     }
 
     private static func isSignatureProductList(_ text: String) -> Bool {
@@ -679,7 +734,6 @@ extension EmailDOMQuoteRemover {
     }
 
     private static func isSignaturePhoneSegment(_ text: String) -> Bool {
-        if matchesEntireLine(SignaturePatterns.descriptivePhoneLine, text: text) { return true }
         let range = NSRange(location: 0, length: text.utf16.count)
 
         let matches = signaturePhonePattern?.matches(in: text, options: [], range: range) ?? []
@@ -706,7 +760,11 @@ extension EmailDOMQuoteRemover {
         if matchesEntireLine(signaturePhoneKnownLabelPattern, text: prefix) {
             return true
         }
-        return false
+        let compactCandidate = String(text[matchRange]).filter { !$0.isWhitespace }
+        return matchesEntireLine(SignaturePatterns.descriptivePhoneLine, text: text) &&
+            !matchesEntireLine(signatureNonPhoneDatePattern, text: compactCandidate) &&
+            !(matchesEntireLine(signatureBareHoursLabelPattern, text: prefix) &&
+                matchesEntireLine(signatureTimeRangePattern, text: compactCandidate))
     }
 
     private static func isSignaturePhoneLeadingSegment(_ text: String) -> Bool {

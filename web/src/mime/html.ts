@@ -13,7 +13,6 @@ import {
   WEB_URL_PATTERN,
   ADDRESS_KEYWORD_PATTERN,
   SIGN_OFF_PHRASES,
-  LEGAL_FOOTER_OPENERS,
   DESCRIPTIVE_PHONE_LINE_PATTERN,
   isStrongSignatureSupportLine,
   shouldPreserveSignatureNameLine,
@@ -1247,7 +1246,6 @@ function escapedHTML(text: string): string {
 }
 
 const SIGNATURE_TEXT_MARKERS: RegExp[] = [
-  ...LEGAL_FOOTER_OPENERS.map((pattern) => new RegExp(pattern, 'i')),
   /^\s*--\s*$/i,
   /Sent from my (?:iPhone|iPad|Android|Galaxy|Pixel|Samsung)/i,
   /Sent from (?:Outlook|Mail for Windows|Spark|ProtonMail|BlueMail|Gmail|Yahoo Mail)/i,
@@ -1270,24 +1268,11 @@ function truncateAtSignatureMarkers(document: Document): void {
     for (const pattern of SIGNATURE_TEXT_MARKERS) {
       const match = pattern.exec(text)
       if (match) {
-        if (LEGAL_FOOTER_OPENERS.includes(pattern.source) && !isAtSignatureLineStart(textNode))
-          continue
         truncateAtTextNode(textNode, match.index, text)
         return
       }
     }
   }
-}
-
-function isAtSignatureLineStart(textNode: Text): boolean {
-  let ancestor = textNode.parentElement
-  while (ancestor) {
-    if (['p', 'div', 'li', 'td', 'body'].includes(tagName(ancestor))) {
-      return inlineHeaderLines(ancestor).some((line) => line.startTextNode === textNode)
-    }
-    ancestor = ancestor.parentElement
-  }
-  return false
 }
 
 const SIGNATURE_CITY_STATE_ZIP_PATTERN = /^[A-Z][A-Z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$/i
@@ -1308,6 +1293,9 @@ const SIGNATURE_PHONE_SUFFIX_LABEL_PATTERN =
 
 const SIGNATURE_NON_PHONE_DATE_PATTERN =
   /^(?:(?:19|20)\p{Nd}{2}(?:-|\.)(?:\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}|\p{Nd}{4})|\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}(?:-|\.)(?:19|20)\p{Nd}{2})$/u
+const SIGNATURE_TIME_RANGE_PATTERN =
+  /^(?:[01]?\d|2[0-3])[.:]?[0-5]\d-(?:(?:[01]?\d|2[0-3])[.:]?[0-5]\d|24[.:]?00)$/
+const SIGNATURE_BARE_HOURS_LABEL_PATTERN = /^after[ -]hours\s*:$/i
 
 // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
 const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
@@ -1467,16 +1455,12 @@ function truncateTrailingContactSignature(document: Document): void {
     return
   }
 
-  // A logo below a confirmed contact block is signature chrome. Bound image-only tails.
-  let removalEnd = lastNonEmpty
-  let imageCount = 0
-  for (let index = lastNonEmpty + 1; index < lines.length; index++) {
-    if (lines[index]!.text.length > 0) break
-    if (lines[index]!.element.querySelector('img')) {
-      if (imageCount >= 3) break
-      imageCount += 1
+  // Widening the range for metadata must not claim unmarked body media,
+  // including images between the contacts and footer or inside a footer line.
+  if (tailCount > 0) {
+    for (let index = signatureStart; index <= lastNonEmpty; index++) {
+      if (containsSignatureTailMedia(lines[index]!.element)) return
     }
-    removalEnd = index
   }
   let preservedHTML = ''
   if (sawSignOffBeforeSignature) {
@@ -1488,7 +1472,8 @@ function truncateTrailingContactSignature(document: Document): void {
     }
     signatureStart = scanIndex
   }
-  removeSignatureLines(lines, signatureStart, removalEnd, preservedHTML)
+  // Preserve unmarked media after the signature; only explicit wrappers own their images.
+  removeSignatureLines(lines, signatureStart, lastNonEmpty, preservedHTML)
 }
 
 // Column headings and repeated person records distinguish directories from signatures.
@@ -1561,6 +1546,25 @@ function removeSignatureLines(
   // Text embedded in a diagram is part of the media, not a safe signature boundary.
   if (first.startTextNode?.parentElement?.closest('svg, video, audio, object, iframe, canvas'))
     return
+  // A CID link or background on the boundary's ancestor owns content too.
+  let parent = first.startTextNode?.parentElement
+  while (parent) {
+    if (hasSignatureMediaAttributes(parent)) return
+    if (parent === first.element) break
+    parent = parent.parentElement
+  }
+  // Sub-line truncation must preserve the same unmarked trailing media as whole-block cleanup.
+  if (first.startTextNode) {
+    if (containsMediaAfterSignature(first.startTextNode, first.element)) return
+  } else if (containsSignatureTailMedia(first.element)) {
+    return
+  }
+  const checked = new Set([first.element])
+  for (const line of lines.slice(start, end + 1)) {
+    if (checked.has(line.element)) continue
+    checked.add(line.element)
+    if (containsSignatureTailMedia(line.element)) return
+  }
   const hasPrefix =
     lines.slice(0, start).some((line) => line.element === first.element && line.text.length > 0) ||
     hasMediaBeforeSignature(first.startTextNode, first.element)
@@ -1602,6 +1606,33 @@ function removeSignatureLines(
   }
 }
 
+function containsMediaAfterSignature(boundary: Text, root: Element): boolean {
+  let reachedBoundary = false
+  const stack: Node[] = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    if (node === boundary) {
+      reachedBoundary = true
+      continue
+    }
+    if (reachedBoundary && node.nodeType === NODE_ELEMENT) {
+      if (containsSignatureTailMedia(node as Element)) return true
+      // The subtree was checked as a whole.
+      continue
+    }
+    stack.push(...Array.from(node.childNodes).reverse())
+  }
+  return false
+}
+
+function hasSignatureMediaAttributes(element: Element): boolean {
+  return (
+    ['src', 'srcset', 'background', 'poster'].some((name) => element.hasAttribute(name)) ||
+    ['href', 'xlink:href'].some((name) => /cid:/i.test(element.getAttribute(name) ?? '')) ||
+    /url\s*\(/i.test(element.getAttribute('style') ?? '')
+  )
+}
+
 function hasMediaBeforeSignature(boundary: Text | null, root: Element): boolean {
   if (!boundary) return false
   const stack: Node[] = [root]
@@ -1614,8 +1645,7 @@ function hasMediaBeforeSignature(boundary: Text | null, root: Element): boolean 
         ['img', 'picture', 'svg', 'video', 'audio', 'object', 'embed', 'iframe', 'canvas'].includes(
           tagName(element),
         ) ||
-        element.hasAttribute('background') ||
-        element.getAttribute('style')?.toLowerCase().includes('url(')
+        hasSignatureMediaAttributes(element)
       )
         return true
     }
@@ -1664,12 +1694,34 @@ function isSignaturePostalLine(text: string): boolean {
   )
 }
 
+function containsSignatureTailMedia(element: Element): boolean {
+  const mediaSelector =
+    'img, picture, svg, video, audio, object, embed, iframe, [src], [srcset], [background], [poster]'
+  if (element.matches(mediaSelector) || element.querySelector(mediaSelector)) return true
+  // CID references also include linked attachments (href/xlink:href).
+  if (/cid:/i.test(element.outerHTML)) return true
+  return [element, ...element.querySelectorAll('[style]')].some((candidate) =>
+    /url\s*\(/i.test(candidate.getAttribute('style') ?? ''),
+  )
+}
+
 function isSignatureTailLine(text: string): boolean {
-  if (/^(?:licensed|licen[cs]e|registration|registered|npn)\b[^.!?]*\d/i.test(text)) return true
-  if (isSignatureProductList(text)) return true
-  if (/^(?:p\.?\s*s\.?|please|the|i|we|you|your|also|let|can|could|will)\b/i.test(text))
-    return false
-  return text.split(/\s+/).length <= 7 && !/\p{Nd}/u.test(text) && /[.!]$/.test(text)
+  // Match the entire known boilerplate sentence. A heading or keyword match
+  // would also swallow authored discussion or a postscript in the same block.
+  if (
+    /^(?:(?:confidentiality notice|disclaimer)\s*:\s*)?this e-?mail and any attachments are for the exclusive(?: and confidential)? use of the intended recipients?\.?$/i.test(
+      text,
+    )
+  ) {
+    return true
+  }
+
+  // A whole license/registration identifier is metadata. Sentences containing
+  // a number, short slogans, and pipe-separated choices are ambiguous body text.
+  if (text.length > 160) return false
+  return /^(?:(?:licen[cs]e|registration|npn)\b(?:\s+(?:number|no\.?))?\s*[:#]?\s*[A-Z0-9-]*\d[A-Z0-9-]*|licensed in [A-Z]{2}(?:\s*(?:,|&|\band\b)\s*[A-Z]{2})*\s*[-–—]\s*NPN\s*[:#]?\s*\d[\d-]*)\.?$/i.test(
+    text,
+  )
 }
 
 function isSignatureProductList(text: string): boolean {
@@ -1682,7 +1734,10 @@ function isSignatureProductList(text: string): boolean {
         words.length >= 1 &&
         words.length <= 3 &&
         !/\p{Nd}/u.test(segment) &&
-        !/@|http|www\.|[.!?:;]/i.test(segment)
+        !segment.includes('@') &&
+        !segment.includes('http') &&
+        !segment.includes('www.') &&
+        !/[.!?:;]/.test(segment)
       )
     })
   )
@@ -1774,7 +1829,6 @@ function isSignaturePhoneLine(text: string): boolean {
 }
 
 function isSignaturePhoneSegment(text: string): boolean {
-  if (DESCRIPTIVE_PHONE_LINE_PATTERN.test(text)) return true
   let phone: string | undefined
   let phoneStart = -1
   for (const candidateMatch of text.matchAll(SIGNATURE_PHONE_PATTERN)) {
@@ -1796,7 +1850,17 @@ function isSignaturePhoneSegment(text: string): boolean {
   const suffix = text.slice(phoneStart + phone.length)
   if (!isAllowedSignaturePhoneSuffix(suffix)) return false
 
-  return prefix.length === 0 || SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix)
+  const compactCandidate = phone.replace(/\s+/g, '')
+  return (
+    prefix.length === 0 ||
+    SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix) ||
+    (DESCRIPTIVE_PHONE_LINE_PATTERN.test(text) &&
+      !SIGNATURE_NON_PHONE_DATE_PATTERN.test(compactCandidate) &&
+      !(
+        SIGNATURE_BARE_HOURS_LABEL_PATTERN.test(prefix) &&
+        SIGNATURE_TIME_RANGE_PATTERN.test(compactCandidate)
+      ))
+  )
 }
 
 function isSignaturePhoneLeadingSegment(text: string): boolean {
