@@ -203,9 +203,15 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
             // Inspect this occurrence, not the document's first CID. A logo
             // mockup followed by body instructions remains real message content.
-            let hasFollowingBodyProse = hasFollowingBodyProse(
-                in: lowercasedHTML, at: valueStart, before: replyBoundaryOffset
-            )
+            let occurrenceStart = isInsideHTMLTag(in: lowercasedHTML, at: valueStart)
+                ? lowercasedHTML[..<valueStart].lastIndex(of: "<") ?? valueStart
+                : lowercasedHTML.index(valueStart, offsetBy: -4)
+            let occurrenceEnd = replyBoundaryOffset.flatMap { offset in
+                offset > cidOffset ? lowercasedHTML.index(lowercasedHTML.startIndex, offsetBy: offset) : nil
+            } ?? lowercasedHTML.endIndex
+            let occurrenceHTML = String(lowercasedHTML[occurrenceStart..<occurrenceEnd])
+            let followingHTML = htmlAfterFirstCIDBeforeNextSignOff(in: occurrenceHTML) ?? ""
+            let hasFollowingBodyProse = signatureContactOrRoleLines(in: followingHTML).contains(where: isBodyProseLine)
             let isBeforeCorroboratedSignOff = !isAfterCorroboratedSignOff &&
                 !isAfterBrandingSignOff && corroboratedOffsets.contains { cidOffset < $0 }
             let isBeforeSignOff = (firstSignOffOffset.map { cidOffset < $0 } ?? false) ||
