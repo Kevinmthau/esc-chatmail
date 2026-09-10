@@ -451,6 +451,36 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
 
     func testRemoveQuotes_signatureMode_preservesReferenceBeforeContactSignature() {
         let referenceLines = [
+            "Do not pay the consultant",
+            "DO NOT PAY THE CONSULTANT",
+            "PLEASE CHECK WITH YOUR ATTORNEY",
+            "DO NOT PAY THE CONSULTANT UNTIL APPROVED",
+            "ATTORNEY APPROVAL IS REQUIRED BEFORE PAYMENT",
+            "Consultant Approval Required Before You Pay",
+            "STOP WORK UNTIL COUNSEL REVIEWS",
+            "HOLD FUNDS UNTIL ATTORNEY CONFIRMS",
+            "ESCALATE THIS TO THE ATTORNEY",
+            "Hold Funds Until Attorney Confirms",
+            "COMPANY CLOSED UNTIL FURTHER NOTICE",
+            "Company Closed Until Further Notice",
+            "GROUP DISCOUNTS AVAILABLE THROUGH FRIDAY",
+            "Please check with your attorney",
+            "I will check with counsel",
+            "We need a new engineer",
+            "The analyst will follow up",
+            "Payment pending attorney approval",
+            "Approval pending from counsel",
+            "Service period: 2026-2027",
+            "Service date: 2026-0815",
+            "Office hours: 0900-1700",
+            "Phone model: 1234-5678",
+            "Emergency line: 08-15-2026 (office)",
+            "Emergency line: 2026-0815",
+            "After hours: 0900-1700",
+            "After hours: 09.00-17.00",
+            "After hours: 9.00-17.00",
+            "After hours: 0900-2400",
+            "Emergency line: 08 - 15 - 2026",
             "P2026-0815",
             "Deadline: 2026-08-15",
             "Case: 2026-0815",
@@ -523,6 +553,8 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             "Phone: 914-564-1325 | 24/7",
             "Emergency line after hours: 914-373-4658",
             "After hours: 914-373-4658",
+            "Emergency line: 555-1212 x112",
+            "Toll-free number: +1 800-555-1212",
 
             "415-555-1212",
             "(415) 555-1212",
@@ -566,6 +598,17 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             "Office reference: 914-373-4658",
             "Emergency line: 08-15-2026",
             "Emergency line: 12345678",
+            "Service period: 2026-2027",
+            "Service date: 2026-0815",
+            "Office hours: 0900-1700",
+            "Phone model: 1234-5678",
+            "Emergency line: 08-15-2026 (office)",
+            "Emergency line: 2026-0815",
+            "After hours: 0900-1700",
+            "After hours: 09.00-17.00",
+            "After hours: 9.00-17.00",
+            "After hours: 0900-2400",
+            "Emergency line: 08 - 15 - 2026",
 
             "Can you give me a call? 415-283-6379",
             "Call me at (415) 555-1212 when you are free.",
@@ -737,7 +780,7 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         for name in ["Marcella Ruiz", "Persephone Lee"] {
             XCTAssertTrue(SignatureSignOffPolicy.shouldPreserveNameLine(name))
         }
-        for title in ["Loan Officer", "Chief Executive Officer", "Fairfax Insurance Agency", "Acme Inc.", "Co-Founder"] {
+        for title in ["Loan Officer", "Chief Executive Officer", "Fairfax Insurance Agency", "Acme Inc.", "Co-Founder", "Director of Sales", "consultant", "Senior Financial Analyst", "software engineer"] {
             XCTAssertTrue(SignatureSignOffPolicy.isStrongSupportLine(title), title)
         }
         XCTAssertFalse(SignatureSignOffPolicy.isStrongSupportLine("The homeowner will coordinate with the broker."))

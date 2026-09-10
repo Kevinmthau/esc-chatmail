@@ -1289,6 +1289,9 @@ const SIGNATURE_PHONE_SUFFIX_LABEL_PATTERN =
 
 const SIGNATURE_NON_PHONE_DATE_PATTERN =
   /^(?:(?:19|20)\p{Nd}{2}(?:-|\.)(?:\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}|\p{Nd}{4})|\p{Nd}{1,2}(?:-|\.)\p{Nd}{1,2}(?:-|\.)(?:19|20)\p{Nd}{2})$/u
+const SIGNATURE_TIME_RANGE_PATTERN =
+  /^(?:[01]?\d|2[0-3])[.:]?[0-5]\d-(?:(?:[01]?\d|2[0-3])[.:]?[0-5]\d|24[.:]?00)$/
+const SIGNATURE_BARE_HOURS_LABEL_PATTERN = /^after[ -]hours\s*:$/i
 
 // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
 const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
@@ -1522,7 +1525,6 @@ function isSignaturePhoneLine(text: string): boolean {
 }
 
 function isSignaturePhoneSegment(text: string): boolean {
-  if (DESCRIPTIVE_PHONE_LINE_PATTERN.test(text)) return true
   let phone: string | undefined
   let phoneStart = -1
   for (const candidateMatch of text.matchAll(SIGNATURE_PHONE_PATTERN)) {
@@ -1544,7 +1546,17 @@ function isSignaturePhoneSegment(text: string): boolean {
   const suffix = text.slice(phoneStart + phone.length)
   if (!isAllowedSignaturePhoneSuffix(suffix)) return false
 
-  return prefix.length === 0 || SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix)
+  const compactCandidate = phone.replace(/\s+/g, '')
+  return (
+    prefix.length === 0 ||
+    SIGNATURE_PHONE_KNOWN_LABEL_PATTERN.test(prefix) ||
+    (DESCRIPTIVE_PHONE_LINE_PATTERN.test(text) &&
+      !SIGNATURE_NON_PHONE_DATE_PATTERN.test(compactCandidate) &&
+      !(
+        SIGNATURE_BARE_HOURS_LABEL_PATTERN.test(prefix) &&
+        SIGNATURE_TIME_RANGE_PATTERN.test(compactCandidate)
+      ))
+  )
 }
 
 function isSignaturePhoneLeadingSegment(text: string): boolean {
