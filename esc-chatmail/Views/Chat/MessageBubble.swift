@@ -162,6 +162,11 @@ struct MessageBubble: View {
                 Spacer()
             }
         }
+        .background {
+            InlineAttachmentDownloadTrigger(
+                attachments: InlineAttachmentDownloadPolicy.pendingImages(in: message.attachments, isFromMe: message.isFromMe)
+            )
+        }
         .task(id: currentLoadSignature) {
             await viewModel.loadIfNeeded(using: loadContext(contentSignature: currentLoadSignature))
         }
