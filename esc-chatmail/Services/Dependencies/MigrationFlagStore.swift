@@ -8,6 +8,12 @@ import Foundation
 protocol MigrationFlagStore: AnyObject {
     func bool(forKey defaultName: String) -> Bool
     func set(_ value: Bool, forKey defaultName: String)
+    func string(forKey defaultName: String) -> String?
+    func setString(_ value: String?, forKey defaultName: String)
 }
 
-extension UserDefaults: MigrationFlagStore {}
+extension UserDefaults: MigrationFlagStore {
+    func setString(_ value: String?, forKey defaultName: String) {
+        set(value, forKey: defaultName)
+    }
+}
