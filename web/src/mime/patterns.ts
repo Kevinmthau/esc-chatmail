@@ -82,3 +82,66 @@ export function isLetterChar(ch: string): boolean {
 export function isDigitChar(ch: string): boolean {
   return /\p{Nd}/u.test(ch)
 }
+
+/** Shared signature vocabulary; HTML consumers adapt tag/whitespace boundaries. */
+export const SIGN_OFF_PHRASES = new Set([
+  'all the best',
+  'best',
+  'best regards',
+  'best wishes',
+  'cheers',
+  'kind regards',
+  'many thanks',
+  'regards',
+  'sincerely',
+  'take care',
+  'thank you',
+  'thanks',
+  'warm regards',
+  'warmly',
+  'yours truly',
+])
+
+export const LEGAL_FOOTER_OPENERS = [
+  String.raw`^\s*confidentiality notice\s*:`,
+  String.raw`^\s*this e-?mail (?:and any attachments|is confidential|may contain)\b`,
+  String.raw`^\s*disclaimer\s*:`,
+]
+
+const DESCRIPTIVE_PHONE_LABEL = String.raw`(?!(?:call|please|use|dial|contact)\b)(?![^:]*\b(?:reference|account|invoice|case|order|ticket)\b)(?=[^:]*\b(?:line|phone|office|cell|mobile|tel|fax|hours|emergency|direct|desk|toll|dispatch|service)\b)[a-z]+(?:[ /&-]+[a-z]+){0,3}\s*:`
+const DESCRIPTIVE_PHONE_NUMBER = String.raw`(?=(?:[\s().+-]*\d){7})(?!(?:(?:19|20)\d{2}[-.]\d{1,2}[-.]\d{1,2}|\d{1,2}[-.]\d{1,2}[-.](?:19|20)\d{2})\s*$)\+?\(?\d{1,4}\)?(?:[\s.-]+\(?\d{1,4}\)?){1,4}`
+const DESCRIPTIVE_PHONE_SUFFIX = String.raw`(?:\s*(?:x|ext\.?|extension|#)\s*:?\s*\d+|\s*\((?:mobile|cell|office|work|home|direct|desk|main|fax)\))?`
+export const DESCRIPTIVE_PHONE_LINE_PATTERN = new RegExp(
+  '^' +
+    DESCRIPTIVE_PHONE_LABEL +
+    String.raw`\s*` +
+    DESCRIPTIVE_PHONE_NUMBER +
+    DESCRIPTIVE_PHONE_SUFFIX +
+    '$',
+  'i',
+)
+
+export const SIGNATURE_NAME_CONTACT_WORD_PATTERN = /\b(?:fax|mobile|office|cell|phone)\b/i
+const SIGNATURE_SUPPORT_KEYWORD_PATTERN =
+  /\b(?:director|manager|vp|vice president|president|founder|ceo|cfo|cto|coo|realtor|broker|associate|sales|agent|partner|principal|owner|specialist|officer|chief|advisor|consultant|engineer|attorney|counsel|analyst|coordinator|agency|inc|llc|ltd|corp|corporation|company|co|partners|group|llp|lp)\b/i
+
+export function isStrongSignatureSupportLine(line: string): boolean {
+  const trimmed = line.trim()
+  if (trimmed.split(/\s+/).length >= 8) return false
+  if (/[.?!]$/.test(trimmed) && !/\b(?:inc|co|corp)\.$/i.test(trimmed)) return false
+  return SIGNATURE_SUPPORT_KEYWORD_PATTERN.test(trimmed)
+}
+
+export function shouldPreserveSignatureNameLine(line: string): boolean {
+  const trimmed = line.trim()
+  return (
+    trimmed.length > 0 &&
+    trimmed.length <= 40 &&
+    /\p{L}/u.test(trimmed) &&
+    !/\p{Nd}/u.test(trimmed) &&
+    !/@|http|www\.|\||tel:/i.test(trimmed) &&
+    !SIGNATURE_NAME_CONTACT_WORD_PATTERN.test(trimmed) &&
+    trimmed.split(/\s+/).length <= 4 &&
+    !isStrongSignatureSupportLine(trimmed)
+  )
+}

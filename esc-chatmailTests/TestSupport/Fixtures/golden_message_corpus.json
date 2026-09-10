@@ -133,6 +133,24 @@
       "notes": "When Gmail quote cleanup removes nested blockquotes but leaves a trailing 'Notice To Recipient' paragraph, bubble text should keep only the new user content.",
       "inputHTML": "<div dir=\"ltr\">Any word?</div><br><div class=\"gmail_quote gmail_quote_container\"><div dir=\"ltr\" class=\"gmail_attr\">On Tue, Feb 24, 2026 at 11:27 AM Kevin Thau &lt;kmthau@gmail.com&gt; wrote:<br></div><blockquote class=\"gmail_quote\" style=\"margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex\"><div dir=\"ltr\">Makes sense. Thank you.</div></blockquote><p style=\"font-size:8pt;margin-top:0\">Notice To Recipient: This e-mail is meant for only the intended recipient of the transmission, and may be a communication privileged by law. If you received this e-mail in error, any review, use, dissemination, distribution, or copying of this e-mail is strictly prohibited. Please notify us immediately of the error by return e-mail and please delete this message and any and all duplicates of this message from your system. Thank you in advance for your cooperation. For additional policies governing this e-mail, please see <a href=\"http://www.examplelaw.com/about/firm-policies/\">http://www.examplelaw.com/about/firm-policies/</a>.</p></div>",
       "expected": "Any word?"
+    },
+    {
+      "id": "html_labeled_phone_hours_signature_without_wrapper_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately.",
+      "inputHTML": "<div>We hope you are happy with our work. Please call or email with any questions.</div><div>Thank you!</div><div>Best,</div><div>John Boga</div><div>Property Manager</div><div>NYC Brownstone Maintenance</div><div>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</div><div>Emergency line after hours: 914-373-4658</div><div>www.nycbrownstone.net</div>",
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,"
+    },
+    {
+      "id": "html_outlook_paragraph_signature_with_hours_phone_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine / web isSignaturePhoneLine labelled hours and descriptive phone labels. Sign-off name policy is covered separately.",
+      "inputHTML": "<p>We hope you are happy with our work. Please call or email with any questions.</p><p>Thank you!</p><p>Best,</p><p>John Boga</p><p>Property Manager</p><p>NYC Brownstone Maintenance</p><p>Office: 914-564-1325 | Monday - Friday | 9am - 5pm</p><p>Emergency line after hours: 914-373-4658</p><p>www.nycbrownstone.net</p>",
+      "expected": "We hope you are happy with our work. Please call or email with any questions.\n\nThank you!\n\nBest,"
+    },
+    {
+      "id": "html_pipe_colon_phone_signature_removed",
+      "notes": "Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine separator collapse / web isSignaturePhoneLine.",
+      "inputHTML": "<div>Current reply.</div><div>Jane Doe</div><div>Partner</div><div>jane@example.test</div><div>Office: 770-555-0148 | Fax: 770-555-0149</div>",
+      "expected": "Current reply."
     }
   ],
   "rawSourceHTMLRecoveryCases": [
