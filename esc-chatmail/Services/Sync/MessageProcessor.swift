@@ -938,11 +938,7 @@ class MessageProcessor: @unchecked Sendable {
             }
         }
 
-        if let htmlPreview = processedChatPreviewText(
-            content: html,
-            inputKind: .html,
-            sanitizeRawEmailSource: false
-        ) {
+        if let htmlPreview = Self.deriveHTMLChatPreview(from: html) {
             return htmlPreview
         }
 
@@ -959,6 +955,14 @@ class MessageProcessor: @unchecked Sendable {
             inputKind: .plainText,
             sanitizeRawEmailSource: true
         )
+    }
+
+    /// Shared by ingest and the versioned repair; never mutates canonical HTML.
+    static func deriveHTMLChatPreview(from html: String?) -> String? {
+        ChatBubbleTextProcessor.htmlCompatibilityFallback(
+            from: html,
+            classifyRichContent: false
+        ).mainText
     }
 
     private func createOutgoingForwardChatPreviewText(

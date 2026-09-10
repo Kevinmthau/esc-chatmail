@@ -5,12 +5,13 @@ enum SyncRunKind: String, Sendable, Equatable {
     case foregroundIncremental
     case background
     case pendingActions
+    case maintenance
 
     var isForeground: Bool {
         switch self {
         case .foregroundInitial, .foregroundIncremental:
             return true
-        case .background, .pendingActions:
+        case .background, .pendingActions, .maintenance:
             return false
         }
     }

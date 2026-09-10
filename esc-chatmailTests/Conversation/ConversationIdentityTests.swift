@@ -257,6 +257,19 @@ final class ConversationIdentityTests: XCTestCase {
                 from: "Hide My Email <relay123@privaterelay.appleid.com>",
                 to: ["me@example.com"]
             ),
+            // Revert-check: Message.strictParticipantSetIdentity must apply
+            // the HME exclusion to To and Cc rows as well as From rows.
+            Fixture(
+                name: "hide-my-email To is dropped by both derivations",
+                from: "tickets@sfballet.org",
+                to: ["Hide My Email <to-relay@icloud.com>"]
+            ),
+            Fixture(
+                name: "hide-my-email Cc is dropped by both derivations",
+                from: "alice@example.com",
+                to: ["me@example.com"],
+                cc: ["Hide-My-Email <cc-relay@icloud.com>", "Bob <bob@example.com>"]
+            ),
             Fixture(
                 name: "list mail keys by List-Id in both derivations",
                 from: "Announcements <announce@lists.example.com>",

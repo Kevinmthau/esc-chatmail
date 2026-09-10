@@ -3,12 +3,21 @@
 
 import {
   ADDRESS_KEYWORD_PATTERN,
+  DESCRIPTIVE_PHONE_LINE_PATTERN,
+  SIGN_OFF_PHRASES,
+  shouldPreserveSignatureNameLine,
+  isStrongSignatureSupportLine,
   EMAIL_ADDRESS_PATTERN,
   PHONE_PATTERN,
   SIGNATURE_DELIMITER_PATTERN,
   STANDALONE_CONTACT_LABEL_PATTERN,
   WEB_URL_PATTERN,
 } from './patterns'
+import {
+  isContactSignatureLine,
+  isSignatureSupportLine,
+  isTrailingSignatureContactLine,
+} from './html'
 import { isListItem, normalizeLineEndings } from './text'
 
 const TRAILING_SCAN_LINE_LIMIT = 80
@@ -60,6 +69,8 @@ const HARD_INDICATOR_FRAGMENTS: string[] = [
   'this message is intended',
   'this e-mail is meant for only the intended recipient',
   'this communication is confidential',
+  'this communication is provided for informational purposes and is not an account statement',
+  'our form crs and guide to investment services contain important information',
   'this message contains confidential',
   'this e-mail is confidential',
   'this electronic mail transmission may contain confidential',
@@ -72,7 +83,6 @@ const HARD_INDICATOR_FRAGMENTS: string[] = [
   'confidentiality notice:',
   'disclaimer:',
   'legal disclaimer:',
-  'important:',
   'please consider the environment',
   'think before you print',
 
@@ -98,24 +108,32 @@ const HARD_INDICATOR_FRAGMENTS: string[] = [
   'before wiring any money',
 ]
 
-const SIGN_OFF_WORDS = new Set([
-  'regards',
-  'thanks',
-  'thank you',
-  'best',
-  'cheers',
-  'sincerely',
-  'yours truly',
-  'best wishes',
-  'best regards',
-  'kind regards',
-  'warm regards',
-  'take care',
-  'all the best',
-])
+// Legal openers only admit known disclaimer sentence forms in later paragraphs.
+const LEGAL_CONTINUATION_PREFIXES = [
+  'please refer to your monthly statements for the official record',
+  'questions should be directed to your',
+  'you should consult your own tax, legal, and accounting advisors',
+  'please submit personal information through secure channels',
+  'investment products involve risk',
+  'no bank guarantee is provided for investment products',
+  'this material is intended solely for the recipient',
+  'distribution to unintended recipients is restricted',
+  'any forwarding should comply with firm communication standards',
+  'payment details should always be confirmed by phone using a known number',
+  'if funds were sent to an unintended account',
+  'additional disclosures may apply based on account type',
+  'product availability depends on review and approval requirements',
+  'services described may vary by location and client eligibility',
+  'historical references do not guarantee future performance',
+  'terms may be updated periodically without prior notice',
+  'use of electronic communication is subject to monitoring and retention',
+  'this message may include privileged information under applicable law',
+]
+
+const SIGN_OFF_WORDS = SIGN_OFF_PHRASES
 
 const CONTACT_PREFIX_PATTERN =
-  /^(m|c|o|f|d|t|p|tel|phone|mobile|office|direct|fax)\s*(?:[:.-]\s*\S+|\(?\+?\d[\d\s().-]{5,}\b)/i
+  /^(?:[mcofdtp](?:\s*:\s*|\s+)|(?:tel|phone|mobile|office|direct|fax)(?:[.:]\s+|\s+))\(?\+?\d[\d\s().-]{5,}\b/i
 
 const TITLE_KEYWORDS = [
   'director',
@@ -177,11 +195,6 @@ export function removeSignature(text: string): string {
   }
 
   const scanStart = Math.max(0, lastNonEmpty - TRAILING_SCAN_LINE_LIMIT)
-  const nonEmptyLineCount = lines.reduce(
-    (count, line) => (line.trim().length > 0 ? count + 1 : count),
-    0,
-  )
-
   // Pass 1: definitive signature indicators near the end.
   let earliestHardIndicator: number | null = null
   for (let index = lastNonEmpty; index >= scanStart; index--) {
@@ -189,7 +202,7 @@ export function removeSignature(text: string): string {
     if (line.length === 0) continue
 
     const evaluation = evaluateLine(line)
-    if (evaluation.isHardIndicator) {
+    if (evaluation.isHardIndicator && hasSignatureOnlyTail(index, lines, lastNonEmpty)) {
       earliestHardIndicator = index
     }
   }
@@ -199,7 +212,21 @@ export function removeSignature(text: string): string {
       return joinLines(lines, earliestHardIndicator)
     }
     const startLine = findSignatureStartLine(earliestHardIndicator, lines)
-    return joinLines(lines, startLine)
+    return joinLines(lines, preservingSignOff(startLine, earliestHardIndicator, lines))
+  }
+
+  // A body sentence or bare sign-off after contact information ends the block.
+  if (!evaluateLine(lines[lastNonEmpty]!).hasContactInfo) {
+    // A clipped corporate row must expand the standalone name immediately above.
+    const nameIndex = previousNonEmptyLineIndex(lastNonEmpty, lines)
+    if (
+      containsSignatureSeparator(lines[lastNonEmpty]!) &&
+      nameIndex !== null &&
+      shouldPreserveSingleNameSignOff(lines[nameIndex]!, nameIndex, lines)
+    ) {
+      return joinLines(lines, nameIndex + 1)
+    }
+    return trimmed
   }
 
   // Pass 2: heuristic trailing block detection (contact info or titles).
@@ -209,12 +236,22 @@ export function removeSignature(text: string): string {
   let signatureSupportSignals = 0
   let affiliationSupportSignals = 0
   let sawSignOffLine = false
+  let hasDirectContactInfo = false
+  let bridgedTagline = false
   let sawSeparator = false
 
   for (let index = lastNonEmpty; index >= scanStart; index--) {
     const line = lines[index]!.trim()
 
     if (line.length === 0) {
+      const previous = previousNonEmptyLineIndex(index, lines)
+      if (
+        !bridgedTagline &&
+        contactSignals >= 2 &&
+        previous !== null &&
+        isTaglineBetweenAffiliationAndContacts(lines[previous]!, previous, lines)
+      )
+        continue
       if (
         shouldContinueAcrossBlankLine(
           index,
@@ -236,9 +273,19 @@ export function removeSignature(text: string): string {
       continue
     }
 
+    const isTaglineBridge =
+      !bridgedTagline &&
+      contactSignals >= 2 &&
+      isTaglineBetweenAffiliationAndContacts(line, index, lines)
+    if (isBodyProseLine(line) && !isTaglineBridge) break
     const evaluation = evaluateLine(line)
     if (evaluation.hasContactInfo) {
       contactSignals += 1
+      hasDirectContactInfo =
+        hasDirectContactInfo ||
+        EMAIL_ADDRESS_PATTERN.test(line) ||
+        CONTACT_PREFIX_PATTERN.test(line) ||
+        (PHONE_PATTERN.test(line) && looksLikeStandalonePhoneLine(line, line.toLowerCase()))
     }
 
     if (
@@ -250,7 +297,9 @@ export function removeSignature(text: string): string {
       break
     }
 
-    const isContinuationLine = signatureLineCount > 0 && isLikelySignatureContinuation(line)
+    if (isTaglineBridge) bridgedTagline = true
+    const isContinuationLine =
+      signatureLineCount > 0 && (isLikelySignatureContinuation(line) || isTaglineBridge)
     if (evaluation.isLikelySignatureLine || isContinuationLine) {
       signatureLineCount += 1
       signatureStartLine = index
@@ -279,30 +328,212 @@ export function removeSignature(text: string): string {
     ) {
       return trimmed
     }
-    if (
-      contactSignals >= 2 &&
-      affiliationSupportSignals === 0 &&
-      !sawSignOffLine &&
-      hasContactListIntroBeforeSignature(signatureStartLine, lines)
-    ) {
-      return trimmed
-    }
-    const totalChars = trimmed.length
-    if (contactSignals === 0 && nonEmptyLineCount <= 4 && totalChars < 180) {
+    if (contactSignals >= 2 && hasContactListIntroBeforeSignature(signatureStartLine, lines)) {
       return trimmed
     }
     if (
-      contactSignals === 1 &&
-      signatureLineCount <= 1 &&
-      !hasSupportingSignatureContext(signatureStartLine, lines, lastNonEmpty)
+      signatureLineCount < 3 ||
+      // Links or descriptive phone labels can be an authored resource list.
+      // Require a closing, email address or conventional phone row too.
+      !(sawSignOffLine || hasDirectContactInfo) ||
+      !(
+        contactSignals >= 2 ||
+        (contactSignals === 1 && (affiliationSupportSignals > 0 || sawSignOffLine))
+      ) ||
+      !(
+        sawSignOffLine ||
+        affiliationSupportSignals > 0 ||
+        lines
+          .slice(signatureStartLine, lastNonEmpty + 1)
+          .some((line) => MULTI_WORD_NAME_PATTERN.test(line))
+      )
     ) {
       return trimmed
     }
     const adjustedStart = adjustToSeparator(signatureStartLine, lines)
-    return joinLines(lines, adjustedStart)
+    return joinLines(lines, preservingSignOff(adjustedStart, lastNonEmpty, lines))
   }
 
   return trimmed
+}
+
+/** Requires a sign-off: extracted text cannot distinguish signatures from kept referrals. */
+export function removeTrailingContactSignature(text: string): string {
+  const normalized = normalizeLineEndings(text)
+  const trimmed = normalized.trim()
+  const lines = normalized.split('\n')
+  let last = lines.length - 1
+  while (last >= 0 && lines[last]!.trim().length === 0) last--
+  if (last < 0 || !isTrailingSignatureContactLine(lines[last]!.trim())) return trimmed
+
+  let start = last
+  let contacts = 0
+  let signOffIndex: number | null = null
+  for (let index = last; index >= Math.max(0, last - 32); index--) {
+    const line = lines[index]!.trim()
+    if (line.length === 0) continue
+    if (isSignOffLineForSignatureContext(line)) {
+      signOffIndex = index
+      break
+    }
+    // Email addresses and titles inside instructions are still body prose.
+    if (
+      isBodyProseLine(line) ||
+      ((EMAIL_ADDRESS_PATTERN.test(line) || WEB_URL_PATTERN.test(line)) &&
+        !isStrictContactLine(line))
+    ) {
+      break
+    }
+    if (isContactSignatureLine(line)) {
+      if (!isTrailingSignatureContactLine(line)) {
+        break
+      }
+      contacts++
+    } else if (!isSignatureSupportLine(line)) {
+      break
+    }
+    start = index
+  }
+  const removalCount = lines.slice(start, last + 1).filter((line) => line.trim().length > 0).length
+  if (signOffIndex === null || contacts < 2 || removalCount < 3) return trimmed
+  const result = joinLines(lines, preservingSignOff(signOffIndex, last, lines))
+  // Never erase the entire extracted message.
+  return result.length > 0 ? result : trimmed
+}
+
+// Markers in a reply are footers only when their entire tail is signature-like.
+function hasSignatureOnlyTail(index: number, lines: string[], lastNonEmpty: number): boolean {
+  if (isDelimiterLine(lines[index]!.trim())) return true
+  let previous = lines[index]!.trim()
+  const isLegalFooter =
+    /confidential|disclaimer|notice to recipient|communication.*informational|our form crs|wire fraud/i.test(
+      previous,
+    )
+  const isCIDFooter =
+    previous.toLowerCase().startsWith('[cid:') &&
+    lines.slice(Math.max(0, index - 5), index).some(isStrongSignatureSupportLine)
+  let cidTailLines = 0
+  for (const candidate of lines.slice(index + 1, lastNonEmpty + 1)) {
+    const line = candidate.trim()
+    if (line.length === 0) {
+      previous = ''
+      continue
+    }
+    const evaluation = evaluateLine(line)
+    const continuesWrappedFooter =
+      isLegalFooter &&
+      !hasAuthoredProsePrefix(line) &&
+      previous.length > 0 &&
+      !/[.!?]$/.test(previous) &&
+      /^[a-z]/.test(line)
+    const isLegalContinuation =
+      isLegalFooter &&
+      LEGAL_CONTINUATION_PREFIXES.some((prefix) => line.toLowerCase().startsWith(prefix))
+    const isCIDTagline =
+      isCIDFooter &&
+      !hasAuthoredProsePrefix(line) &&
+      !isPostscriptLine(line.toLowerCase()) &&
+      cidTailLines < 2 &&
+      line.length <= 72 &&
+      !/\d/.test(line) &&
+      !/[.!?]$/.test(line)
+    if (isCIDTagline) cidTailLines++
+    if (!(
+      evaluation.isHardIndicator ||
+      isStrictContactLine(line) ||
+      isStrictSupportLine(line) ||
+      continuesWrappedFooter ||
+      isLegalContinuation ||
+      isCIDTagline
+    ))
+      return false
+    previous = line
+  }
+  return true
+}
+
+function preservingSignOff(start: number, end: number, lines: string[]): number {
+  const previous = previousNonEmptyLineIndex(start, lines)
+  if (previous !== null && isSignOffLineForSignatureContext(lines[previous]!)) {
+    const first = lines.slice(start, end + 1).find((line) => line.trim().length > 0)
+    if (first && shouldPreserveSignatureNameLine(first)) start = previous
+  }
+  for (let index = start; index <= end; index++) {
+    if (!isSignOffLineForSignatureContext(lines[index]!)) continue
+    let nameIndex = index + 1
+    while (nameIndex <= end && lines[nameIndex]!.trim().length === 0) nameIndex++
+    if (nameIndex > end) return start
+    const name = lines[nameIndex]!.trim()
+    if (shouldPreserveSignatureNameLine(name)) return nameIndex + 1
+    return start
+  }
+  return start
+}
+
+function isTaglineBetweenAffiliationAndContacts(
+  line: string,
+  index: number,
+  lines: string[],
+): boolean {
+  // Only bridge known branding copy. Unknown short sentences can be authored
+  // updates even inside a contact block.
+  if (line.trim().toLowerCase() !== 'protecting what matters most.') return false
+  const previousIndex = previousNonEmptyLineIndex(index, lines)
+  if (previousIndex === null) return false
+  const previous = lines[previousIndex]!.trim()
+  return isStrongSignatureSupportLine(previous) || MULTI_WORD_NAME_PATTERN.test(previous)
+}
+
+function hasAuthoredProsePrefix(line: string): boolean {
+  return /^(?:please|kindly|can|could|would|i|we|you|our|the|this|that|here|there|let|remember|also|attached|send|call|reply|note|use|check|review|confirm)\b/i.test(
+    line.trim(),
+  )
+}
+
+function isBodyProseLine(line: string): boolean {
+  if (isSignOffLineForSignatureContext(line)) return false
+  if (hasAuthoredProsePrefix(line) || isPostscriptLine(line.toLowerCase())) return true
+  return (
+    line.split(/\s+/).length > 1 &&
+    /[.!?]$/.test(line) &&
+    !isStrongSignatureSupportLine(line) &&
+    !/\b(?:n\.a|ltd|llp)\.$/i.test(line)
+  )
+}
+
+function isStrictSupportLine(line: string): boolean {
+  if (isBodyProseLine(line)) return false
+  return (
+    isStrongSignatureSupportLine(line) ||
+    SINGLE_NAME_PATTERN.test(line) ||
+    MULTI_WORD_NAME_PATTERN.test(line) ||
+    isSignOffLineForSignatureContext(line)
+  )
+}
+
+// Email/URL matches must leave only a contact label, name or affiliation around them.
+function isStrictContactLine(line: string): boolean {
+  if (isBodyProseLine(line)) return false
+  if (STANDALONE_CONTACT_LABEL_PATTERN.test(line) || DESCRIPTIVE_PHONE_LINE_PATTERN.test(line))
+    return true
+  const patterns = [EMAIL_ADDRESS_PATTERN, WEB_URL_PATTERN, PHONE_PATTERN]
+  if (!patterns.some((pattern) => pattern.test(line))) return false
+  let remainder = line
+  for (const pattern of patterns)
+    remainder = remainder.replace(
+      new RegExp(pattern.source, pattern.flags.replace('g', '') + 'g'),
+      ' ',
+    )
+  remainder = remainder
+    .replace(/[|•│┃¦<>():+.,/-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return (
+    remainder.length === 0 ||
+    STANDALONE_CONTACT_LABEL_PATTERN.test(remainder) ||
+    /^(?:tel|phone|mobile|office|direct|fax|cell)$/i.test(remainder) ||
+    isStrictSupportLine(remainder)
+  )
 }
 
 // MARK: - Line evaluation
@@ -313,8 +544,25 @@ function evaluateLine(line: string): LineEvaluation {
 
   const isDelimiter = SIGNATURE_DELIMITER_PATTERN.test(trimmed)
   const isCidLine = lowercased.startsWith('[cid:')
-  const hasHardFragment = HARD_INDICATOR_FRAGMENTS.some((fragment) => lowercased.includes(fragment))
-  const hasContactPrefix = CONTACT_PREFIX_PATTERN.test(trimmed)
+  // DOM opener vocabulary relies on surrounding structure. Plain text needs
+  // a complete boilerplate statement; an opener cannot swallow instructions
+  // in the same paragraph.
+  const hasLegalOpener =
+    /^this e-?mail (?:is confidential|may contain (?:confidential(?: or privileged)?|privileged(?: or confidential)?) information)(?: intended (?:only|solely) for the (?:intended )?recipient)?\.?$/i.test(
+      trimmed,
+    )
+  const isPreferenceFooter =
+    /^update your preferences(?:\s*:?\s+(?:https?:\/\/|www\.)\S+)?[.!]?$/i.test(trimmed)
+  const hasHardFragment =
+    hasLegalOpener ||
+    isPreferenceFooter ||
+    HARD_INDICATOR_FRAGMENTS.some(
+      (fragment) =>
+        lowercased.startsWith(fragment) ||
+        new RegExp(`[.!?]\\s+${fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(lowercased),
+    )
+  const hasContactPrefix =
+    CONTACT_PREFIX_PATTERN.test(trimmed) || DESCRIPTIVE_PHONE_LINE_PATTERN.test(trimmed)
   const hasStandaloneContactLabel = STANDALONE_CONTACT_LABEL_PATTERN.test(trimmed)
 
   const hasEmail = EMAIL_ADDRESS_PATTERN.test(trimmed)
@@ -325,7 +573,7 @@ function evaluateLine(line: string): LineEvaluation {
   const hasContactInfo =
     hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || hasStandaloneContactLabel
 
-  const isHardIndicator = isDelimiter || isCidLine || hasHardFragment || hasContactPrefix
+  const isHardIndicator = isDelimiter || isCidLine || hasHardFragment
 
   let score = 0
   if (isSignOffLine(lowercased)) score += 1
@@ -429,6 +677,7 @@ function findSignatureStartLine(indicatorIndex: number, lines: string[]): number
       continue
     }
 
+    if (isBodyProseLine(line)) break
     const evaluation = evaluateLine(line)
     if (!foundShortLines && shouldPreserveSingleNameSignOff(line, index, lines)) {
       break
@@ -470,6 +719,7 @@ function shouldContinueAcrossBlankLineInHardIndicatorScan(index: number, lines: 
       return true
     }
 
+    if (isBodyProseLine(candidate)) return false
     const evaluation = evaluateLine(candidate)
     if (
       evaluation.isHardIndicator ||
@@ -509,7 +759,8 @@ function looksLikeSignatureLine(line: string): boolean {
     trimmed.endsWith('?')
   )
   const lowercased = trimmed.toLowerCase()
-  const hasContactPrefix = CONTACT_PREFIX_PATTERN.test(trimmed)
+  const hasContactPrefix =
+    CONTACT_PREFIX_PATTERN.test(trimmed) || DESCRIPTIVE_PHONE_LINE_PATTERN.test(trimmed)
   const hasStandaloneContactLabel = STANDALONE_CONTACT_LABEL_PATTERN.test(trimmed)
   const hasEmail = EMAIL_ADDRESS_PATTERN.test(trimmed)
   const hasUrl = WEB_URL_PATTERN.test(trimmed)
@@ -589,47 +840,6 @@ function nextNonEmptyLine(index: number, lines: string[]): string | null {
     probe += 1
   }
   return null
-}
-
-function hasSupportingSignatureContext(
-  startLine: number,
-  lines: string[],
-  lastNonEmpty: number,
-): boolean {
-  const lookbackStart = Math.max(0, startLine - 4)
-  for (let index = startLine - 1; index >= lookbackStart; index--) {
-    const line = lines[index]!.trim()
-    if (line.length === 0) continue
-
-    const lowercased = line.toLowerCase()
-    const evaluation = evaluateLine(line)
-    if (
-      isSignOffLine(lowercased) ||
-      evaluation.hasContactInfo ||
-      evaluation.isHardIndicator ||
-      containsKeyword(lowercased, TITLE_KEYWORDS) ||
-      containsKeyword(lowercased, ORGANIZATION_KEYWORDS) ||
-      containsAddressKeyword(lowercased)
-    ) {
-      return true
-    }
-  }
-
-  let contactLineCount = 0
-  for (let index = startLine; index <= lastNonEmpty; index++) {
-    const line = lines[index]!.trim()
-    if (line.length === 0) continue
-
-    const evaluation = evaluateLine(line)
-    if (evaluation.hasContactInfo) {
-      contactLineCount += 1
-      if (contactLineCount >= 2) {
-        return true
-      }
-    }
-  }
-
-  return false
 }
 
 function hasContactListIntroBeforeSignature(startLine: number, lines: string[]): boolean {
@@ -783,7 +993,8 @@ function isLikelySignatureContinuation(line: string): boolean {
     return true
   }
 
-  const hasContactPrefix = CONTACT_PREFIX_PATTERN.test(trimmed)
+  const hasContactPrefix =
+    CONTACT_PREFIX_PATTERN.test(trimmed) || DESCRIPTIVE_PHONE_LINE_PATTERN.test(trimmed)
   const hasEmail = EMAIL_ADDRESS_PATTERN.test(trimmed)
   const hasUrl = WEB_URL_PATTERN.test(trimmed)
   const hasPhoneCandidate = PHONE_PATTERN.test(trimmed)
@@ -792,10 +1003,8 @@ function isLikelySignatureContinuation(line: string): boolean {
     return true
   }
 
-  // Address-style continuation line (e.g., "New York, NY 10013")
-  if (trimmed.length <= 72 && trimmed.includes(',') && /\d/.test(trimmed)) {
-    return true
-  }
+  // City/state/postal rows only; comma-plus-digits also matched calendar dates.
+  if (/^[A-Za-z][A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$/.test(trimmed)) return true
 
   return false
 }

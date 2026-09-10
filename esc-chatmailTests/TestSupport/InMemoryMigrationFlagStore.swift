@@ -10,6 +10,19 @@ import Foundation
 final class InMemoryMigrationFlagStore: MigrationFlagStore {
     private let lock = NSLock()
     private var flags: [String: Bool] = [:]
+    private var strings: [String: String] = [:]
+
+    func string(forKey defaultName: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return strings[defaultName]
+    }
+
+    func setString(_ value: String?, forKey defaultName: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        strings[defaultName] = value
+    }
 
     func bool(forKey defaultName: String) -> Bool {
         lock.lock()

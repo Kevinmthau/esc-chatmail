@@ -153,6 +153,40 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         withExtendedLifetime(coordinator) {}
     }
 
+    func testRepairMissingConversationPreviews_preservesPendingSendShell() async throws {
+        let oldDate = Date(timeIntervalSinceNow: -7_200)
+        let pendingShell = ConversationBuilder()
+            .withCreatedAt(oldDate)
+            .withLastMessageDate(oldDate)
+            .visible()
+            .build(in: context)
+        let pendingShellID = pendingShell.id
+        let pendingRecord = context.insertTestObject(OutboundSendMutationRecord.self)
+        pendingRecord.id = "launch-repair-pending-send"
+        pendingRecord.createdAt = Date()
+        pendingRecord.conversationId = pendingShellID
+        try context.save()
+
+        let coordinator = makeCoordinator()
+        coordinator.repairMissingConversationPreviews()
+
+        await waitUntil {
+            self.migrationFlags.bool(
+                forKey: ConversationLaunchRepairCoordinator.conversationPreviewRepairMigrationKey
+            )
+        }
+
+        let preserved = try fetchConversation(pendingShell.objectID)
+        XCTAssertNil(preserved.archivedAt)
+        XCTAssertFalse(preserved.hidden)
+        XCTAssertEqual(
+            try context.fetch(OutboundSendMutationRecord.fetchRequest())
+                .compactMap(\.conversationId),
+            [pendingShellID]
+        )
+        withExtendedLifetime(coordinator) {}
+    }
+
     // Revert-check: the guard-let on repairIdentifierDerivedListConversationTitles' nil return in ConversationLaunchRepairCoordinator.repairListConversationTitles — reverted to treating a failed scan as a zero-candidate scan, the first run latches hasCompletedListConversationTitleRepair and the re-run poll below never observes a second sync wait.
     func testRepairListConversationTitles_fetchFailureDoesNotLatchCompletionAndStaysArmed() async throws {
         let failingContext = try FailingReadStore.makeFailingContext()

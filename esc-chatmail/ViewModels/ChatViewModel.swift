@@ -445,8 +445,9 @@ final class ChatViewModel: ObservableObject {
         guard let result else { return nil }
 
         // Clear only after local preflight reaches durable transmission admission.
+        // Keep the reply target so another message in this chat retains its
+        // subject and threading headers while the sent-message echo arrives.
         replyText = ""
-        replyingTo = nil
         composerState.attachments = []
         return result
     }

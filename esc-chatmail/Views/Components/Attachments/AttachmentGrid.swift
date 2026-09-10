@@ -1,8 +1,10 @@
 import SwiftUI
+import CoreData
 
 struct AttachmentGrid: View {
     let attachments: [Attachment]
     @ObservedObject var downloader: AttachmentDownloader
+    var imagePresentations: [NSManagedObjectID: InlineImagePresentationPolicy] = [:]
     let onTap: (Attachment) -> Void
 
     var columns: [GridItem] {
@@ -18,6 +20,7 @@ struct AttachmentGrid: View {
                     downloader: downloader,
                     showOverlay: attachments.count > 6 && attachment == attachments[5],
                     overlayCount: attachments.count - 5,
+                    imagePresentation: imagePresentations[attachment.objectID] ?? .standard,
                     onTap: { onTap(attachment) }
                 )
             }

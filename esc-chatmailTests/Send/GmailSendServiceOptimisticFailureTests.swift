@@ -716,6 +716,12 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testAPICommitAfterSyncStagesConsumptionBeforeSaveConvergesAtomically() async throws {
+        // NSInMemoryStore crashes inside Core Data's deletion-conflict merge
+        // once the optimistic message owns cascade participant rows. SQLite is
+        // the production store and exercises the intended sibling-save race.
+        coreDataStack = TestCoreDataStack(storeKind: .sqlite)
+        sendService = GmailSendService(viewContext: coreDataStack.viewContext)
+
         let recipient = "api-reconcile-during-sync@example.com"
         let remoteMessageID = "gmail-api-reconcile-race-id"
         let remoteThreadID = "gmail-api-reconcile-race-thread"

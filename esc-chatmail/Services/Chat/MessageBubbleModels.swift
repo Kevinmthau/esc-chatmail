@@ -54,7 +54,8 @@ struct MessageBubbleAttachmentSnapshot: Sendable, Equatable {
                     EmailDocument.normalizedContentID(attachment.contentId) ?? "cid:nil",
                     attachment.filename.lowercased(),
                     attachment.mimeType.lowercased(),
-                    "\(attachment.width)x\(attachment.height)"
+                    "\(attachment.width)x\(attachment.height)",
+                    attachment.width == 0 || attachment.height == 0 ? attachment.stateRaw : ""
                 ].joined(separator: "~")
             }
             .joined(separator: ";")
@@ -66,6 +67,21 @@ struct MessageBubbleHTMLAnalysis: Sendable, Equatable {
     let referencedInlineContentIDs: Set<String>
     let nonDisplayableInlineContentIDs: Set<String>
     let supportsCalendarInvitePreviewCard: Bool
+    let bodyInlineContentIDs: Set<String>
+
+    init(
+        hasHTMLSource: Bool,
+        referencedInlineContentIDs: Set<String>,
+        nonDisplayableInlineContentIDs: Set<String>,
+        supportsCalendarInvitePreviewCard: Bool,
+        bodyInlineContentIDs: Set<String> = []
+    ) {
+        self.hasHTMLSource = hasHTMLSource
+        self.referencedInlineContentIDs = referencedInlineContentIDs
+        self.nonDisplayableInlineContentIDs = nonDisplayableInlineContentIDs
+        self.supportsCalendarInvitePreviewCard = supportsCalendarInvitePreviewCard
+        self.bodyInlineContentIDs = bodyInlineContentIDs
+    }
 
     static let empty = MessageBubbleHTMLAnalysis(
         hasHTMLSource: false,

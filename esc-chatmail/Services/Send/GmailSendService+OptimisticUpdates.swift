@@ -45,6 +45,36 @@ extension GmailSendService {
         senderName: String? = nil,
         optimisticConversation: OptimisticConversationReference? = nil
     ) async throws -> OptimisticSendHandle {
+        try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
+            try await createOptimisticMessageWithoutCleanupInterleaving(
+                to: recipients,
+                body: body,
+                subject: subject,
+                threadId: threadId,
+                attachments: attachments,
+                chatPreviewText: chatPreviewText,
+                senderEmail: senderEmail,
+                senderName: senderName,
+                optimisticConversation: optimisticConversation
+            )
+        }
+    }
+
+    /// The shared cleanup-sensitive mutation gate makes the conversation lookup
+    /// and the atomic optimistic graph + recovery-record save one indivisible
+    /// operation relative to destructive store maintenance.
+    @MainActor
+    private func createOptimisticMessageWithoutCleanupInterleaving(
+        to recipients: [String],
+        body: String,
+        subject: String?,
+        threadId: String?,
+        attachments: [OutboundMessageRequest.AttachmentContext],
+        chatPreviewText: String?,
+        senderEmail: String?,
+        senderName: String?,
+        optimisticConversation: OptimisticConversationReference?
+    ) async throws -> OptimisticSendHandle {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
         let snippet = String(body.prefix(120))
@@ -148,16 +178,23 @@ extension GmailSendService {
             conversation: conversation
         )
         do {
+            let messageParticipants = try createOptimisticMessageParticipants(
+                recipients: recipients,
+                senderEmail: resolvedSenderEmail,
+                senderName: senderName ?? authSession.userName,
+                for: message
+            )
             try assignPermanentObjectIDsIfNeeded(
                 for: optimisticGraphObjects(
                     conversation: conversation,
                     message: message,
-                    attachments: attachmentObjects
+                    attachments: attachmentObjects,
+                    messageParticipants: messageParticipants
                 ),
                 in: viewContext
             )
         } catch {
-            Log.error("Failed to obtain permanent IDs for optimistic send", category: .message, error: error)
+            Log.error("Failed to prepare optimistic send graph", category: .message, error: error)
             rollbackOptimisticCreation(message, snapshot: preassignmentRollbackSnapshot)
             throw SendError.optimisticCreationFailed
         }
@@ -838,10 +875,49 @@ extension GmailSendService {
     }
 
     @MainActor
+    private func createOptimisticMessageParticipants(
+        recipients: [String],
+        senderEmail: String?,
+        senderName: String?,
+        for message: Message
+    ) throws -> [MessageParticipant] {
+        var participants: [MessageParticipant] = []
+        if let senderEmail {
+            let fromHeader = MimeBuilder.formatFromHeader(
+                email: senderEmail,
+                name: senderName
+            )
+            guard let participant = try MessageParticipantFactory.create(
+                from: fromHeader,
+                kind: .from,
+                for: message,
+                in: viewContext
+            ) else {
+                throw SendError.optimisticCreationFailed
+            }
+            participants.append(participant)
+        }
+
+        for recipient in recipients {
+            guard let participant = try MessageParticipantFactory.create(
+                from: recipient,
+                kind: .to,
+                for: message,
+                in: viewContext
+            ) else {
+                throw SendError.optimisticCreationFailed
+            }
+            participants.append(participant)
+        }
+        return participants
+    }
+
+    @MainActor
     private func optimisticGraphObjects(
         conversation: Conversation,
         message: Message,
-        attachments: [Attachment]
+        attachments: [Attachment],
+        messageParticipants: [MessageParticipant]
     ) -> [NSManagedObject] {
         var objects: [NSManagedObject] = [conversation, message]
         objects.append(contentsOf: attachments)
@@ -850,8 +926,13 @@ extension GmailSendService {
             objects.append(contentsOf: participants)
             objects.append(contentsOf: participants.compactMap(\.person))
         }
+        objects.append(contentsOf: messageParticipants)
+        objects.append(contentsOf: messageParticipants.compactMap(\.person))
 
-        return objects.filter { $0.managedObjectContext === viewContext }
+        var seen = Set<ObjectIdentifier>()
+        return objects.filter {
+            $0.managedObjectContext === viewContext && seen.insert(ObjectIdentifier($0)).inserted
+        }
     }
 
     @MainActor

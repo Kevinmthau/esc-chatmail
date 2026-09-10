@@ -458,8 +458,11 @@ final class HTMLContentHandler: @unchecked Sendable {
         }
     }
 
-    func cleanupOrphanedFiles(validMessageIds: Set<String>) {
-        _ = accountBoundary.perform(directoryKey: directoryKey, expectedGeneration: nil) {
+    func cleanupOrphanedFiles(
+        validMessageIds: Set<String>,
+        expectedGeneration: HTMLContentAccountGeneration? = nil
+    ) {
+        _ = accountBoundary.perform(directoryKey: directoryKey, expectedGeneration: expectedGeneration) {
             let contents = FileSystemErrorHandler.contentsOfDirectory(at: messagesDirectory, category: .general)
             for fileURL in contents {
                 let messageId = fileURL.deletingPathExtension().lastPathComponent

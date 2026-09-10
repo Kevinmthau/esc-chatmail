@@ -9,7 +9,7 @@
 import { getDB, type ChatmailDB } from '@/db/schema'
 import type { PersonRow } from '@/db/types'
 import type { TokenBroker } from '@/gmail/gmailFetch'
-import { makeRecipientParticipantSetIdentity } from '@/identity/participantSet'
+import { makeStoredRecipientParticipantSetIdentity } from '@/identity/recipientIdentity'
 import { selectParticipantHashConversation } from '@/identity/routing'
 import { newId } from '@/lib/uuid'
 import * as messageActions from '@/outbox/messageActions'
@@ -133,7 +133,7 @@ export async function findConversationByParticipants(emails: string[]): Promise<
   const db = getDB()
   const account = await db.accounts.toCollection().first()
   const myAliases: ReadonlySet<string> = new Set(account?.aliases ?? [])
-  const setIdentity = makeRecipientParticipantSetIdentity(emails, myAliases)
+  const setIdentity = await makeStoredRecipientParticipantSetIdentity(db, emails, myAliases)
   if (setIdentity === null) return null
 
   const candidates = await db.conversations

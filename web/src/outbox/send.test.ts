@@ -202,6 +202,29 @@ describe('sendMessage', () => {
     expect((await db.messages.get('g_n1'))?.sendState).toBe('sent')
   })
 
+  it('excludes a cached Hide My Email recipient from compose identity', async () => {
+    const relay = 'relay@privaterelay.appleid.com'
+    await db.people.add({ email: relay, displayName: 'Hide My Email' })
+    const { captured } = respondWith('g_hme', 't_hme')
+
+    const result = await sendMessage(
+      db,
+      broker,
+      { to: [relay], body: 'relay note' },
+      { now: () => NOW },
+    )
+
+    const conversation = await db.conversations.get(result.conversationId)
+    const selfIdentity = makeRecipientParticipantSetIdentity([ME], new Set([ME]))
+    expect(conversation?.participantHash).toBe(selfIdentity?.participantHash)
+    const participants = await db.convoParticipants
+      .where('conversationId')
+      .equals(result.conversationId)
+      .toArray()
+    expect(participants.map((participant) => participant.email)).toEqual([ME])
+    expect(decodeBase64Url(captured[0]?.raw ?? '')).toContain(`To: ${relay}\r\n`)
+  })
+
   it('keeps an explicit self-only compose addressed to the account alias', async () => {
     const { captured } = respondWith('g_note', 't_note')
 
