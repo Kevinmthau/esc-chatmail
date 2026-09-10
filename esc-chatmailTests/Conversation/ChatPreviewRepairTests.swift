@@ -71,6 +71,37 @@ final class ChatPreviewRepairTests: XCTestCase {
         }
     }
 
+    // Revert-check: CacheVersioning.chatPreviewDerivationVersion schedules F12
+    // through the existing coordinator after the prior repair completed;
+    // EmailDOMQuoteRemover's link evidence changes only the saved preview.
+    func testF12VersionRepairsLabeledContactsWithoutChangingCanonicalHTML() async throws {
+        let received = try message("001")
+        let f12HTML = """
+        <p>Keep this reply.</p><p>Best,</p><p>Jane Doe</p>
+        <p><a href="mailto:jane@example.test">Email me</a></p>
+        <p><a href="tel:+14155551212">Call the office</a></p>
+        """
+        let canonicalURL = try XCTUnwrap(handler.saveHTML(f12HTML, for: "001"))
+        received.bodyStorageURI = canonicalURL.absoluteString
+        let canonicalData = try Data(contentsOf: canonicalURL)
+        try context.save()
+        flags.set(true, forKey: "chatPreviewRepair.2026-09-09-signature-cleanup-v1")
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await waitUntil { self.flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey) }
+        context.refreshAllObjects()
+
+        XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nJane Doe")
+        XCTAssertEqual(received.bodyStorageURI, canonicalURL.absoluteString)
+        XCTAssertEqual(handler.loadHTML(for: "001"), f12HTML)
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalData)
+        let previousWaits = syncWaiter.waitForCurrentSyncToCompleteCalls
+        repair.repairPersistedChatPreviews()
+        XCTAssertEqual(syncWaiter.waitForCurrentSyncToCompleteCalls, previousWaits)
+        withExtendedLifetime(repair) {}
+    }
+
     // Revert-check: pending mutations preserve their conversation without stopping unrelated repairs.
     func testPendingSendDefersWithoutSkippingProtectedMessage() async throws {
         _ = try message("001")

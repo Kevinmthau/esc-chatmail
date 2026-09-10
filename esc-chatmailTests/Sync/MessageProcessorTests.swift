@@ -269,6 +269,29 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertEqual(processed.canonicalContent?.html, html)
     }
 
+    func testProcessGmailMessage_labeledContactLinksOnlyChangePersistedPreview() async throws {
+        // Revert-check: EmailDOMQuoteRemover's F12 link evidence must reach
+        // MessageProcessor's HTML-first preview without rewriting canonical HTML.
+        let html = """
+        <p>Please confirm the appointment.</p><p>Best,</p><p>Jane Doe</p>
+        <p><a href="mailto:jane@example.test">Email me</a></p>
+        <p><a href="tel:+14155551212">Call the office</a></p>
+        """
+        let message = makeMultipartAlternativeMessage(
+            id: "f12-labeled-contact-preview",
+            plainText: "PLAIN_FALLBACK_MUST_NOT_WIN",
+            html: html,
+            plainFirst: false
+        )
+
+        let processedMessage = try await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.chatPreviewText, "Please confirm the appointment.\n\nBest,\n\nJane Doe")
+        XCTAssertEqual(processed.htmlBody, html)
+        XCTAssertEqual(processed.canonicalContent?.html, html)
+    }
+
     func testProcessGmailMessage_outgoingForwardWithoutUserBodyDoesNotUseForwardedHTMLAsChatPreview() async throws {
         let plainText = """
 

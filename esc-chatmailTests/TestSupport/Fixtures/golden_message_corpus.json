@@ -709,6 +709,120 @@
       "inputHTML": "<section>Here is the plumber I recommend.</section><section>Jane Doe</section><section>Account Manager</section><section>jane@example.com</section><section>404-555-0142</section>",
       "expected": "Here is the plumber I recommend.\n\nJane Doe\n\nAccount Manager jane@example.com 404-555-0142",
       "notes": "PR 235 regression: referrals need not contain a contact keyword or end with a colon."
+    },
+    {
+      "id": "f12_long_signature_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature / web html.ts truncateTrailingContactSignature use the 80-slot DOM lookback, including blank separators; 38 contacts put context beyond F1 and the old DOM window.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p>jane0@example.test</p><p>jane1@example.test</p><p>jane2@example.test</p><p>jane3@example.test</p><p>jane4@example.test</p><p>jane5@example.test</p><p>jane6@example.test</p><p>jane7@example.test</p><p>jane8@example.test</p><p>jane9@example.test</p><p>jane10@example.test</p><p>jane11@example.test</p><p>jane12@example.test</p><p>jane13@example.test</p><p>jane14@example.test</p><p>jane15@example.test</p><p>jane16@example.test</p><p>jane17@example.test</p><p>jane18@example.test</p><p>jane19@example.test</p><p>jane20@example.test</p><p>jane21@example.test</p><p>jane22@example.test</p><p>jane23@example.test</p><p>jane24@example.test</p><p>jane25@example.test</p><p>jane26@example.test</p><p>jane27@example.test</p><p>jane28@example.test</p><p>jane29@example.test</p><p>jane30@example.test</p><p>jane31@example.test</p><p>jane32@example.test</p><p>jane33@example.test</p><p>jane34@example.test</p><p>jane35@example.test</p><p>jane36@example.test</p><p>jane37@example.test</p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_long_contact_list_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature / web html.ts truncateTrailingContactSignature must reach and retain the contact-list introduction outside the old window.",
+      "inputHTML": "<p>Here are the reviewer contacts:</p><p>Jane Doe</p><p>Partner</p><p>jane0@example.test</p><p>jane1@example.test</p><p>jane2@example.test</p><p>jane3@example.test</p><p>jane4@example.test</p><p>jane5@example.test</p><p>jane6@example.test</p><p>jane7@example.test</p><p>jane8@example.test</p><p>jane9@example.test</p><p>jane10@example.test</p><p>jane11@example.test</p><p>jane12@example.test</p><p>jane13@example.test</p><p>jane14@example.test</p><p>jane15@example.test</p><p>jane16@example.test</p><p>jane17@example.test</p><p>jane18@example.test</p><p>jane19@example.test</p><p>jane20@example.test</p><p>jane21@example.test</p><p>jane22@example.test</p><p>jane23@example.test</p><p>jane24@example.test</p><p>jane25@example.test</p><p>jane26@example.test</p><p>jane27@example.test</p><p>jane28@example.test</p><p>jane29@example.test</p><p>jane30@example.test</p><p>jane31@example.test</p><p>jane32@example.test</p><p>jane33@example.test</p><p>jane34@example.test</p><p>jane35@example.test</p><p>jane36@example.test</p><p>jane37@example.test</p>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nPartner jane0@example.test jane1@example.test jane2@example.test jane3@example.test jane4@example.test jane5@example.test jane6@example.test jane7@example.test jane8@example.test jane9@example.test jane10@example.test jane11@example.test jane12@example.test jane13@example.test jane14@example.test jane15@example.test jane16@example.test jane17@example.test jane18@example.test jane19@example.test jane20@example.test jane21@example.test jane22@example.test jane23@example.test jane24@example.test jane25@example.test jane26@example.test jane27@example.test jane28@example.test jane29@example.test jane30@example.test jane31@example.test jane32@example.test jane33@example.test jane34@example.test jane35@example.test jane36@example.test jane37@example.test"
+    },
+    {
+      "id": "f12_long_signature_blank_separators",
+      "notes": "Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature / web html.ts truncateTrailingContactSignature use the 80-slot DOM lookback, including blank separators; 38 contacts put context beyond F1 and the old DOM window.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p></p><p>jane0@example.test</p><p></p><p>jane1@example.test</p><p></p><p>jane2@example.test</p><p></p><p>jane3@example.test</p><p></p><p>jane4@example.test</p><p></p><p>jane5@example.test</p><p></p><p>jane6@example.test</p><p></p><p>jane7@example.test</p><p></p><p>jane8@example.test</p><p></p><p>jane9@example.test</p><p></p><p>jane10@example.test</p><p></p><p>jane11@example.test</p><p></p><p>jane12@example.test</p><p></p><p>jane13@example.test</p><p></p><p>jane14@example.test</p><p></p><p>jane15@example.test</p><p></p><p>jane16@example.test</p><p></p><p>jane17@example.test</p><p></p><p>jane18@example.test</p><p></p><p>jane19@example.test</p><p></p><p>jane20@example.test</p><p></p><p>jane21@example.test</p><p></p><p>jane22@example.test</p><p></p><p>jane23@example.test</p><p></p><p>jane24@example.test</p><p></p><p>jane25@example.test</p><p></p><p>jane26@example.test</p><p></p><p>jane27@example.test</p><p></p><p>jane28@example.test</p><p></p><p>jane29@example.test</p><p></p><p>jane30@example.test</p><p></p><p>jane31@example.test</p><p></p><p>jane32@example.test</p><p></p><p>jane33@example.test</p><p></p><p>jane34@example.test</p><p></p><p>jane35@example.test</p><p></p><p>jane36@example.test</p><p></p><p>jane37@example.test</p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_long_contact_list_blank_separators",
+      "notes": "Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature / web html.ts truncateTrailingContactSignature must reach and retain the contact-list introduction outside the old window.",
+      "inputHTML": "<p>Here are the reviewer contacts:</p><p>Jane Doe</p><p>Partner</p><p></p><p>jane0@example.test</p><p></p><p>jane1@example.test</p><p></p><p>jane2@example.test</p><p></p><p>jane3@example.test</p><p></p><p>jane4@example.test</p><p></p><p>jane5@example.test</p><p></p><p>jane6@example.test</p><p></p><p>jane7@example.test</p><p></p><p>jane8@example.test</p><p></p><p>jane9@example.test</p><p></p><p>jane10@example.test</p><p></p><p>jane11@example.test</p><p></p><p>jane12@example.test</p><p></p><p>jane13@example.test</p><p></p><p>jane14@example.test</p><p></p><p>jane15@example.test</p><p></p><p>jane16@example.test</p><p></p><p>jane17@example.test</p><p></p><p>jane18@example.test</p><p></p><p>jane19@example.test</p><p></p><p>jane20@example.test</p><p></p><p>jane21@example.test</p><p></p><p>jane22@example.test</p><p></p><p>jane23@example.test</p><p></p><p>jane24@example.test</p><p></p><p>jane25@example.test</p><p></p><p>jane26@example.test</p><p></p><p>jane27@example.test</p><p></p><p>jane28@example.test</p><p></p><p>jane29@example.test</p><p></p><p>jane30@example.test</p><p></p><p>jane31@example.test</p><p></p><p>jane32@example.test</p><p></p><p>jane33@example.test</p><p></p><p>jane34@example.test</p><p></p><p>jane35@example.test</p><p></p><p>jane36@example.test</p><p></p><p>jane37@example.test</p>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nPartner jane0@example.test jane1@example.test jane2@example.test jane3@example.test jane4@example.test jane5@example.test jane6@example.test jane7@example.test jane8@example.test jane9@example.test jane10@example.test jane11@example.test jane12@example.test jane13@example.test jane14@example.test jane15@example.test jane16@example.test jane17@example.test jane18@example.test jane19@example.test jane20@example.test jane21@example.test jane22@example.test jane23@example.test jane24@example.test jane25@example.test jane26@example.test jane27@example.test jane28@example.test jane29@example.test jane30@example.test jane31@example.test jane32@example.test jane33@example.test jane34@example.test jane35@example.test jane36@example.test jane37@example.test"
+    },
+    {
+      "id": "f12_labeled_links_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.linkedContactEvidence / web html.ts trailingSignatureLinkContact recognize labeled mailto/tel only on their own projected lines, keeping the existing sign-off/name policy.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_labeled_links_br",
+      "notes": "Revert-check: EmailDOMQuoteRemover.linkedContactEvidence / web html.ts trailingSignatureLinkContact recognize labeled mailto/tel only on their own projected lines, keeping the existing sign-off/name policy.",
+      "inputHTML": "<div>Current reply.<br>Best,<br>Jane Doe<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></div>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_labeled_links_cells",
+      "notes": "Revert-check: EmailDOMQuoteRemover.linkedContactEvidence / web html.ts trailingSignatureLinkContact recognize labeled mailto/tel only on their own projected lines, keeping the existing sign-off/name policy.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><table><tr><td>Jane Doe</td><td><a href=\"mailto:jane@example.test\">Email me</a></td><td><a href=\"tel:+14155551212\">Call the office</a></td></tr></table>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "f12_linked_contact_list",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing-pass link evidence must preserve contact-list introductions.",
+      "inputHTML": "<p>Here are the reviewer contacts:</p><p>Jane Doe</p><p>Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p>",
+      "expected": "Here are the reviewer contacts:\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_trailing_closing",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable and terminal-tail checks preserve repeated people and a short closing.",
+      "inputHTML": "<p>Current reply.</p><table><tr><td>Jane Doe</td><td><a href=\"mailto:jane@example.test\">Email me</a></td><td><a href=\"tel:+14155551212\">Call the office</a></td></tr><tr><td>John Smith</td><td><a href=\"mailto:john@example.test\">Email me</a></td><td><a href=\"tel:+14155551313\">Call the office</a></td></tr></table><p>Thanks,</p><p>Kevin</p>",
+      "expected": "Current reply.\n\nJane Doe Email me Call the office\n\nJohn Smith Email me Call the office\n\nThanks,\n\nKevin"
+    },
+    {
+      "id": "f12_linked_signature_postscript",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing contact classification must stop for authored content and must not infer contacts from HTTPS targets.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>P.S. Please copy me on the reply.</p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe\n\nEmail me\n\nCall the office\n\nP.S. Please copy me on the reply."
+    },
+    {
+      "id": "f12_linked_signature_instruction",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing contact classification must stop for authored content and must not infer contacts from HTTPS targets.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>Please <a href=\"mailto:jane@example.test\">Email me</a> if the estimate changes.</p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe\n\nEmail me\n\nCall the office\n\nPlease Email me if the estimate changes."
+    },
+    {
+      "id": "f12_linked_signature_document",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing contact classification must stop for authored content and must not infer contacts from HTTPS targets.",
+      "inputHTML": "<p>Current reply.</p><p>Best,</p><p>Jane Doe</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p><a href=\"https://example.test/document\">Read the plan</a></p>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe\n\nEmail me\n\nCall the office\n\nRead the plan"
+    },
+    {
+      "id": "f12_standalone_labeled_link",
+      "notes": "Revert-check: EmailDOMQuoteRemover / web html.ts trailing pass still requires two contact lines and three removable lines.",
+      "inputHTML": "<p>Current reply.</p><p><a href=\"mailto:jane@example.test\">Email me</a></p>",
+      "expected": "Current reply.\n\nEmail me"
+    },
+    {
+      "id": "f12_linked_directory_single_cell_rows",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must find repeated people in BR sublines within a single cell, alongside link-only contacts.",
+      "inputHTML": "<p>Current reply.</p><table><tr><td>Jane Doe<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td></tr><tr><td>John Smith<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td></tr></table>",
+      "expected": "Current reply.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_single_cell_paragraphs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain repeated people whose names and labeled contacts occupy separate paragraph blocks in each cell.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td><p>Jane Doe</p><p>Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p></td></tr><tr><td><p>John Smith</p><p>Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_single_cell_divs",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain repeated people whose names and labeled contacts occupy separate div blocks in each cell.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td><div>Jane Doe</div><div>Partner</div><div><a href=\"mailto:jane@example.test\">Email me</a></div><div><a href=\"tel:+14155551212\">Call the office</a></div></td></tr><tr><td><div>John Smith</div><div>Partner</div><div><a href=\"mailto:john@example.test\">Email me</a></div><div><a href=\"tel:+14155551313\">Call the office</a></div></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_side_by_side_cells",
+      "notes": "Revert-check: EmailDOMQuoteRemover.shouldPreserveContactTable / web html.ts shouldPreserveContactTable must retain complete person records arranged side by side in one table row.",
+      "inputHTML": "<p>The team is listed below.</p><table><tr><td>Jane Doe<br>Partner<br><a href=\"mailto:jane@example.test\">Email me</a><br><a href=\"tel:+14155551212\">Call the office</a></td><td>John Smith<br>Partner<br><a href=\"mailto:john@example.test\">Email me</a><br><a href=\"tel:+14155551313\">Call the office</a></td></tr></table>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office John Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_paragraph_records",
+      "notes": "Revert-check: trailing signature removal must retain multiple complete name/contact records even when the directory uses ordinary paragraphs without a table.",
+      "inputHTML": "<p>The team is listed below.</p><p>Jane Doe</p><p>Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>John Smith</p><p>Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p>",
+      "expected": "The team is listed below.\n\nJane Doe\n\nPartner\n\nEmail me\n\nCall the office\n\nJohn Smith\n\nPartner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "f12_linked_directory_combined_name_title_records",
+      "notes": "Revert-check: repeated contact records must remain visible when each person's name and role share a paragraph, so the identity line also matches signature support text.",
+      "inputHTML": "<p>The team is listed below.</p><p>Jane Doe, Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>John Smith, Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p>",
+      "expected": "The team is listed below.\n\nJane Doe, Partner\n\nEmail me\n\nCall the office\n\nJohn Smith, Partner\n\nEmail me\n\nCall the office"
     }
   ],
   "rawSourceHTMLRecoveryCases": [

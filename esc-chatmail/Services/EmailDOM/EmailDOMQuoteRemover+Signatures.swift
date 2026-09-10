@@ -220,11 +220,16 @@ extension EmailDOMQuoteRemover {
         "contact", "email", "reviewer", "recipient"
     ]
 
+    // The inclusive DOM window includes lastNonEmpty - 80; blank separators consume slots.
+    private static let trailingSignatureLookback = 80
+
     private struct SignatureLine {
         let element: Element
         let text: String
         let startTextNode: TextNode?
         let startUTF16Offset: Int
+        let links: [VisibleLineLink]
+        let nonLinkText: String
     }
 
     /// Expand only signature scanning: quote/header passes retain their existing line units.
@@ -238,11 +243,13 @@ extension EmailDOMQuoteRemover {
                 return (cells.isEmpty ? [element] : cells).flatMap { cell in
                     inlineHeaderLines(in: cell).map {
                         SignatureLine(element: element, text: $0.text, startTextNode: $0.startTextNode,
-                                      startUTF16Offset: $0.startUTF16Offset)
+                                      startUTF16Offset: $0.startUTF16Offset, links: $0.links, nonLinkText: $0.nonLinkText)
                     }
                 }
             }
-            return [SignatureLine(element: element, text: line.text, startTextNode: nil, startUTF16Offset: 0)]
+            let projected = inlineHeaderLines(in: element).first
+            return [SignatureLine(element: element, text: line.text, startTextNode: nil, startUTF16Offset: 0,
+                                  links: projected?.links ?? [], nonLinkText: projected?.nonLinkText ?? line.text)]
         }
     }
 
@@ -252,7 +259,7 @@ extension EmailDOMQuoteRemover {
         guard let lastNonEmpty = lines.indices.last(where: { !lines[$0].text.isEmpty }) else { return }
         var lastContact = lastNonEmpty
         var tailCount = 0
-        while !isTrailingSignatureContactLine(lines[lastContact].text) {
+        while !isTrailingSignatureContactLine(lines[lastContact]) {
             guard !isContactSignatureLine(lines[lastContact].text),
                   tailCount < 3, isSignatureTailLine(lines[lastContact].text),
                   let previous = previousNonEmptyLineIndex(before: lastContact, lowerBound: 0, in: lines) else { return }
@@ -260,7 +267,7 @@ extension EmailDOMQuoteRemover {
             lastContact = previous
         }
 
-        let scanStart = max(0, lastNonEmpty - 32)
+        let scanStart = max(0, lastNonEmpty - trailingSignatureLookback)
         var contactLineCount = 0
         var fillerCount = 0
         var signatureStart = lastContact
@@ -283,7 +290,8 @@ extension EmailDOMQuoteRemover {
                 }
 
                 let previousText = lines[previousNonEmptyIndex].text
-                guard isContactSignatureLine(previousText) || isSignatureSupportLine(previousText) ||
+                guard isContactSignatureLine(previousText) || linkedContactEvidence(in: lines[previousNonEmptyIndex]) != nil ||
+                    isSignatureSupportLine(previousText) ||
                     isLikelySignOffLine(previousText) || isSignatureProductList(previousText) else {
                     precedingBodyLine = previousText
                     break
@@ -298,13 +306,14 @@ extension EmailDOMQuoteRemover {
                 break
             }
 
-            if isContactSignatureLine(text) {
-                guard isTrailingSignatureContactLine(text) else {
+            let linkedContact = linkedContactEvidence(in: lines[scanIndex])
+            if isContactSignatureLine(text) || linkedContact != nil {
+                guard isTrailingSignatureContactLine(lines[scanIndex]) else {
                     precedingBodyLine = text
                     break
                 }
                 contactLineCount += 1
-                if hasNonEmailContactSignal(text) {
+                if hasNonEmailContactSignal(text) || linkedContact == true {
                     nonEmailContactLineCount += 1
                 }
                 signatureStart = scanIndex
@@ -339,6 +348,12 @@ extension EmailDOMQuoteRemover {
 
         guard contactLineCount >= 2, !isSignatureProductList(lines[signatureStart].text) else { return }
 
+        if hasRepeatedContactRecords(lines[signatureStart...lastNonEmpty].map {
+            (text: $0.text, isContact: isTrailingSignatureContactLine($0))
+        }) {
+            return
+        }
+
         if try shouldPreserveContactTable(
             Array(lines[signatureStart...lastNonEmpty]),
             hasStrongSignal: sawSignOffBeforeSignature || strongSupportLineCount > 0
@@ -367,13 +382,32 @@ extension EmailDOMQuoteRemover {
         var preservedHTML = ""
         if sawSignOffBeforeSignature {
             if SignatureSignOffPolicy.shouldPreserveNameLine(lines[signatureStart].text),
-               !isContactSignatureLine(lines[signatureStart].text) {
+               !isContactSignatureLine(lines[signatureStart].text), linkedContactEvidence(in: lines[signatureStart]) == nil {
                 preservedHTML = "<div>\(escapedHTML(lines[scanIndex].text))<br>\(escapedHTML(lines[signatureStart].text))</div>"
             }
             signatureStart = scanIndex
         }
         // Preserve unmarked media after the signature; only explicit wrappers own their images.
         try removeSignatureLines(lines, from: signatureStart, through: lastNonEmpty, preserving: preservedHTML)
+    }
+
+    /// Consecutive name/title/company lines share one record until contact details complete it.
+    private static func hasRepeatedContactRecords(_ lines: [(text: String, isContact: Bool)]) -> Bool {
+        var hasPendingName = false
+        var completedRecords = 0
+        for line in lines {
+            if line.isContact {
+                if hasPendingName {
+                    completedRecords += 1
+                    if completedRecords > 1 { return true }
+                    hasPendingName = false
+                }
+            } else if isStrongSignatureSupportLine(line.text) ||
+                        (looksLikeSignatureNameSupportLine(line.text) && SignatureSignOffPolicy.shouldPreserveNameLine(line.text)) {
+                hasPendingName = true
+            }
+        }
+        return false
     }
 
     /// Column headings and repeated person records distinguish directories from signatures.
@@ -401,15 +435,31 @@ extension EmailDOMQuoteRemover {
                 guard signatureAncestor(of: row, tags: ["table"]) === table else { continue }
                 let rowCells = row.children().array().filter { ["td", "th"].contains($0.tagNameNormal()) }
                 if rowCells.contains(where: { $0.tagNameNormal() == "th" }) { return true }
-                let texts = rowCells.map { cell in
-                    inlineHeaderLines(in: cell).map(\.text).joined(separator: " ")
+                // Contact records may use block children instead of BRs, including
+                // an unwrapped name before those blocks inside the same cell.
+                let cellLines = rowCells.map { inlineHeaderLines(in: $0, splitBlockLines: true) }
+                let texts = cellLines.map { lines in
+                    lines.map(\.text).joined(separator: " ")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                 }
                 if texts.filter({ fieldHeadings.contains($0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ":"))) }).count >= 2 {
                     return true
                 }
-                if texts.contains(where: { looksLikeSignatureNameSupportLine($0) && SignatureSignOffPolicy.shouldPreserveNameLine($0) }),
-                   texts.contains(where: isContactSignatureLine) {
+                // Also include direct cell names that the signature scan may not project.
+                if hasRepeatedContactRecords(cellLines.joined().map {
+                    (text: $0.text, isContact: isTrailingSignatureContactLine($0.text) ||
+                        linkedContactEvidence(links: $0.links, nonLinkText: $0.nonLinkText) != nil)
+                }) { return true }
+                // Explicit contact labels such as "Email" and "Telephone" are not person names.
+                let nameCandidates = zip(texts, cellLines).compactMap { text, lines in
+                    lines.contains(where: { linkedContactEvidence(links: $0.links, nonLinkText: $0.nonLinkText) != nil }) ? nil : text
+                } + cellLines.joined().filter {
+                    linkedContactEvidence(links: $0.links, nonLinkText: $0.nonLinkText) == nil
+                }.map(\.text)
+                if nameCandidates.contains(where: { looksLikeSignatureNameSupportLine($0) && SignatureSignOffPolicy.shouldPreserveNameLine($0) }),
+                   texts.contains(where: isContactSignatureLine) || cellLines.joined().contains(where: {
+                       linkedContactEvidence(links: $0.links, nonLinkText: $0.nonLinkText) != nil
+                   }) {
                     personRows += 1
                     if personRows > 1 { return true }
                 }
@@ -456,10 +506,14 @@ extension EmailDOMQuoteRemover {
         }
         // SwiftSoup can reuse an ancestor's raw table HTML after a previously dirty child changes.
         // Reassigning the unchanged tag invalidates that snapshot without changing markup or attributes.
-        var ancestor = first.element.parent()
-        while let element = ancestor, element.tagNameNormal() != "body" {
-            try element.tagName(element.tagName())
-            ancestor = element.parent()
+        var invalidatedAncestors = Set<ObjectIdentifier>()
+        for line in lines[start...end] {
+            var ancestor = line.element.parent()
+            while let element = ancestor, element.tagNameNormal() != "body" {
+                guard invalidatedAncestors.insert(ObjectIdentifier(element)).inserted else { break }
+                try element.tagName(element.tagName())
+                ancestor = element.parent()
+            }
         }
         let hasPrefix = lines[..<start].contains { $0.element === first.element && !$0.text.isEmpty } ||
             hasMediaBeforeSignature(first.startTextNode, in: first.element)
@@ -562,6 +616,83 @@ extension EmailDOMQuoteRemover {
                 matchesEntireLine(signatureCityStateZipPattern, text: label) ||
                 isSignaturePostalLine(label)
         }
+    }
+
+    private static let signatureEmailLinkLabelPattern = try? NSRegularExpression(
+        pattern: #"^(?:email|e-mail)(?: me| us)?$"#, options: [.caseInsensitive]
+    )
+
+    private static let signaturePhoneLinkLabelPattern = try? NSRegularExpression(
+        pattern: #"^(?:tel|telephone|phone|call(?: me| us| the office)?)$"#, options: [.caseInsensitive]
+    )
+
+    private static let signatureEmailSurroundingLabelPattern = try? NSRegularExpression(
+        pattern: #"^(?:email|e-mail|e)$"#, options: [.caseInsensitive]
+    )
+
+    private static let signaturePhoneSurroundingLabelPattern = try? NSRegularExpression(
+        pattern: #"^(?:tel|telephone|phone|t|office|work|direct|mobile|cell|fax)$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let signatureMailtoTargetPattern = try? NSRegularExpression(
+        pattern: #"^mailto:([^?]+)(?:\?[^\s]*)?$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let signatureLinkedEmailAddressPattern = try? NSRegularExpression(
+        pattern: #"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)+$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let signatureTelTargetPattern = try? NSRegularExpression(
+        pattern: #"^tel:\+?[0-9(). -]+$"#, options: [.caseInsensitive]
+    )
+
+    private static func isTrailingSignatureContactLine(_ line: SignatureLine) -> Bool {
+        isTrailingSignatureContactLine(line.text) || linkedContactEvidence(in: line) != nil
+    }
+
+    private static func linkedContactEvidence(in line: SignatureLine) -> Bool? {
+        linkedContactEvidence(links: line.links, nonLinkText: line.nonLinkText)
+    }
+
+    /// Nil rejects the line; false is email-only evidence; true includes a telephone link.
+    /// Targets never enter visible text or the shared quote/header contact predicate.
+    private static func linkedContactEvidence(links: [VisibleLineLink], nonLinkText: String) -> Bool? {
+        guard !links.isEmpty else { return nil }
+        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "|•│┃¦:;,.()[]–—-"))
+        let surrounding = nonLinkText.trimmingCharacters(in: separators)
+        let hasEmailLabel = matchesEntireLine(signatureEmailSurroundingLabelPattern, text: surrounding)
+        let hasPhoneLabel = matchesEntireLine(signaturePhoneSurroundingLabelPattern, text: surrounding)
+        guard surrounding.isEmpty || hasEmailLabel || hasPhoneLabel else { return nil }
+        var hasTelephone = false
+        for link in links {
+            guard link.rawTarget.rangeOfCharacter(from: .newlines) == nil else { return nil }
+            if !hasPhoneLabel, isPlausibleSignatureMailtoTarget(link.rawTarget),
+               matchesEntireLine(signatureEmailLinkLabelPattern, text: link.text) {
+                continue
+            }
+            if !hasEmailLabel, matchesEntireLine(signatureTelTargetPattern, text: link.rawTarget),
+               matchesEntireLine(signaturePhoneLinkLabelPattern, text: link.text),
+               (7...15).contains(link.rawTarget.filter { $0.isASCII && $0.isNumber }.count) {
+                hasTelephone = true
+                continue
+            }
+            // Every visible anchor must be a contact; a document or instruction link is authored text.
+            return nil
+        }
+        return hasTelephone
+    }
+
+    private static func isPlausibleSignatureMailtoTarget(_ target: String) -> Bool {
+        let range = NSRange(location: 0, length: target.utf16.count)
+        guard let match = signatureMailtoTargetPattern?.firstMatch(in: target, range: range), match.range == range,
+              let addressRange = Range(match.range(at: 1), in: target) else { return false }
+        let address = String(target[addressRange])
+        let localPart = address.prefix(while: { $0 != "@" })
+        return !localPart.hasPrefix(".") && !localPart.hasSuffix(".") && !localPart.contains("..") &&
+            matchesEntireLine(signatureLinkedEmailAddressPattern, text: address)
     }
 
     private static func isSignaturePostalLine(_ text: String) -> Bool {
