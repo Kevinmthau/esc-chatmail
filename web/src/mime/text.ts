@@ -130,6 +130,7 @@ export function unwrapEmailLineBreaks(text: string): string {
         if (
           !endsWithPunctuation &&
           !startsWithUppercase &&
+          !/^(https?:\/\/|www\.)/i.test(nextLine) &&
           !currentIsSignatureDelimiter &&
           !nextIsSignatureDelimiter
         ) {
@@ -167,6 +168,7 @@ export function unwrapEmailLineBreaks(text: string): string {
         !endsWithPunctuation &&
         !endsWithColon &&
         !startsWithUppercase &&
+        !/^(https?:\/\/|www\.)/i.test(trimmedLine) &&
         !nextIsListItem &&
         !currentIsSignatureDelimiter &&
         !nextIsSignatureDelimiter

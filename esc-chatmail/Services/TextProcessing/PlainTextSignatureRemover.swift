@@ -43,6 +43,7 @@ enum PlainTextSignatureRemover {
         // Unsubscribe and preference links
         "unsubscribe",
         "update your email preferences",
+        "update your preferences",
         "manage your subscription",
         "click here to unsubscribe",
         "opt out of future",
@@ -57,6 +58,8 @@ enum PlainTextSignatureRemover {
         "this message is intended",
         "this e-mail is meant for only the intended recipient",
         "this communication is confidential",
+        "this communication is provided for informational purposes",
+        "our form crs",
         "this message contains confidential",
         "this e-mail is confidential",
         "this electronic mail transmission may contain confidential",
@@ -69,7 +72,6 @@ enum PlainTextSignatureRemover {
         "confidentiality notice:",
         "disclaimer:",
         "legal disclaimer:",
-        "important:",
         "please consider the environment",
         "think before you print",
 
@@ -95,27 +97,36 @@ enum PlainTextSignatureRemover {
         "before wiring any money",
     ]
 
-    private static let signOffWords: Set<String> = [
-        "regards",
-        "thanks",
-        "thank you",
-        "best",
-        "cheers",
-        "sincerely",
-        "yours truly",
-        "best wishes",
-        "best regards",
-        "kind regards",
-        "warm regards",
-        "take care",
-        "all the best"
+    // A legal opener does not make later paragraphs boilerplate. Recognise known
+    // disclaimer sentence forms instead of words such as "account" or "services".
+    private static let legalContinuationPrefixes: [String] = [
+        "please refer to your monthly statements for the official record",
+        "questions should be directed to your",
+        "you should consult your own tax, legal, and accounting advisors",
+        "please submit personal information through secure channels",
+        "investment products involve risk",
+        "no bank guarantee is provided for investment products",
+        "this material is intended solely for the recipient",
+        "distribution to unintended recipients is restricted",
+        "any forwarding should comply with firm communication standards",
+        "payment details should always be confirmed by phone using a known number",
+        "if funds were sent to an unintended account",
+        "additional disclosures may apply based on account type",
+        "product availability depends on review and approval requirements",
+        "services described may vary by location and client eligibility",
+        "historical references do not guarantee future performance",
+        "terms may be updated periodically without prior notice",
+        "use of electronic communication is subject to monitoring and retention",
+        "this message may include privileged information under applicable law",
     ]
+
+    private static let signOffWords = SignaturePatterns.signOffPhrases
 
     private static let delimiterLinePattern = SignaturePatterns.delimiterLine
 
     private static let contactPrefixPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: "^(m|c|o|f|d|t|p|tel|phone|mobile|office|direct|fax)\\s*(?:[:.-]\\s*\\S+|\\(?\\+?\\d[\\d\\s().-]{5,}\\b)",
+            pattern: #"^(?:[mcofdtp](?:\s*:\s*|\s+)|(?:tel|phone|mobile|office|direct|fax)(?:[.:]\s+|\s+))\(?\+?\d[\d\s().-]{5,}\b"#,
             options: [.caseInsensitive]
         )
     }()
@@ -177,12 +188,6 @@ enum PlainTextSignatureRemover {
         }
 
         let scanStart = max(0, lastNonEmpty - trailingScanLineLimit)
-        let nonEmptyLineCount = lines.reduce(into: 0) { count, line in
-            if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                count += 1
-            }
-        }
-
         // Pass 1: Look for definitive signature indicators near the end.
         var earliestHardIndicator: Int?
         for index in stride(from: lastNonEmpty, through: scanStart, by: -1) {
@@ -190,7 +195,7 @@ enum PlainTextSignatureRemover {
             guard !line.isEmpty else { continue }
 
             let evaluation = evaluateLine(line)
-            if evaluation.isHardIndicator {
+            if evaluation.isHardIndicator && hasSignatureOnlyTail(after: index, lines: lines, lastNonEmpty: lastNonEmpty) {
                 earliestHardIndicator = index
             }
         }
@@ -200,7 +205,20 @@ enum PlainTextSignatureRemover {
                 return joinLines(lines, upTo: hardIndicatorIndex)
             }
             let startLine = findSignatureStartLine(before: hardIndicatorIndex, lines: lines)
-            return joinLines(lines, upTo: startLine)
+            return joinLines(lines, upTo: preservingSignOff(startingAt: startLine, through: hardIndicatorIndex, lines: lines))
+        }
+
+        // Pass 2 is end-anchored: a body sentence or bare sign-off after contact
+        // information must never be consumed as part of a signature.
+        guard evaluateLine(lines[lastNonEmpty]).hasContactInfo else {
+            // A clipped corporate row can still identify itself by expanding the
+            // standalone name immediately above it, without treating arbitrary titles as tails.
+            if containsSignatureSeparator(lines[lastNonEmpty]),
+               let nameIndex = previousNonEmptyLineIndex(before: lastNonEmpty, in: lines),
+               shouldPreserveSingleNameSignOff(lines[nameIndex], at: nameIndex, in: lines) {
+                return joinLines(lines, upTo: nameIndex + 1)
+            }
+            return trimmed
         }
 
         // Pass 2: Heuristic trailing block detection (contact info or titles).
@@ -210,12 +228,18 @@ enum PlainTextSignatureRemover {
         var signatureSupportSignals = 0
         var affiliationSupportSignals = 0
         var sawSignOffLine = false
+        var bridgedTagline = false
         var sawSeparator = false
 
         for index in stride(from: lastNonEmpty, through: scanStart, by: -1) {
             let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
 
             if line.isEmpty {
+                if !bridgedTagline, contactSignals >= 2,
+                   let previous = previousNonEmptyLineIndex(before: index, in: lines),
+                   isTaglineBetweenAffiliationAndContacts(lines[previous], at: previous, lines: lines) {
+                    continue
+                }
                 if shouldContinueAcrossBlankLine(
                     at: index,
                     scanStart: scanStart,
@@ -235,6 +259,9 @@ enum PlainTextSignatureRemover {
                 continue
             }
 
+            let isTaglineBridge = !bridgedTagline && contactSignals >= 2 &&
+                isTaglineBetweenAffiliationAndContacts(line, at: index, lines: lines)
+            if isBodyProseLine(line) && !isTaglineBridge { break }
             let evaluation = evaluateLine(line)
             if evaluation.hasContactInfo {
                 contactSignals += 1
@@ -249,7 +276,8 @@ enum PlainTextSignatureRemover {
                 break
             }
 
-            let isContinuationLine = signatureLineCount > 0 && isLikelySignatureContinuation(line)
+            if isTaglineBridge { bridgedTagline = true }
+            let isContinuationLine = signatureLineCount > 0 && (isLikelySignatureContinuation(line) || isTaglineBridge)
             if evaluation.isLikelySignatureLine || isContinuationLine {
                 signatureLineCount += 1
                 // We scan backwards, so each matched line becomes the new earliest start.
@@ -278,24 +306,131 @@ enum PlainTextSignatureRemover {
                 return trimmed
             }
             if contactSignals >= 2 &&
-                affiliationSupportSignals == 0 &&
-                !sawSignOffLine &&
                 hasContactListIntroBeforeSignature(startingAt: startLine, lines: lines) {
                 return trimmed
             }
-            let totalChars = trimmed.count
-            if contactSignals == 0 && nonEmptyLineCount <= 4 && totalChars < 180 {
-                return trimmed
-            }
-            if contactSignals == 1 && signatureLineCount <= 1 &&
-                !hasSupportingSignatureContext(startingAt: startLine, lines: lines, lastNonEmpty: lastNonEmpty) {
+            guard signatureLineCount >= 3,
+                  contactSignals >= 2 || (contactSignals == 1 && (affiliationSupportSignals > 0 || sawSignOffLine)),
+                  sawSignOffLine || affiliationSupportSignals > 0 ||
+                    lines[startLine...lastNonEmpty].contains(where: { matchesRegex(multiWordNamePattern, in: $0) }) else {
                 return trimmed
             }
             let adjustedStart = adjustToSeparator(startLine, lines: lines)
-            return joinLines(lines, upTo: adjustedStart)
+            return joinLines(lines, upTo: preservingSignOff(startingAt: adjustedStart, through: lastNonEmpty, lines: lines))
         }
 
         return trimmed
+    }
+
+    /// A marker inside a reply is not a footer when ordinary body text follows it.
+    /// Soft-wrapped legal paragraphs may continue onto a lowercase line without a
+    /// paragraph break; a later body paragraph must still stop the truncation.
+    private static func hasSignatureOnlyTail(after index: Int, lines: [String], lastNonEmpty: Int) -> Bool {
+        if isDelimiterLine(lines[index].trimmingCharacters(in: .whitespacesAndNewlines)) { return true }
+        guard index < lastNonEmpty else { return true }
+        var previous = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+        let isLegalFooter = previous.range(of: #"confidential|disclaimer|notice to recipient|communication.*informational|our form crs|wire fraud"#, options: [.regularExpression, .caseInsensitive]) != nil
+        let isCIDFooter = previous.lowercased().hasPrefix("[cid:") &&
+            lines.prefix(index).suffix(5).contains(where: SignatureSignOffPolicy.isStrongSupportLine)
+        var cidTailLines = 0
+        for candidate in lines[(index + 1)...lastNonEmpty] {
+            let line = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { previous = ""; continue }
+            let evaluation = evaluateLine(line)
+            let continuesWrappedFooter = isLegalFooter && !hasAuthoredProsePrefix(line) && !previous.isEmpty &&
+                !(previous.last.map { ".!?".contains($0) } ?? false) && line.first?.isLowercase == true
+            let isLegalContinuation = isLegalFooter && legalContinuationPrefixes.contains {
+                line.lowercased().hasPrefix($0)
+            }
+            let isCIDTagline = isCIDFooter && !hasAuthoredProsePrefix(line) &&
+                !isPostscriptLine(line.lowercased()) && cidTailLines < 2 && line.count <= 72 &&
+                line.rangeOfCharacter(from: .decimalDigits) == nil &&
+                !(line.last.map { ".!?".contains($0) } ?? false)
+            if isCIDTagline { cidTailLines += 1 }
+            guard evaluation.isHardIndicator || isStrictContactLine(line) ||
+                    isStrictSupportLine(line) || continuesWrappedFooter ||
+                    isLegalContinuation || isCIDTagline else { return false }
+            previous = line
+        }
+        return true
+    }
+
+    /// Preserve the same sign-off/name pair as the HTML wrapper cleanup.
+    private static func preservingSignOff(startingAt start: Int, through end: Int, lines: [String]) -> Int {
+        var start = start
+        if let previous = previousNonEmptyLineIndex(before: start, in: lines),
+           isSignOffLineForSignatureContext(lines[previous]),
+           let first = lines[start...end].first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+           SignatureSignOffPolicy.shouldPreserveNameLine(first) { start = previous }
+        guard start <= end else { return start }
+        for index in start...end where isSignOffLineForSignatureContext(lines[index]) {
+            var nameIndex = index + 1
+            while nameIndex <= end && lines[nameIndex].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                nameIndex += 1
+            }
+            guard nameIndex <= end else { return start }
+            let name = lines[nameIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+            if SignatureSignOffPolicy.shouldPreserveNameLine(name) {
+                return nameIndex + 1
+            }
+            return start
+        }
+        return start
+    }
+
+    private static func isTaglineBetweenAffiliationAndContacts(_ line: String, at index: Int, lines: [String]) -> Bool {
+        guard !hasAuthoredProsePrefix(line), !isPostscriptLine(line.lowercased()),
+              line.count <= 100, line.split(whereSeparator: \.isWhitespace).count <= 7,
+              line.last == "." || line.last == "!",
+              line.rangeOfCharacter(from: .decimalDigits) == nil,
+              let previousIndex = previousNonEmptyLineIndex(before: index, in: lines) else { return false }
+        let previous = lines[previousIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        return SignatureSignOffPolicy.isStrongSupportLine(previous) ||
+            matchesRegex(multiWordNamePattern, in: previous)
+    }
+
+    private static func hasAuthoredProsePrefix(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespacesAndNewlines).range(
+            of: #"^(?:please|kindly|can|could|would|i|we|you|our|the|this|that|here|there|let|remember|also|attached|send|call|reply|note|use|check|review|confirm)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func isBodyProseLine(_ line: String) -> Bool {
+        if isSignOffLineForSignatureContext(line) { return false }
+        if hasAuthoredProsePrefix(line) || isPostscriptLine(line.lowercased()) { return true }
+        return line.split(whereSeparator: \.isWhitespace).count > 1 &&
+            (line.last.map { ".!?".contains($0) } ?? false) &&
+            !SignatureSignOffPolicy.isStrongSupportLine(line) &&
+            line.range(of: #"\b(?:n\.a|ltd|llp)\.$"#, options: [.regularExpression, .caseInsensitive]) == nil
+    }
+
+    private static func isStrictSupportLine(_ line: String) -> Bool {
+        guard !isBodyProseLine(line) else { return false }
+        return SignatureSignOffPolicy.isStrongSupportLine(line) ||
+            matchesRegex(singleNamePattern, in: line) || matchesRegex(multiWordNamePattern, in: line) ||
+            isSignOffLineForSignatureContext(line)
+    }
+
+    /// Email/URL matches alone are not contact rows: validate the text left around them.
+    private static func isStrictContactLine(_ line: String) -> Bool {
+        guard !isBodyProseLine(line) else { return false }
+        if matchesRegex(standaloneContactLabelPattern, in: line) ||
+            matchesRegex(SignaturePatterns.descriptivePhoneLine, in: line) { return true }
+        let patterns = [emailPattern, urlPattern, phonePattern]
+        guard patterns.contains(where: { matchesRegex($0, in: line) }) else { return false }
+        var remainder = line
+        for pattern in patterns {
+            remainder = pattern?.stringByReplacingMatches(
+                in: remainder, range: NSRange(location: 0, length: remainder.utf16.count), withTemplate: " "
+            ) ?? remainder
+        }
+        remainder = remainder.replacingOccurrences(of: #"[|•│┃¦<>():+.,/\-]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return remainder.isEmpty || matchesRegex(standaloneContactLabelPattern, in: remainder) ||
+            remainder.range(of: #"^(?:tel|phone|mobile|office|direct|fax|cell)$"#, options: [.regularExpression, .caseInsensitive]) != nil ||
+            isStrictSupportLine(remainder)
     }
 
     // MARK: - Line Evaluation
@@ -306,8 +441,15 @@ enum PlainTextSignatureRemover {
 
         let isDelimiter = matchesRegex(delimiterLinePattern, in: trimmed)
         let isCidLine = lowercased.hasPrefix("[cid:")
-        let hasHardFragment = hardIndicatorFragments.contains { lowercased.contains($0) }
-        let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed)
+        let hasLegalOpener = SignaturePatterns.legalFooterOpeners.contains {
+            trimmed.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
+        }
+        let hasHardFragment = hasLegalOpener || hardIndicatorFragments.contains { fragment in
+            lowercased.hasPrefix(fragment) ||
+                lowercased.range(of: #"[.!?]\s+"# + NSRegularExpression.escapedPattern(for: fragment), options: .regularExpression) != nil
+        }
+        let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed) ||
+            matchesRegex(SignaturePatterns.descriptivePhoneLine, in: trimmed)
         let hasStandaloneContactLabel = matchesRegex(standaloneContactLabelPattern, in: trimmed)
 
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
@@ -321,7 +463,7 @@ enum PlainTextSignatureRemover {
         let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || hasStandaloneContactLabel
 
         // Keep hard indicators conservative. URL/phone lines need surrounding context.
-        let isHardIndicator = isDelimiter || isCidLine || hasHardFragment || hasContactPrefix
+        let isHardIndicator = isDelimiter || isCidLine || hasHardFragment
 
         var score = 0
         if isSignOffLine(lowercased) { score += 1 }
@@ -441,6 +583,7 @@ enum PlainTextSignatureRemover {
                 continue
             }
 
+            if isBodyProseLine(line) { break }
             let evaluation = evaluateLine(line)
             if !foundShortLines,
                shouldPreserveSingleNameSignOff(line, at: index, in: lines) {
@@ -487,6 +630,7 @@ enum PlainTextSignatureRemover {
                 return true
             }
 
+            if isBodyProseLine(candidate) { return false }
             let evaluation = evaluateLine(candidate)
             if evaluation.isHardIndicator ||
                 evaluation.hasContactInfo ||
@@ -520,7 +664,8 @@ enum PlainTextSignatureRemover {
         let shortEnough = trimmed.count <= 80
         let noSentenceEnding = !(trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?"))
         let lowercased = trimmed.lowercased()
-        let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed)
+        let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed) ||
+            matchesRegex(SignaturePatterns.descriptivePhoneLine, in: trimmed)
         let hasStandaloneContactLabel = matchesRegex(standaloneContactLabelPattern, in: trimmed)
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
@@ -607,45 +752,6 @@ enum PlainTextSignatureRemover {
             probe += 1
         }
         return nil
-    }
-
-    private static func hasSupportingSignatureContext(
-        startingAt startLine: Int,
-        lines: [String],
-        lastNonEmpty: Int
-    ) -> Bool {
-        let lookbackStart = max(0, startLine - 4)
-        for index in stride(from: startLine - 1, through: lookbackStart, by: -1) {
-            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
-
-            let lowercased = line.lowercased()
-            let evaluation = evaluateLine(line)
-            if isSignOffLine(lowercased) ||
-                evaluation.hasContactInfo ||
-                evaluation.isHardIndicator ||
-                containsKeyword(lowercased, in: titleKeywords) ||
-                containsKeyword(lowercased, in: organizationKeywords) ||
-                containsAddressKeyword(lowercased) {
-                return true
-            }
-        }
-
-        var contactLineCount = 0
-        for index in startLine...lastNonEmpty {
-            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
-
-            let evaluation = evaluateLine(line)
-            if evaluation.hasContactInfo {
-                contactLineCount += 1
-                if contactLineCount >= 2 {
-                    return true
-                }
-            }
-        }
-
-        return false
     }
 
     private static func hasContactListIntroBeforeSignature(startingAt startLine: Int, lines: [String]) -> Bool {
@@ -807,7 +913,8 @@ enum PlainTextSignatureRemover {
             return true
         }
 
-        let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed)
+        let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed) ||
+            matchesRegex(SignaturePatterns.descriptivePhoneLine, in: trimmed)
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
         let hasPhoneCandidate = matchesRegex(phonePattern, in: trimmed)
@@ -816,10 +923,9 @@ enum PlainTextSignatureRemover {
             return true
         }
 
-        // Address-style continuation line (e.g., "New York, NY 10013")
-        if trimmed.count <= 72,
-           trimmed.contains(","),
-           trimmed.range(of: "\\d", options: .regularExpression) != nil {
+        // A real city/state/postal row can continue an already corroborated block.
+        // A comma and arbitrary digits (calendar dates, meeting IDs) cannot.
+        if trimmed.range(of: #"^[A-Za-z][A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$"#, options: .regularExpression) != nil {
             return true
         }
 

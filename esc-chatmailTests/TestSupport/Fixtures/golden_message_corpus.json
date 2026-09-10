@@ -38,9 +38,9 @@
     },
     {
       "id": "address_keyword_word_boundary_does_not_match_inside_words",
-      "notes": "Address keywords like 'ave' must not match inside words like 'have' (which can cause legitimate body sentences to be stripped as signatures).",
+      "notes": "Address keywords like 'ave' must not match inside words like 'have' (which can cause legitimate body sentences to be stripped as signatures). Revert-check: PlainTextSignatureRemover / web signature.ts preserve bare sign-offs regardless of message length (F25).",
       "input": "Hi Alex,\n\nWe can check and get back to you tomorrow.\n\nHi Sam,\n\nHow many miles does the car have now? Where is it located?\n\nThanks,\nJordan\n\n> On Feb 15, 2026, at 4:36 PM, Alex wrote:\n> Can we turn the car in early?\n> Thank you!",
-      "expected": "Hi Alex,\n\nWe can check and get back to you tomorrow.\n\nHi Sam,\n\nHow many miles does the car have now? Where is it located?"
+      "expected": "Hi Alex,\n\nWe can check and get back to you tomorrow.\n\nHi Sam,\n\nHow many miles does the car have now? Where is it located?\n\nThanks,\n\nJordan"
     },
     {
       "id": "corporate_signature_long_inline_separators_removed",
@@ -77,6 +77,192 @@
       "notes": "Law-firm style 'Notice To Recipient' legal footers should be removed when they survive quote extraction as trailing disclaimer text.",
       "input": "Any word?\n\nNotice To Recipient: This e-mail is meant for only the intended recipient of the transmission, and may be a communication privileged by law. If you received this e-mail in error, any review, use, dissemination, distribution, or copying of this e-mail is strictly prohibited. Please notify us immediately of the error by return e-mail and please delete this message and any and all duplicates of this message from your system. Thank you in advance for your cooperation. For additional policies governing this e-mail, please see http://www.examplelaw.com/about/firm-policies/.",
       "expected": "Any word?"
+    },
+    {
+      "id": "plain_signature_audit_body_mobile-first",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nMobile-first design is the priority for this release.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nMobile-first design is the priority for this release.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_m",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nM. Smith will join us tomorrow.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nM. Smith will join us tomorrow.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_o-rings",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nO-rings are back in stock.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nO-rings are back in stock.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_f-150",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nF-150 is in the shop this week.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nF-150 is in the shop this week.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_d",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nD. Wong signed off on the plan.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nD. Wong signed off on the plan.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_important",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nImportant: the deadline moved to Monday.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nImportant: the deadline moved to Monday.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_you",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nYou are receiving this because we need your input.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nYou are receiving this because we need your input.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_body_our",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nOur privacy policy changed this week.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.",
+      "expected": "Hi team,\n\nThe review is complete.\n\nOur privacy policy changed this week.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday."
+    },
+    {
+      "id": "plain_signature_audit_orphan_postscript",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "The delivery is confirmed.\n\nP.S. Please use the side entrance.",
+      "expected": "The delivery is confirmed.\n\nP.S. Please use the side entrance."
+    },
+    {
+      "id": "plain_signature_audit_long_reply_bare_signoff",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Hi team,\n\nThe review is complete.\n\nWe have updated the plan.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.\n\nBest,\nKevin",
+      "expected": "Hi team,\n\nThe review is complete.\n\nWe have updated the plan.\n\nPlease send your comments tomorrow.\n\nWe will discuss them on Friday.\n\nBest,\n\nKevin"
+    },
+    {
+      "id": "plain_signature_audit_zoom_invite",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Topic: Weekly sync\nTime: September 12, 2026 10:00 AM\nJoin Zoom Meeting\nhttps://zoom.us/j/123456789\nMeeting ID: 123 456 789\nPasscode: 246810",
+      "expected": "Topic: Weekly sync\n\nTime: September 12, 2026 10:00 AM\n\nJoin Zoom Meeting\n\nhttps://zoom.us/j/123456789\n\nMeeting ID: 123 456 789\n\nPasscode: 246810"
+    },
+    {
+      "id": "plain_signature_audit_shipping_block",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Your order is on its way.\n\nShip to:\nJordan Smith\n123 Main Street\nNew York, NY 10013",
+      "expected": "Your order is on its way.\n\nShip to:\n\nJordan Smith 123 Main Street\n\nNew York, NY 10013"
+    },
+    {
+      "id": "plain_signature_audit_calendar_block",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Design review\n\nWednesday, September 16, 2026\n10:00 AM - 11:00 AM\nLocation: Conference Room A",
+      "expected": "Design review\n\nWednesday, September 16, 2026 10:00 AM - 11:00 AM\n\nLocation: Conference Room A"
+    },
+    {
+      "id": "plain_signature_audit_two_link_share",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Here are the links you asked for:\nhttps://example.com/one\nhttps://example.com/two",
+      "expected": "Here are the links you asked for:\n\nhttps://example.com/one\n\nhttps://example.com/two"
+    },
+    {
+      "id": "plain_signature_audit_contact_card_then_body",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "Please reach out to our property manager directly:\nJohn Boga\nProperty Manager\njohn@example.com\n914-555-0123\n\nPlease copy me on your reply.",
+      "expected": "Please reach out to our property manager directly:\n\nJohn Boga\n\nProperty Manager john@example.com 914-555-0123\n\nPlease copy me on your reply."
+    },
+    {
+      "id": "plain_signature_audit_contact_list_followed_by_signoff",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "If this matter is urgent, please contact:\n- Shane at shane@example.com or 424-555-0123\n- Victoria at victoria@example.com or 312-555-0123\n\nThank you,\nDominic",
+      "expected": "If this matter is urgent, please contact:\n\n- Shane at shane@example.com or 424-555-0123\n\n- Victoria at victoria@example.com or 312-555-0123\n\nThank you,\nDominic"
+    },
+    {
+      "id": "plain_signature_audit_footer_phrase_followed_by_body",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "The draft is ready.\n\nUnsubscribe from these notifications.\n\nWe should keep that sentence in the new template.",
+      "expected": "The draft is ready.\n\nUnsubscribe from these notifications.\n\nWe should keep that sentence in the new template."
+    },
+    {
+      "id": "plain_signature_audit_signoff_contacts",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts anchored contact and footer detection. Preservation and removal twin.",
+      "input": "The contract is ready.\n\nSincerely,\nMarcita Threash\nSenior Account Manager\nProtecting what matters most.\nmarcita@example.com\nwww.example.com",
+      "expected": "The contract is ready.\n\nSincerely,\n\nMarcita Threash"
+    },
+    {
+      "id": "plain_signature_audit_mobile_footer",
+      "notes": "HONEST SCOPE: existing removal control that passed before hardening; paired body keepers expose the regression. Revert-check: PlainTextSignatureRemover / web signature.ts trailing footer validation.",
+      "input": "The review is complete.\n\nSent from my iPhone",
+      "expected": "The review is complete."
+    },
+    {
+      "id": "plain_signature_audit_legal_footer",
+      "notes": "HONEST SCOPE: existing removal control that passed before hardening; paired body keepers expose the regression. Revert-check: PlainTextSignatureRemover / web signature.ts trailing footer validation.",
+      "input": "The review is complete.\n\nThis email and any attachments are confidential and intended solely\nfor the use of the individual to whom they are addressed.",
+      "expected": "The review is complete."
+    },
+    {
+      "id": "plain_signature_audit_wire_fraud_footer",
+      "notes": "HONEST SCOPE: existing removal control that passed before hardening; paired body keepers expose the regression. Revert-check: PlainTextSignatureRemover / web signature.ts trailing footer validation.",
+      "input": "Escrow documents are ready for your signature.\n\nWIRE FRAUD IS REAL. Before wiring any money, call the intended\nrecipient at a number you know is valid to confirm the instructions.",
+      "expected": "Escrow documents are ready for your signature."
+    },
+    {
+      "id": "plain_signature_audit_descriptive_phone_signature",
+      "input": "The repair is scheduled.\n\nBest,\nJohn Boga\nProperty Manager\nEmergency line after hours: 914-373-4658\nwww.nycbrownstone.net",
+      "expected": "The repair is scheduled.\n\nBest,\n\nJohn Boga",
+      "notes": "Revert-check: shared descriptive phone line in PlainTextSignatureRemover / web signature.ts; signature removal twin to phone-in-body keepers."
+    },
+    {
+      "id": "plain_signature_audit_legal_words_in_body",
+      "input": "Confidentiality notice: we need to discuss this.\n\nThe account is ready for review.\n\nOur services launch on Monday.",
+      "expected": "Confidentiality notice: we need to discuss this.\n\nThe account is ready for review.\n\nOur services launch on Monday.",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts reject body paragraphs after legal openers and honor explicit contact-list intros even with job titles."
+    },
+    {
+      "id": "plain_signature_audit_body_after_legal_footer",
+      "input": "The document is attached.\n\nThis email and any attachments are confidential.\n\nThe account is ready and the terms are final.\n\nPlease review our services before Monday.",
+      "expected": "The document is attached.\n\nThis email and any attachments are confidential.\n\nThe account is ready and the terms are final.\n\nPlease review our services before Monday.",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts reject body paragraphs after legal openers and honor explicit contact-list intros even with job titles."
+    },
+    {
+      "id": "plain_signature_audit_titled_contact_list",
+      "input": "Here are the contacts:\n- Jane Doe — Account Manager — jane@example.com\n- John Roe — Sales Director — john@example.com\nhttps://example.com/team",
+      "expected": "Here are the contacts:\n\n- Jane Doe — Account Manager — jane@example.com\n\n- John Roe — Sales Director — john@example.com\n\nhttps://example.com/team",
+      "notes": "Revert-check: PlainTextSignatureRemover / web signature.ts reject body paragraphs after legal openers and honor explicit contact-list intros even with job titles."
+    },
+    {
+      "id": "plain_signature_audit_title_prose",
+      "input": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nThe manager will call tomorrow.",
+      "expected": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nThe manager will call tomorrow.",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_email_prose",
+      "input": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nPlease send the revised plan to bob@example.com.",
+      "expected": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nPlease send the revised plan to bob@example.com.",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_url_prose",
+      "input": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nPlease review the revised plan at https://example.com/plan.",
+      "expected": "Please review the plan.\n\nCONFIDENTIALITY NOTICE: This email is confidential.\n\nPlease review the revised plan at https://example.com/plan.",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_authored_tagline_body_sentence",
+      "input": "Please review the plan.\n\nThe homeowner will coordinate with the broker.\nThe estimate changed.\n415-555-1212\njane@example.com",
+      "expected": "Please review the plan.\n\nThe homeowner will coordinate with the broker.\n\nThe estimate changed.\n\n415-555-1212 jane@example.com",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_authored_tagline_personal_name",
+      "input": "Please review the plan.\n\nJane Doe\nThe estimate changed.\n415-555-1212\njane@example.com",
+      "expected": "Please review the plan.\n\nJane Doe\n\nThe estimate changed.\n\n415-555-1212 jane@example.com",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
+    },
+    {
+      "id": "plain_signature_audit_body_before_legal_footer",
+      "input": "The manager will call tomorrow.\n\nThis email and any attachments are confidential.",
+      "expected": "The manager will call tomorrow.",
+      "notes": "Revert-check: strict contact/support checks and authored-prose veto in PlainTextSignatureRemover / web signature.ts; a footer marker or tagline bridge must not consume instructions."
     }
   ],
   "htmlToBubbleTextCases": [
