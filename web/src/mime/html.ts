@@ -13,7 +13,6 @@ import {
   WEB_URL_PATTERN,
   ADDRESS_KEYWORD_PATTERN,
   SIGN_OFF_PHRASES,
-  LEGAL_FOOTER_OPENERS,
   DESCRIPTIVE_PHONE_LINE_PATTERN,
   isStrongSignatureSupportLine,
 } from './patterns'
@@ -1243,7 +1242,6 @@ function escapedHTML(text: string): string {
 }
 
 const SIGNATURE_TEXT_MARKERS: RegExp[] = [
-  ...LEGAL_FOOTER_OPENERS.map((pattern) => new RegExp(pattern, 'i')),
   /^\s*--\s*$/i,
   /Sent from my (?:iPhone|iPad|Android|Galaxy|Pixel|Samsung)/i,
   /Sent from (?:Outlook|Mail for Windows|Spark|ProtonMail|BlueMail|Gmail|Yahoo Mail)/i,
@@ -1266,24 +1264,11 @@ function truncateAtSignatureMarkers(document: Document): void {
     for (const pattern of SIGNATURE_TEXT_MARKERS) {
       const match = pattern.exec(text)
       if (match) {
-        if (LEGAL_FOOTER_OPENERS.includes(pattern.source) && !isAtSignatureLineStart(textNode))
-          continue
         truncateAtTextNode(textNode, match.index, text)
         return
       }
     }
   }
-}
-
-function isAtSignatureLineStart(textNode: Text): boolean {
-  let ancestor = textNode.parentElement
-  while (ancestor) {
-    if (['p', 'div', 'li', 'td', 'body'].includes(tagName(ancestor))) {
-      return inlineHeaderLines(ancestor).some((line) => line.startTextNode === textNode)
-    }
-    ancestor = ancestor.parentElement
-  }
-  return false
 }
 
 const SIGNATURE_CITY_STATE_ZIP_PATTERN = /^[A-Z][A-Z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$/i
@@ -1406,43 +1391,48 @@ function truncateTrailingContactSignature(document: Document): void {
     return
   }
 
-  // A logo below a confirmed contact block is signature chrome. Bound image-only tails.
-  let removalEnd = lastNonEmpty
-  let imageCount = 0
-  for (let index = lastNonEmpty + 1; index < lines.length; index++) {
-    if (lines[index]!.text.length > 0) break
-    if (lines[index]!.element.querySelector('img')) {
-      if (imageCount >= 3) break
-      imageCount += 1
+  // Widening the range for metadata must not claim unmarked body media,
+  // including images between the contacts and footer or inside a footer line.
+  if (tailCount > 0) {
+    for (let index = signatureStart; index <= lastNonEmpty; index++) {
+      if (containsSignatureTailMedia(lines[index]!.element)) return
     }
-    removalEnd = index
   }
-  for (let index = signatureStart; index <= removalEnd; index++) {
+
+  // Unmarked images can be authored attachments, even after confirmed contacts.
+  // Only remove the text block; explicit signature wrappers own their images.
+  for (let index = signatureStart; index <= lastNonEmpty; index++) {
     lines[index]!.element.remove()
   }
 }
 
-function isSignatureTailLine(text: string): boolean {
-  if (/^(?:licensed|licen[cs]e|registration|registered|npn)\b[^.!?]*\d/i.test(text)) return true
-  if (isSignatureProductList(text)) return true
-  if (/^(?:p\.?\s*s\.?|please|the|i|we|you|your|also|let|can|could|will)\b/i.test(text))
-    return false
-  return text.split(/\s+/).length <= 7 && !/\p{Nd}/u.test(text) && /[.!]$/.test(text)
+function containsSignatureTailMedia(element: Element): boolean {
+  const mediaSelector =
+    'img, picture, svg, video, audio, object, embed, iframe, [src], [srcset], [background], [poster]'
+  if (element.matches(mediaSelector) || element.querySelector(mediaSelector)) return true
+  // CID references also include linked attachments (href/xlink:href).
+  if (/cid:/i.test(element.outerHTML)) return true
+  return [element, ...element.querySelectorAll('[style]')].some((candidate) =>
+    /url\s*\(/i.test(candidate.getAttribute('style') ?? ''),
+  )
 }
 
-function isSignatureProductList(text: string): boolean {
-  const segments = text.split(/[|•]/)
-  return (
-    segments.length >= 3 &&
-    segments.every((segment) => {
-      const words = segment.trim().split(/\s+/).filter(Boolean)
-      return (
-        words.length >= 1 &&
-        words.length <= 3 &&
-        !/\p{Nd}/u.test(segment) &&
-        !/@|http|www\.|[.!?:;]/i.test(segment)
-      )
-    })
+function isSignatureTailLine(text: string): boolean {
+  // Match the entire known boilerplate sentence. A heading or keyword match
+  // would also swallow authored discussion or a postscript in the same block.
+  if (
+    /^(?:(?:confidentiality notice|disclaimer)\s*:\s*)?this e-?mail and any attachments are for the exclusive(?: and confidential)? use of the intended recipients?\.?$/i.test(
+      text,
+    )
+  ) {
+    return true
+  }
+
+  // A whole license/registration identifier is metadata. Sentences containing
+  // a number, short slogans, and pipe-separated choices are ambiguous body text.
+  if (text.length > 160) return false
+  return /^(?:(?:licen[cs]e|registration|npn)\b(?:\s+(?:number|no\.?))?\s*[:#]?\s*[A-Z0-9-]*\d[A-Z0-9-]*|licensed in [A-Z]{2}(?:\s*(?:,|&|\band\b)\s*[A-Z]{2})*\s*[-–—]\s*NPN\s*[:#]?\s*\d[\d-]*)\.?$/i.test(
+    text,
   )
 }
 

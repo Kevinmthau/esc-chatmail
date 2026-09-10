@@ -109,7 +109,7 @@ extension EmailDOMQuoteRemover {
     // MARK: - Signature text markers
 
     private static let signatureTextMarkers: [NSRegularExpression] = {
-        let raw = SignaturePatterns.legalFooterOpeners + [
+        let raw = [
             "^\\s*--\\s*$",                  // line containing only --
             "Sent from my (?:iPhone|iPad|Android|Galaxy|Pixel|Samsung)",
             "Sent from (?:Outlook|Mail for Windows|Spark|ProtonMail|BlueMail|Gmail|Yahoo Mail)",
@@ -144,26 +144,11 @@ extension EmailDOMQuoteRemover {
             for pattern in signatureTextMarkers {
                 let range = NSRange(location: 0, length: text.utf16.count)
                 if let match = pattern.firstMatch(in: text, options: [], range: range) {
-                    if SignaturePatterns.legalFooterOpeners.contains(pattern.pattern),
-                       !isAtSignatureLineStart(textNode) {
-                        continue
-                    }
                     try truncateAtTextNode(textNode, matchStartUTF16: match.range.location, in: text)
                     return
                 }
             }
         }
-    }
-
-    private static func isAtSignatureLineStart(_ textNode: TextNode) -> Bool {
-        var ancestor = textNode.parent() as? Element
-        while let element = ancestor {
-            if ["p", "div", "li", "td", "body"].contains(element.tagNameNormal()) {
-                return inlineHeaderLines(in: element).contains { $0.startTextNode === textNode }
-            }
-            ancestor = element.parent()
-        }
-        return false
     }
 
     private static let signatureEmailPattern = EmailPatterns.address
@@ -314,41 +299,50 @@ extension EmailDOMQuoteRemover {
             return
         }
 
-        // A logo below a confirmed contact block is signature chrome. Bound image-only tails.
-        var removalEnd = lastNonEmpty
-        var imageCount = 0
-        for index in (lastNonEmpty + 1)..<lines.count {
-            guard lines[index].text.isEmpty else { break }
-            if (try? lines[index].element.select("img").isEmpty()) == false {
-                guard imageCount < 3 else { break }
-                imageCount += 1
+        // Widening the range for metadata must not claim unmarked body media,
+        // including images between the contacts and footer or inside a footer line.
+        if tailCount > 0 {
+            for index in signatureStart...lastNonEmpty {
+                guard try !containsSignatureTailMedia(lines[index].element) else { return }
             }
-            removalEnd = index
         }
-        for index in signatureStart...removalEnd {
+
+        // Unmarked images can be authored attachments, even after confirmed contacts.
+        // Only remove the text block; explicit signature wrappers own their images.
+        for index in signatureStart...lastNonEmpty {
             try lines[index].element.remove()
         }
     }
 
-    private static func isSignatureTailLine(_ text: String) -> Bool {
-        let words = text.split(whereSeparator: \.isWhitespace)
-        if text.range(of: #"^(?:licensed|licen[cs]e|registration|registered|npn)\b[^.!?]*\d"#, options: [.regularExpression, .caseInsensitive]) != nil {
-            return true
+    private static func containsSignatureTailMedia(_ element: Element) throws -> Bool {
+        let mediaSelector = "img, picture, svg, video, audio, object, embed, iframe, [src], [srcset], [background], [poster]"
+        if try !element.select(mediaSelector).isEmpty() { return true }
+        // CID references also include linked attachments (href/xlink:href).
+        if try element.outerHtml().range(of: "cid:", options: .caseInsensitive) != nil { return true }
+        let styledElements = [element] + (try element.select("[style]")).array()
+        return styledElements.contains { candidate in
+            let style = (try? candidate.attr("style")) ?? ""
+            return style.range(of: #"url\s*\("#, options: [.regularExpression, .caseInsensitive]) != nil
         }
-        if isSignatureProductList(text) { return true }
-        guard text.range(of: #"^(?:p\.?\s*s\.?|please|the|i|we|you|your|also|let|can|could|will)\b"#, options: [.regularExpression, .caseInsensitive]) == nil else { return false }
-        return words.count <= 7 && text.rangeOfCharacter(from: .decimalDigits) == nil &&
-            text.last.map { ".!".contains($0) } == true
     }
 
-    private static func isSignatureProductList(_ text: String) -> Bool {
-        let segments = text.components(separatedBy: CharacterSet(charactersIn: "|•"))
-        return segments.count >= 3 && segments.allSatisfy { segment in
-            let words = segment.split(whereSeparator: \.isWhitespace)
-            return (1...3).contains(words.count) && segment.rangeOfCharacter(from: .decimalDigits) == nil &&
-                !segment.contains("@") && !segment.contains("http") && !segment.contains("www.") &&
-                segment.rangeOfCharacter(from: CharacterSet(charactersIn: ".!?:;")) == nil
+    private static func isSignatureTailLine(_ text: String) -> Bool {
+        // Match the entire known boilerplate sentence. A heading or keyword match
+        // would also swallow authored discussion or a postscript in the same block.
+        if text.range(
+            of: #"^(?:(?:confidentiality notice|disclaimer)\s*:\s*)?this e-?mail and any attachments are for the exclusive(?: and confidential)? use of the intended recipients?\.?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
         }
+
+        // A whole license/registration identifier is metadata. Sentences containing
+        // a number, short slogans, and pipe-separated choices are ambiguous body text.
+        guard text.utf16.count <= 160 else { return false }
+        return text.range(
+            of: #"^(?:(?:licen[cs]e|registration|npn)\b(?:\s+(?:number|no\.?))?\s*[:#]?\s*[A-Z0-9-]*\d[A-Z0-9-]*|licensed in [A-Z]{2}(?:\s*(?:,|&|\band\b)\s*[A-Z]{2})*\s*[-–—]\s*NPN\s*[:#]?\s*\d[\d-]*)\.?$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
     }
 
     private static func previousNonEmptyLineIndex(
