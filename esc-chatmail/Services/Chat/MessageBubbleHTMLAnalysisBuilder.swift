@@ -203,15 +203,9 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
             // Inspect this occurrence, not the document's first CID. A logo
             // mockup followed by body instructions remains real message content.
-            let occurrenceStart = isInsideHTMLTag(in: lowercasedHTML, at: valueStart)
-                ? lowercasedHTML[..<valueStart].lastIndex(of: "<") ?? valueStart
-                : lowercasedHTML.index(valueStart, offsetBy: -4)
-            let occurrenceEnd = replyBoundaryOffset.flatMap { offset in
-                offset > cidOffset ? lowercasedHTML.index(lowercasedHTML.startIndex, offsetBy: offset) : nil
-            } ?? lowercasedHTML.endIndex
-            let occurrenceHTML = String(lowercasedHTML[occurrenceStart..<occurrenceEnd])
-            let followingHTML = htmlAfterFirstCIDBeforeNextSignOff(in: occurrenceHTML) ?? ""
-            let hasFollowingBodyProse = signatureContactOrRoleLines(in: followingHTML).contains(where: isBodyProseLine)
+            let hasFollowingBodyProse = hasFollowingBodyProse(
+                in: lowercasedHTML, at: valueStart, before: replyBoundaryOffset
+            )
             let isBeforeCorroboratedSignOff = !isAfterCorroboratedSignOff &&
                 !isAfterBrandingSignOff && corroboratedOffsets.contains { cidOffset < $0 }
             let isBeforeSignOff = (firstSignOffOffset.map { cidOffset < $0 } ?? false) ||
@@ -239,6 +233,18 @@ enum MessageBubbleHTMLAnalysisBuilder {
         nonDisplayable.subtract(bodyReferenced)
 
         return nonDisplayable
+    }
+
+    private static func hasFollowingBodyProse(in html: String, at valueStart: String.Index, before replyOffset: Int?) -> Bool {
+        let cidOffset = html.distance(from: html.startIndex, to: valueStart)
+        let start = isInsideHTMLTag(in: html, at: valueStart)
+            ? html[..<valueStart].lastIndex(of: "<") ?? valueStart
+            : html.index(valueStart, offsetBy: -4)
+        let end = replyOffset.flatMap { offset in
+            offset > cidOffset ? html.index(html.startIndex, offsetBy: offset) : nil
+        } ?? html.endIndex
+        let followingHTML = htmlAfterFirstCIDBeforeNextSignOff(in: String(html[start..<end])) ?? ""
+        return signatureContactOrRoleLines(in: followingHTML).contains(where: isBodyProseLine)
     }
 
     private static func firstHardSignatureBoundaryOffset(in lowercasedHTML: String) -> Int? {
@@ -930,6 +936,27 @@ enum MessageBubbleHTMLAnalysisBuilder {
         return hasSignatureKeyword || hasCorroboratedRegion || (hasBrandingRegion && isGenerated)
     }
 
+    /// Presentation may compact a surviving signature candidate, but ordinary
+    /// pasted photos (including a bare thanks/name with no signature evidence)
+    /// retain their existing size and chrome.
+    private static func bodyInlineContentIDs(in html: String) -> Set<String> {
+        let lowercasedHTML = html.lowercased()
+        let replyOffset = firstReplyBoundaryOffset(in: lowercasedHTML)
+        let boundaries = [firstHardSignatureBoundaryOffset(in: lowercasedHTML), replyOffset] +
+            standaloneTrailingSignatureStartOffsets(in: lowercasedHTML, before: replyOffset).map(Optional.some)
+        guard let firstBoundary = boundaries.compactMap({ $0 }).min() else {
+            return extractReferencedContentIDs(from: lowercasedHTML)
+        }
+        let end = lowercasedHTML.index(lowercasedHTML.startIndex, offsetBy: firstBoundary)
+        var bodyIDs = extractReferencedContentIDs(from: String(lowercasedHTML[..<end]))
+        EmailDocument.scanReferencedContentIDs(in: lowercasedHTML) { cid, start in
+            if hasFollowingBodyProse(in: lowercasedHTML, at: start, before: replyOffset) {
+                bodyIDs.insert(cid)
+            }
+        }
+        return bodyIDs
+    }
+
     private static func supportsCalendarInvitePreviewCard(
         canonicalHTML: String,
         isForwardedEmail: Bool,
@@ -991,7 +1018,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
                 senderName: senderName,
                 senderEmail: senderEmail,
                 subject: subject
-            )
+            ),
+            bodyInlineContentIDs: bodyInlineContentIDs(in: canonicalHTML)
         )
     }
 

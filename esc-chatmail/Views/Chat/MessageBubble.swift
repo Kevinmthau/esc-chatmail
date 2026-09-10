@@ -247,7 +247,18 @@ struct MessageBubble: View {
         )
         if !displayable.isEmpty {
             if style.showAttachmentGrid {
-                AttachmentGridView(attachments: displayable)
+                AttachmentGridView(
+                    attachments: displayable,
+                    inlineImagePresentations: Dictionary(uniqueKeysWithValues: displayable.map {
+                        ($0.objectID, InlineImagePresentationPolicy.resolve(
+                            attachment: $0,
+                            isFromMe: message.isFromMe,
+                            isHTMLPreview: showHTMLPreview,
+                            bodyContentIDs: viewModel.htmlAnalysis.bodyInlineContentIDs,
+                            hasLoadedAnalysis: viewModel.hasLoadedContent
+                        ))
+                    })
+                )
                     .frame(maxWidth: style.maxBubbleWidth)
             } else {
                 AttachmentIndicator(count: displayable.count)
