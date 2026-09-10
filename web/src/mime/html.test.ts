@@ -122,3 +122,11 @@ describe('confirmed signature tails', () => {
     expect(cleanedText(html)).toBe('Please read the confidentiality notice: it changed.')
   })
 })
+
+// Revert-check: short authored sentences are not branding taglines.
+it.each(['P.S. Bring the draft.', 'Please bring the draft.', 'The estimate changed.'])(
+  'preserves a post-signature instruction: %s',
+  (tail) => {
+    expect(cleanedText(messageWithTrailingSignature('') + `<p>${tail}</p>`)).toContain(tail)
+  },
+)

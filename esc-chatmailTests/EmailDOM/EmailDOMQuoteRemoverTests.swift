@@ -608,6 +608,14 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: contactList, mode: .quotedAndSignatures)), plainText(contactList))
     }
 
+    func testSignatureTailSkipPreservesPostscriptsAndAuthoredInstructions() {
+        // Revert-check: short authored sentences are not branding taglines.
+        let signature = "<p>Current reply.</p><p>John Smith</p><p>Partner</p><p>john@example.test</p><p>415-555-1212</p>"
+        for tail in ["P.S. Bring the draft.", "Please bring the draft.", "The estimate changed."] {
+            XCTAssertTrue(plainText(EmailDOMQuoteRemover.removeQuotes(from: signature + "<p>\(tail)</p>", mode: .quotedAndSignatures)).contains(tail))
+        }
+    }
+
     func testLegalFooterOpenersAreAnchoredToVisibleLineStart() {
         // Revert-check: legal openers remove the full notice, not just a later disclaimer sentence.
         let signature = "<p>Current reply.</p><p>Jane Doe</p><p>Partner</p><p>jane@example.test</p><p>415-555-1212</p>"

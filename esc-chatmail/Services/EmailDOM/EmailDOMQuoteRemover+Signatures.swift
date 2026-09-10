@@ -336,6 +336,7 @@ extension EmailDOMQuoteRemover {
             return true
         }
         if isSignatureProductList(text) { return true }
+        guard text.range(of: #"^(?:p\.?\s*s\.?|please|the|i|we|you|your|also|let|can|could|will)\b"#, options: [.regularExpression, .caseInsensitive]) == nil else { return false }
         return words.count <= 7 && text.rangeOfCharacter(from: .decimalDigits) == nil &&
             text.last.map { ".!".contains($0) } == true
     }

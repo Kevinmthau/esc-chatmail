@@ -1425,6 +1425,8 @@ function truncateTrailingContactSignature(document: Document): void {
 function isSignatureTailLine(text: string): boolean {
   if (/^(?:licensed|licen[cs]e|registration|registered|npn)\b[^.!?]*\d/i.test(text)) return true
   if (isSignatureProductList(text)) return true
+  if (/^(?:p\.?\s*s\.?|please|the|i|we|you|your|also|let|can|could|will)\b/i.test(text))
+    return false
   return text.split(/\s+/).length <= 7 && !/\p{Nd}/u.test(text) && /[.!]$/.test(text)
 }
 
