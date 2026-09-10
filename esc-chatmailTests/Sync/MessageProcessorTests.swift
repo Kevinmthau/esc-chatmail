@@ -246,6 +246,29 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertFalse(processed.chatPreviewText?.contains("QUOTED_ORIGINAL_TOKEN") == true)
     }
 
+    func testProcessGmailMessage_htmlFirstSignatureCleanupOnlyChangesPersistedPreview() async throws {
+        // Revert-check: MessageProcessor's HTML-first preview derivation must
+        // preserve the sign-off and following body text without changing canonical HTML.
+        let html = """
+        <div>Please confirm the appointment.</div>
+        <div class="gmail_signature">Best,<br>Alex<br>Account Manager<br>alex@example.com</div>
+        <div>P.S. Bring the printed plan.</div>
+        """
+        let message = makeMultipartAlternativeMessage(
+            id: "html-first-signature-preview",
+            plainText: "PLAIN_FALLBACK_MUST_NOT_WIN",
+            html: html,
+            plainFirst: false
+        )
+
+        let processedMessage = try await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.chatPreviewText, "Please confirm the appointment.\n\nBest,\nAlex\n\nP.S. Bring the printed plan.")
+        XCTAssertEqual(processed.htmlBody, html)
+        XCTAssertEqual(processed.canonicalContent?.html, html)
+    }
+
     func testProcessGmailMessage_outgoingForwardWithoutUserBodyDoesNotUseForwardedHTMLAsChatPreview() async throws {
         let plainText = """
 
