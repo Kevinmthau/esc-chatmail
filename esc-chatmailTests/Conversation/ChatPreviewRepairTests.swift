@@ -103,6 +103,28 @@ final class ChatPreviewRepairTests: XCTestCase {
         withExtendedLifetime(repair) {}
     }
 
+    func testRepeatedFooterVersionRepairsPreviouslyCompletedPreviewWithoutChangingSource() async throws {
+        let received = try message("001")
+        let source = RepeatedCorporateSignatureFixture.html()
+        let canonicalURL = try XCTUnwrap(handler.saveHTML(source, for: "001"))
+        received.bodyStorageURI = canonicalURL.absoluteString
+        received.chatPreviewText = RepeatedCorporateSignatureFixture.plainText(includeHistory: false)
+        let canonicalData = try Data(contentsOf: canonicalURL)
+        try context.save()
+        flags.set(true, forKey: "chatPreviewRepair.2026-09-10-signature-contact-links-v1")
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        context.refreshAllObjects()
+
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
+        XCTAssertEqual(received.chatPreviewText, RepeatedCorporateSignatureFixture.expectedChatText)
+        XCTAssertEqual(received.bodyStorageURI, canonicalURL.absoluteString)
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalData)
+        withExtendedLifetime(repair) {}
+    }
+
     // Revert-check: pending mutations preserve their conversation without stopping unrelated repairs.
     func testPendingSendDefersWithoutSkippingProtectedMessage() async throws {
         _ = try message("001")

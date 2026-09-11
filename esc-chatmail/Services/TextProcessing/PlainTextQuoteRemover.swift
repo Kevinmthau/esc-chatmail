@@ -150,6 +150,9 @@ enum PlainTextQuoteRemover {
 
         // Remove signatures (optional).
         if removingSignature {
+            cleanText = RepeatedSignatureRemover.removeSignature(from: cleanText) {
+                quotedParts.map(\.text).joined(separator: "\n")
+            }
             cleanText = removeSignature(from: cleanText)
         }
 
