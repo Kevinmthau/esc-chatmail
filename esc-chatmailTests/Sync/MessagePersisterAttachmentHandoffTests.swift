@@ -2,6 +2,22 @@ import CoreData
 import XCTest
 @testable import esc_chatmail
 
+/// The fixtures and the persister call go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `testStack.viewContext`,
+/// which is private-queue. `MessagePersister` is not actor-isolated and
+/// operates on whatever context it is handed, on the caller's thread — here
+/// this `@MainActor` test body, which reads and mutates the same objects
+/// around the call. A private-queue context makes every one of those accesses
+/// off-queue; see that helper for what it races.
+///
+/// Production runs this handoff on a sync background context inside
+/// `perform`, which this test does not model: the file-handoff logic under
+/// test is queue-agnostic, and modelling it would mean moving the whole body
+/// (fixtures, call, assertions) inside one `performAndWait` block.
+///
+/// HONEST SCOPE: this test cannot reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class MessagePersisterAttachmentHandoffTests: XCTestCase {
     private var testStack: TestCoreDataStack!
@@ -73,7 +89,7 @@ final class MessagePersisterAttachmentHandoffTests: XCTestCase {
         let uniqueData = Data(repeating: 0x03, count: 16)
         XCTAssertTrue(AttachmentPaths.saveData(uniqueData, to: uniqueLocalPath))
 
-        let context = testStack.viewContext
+        let context: NSManagedObjectContext = testStack.makeMainQueueViewContext()
         let optimisticMessage = MessageBuilder()
             .withId(optimisticMessageID)
             .withAttachments()
