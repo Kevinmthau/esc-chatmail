@@ -171,9 +171,13 @@ struct ChatPreviewRepair {
                 NewsletterFallbackText.looksLikeFallbackText(bodyText ?? storedHTMLText)
             return recoversNewsletterFallback ? nil : storedHTMLText
         }
-        // Outgoing rows never recover over the network, so the loader's result
-        // is fully local: stored HTML text, else the body-text fallback, unless
-        // the legacy outgoing body is richer.
+        // Outgoing rows never recover over the network, so this is fully
+        // local: stored HTML text, else the body-text fallback, unless the
+        // legacy outgoing body is richer. The richer-body comparison stays
+        // here even though the bubble loader no longer runs it: a device
+        // upgrading straight from a pre-backfill build still needs this pass
+        // to migrate those rows, and nothing else can recover the fuller
+        // authored text afterwards.
         let loadedText = storedHTMLText ?? bodyText.flatMap {
             MessageBubbleContentSource.bodyTextFallback(from: $0).mainText
         }

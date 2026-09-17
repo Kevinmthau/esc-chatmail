@@ -100,11 +100,7 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
         } else if let storedChatPreviewText {
             fullTextContent = storedChatPreviewText
         } else {
-            let outgoingBodyFallback = outgoingPlainTextContent(
-                from: request,
-                loadedPlainText: loadedContent.plainText
-            )
-            fullTextContent = outgoingBodyFallback ?? loadedContent.plainText
+            fullTextContent = loadedContent.plainText
         }
         let sharedDocumentLinkBodyText = forwardedDisplayContent == nil ? request.bodyText : nil
         let sharedDocumentLinkSnippet = forwardedDisplayContent == nil ? request.snippet : nil
@@ -164,20 +160,6 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
             forwardedDisplayContent: nil,
             htmlAnalysis: .placeholder(hasHTMLSource: false),
             isComplete: false
-        )
-    }
-
-    private func outgoingPlainTextContent(
-        from request: MessageBubbleContentRequest,
-        loadedPlainText: String?
-    ) -> String? {
-        guard request.isFromMe, !request.isForwardedEmail else {
-            return nil
-        }
-
-        return LegacyOutgoingBodyTextFallback.preferredBodyText(
-            fromBody: request.bodyText,
-            over: loadedPlainText
         )
     }
 
