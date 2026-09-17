@@ -31,6 +31,25 @@ enum MessageBubbleContentSource {
         return (nil, false, [])
     }
 
+    /// Derives bubble text from a persisted `bodyText` when no stored HTML
+    /// produced any. Shared by the bubble loader's compatibility path and the
+    /// blank-preview backfill so a backfilled preview matches what the bubble
+    /// already showed.
+    static func bodyTextFallback(from bodyText: String) -> ChatBubbleTextProcessingResult {
+        let fallbackContent = RawEmailSourceSanitizer.extractHTMLText(from: bodyText) ?? bodyText
+        if fallbackContent != bodyText {
+            return ChatBubbleTextProcessor.htmlCompatibilityFallback(
+                from: fallbackContent,
+                classifyRichContent: true
+            )
+        }
+        return ChatBubbleTextProcessor.legacyAutoDetectedFallback(
+            from: fallbackContent,
+            sanitizeRawEmailSource: true,
+            classifyRichContent: true
+        )
+    }
+
     /// Classifies rich HTML without deriving chat-bubble text. Used when
     /// Message.chatPreviewText is already the visible bubble source.
     static func classifyRichContent(

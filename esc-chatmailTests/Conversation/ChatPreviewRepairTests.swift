@@ -35,7 +35,10 @@ final class ChatPreviewRepairTests: XCTestCase {
         super.tearDown()
     }
 
-    // Revert-check: received/HTML eligibility, non-empty assignment, and limited ID-ordered batches.
+    // Revert-check: received-only eligibility, derivation from local HTML only,
+    // non-empty assignment, and limited ID-ordered batches. Rows without local
+    // HTML are scanned (recovery stores HTML under the message ID alone) but
+    // derive nothing, so their saved preview survives.
     func testBatchesRepairReceivedHTMLAndPreserveOtherMessages() async throws {
         let received = try message("001")
         received.isUnread = true
@@ -55,10 +58,14 @@ final class ChatPreviewRepairTests: XCTestCase {
         XCTAssertEqual(first.changedMessageIDs, ["001"])
         XCTAssertTrue(stack.saveIfNeeded(context: background))
         let second = try await repair.prepareBatch(in: background, after: first.lastMessageID, limit: 2)
-        XCTAssertEqual(second.lastMessageID, "005")
-        XCTAssertEqual(second.changedMessageIDs, ["005"])
+        XCTAssertEqual(second.lastMessageID, "004")
+        XCTAssertTrue(second.changedMessageIDs.isEmpty, "Neither row has local HTML to derive from")
         XCTAssertTrue(stack.saveIfNeeded(context: background))
-        let drained = try await repair.prepareBatch(in: background, after: second.lastMessageID, limit: 2)
+        let third = try await repair.prepareBatch(in: background, after: second.lastMessageID, limit: 2)
+        XCTAssertEqual(third.lastMessageID, "005")
+        XCTAssertEqual(third.changedMessageIDs, ["005"])
+        XCTAssertTrue(stack.saveIfNeeded(context: background))
+        let drained = try await repair.prepareBatch(in: background, after: third.lastMessageID, limit: 2)
         XCTAssertTrue(drained.didDrain)
 
         context.refreshAllObjects()
@@ -288,6 +295,192 @@ final class ChatPreviewRepairTests: XCTestCase {
         withExtendedLifetime(repair) {}
     }
 
+    // Revert-check: `ChatPreviewRepair.backfilledPreview` — the forwarded-subject
+    // guard, the received-without-HTML guard, and the outgoing body preference.
+    // Each stored preview must equal the text the bubble already displayed, and
+    // the bubble must not change after the backfill.
+    func testBlankBackfillStoresTheTextTheBubbleAlreadyShows() async throws {
+        let receivedIDOnlyHTML = try blankMessage("001", storedHTML: true, setsBodyStorageURI: false)
+        let receivedWithoutHTML = try blankMessage("002", storedHTML: false)
+        receivedWithoutHTML.bodyText = "Plain received body."
+        let sentWithHTML = try blankMessage("003")
+        sentWithHTML.isFromMe = true
+        let sentWithoutHTML = try blankMessage("004", storedHTML: false)
+        sentWithoutHTML.isFromMe = true
+        sentWithoutHTML.bodyText = "Sent body text.\n\nThanks,\nMe"
+        let sentRicherBody = try blankMessage("005", storedHTML: false)
+        sentRicherBody.isFromMe = true
+        sentRicherBody.bodyStorageURI = try XCTUnwrap(
+            handler.saveHTML("<div>Short</div>", for: "005")
+        ).absoluteString
+        sentRicherBody.bodyText = "Short and then a much longer tail that the HTML lost."
+        let forwarded = try blankMessage("006")
+        forwarded.subject = "Fwd: Quarterly numbers"
+        let whitespacePreview = try blankMessage("007")
+        whitespacePreview.chatPreviewText = " \n "
+        let newsletterFallbackBody = try blankMessage("008")
+        newsletterFallbackBody.bodyText = """
+        View in Browser
+        https://example.com/view
+
+        Unsubscribe
+        https://example.com/unsubscribe
+        """
+        let trustedTransactionalSender = try blankMessage("009")
+        trustedTransactionalSender.senderEmail = "noreply@members.ebay.com"
+        try context.save()
+
+        let allFixtures = [
+            receivedIDOnlyHTML, receivedWithoutHTML, sentWithHTML, sentWithoutHTML,
+            sentRicherBody, forwarded, whitespacePreview, newsletterFallbackBody,
+            trustedTransactionalSender
+        ]
+        var bubbleTextBefore: [String: String?] = [:]
+        for message in allFixtures {
+            bubbleTextBefore[message.id] = await bubbleText(for: message)
+        }
+
+        try await drainBackfill()
+        context.refreshAllObjects()
+
+        // Filled: the stored preview is exactly what the bubble showed.
+        for message in [receivedIDOnlyHTML, sentWithHTML, sentWithoutHTML, sentRicherBody, whitespacePreview] {
+            let before = try XCTUnwrap(bubbleTextBefore[message.id] ?? nil, "Fixture \(message.id) had no bubble text")
+            XCTAssertEqual(message.chatPreviewText, before, "Backfilled preview for \(message.id)")
+        }
+        XCTAssertEqual(sentRicherBody.chatPreviewText, "Short and then a much longer tail that the HTML lost.")
+
+        // Skipped: the loader still owns these rows.
+        XCTAssertNil(receivedWithoutHTML.chatPreviewText, "Received rows without local HTML can still recover over the network")
+        XCTAssertNil(forwarded.chatPreviewText, "A stored preview would replace the forwarded lead-in")
+        XCTAssertNil(
+            newsletterFallbackBody.chatPreviewText,
+            "A newsletter-fallback body can still be replaced by recovered HTML"
+        )
+        XCTAssertNil(
+            trustedTransactionalSender.chatPreviewText,
+            "Trusted transactional senders can still recover HTML"
+        )
+
+        // The bubble is unchanged for every row.
+        for message in allFixtures {
+            let after = await bubbleText(for: message)
+            XCTAssertEqual(after, bubbleTextBefore[message.id] ?? nil, "Bubble text changed for \(message.id)")
+        }
+    }
+
+    // Revert-check: `.receivedHTMLRederivation` must select every received row,
+    // not just `bodyStorageURI` ones. Recovery stores HTML under the message ID
+    // alone, and the backfill persists those rows' previews — so a derivation
+    // change that skipped them would strand them on the old derivation forever.
+    func testRederivationReachesReceivedRowsWithHTMLStoredByMessageIDOnly() async throws {
+        let idOnlyHTML = try message("001", storedHTML: false)
+        _ = try XCTUnwrap(handler.saveHTML(html, for: "001"))
+        let plainTextOnly = try message("002", storedHTML: false)
+        try context.save()
+
+        let background = stack.newBackgroundContext()
+        let batch = try await ChatPreviewRepair(htmlContentHandler: handler).prepareBatch(in: background, after: nil)
+        XCTAssertEqual(batch.changedMessageIDs, ["001"])
+        XCTAssertTrue(stack.saveIfNeeded(context: background))
+
+        context.refreshAllObjects()
+        XCTAssertEqual(idOnlyHTML.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
+        XCTAssertEqual(plainTextOnly.chatPreviewText, "Old preview", "No local HTML derives nothing")
+    }
+
+    // Revert-check: the per-pass loop in `repairPersistedChatPreviews` — a pass
+    // that stops early must not block the next one. A retained failed send
+    // defers its conversation indefinitely, so gating the backfill on the
+    // re-derivation pass completing would strand every blank row.
+    func testCoordinatorBackfillCompletesWhileRederivationDefers() async throws {
+        let deferredByPendingSend = try message("001")
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = "pending-send"
+        record.createdAt = Date()
+        record.conversationId = deferredByPendingSend.conversation?.id
+        let blankSent = try blankMessage("002", storedHTML: false)
+        blankSent.isFromMe = true
+        blankSent.bodyText = "Sent body text."
+        try context.save()
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+
+        context.refreshAllObjects()
+        XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey))
+        XCTAssertEqual(deferredByPendingSend.chatPreviewText, "Old preview")
+        XCTAssertEqual(blankSent.chatPreviewText, "Sent body text.")
+        withExtendedLifetime(repair) {}
+    }
+
+    // Revert-check: the backfill runs under the same pending-send deferral as
+    // the re-derivation pass, so an in-flight send's conversation is untouched
+    // and the pass stays incomplete until the record clears.
+    func testBlankBackfillDefersPendingSendConversations() async throws {
+        let blank = try blankMessage("001", storedHTML: false)
+        blank.isFromMe = true
+        blank.bodyText = "Sent body text."
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = "pending-send"
+        record.createdAt = Date()
+        record.conversationId = blank.conversation?.id
+        try context.save()
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+
+        context.refreshAllObjects()
+        XCTAssertNil(blank.chatPreviewText)
+        XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey))
+        withExtendedLifetime(repair) {}
+    }
+
+    private func drainBackfill() async throws {
+        let repair = ChatPreviewRepair(htmlContentHandler: handler, pass: .blankPreviewBackfill)
+        let background = stack.newBackgroundContext()
+        var cursor: String?
+        while true {
+            let batch = try await repair.prepareBatch(in: background, after: cursor)
+            XCTAssertTrue(stack.saveIfNeeded(context: background))
+            if batch.didDrain { return }
+            cursor = batch.lastMessageID
+        }
+    }
+
+    private func bubbleText(for message: Message) async -> String? {
+        let recovery = NoHTMLRecoverer()
+        let loader = MessageBubbleLoader(
+            contactsResolver: NoContactsResolver(),
+            htmlContentHandler: handler,
+            htmlContentLoader: HTMLContentLoader(contentHandler: handler, recoveryService: recovery),
+            htmlContentRecoveryService: recovery,
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache(),
+            renderedMessageCache: RenderedMessageCache()
+        )
+        let request = ChatMessageRowModelMapper.map(message).makeContentRequest()
+        return await loader.loadContent(from: request).fullTextContent
+    }
+
+    private func blankMessage(
+        _ id: String,
+        storedHTML: Bool = true,
+        setsBodyStorageURI: Bool = true
+    ) throws -> Message {
+        let message = try self.message(id, storedHTML: false)
+        message.chatPreviewText = nil
+        if storedHTML {
+            let url = try XCTUnwrap(handler.saveHTML(html, for: id))
+            if setsBodyStorageURI {
+                message.bodyStorageURI = url.absoluteString
+            }
+        }
+        return message
+    }
+
     private func message(_ id: String, storedHTML: Bool = true) throws -> Message {
         let conversation = ConversationBuilder().build(in: context)
         let message = MessageBuilder().withId(id).inConversation(conversation).build(in: context)
@@ -346,4 +539,14 @@ private actor ChatPreviewRepairGate {
         continuations.removeAll()
         pending.forEach { $0.resume() }
     }
+}
+
+private struct NoHTMLRecoverer: HTMLContentRecovering {
+    func recoverHTMLContent(messageId: String) async -> String? { nil }
+}
+
+private final class NoContactsResolver: ContactsResolving, @unchecked Sendable {
+    func ensureAuthorization() async throws {}
+    func lookup(email: String) async -> ContactMatch? { nil }
+    func prewarm(emails: [String]) async {}
 }

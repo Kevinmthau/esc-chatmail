@@ -32,7 +32,7 @@ extension MessageBubbleLoader {
             )
             return hasRichContent || (
                 resolvedHasHTMLSource &&
-                self.looksLikeNewsletterFallbackText(request.bodyText ?? request.snippet)
+                NewsletterFallbackText.looksLikeFallbackText(request.bodyText ?? request.snippet)
             )
         } ?? false
     }
@@ -78,8 +78,8 @@ extension MessageBubbleLoader {
                 return false
             }
 
-            return looksLikeNewsletterFallbackText(request.bodyText ?? request.snippet) ||
-                looksLikeNewsletterFallbackText(plainText)
+            return NewsletterFallbackText.looksLikeFallbackText(request.bodyText ?? request.snippet) ||
+                NewsletterFallbackText.looksLikeFallbackText(plainText)
         }
 
         if let cached = await renderedMessageCache.cachedChatBubbleText(
@@ -169,7 +169,7 @@ extension MessageBubbleLoader {
             !request.isFromMe &&
             resolvedHasHTMLSource &&
             !result.hasRichContent &&
-            looksLikeNewsletterFallbackText(request.bodyText ?? result.plainText ?? request.snippet)
+            NewsletterFallbackText.looksLikeFallbackText(request.bodyText ?? result.plainText ?? request.snippet)
 
         if (shouldAttemptHTMLRecovery || shouldAttemptTrustedSenderRecovery || shouldAttemptNewsletterFallbackRecovery),
            await isAccountWorkContextCurrent(accountContext),
@@ -207,35 +207,6 @@ extension MessageBubbleLoader {
         return result
     }
 
-    nonisolated private func looksLikeNewsletterFallbackText(_ text: String?) -> Bool {
-        guard let text = text?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !text.isEmpty else {
-            return false
-        }
-
-        let lowercased = text.lowercased()
-        let hasNewsletterMarkers =
-            lowercased.contains("view in browser") ||
-            lowercased.contains("unsubscribe") ||
-            lowercased.contains("manage subscriptions") ||
-            lowercased.contains("manage preferences") ||
-            lowercased.contains("privacy policy")
-
-        guard hasNewsletterMarkers else {
-            return false
-        }
-
-        let urlLikeCount = text.components(separatedBy: .newlines).reduce(into: 0) { count, line in
-            let lowerLine = line.lowercased()
-            if lowerLine.contains("http://") || lowerLine.contains("https://") {
-                count += 1
-            }
-        }
-
-        return urlLikeCount >= 2
-    }
-
     private func processMessageContent(
         from request: MessageBubbleContentRequest,
         sourceSignature: String,
@@ -251,22 +222,7 @@ extension MessageBubbleLoader {
         var cacheSourceSignature = sourceSignature
 
         if processedResult.plainText == nil, let text = request.bodyText {
-            let fallbackContent = RawEmailSourceSanitizer.extractHTMLText(from: text) ?? text
-            let fallbackInputKind: ChatBubbleTextInputKind =
-                fallbackContent == text ? .autoDetectHTML : .html
-            let fallbackResult: ChatBubbleTextProcessingResult
-            if fallbackInputKind == .html {
-                fallbackResult = ChatBubbleTextProcessor.htmlCompatibilityFallback(
-                    from: fallbackContent,
-                    classifyRichContent: true
-                )
-            } else {
-                fallbackResult = ChatBubbleTextProcessor.legacyAutoDetectedFallback(
-                    from: fallbackContent,
-                    sanitizeRawEmailSource: true,
-                    classifyRichContent: true
-                )
-            }
+            let fallbackResult = MessageBubbleContentSource.bodyTextFallback(from: text)
             processedResult = (
                 fallbackResult.mainText,
                 fallbackResult.hasRichContent,

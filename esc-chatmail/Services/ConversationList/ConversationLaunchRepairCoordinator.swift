@@ -32,7 +32,7 @@ final class ConversationLaunchRepairCoordinator {
     private let notificationCenter: NotificationCenter
     private let conversationMutationSerializer: ConversationRollupMutationSerializer
     private let accountWorkCoordinator: SyncRunCoordinator
-    private let chatPreviewRepair: ChatPreviewRepair
+    private let htmlContentHandler: HTMLContentHandler
     private let repairTaskPriority: TaskPriority?
     private var isChatPreviewRepairRunning = false
     private let taskManager = ViewModelTaskManager()
@@ -79,7 +79,7 @@ final class ConversationLaunchRepairCoordinator {
         self.repairTaskPriority = repairTaskPriority
         self.conversationMutationSerializer = conversationMutationSerializer
         self.accountWorkCoordinator = accountWorkCoordinator
-        self.chatPreviewRepair = ChatPreviewRepair(htmlContentHandler: htmlContentHandler)
+        self.htmlContentHandler = htmlContentHandler
         bindSyncCompletionRepairRearm()
     }
 
@@ -119,7 +119,45 @@ final class ConversationLaunchRepairCoordinator {
 
     static let chatPreviewRepairMigrationKey = "chatPreviewRepair." + CacheVersioning.chatPreviewDerivationVersion
     static let chatPreviewRepairCheckpointKey = chatPreviewRepairMigrationKey + ".checkpoint"
+    /// Not tied to the derivation version: the backfill stores what the bubble
+    /// already showed, so a derivation change re-runs the re-derivation pass
+    /// (which owns received HTML rows) rather than this one.
+    static let blankChatPreviewBackfillMigrationKey = "chatPreviewBlankBackfill.v1"
+    static let blankChatPreviewBackfillCheckpointKey = blankChatPreviewBackfillMigrationKey + ".checkpoint"
     private static let chatPreviewRepairTaskKey = "repairPersistedChatPreviews"
+
+    /// One entry per persisted-preview pass, run in order under a single
+    /// account-work request. Each pass owns its own completion flag and cursor.
+    private struct ChatPreviewPass {
+        let repair: ChatPreviewRepair
+        let migrationKey: String
+        let checkpointKey: String
+    }
+
+    private enum ChatPreviewPassOutcome {
+        /// The pass drained with nothing deferred and latched its flag.
+        case completed
+        /// The pass stopped early (deferred rows, a failed save). Later passes
+        /// still run; this one retries on the next launch or sync completion.
+        case incomplete
+        /// Cancellation or an account transition. No later pass may run.
+        case stopped
+    }
+
+    private func chatPreviewPasses() -> [ChatPreviewPass] {
+        [
+            ChatPreviewPass(
+                repair: ChatPreviewRepair(htmlContentHandler: htmlContentHandler, pass: .receivedHTMLRederivation),
+                migrationKey: Self.chatPreviewRepairMigrationKey,
+                checkpointKey: Self.chatPreviewRepairCheckpointKey
+            ),
+            ChatPreviewPass(
+                repair: ChatPreviewRepair(htmlContentHandler: htmlContentHandler, pass: .blankPreviewBackfill),
+                migrationKey: Self.blankChatPreviewBackfillMigrationKey,
+                checkpointKey: Self.blankChatPreviewBackfillCheckpointKey
+            )
+        ]
+    }
 
 #if DEBUG
     func waitForChatPreviewRepairCompletion() async {
@@ -129,55 +167,81 @@ final class ConversationLaunchRepairCoordinator {
 
     /// Checkpoint after each saved batch so cancellation or process exit can
     /// resume without re-reading every earlier HTML file. No model migration.
+    /// A pass that stops early does not block the next one: a retained failed
+    /// send defers its conversation indefinitely, and the backfill must not
+    /// wait on it.
     func repairPersistedChatPreviews() {
-        guard !isChatPreviewRepairRunning,
-              !storage.migrationFlags.bool(forKey: Self.chatPreviewRepairMigrationKey) else { return }
+        let pendingPasses = chatPreviewPasses().filter {
+            !storage.migrationFlags.bool(forKey: $0.migrationKey)
+        }
+        guard !isChatPreviewRepairRunning, !pendingPasses.isEmpty else { return }
         isChatPreviewRepairRunning = true
         taskManager.run(Self.chatPreviewRepairTaskKey, priority: repairTaskPriority) { [weak self] in
             guard let self else { return }
             defer { isChatPreviewRepairRunning = false }
             guard let request = await accountWorkCoordinator.makeAccountWorkRequest() else { return }
-            var checkpoint = ChatPreviewRepair.Checkpoint.decode(
-                storage.migrationFlags.string(forKey: Self.chatPreviewRepairCheckpointKey)
-            )
-            while !Task.isCancelled {
-                // Never wait for sync while holding a lease: account teardown
-                // waits for leases to drain before replacing the store.
-                await syncWaiter.waitForCurrentSyncToComplete()
-                guard !Task.isCancelled,
-                      let lease = await accountWorkCoordinator.acquireAccountWorkLease(kind: .maintenance, for: request) else { return }
-                let batchCheckpoint = checkpoint
-                let batch = await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
-                    await self.prepareAndSaveChatPreviewBatch(lease: lease, checkpoint: batchCheckpoint)
-                }
-                if let batch {
-                    checkpoint.afterMessageID = batch.lastMessageID
-                    checkpoint.firstDeferredMessageID = checkpoint.firstDeferredMessageID ?? batch.firstDeferredMessageID
-                    let isComplete = batch.didDrain && checkpoint.firstDeferredMessageID == nil
-                    if batch.didDrain, let deferred = checkpoint.firstDeferredMessageID {
-                        checkpoint = ChatPreviewRepair.Checkpoint(resumeAtMessageID: deferred)
-                    }
-                    storage.migrationFlags.setString(checkpoint.encoded, forKey: Self.chatPreviewRepairCheckpointKey)
-                    if isComplete {
-                        storage.migrationFlags.set(true, forKey: Self.chatPreviewRepairMigrationKey)
-                        storage.migrationFlags.setString(nil, forKey: Self.chatPreviewRepairCheckpointKey)
-                    }
-                }
-                await accountWorkCoordinator.endRun(lease)
-                guard let batch, !batch.didDrain else { return }
-                await Task.yield()
+            for pass in pendingPasses {
+                let outcome = await runChatPreviewPass(pass, request: request)
+                if outcome == .stopped { return }
             }
         }
     }
 
+    private func runChatPreviewPass(
+        _ pass: ChatPreviewPass,
+        request: AccountWorkRequest
+    ) async -> ChatPreviewPassOutcome {
+        var checkpoint = ChatPreviewRepair.Checkpoint.decode(
+            storage.migrationFlags.string(forKey: pass.checkpointKey)
+        )
+        while !Task.isCancelled {
+            // Never wait for sync while holding a lease: account teardown
+            // waits for leases to drain before replacing the store.
+            await syncWaiter.waitForCurrentSyncToComplete()
+            guard !Task.isCancelled,
+                  let lease = await accountWorkCoordinator.acquireAccountWorkLease(kind: .maintenance, for: request) else {
+                return .stopped
+            }
+            let batchCheckpoint = checkpoint
+            let batch = await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
+                await self.prepareAndSaveChatPreviewBatch(
+                    repair: pass.repair,
+                    lease: lease,
+                    checkpoint: batchCheckpoint
+                )
+            }
+            var isComplete = false
+            if let batch {
+                checkpoint.afterMessageID = batch.lastMessageID
+                checkpoint.firstDeferredMessageID = checkpoint.firstDeferredMessageID ?? batch.firstDeferredMessageID
+                isComplete = batch.didDrain && checkpoint.firstDeferredMessageID == nil
+                if batch.didDrain, let deferred = checkpoint.firstDeferredMessageID {
+                    checkpoint = ChatPreviewRepair.Checkpoint(resumeAtMessageID: deferred)
+                }
+                storage.migrationFlags.setString(checkpoint.encoded, forKey: pass.checkpointKey)
+                if isComplete {
+                    storage.migrationFlags.set(true, forKey: pass.migrationKey)
+                    storage.migrationFlags.setString(nil, forKey: pass.checkpointKey)
+                }
+            }
+            await accountWorkCoordinator.endRun(lease)
+            guard let batch, !batch.didDrain else {
+                return isComplete ? .completed : .incomplete
+            }
+            await Task.yield()
+        }
+        return .stopped
+    }
+
     private func prepareAndSaveChatPreviewBatch(
+        repair: ChatPreviewRepair,
         lease: SyncRun, checkpoint: ChatPreviewRepair.Checkpoint
     ) async -> ChatPreviewRepair.Batch? {
         guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease) else { return nil }
         let context = storage.makeBackgroundContext()
         context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
         do {
-            let batch = try await chatPreviewRepair.prepareBatch(
+            let batch = try await repair.prepareBatch(
                 in: context,
                 after: checkpoint.afterMessageID,
                 startingAt: checkpoint.resumeAtMessageID

@@ -175,13 +175,8 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
             return nil
         }
 
-        let result = ChatBubbleTextProcessor.legacyAutoDetectedFallback(
-            from: request.bodyText,
-            sanitizeRawEmailSource: true,
-            classifyRichContent: false
-        )
         return LegacyOutgoingBodyTextFallback.preferredBodyText(
-            result.mainText,
+            fromBody: request.bodyText,
             over: loadedPlainText
         )
     }
