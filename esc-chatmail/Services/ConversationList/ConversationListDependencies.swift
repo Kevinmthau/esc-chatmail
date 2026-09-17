@@ -11,6 +11,9 @@ struct ConversationListDependencies {
     let conversationManager: ConversationManager
     /// Source of `.syncCompleted` for the launch repair's re-arm.
     var notificationCenter: NotificationCenter = .default
+    /// Priority of the launch repair's store sweeps; see
+    /// `ConversationLaunchRepairCoordinator.init`'s `repairTaskPriority`.
+    var launchRepairTaskPriority: TaskPriority? = .background
     let makeConversationSearchService: @MainActor () -> ConversationSearchService
     let makeConversationSelectionService: @MainActor () -> ConversationSelectionService
     let makeConversationFilterService: @MainActor () -> ConversationFilterService

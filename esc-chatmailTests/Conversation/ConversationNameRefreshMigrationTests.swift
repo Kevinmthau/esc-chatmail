@@ -575,16 +575,19 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         return conversation
     }
 
-    // The preview repair runs at .background priority (and historically
-    // awaited the shared SyncEngine going idle; forTesting now injects an
-    // immediate waiter), so on a loaded CI runner the first poll success can
-    // take several seconds; the deadline is generous because a
-    // green run exits at the first successful poll anyway. 15s still timed
-    // out on a CI run whose test phase ran ~2x slower than baseline, so the
-    // deadline sits far above any observed stall while staying under CI's
-    // 120s per-test allowance. The 50ms interval keeps this MainActor
-    // fetch-and-refresh poll from contending with the repair task's own
-    // MainActor hops.
+    // Production runs the launch repairs at .background priority (and they
+    // historically awaited the shared SyncEngine going idle; forTesting now
+    // injects an immediate waiter). Raising this deadline never fixed the
+    // resulting flakes: 15s timed out, and then 60s lost
+    // testRepairMissingConversationPreviewsRunsV2WhenLegacyV1Completed on
+    // PR #236's merge run, whose worker logged its save 0.6s after the
+    // deadline — a loaded CI VM can leave .background jobs unscheduled for
+    // over a minute, and polling never raises their priority. forTesting now
+    // defaults `launchRepairTaskPriority` to nil, so the repairs inherit the
+    // test's priority; the deadline is only a liveness bound, and a green run
+    // exits at the first successful poll. The 50ms interval keeps this
+    // MainActor fetch-and-refresh poll from contending with the repair task's
+    // own MainActor hops.
     private func waitUntil(
         timeout: TimeInterval = 60.0,
         pollIntervalNanoseconds: UInt64 = 50_000_000,

@@ -2,26 +2,42 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, reset, and assertion goes through the suite's
+/// `viewContext`, a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `coreDataStack.viewContext`, which is private-queue. `GmailSendService` and
+/// `OutboundAttachmentContextBuilder` are `@MainActor` and fetch, save, and
+/// obtain permanent IDs on their context directly, which is on-queue only for a
+/// main-queue context. See that helper for what the private-queue shape races.
+/// `MutationRecordPersistenceFailingContext` is already main-queue; its test
+/// builds it on the same coordinator.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class GmailSendServiceOptimisticCreationTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var viewContext: NSManagedObjectContext!
     private var sendService: GmailSendService!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
-        sendService = GmailSendService(viewContext: coreDataStack.viewContext)
+        viewContext = coreDataStack.makeMainQueueViewContext()
+        sendService = GmailSendService(viewContext: viewContext)
     }
 
     override func tearDown() {
-        coreDataStack?.resetViewContext()
+        viewContext?.reset()
         sendService = nil
+        viewContext = nil
         coreDataStack = nil
         super.tearDown()
     }
 
     func testCreateOptimisticMessage_newConversationPersistsDurablyWithStableIDs() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let attachmentBuilder = OutboundAttachmentContextBuilder(viewContext: context)
         let attachment = AttachmentBuilder()
             .withId("local_attachment_1")
@@ -52,7 +68,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
 
         XCTAssertEqual(fetched.attachmentsArray.compactMap(\.id), ["local_attachment_1"])
 
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let durableMessage = try XCTUnwrap(
             sendService.fetchMessageSync(byID: handle.optimisticMessageID)
         )
@@ -68,7 +84,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             userName: "Me Example"
         )
         let sendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             authSession: authSession
         )
 
@@ -91,7 +107,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             userName: "Me Example"
         )
         let sendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             authSession: authSession
         )
 
@@ -116,7 +132,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             userName: "Me Example"
         )
         let sendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             authSession: authSession
         )
 
@@ -140,7 +156,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             $0.person?.objectID.isTemporaryID == false
         } == true)
 
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let durableMessage = try XCTUnwrap(
             sendService.fetchMessageSync(byID: handle.optimisticMessageID)
         )
@@ -160,10 +176,10 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         let quotedName = "Kevin \"KT\" Thau"
         let authSession = makeTestAuthSession(userEmail: myEmail, userName: quotedName)
         let sendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             authSession: authSession
         )
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
 
         let handle = try await sendService.createOptimisticMessage(
             to: ["friend@example.com"],
@@ -304,7 +320,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
     }
 
     func testCreateOptimisticMessage_persistsGraphAndMutationRecordAtomically() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "durable-record@example.com"
 
         let handle = try await sendService.createOptimisticMessage(
@@ -317,7 +333,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
 
         XCTAssertFalse(context.hasChanges)
 
-        coreDataStack.resetViewContext()
+        viewContext.reset()
 
         let durableMessage = try XCTUnwrap(
             sendService.fetchMessageSync(byID: handle.optimisticMessageID)
@@ -382,7 +398,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
     }
 
     func testCreateOptimisticMessage_reactivatesArchivedConversationDurably() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "friend@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
 
@@ -391,7 +407,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             .withDisplayName("Archived")
             .archived()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let handle = try await sendService.createOptimisticMessage(
             to: [recipient],
@@ -408,13 +424,13 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
     }
 
     func testCreateOptimisticMessage_withOptimisticConversationReferenceReusesExistingConversation() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .withDisplayName("Reply Thread")
             .visible()
             .recentlyActive()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let handle = try await sendService.createOptimisticMessage(
             to: ["friend@example.com"],
@@ -432,7 +448,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
     }
 
     func testCreateOptimisticMessage_inheritsListIdFromAnchoredConversation() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .asList()
             .withListId("list.example.com")
@@ -440,7 +456,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             .visible()
             .recentlyActive()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let handle = try await sendService.createOptimisticMessage(
             to: ["post@list.example.com"],
@@ -460,7 +476,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
     }
 
     func testCreateOptimisticMessage_rejectsRetainedDrainedConversationAnchor() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .asList()
             .withListId("list.example.com")
@@ -468,7 +484,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             .archived()
             .setHidden()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         do {
             _ = try await sendService.createOptimisticMessage(
@@ -490,13 +506,13 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
     }
 
     func testCreateOptimisticMessage_rejectsDeletedRegisteredConversationAnchor() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .withDisplayName("Deleted reply target")
             .visible()
             .recentlyActive()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
         let reference = ConversationReference(objectID: conversation.objectID)
 
         context.delete(conversation)
@@ -521,6 +537,14 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
 
         XCTAssertEqual(try messageCount(in: context), 0)
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+    }
+
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
     }
 
     private func optimisticMutationRecordCount(in context: NSManagedObjectContext) throws -> Int {

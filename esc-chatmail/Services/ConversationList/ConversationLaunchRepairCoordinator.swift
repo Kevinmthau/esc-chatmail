@@ -33,6 +33,7 @@ final class ConversationLaunchRepairCoordinator {
     private let conversationMutationSerializer: ConversationRollupMutationSerializer
     private let accountWorkCoordinator: SyncRunCoordinator
     private let htmlContentHandler: HTMLContentHandler
+    private let repairTaskPriority: TaskPriority?
     private var isChatPreviewRepairRunning = false
     private let taskManager = ViewModelTaskManager()
     private var cancellables = Set<AnyCancellable>()
@@ -54,6 +55,13 @@ final class ConversationLaunchRepairCoordinator {
     ///     `SyncEngine`; tests inject a controllable waiter.
     ///   - notificationCenter: Source of `.syncCompleted` for the repair
     ///     re-arm. Production passes `.default`.
+    ///   - repairTaskPriority: Priority of the three store sweeps (list
+    ///     titles, missing previews, persisted chat previews). Production keeps
+    ///     `.background` so launch maintenance never competes with the UI.
+    ///     Tests pass `nil` to inherit the test's priority: on a loaded CI VM
+    ///     `.background` jobs sat unscheduled for over a minute, and neither
+    ///     polling nor joining the worker task reliably lifts jobs it has
+    ///     already queued, so suites that assert on repair results timed out.
     init(
         storage: StorageDependencies,
         conversationManager: ConversationManager,
@@ -61,12 +69,14 @@ final class ConversationLaunchRepairCoordinator {
         notificationCenter: NotificationCenter = .default,
         conversationMutationSerializer: ConversationRollupMutationSerializer = .shared,
         accountWorkCoordinator: SyncRunCoordinator = .shared,
-        htmlContentHandler: HTMLContentHandler = .shared
+        htmlContentHandler: HTMLContentHandler = .shared,
+        repairTaskPriority: TaskPriority? = .background
     ) {
         self.storage = storage
         self.conversationManager = conversationManager
         self.syncWaiter = syncWaiter
         self.notificationCenter = notificationCenter
+        self.repairTaskPriority = repairTaskPriority
         self.conversationMutationSerializer = conversationMutationSerializer
         self.accountWorkCoordinator = accountWorkCoordinator
         self.htmlContentHandler = htmlContentHandler
@@ -166,7 +176,7 @@ final class ConversationLaunchRepairCoordinator {
         }
         guard !isChatPreviewRepairRunning, !pendingPasses.isEmpty else { return }
         isChatPreviewRepairRunning = true
-        taskManager.run(Self.chatPreviewRepairTaskKey, priority: .background) { [weak self] in
+        taskManager.run(Self.chatPreviewRepairTaskKey, priority: repairTaskPriority) { [weak self] in
             guard let self else { return }
             defer { isChatPreviewRepairRunning = false }
             guard let request = await accountWorkCoordinator.makeAccountWorkRequest() else { return }
@@ -286,7 +296,7 @@ final class ConversationLaunchRepairCoordinator {
               !hasCompletedListConversationTitleRepair else { return }
         isListConversationTitleRepairRunning = true
 
-        taskManager.run("repairListConversationTitles", priority: .background) { [weak self] in
+        taskManager.run("repairListConversationTitles", priority: repairTaskPriority) { [weak self] in
             guard let self = self else { return }
             defer { isListConversationTitleRepairRunning = false }
 
@@ -336,7 +346,7 @@ final class ConversationLaunchRepairCoordinator {
         let hasRepairedKey = Self.conversationPreviewRepairMigrationKey
         let migrationFlags = storage.migrationFlags
 
-        taskManager.run(Self.repairMissingConversationPreviewsTaskKey, priority: .background) { [weak self] in
+        taskManager.run(Self.repairMissingConversationPreviewsTaskKey, priority: repairTaskPriority) { [weak self] in
             guard let self = self else { return }
             var didCompleteRepair = false
             defer {

@@ -455,7 +455,9 @@ final class ChatPreviewRepairTests: XCTestCase {
             notificationCenter: NotificationCenter(),
             conversationMutationSerializer: ConversationRollupMutationSerializer(),
             accountWorkCoordinator: accountWork,
-            htmlContentHandler: handler
+            htmlContentHandler: handler,
+            // Inherit the test's priority: see repairTaskPriority's doc.
+            repairTaskPriority: nil
         )
     }
 

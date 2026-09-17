@@ -2,28 +2,44 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `coreDataStack.viewContext`, which is private-queue.
+/// `OutboundReplyContextBuilder`, `OutboundAttachmentContextBuilder`, and
+/// `MockOutboundMessageSendService` read and write their context directly from
+/// the main actor, which is on-queue only for a main-queue context. See that
+/// helper for what the private-queue shape races. The `Dependencies` built on
+/// `CoreDataStack(persistentContainerForTesting:)` keep that stack's own
+/// main-queue context.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class OutboundMessageCoordinatorTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var viewContext: NSManagedObjectContext!
     private var htmlContentHandler: HTMLContentHandler!
     private var outboundTaskRegistry: OutboundTaskRegistry!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
+        viewContext = coreDataStack.makeMainQueueViewContext()
         htmlContentHandler = HTMLContentHandler()
         outboundTaskRegistry = OutboundTaskRegistry(admissionOpen: true)
     }
 
     override func tearDown() {
         htmlContentHandler = nil
+        viewContext = nil
         coreDataStack = nil
         outboundTaskRegistry = nil
         super.tearDown()
     }
 
     func testSend_composeNormalizesInputAndRunsSendNew() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let mutationTracker = MockOutboundSendMutationTracker()
         let coordinator = makeCoordinator(
@@ -78,7 +94,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_replyBuildsReplyMetadataAndRunsSendReply() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let mutationTracker = MockOutboundSendMutationTracker()
         let coordinator = makeCoordinator(
@@ -88,7 +104,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         )
         let completionExpectation = expectation(description: "reply send completes")
 
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let replyingTo = MessageBuilder()
             .withId("message-1")
@@ -163,7 +179,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     func testSend_consecutiveChatRepliesPreserveSubjectAndThreadingBeforeSyncEcho() async throws {
         // Revert-check: restoring ChatViewModel.sendReply's replyingTo = nil
         // drops the second request's subject, In-Reply-To, and References.
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let sendService = MockOutboundMessageSendService(context: context)
         let coordinator = makeCoordinator(
@@ -223,7 +239,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_chatReplyWithoutTargetPreservesDraftBehindThreadlessLocalSend() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let sendService = MockOutboundMessageSendService(context: context)
         let coordinator = makeCoordinator(
@@ -286,7 +302,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_replyCreatesOptimisticMessageBeforeResolvingQuotedHTML() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let resolutionStarted = expectation(description: "quoted HTML resolution starts")
         let resolutionGate = DispatchSemaphore(value: 0)
@@ -301,7 +317,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             replyQuotedHTMLResolver: resolver
         )
 
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let replyingTo = MessageBuilder()
             .withId("optimistic-before-html-message")
@@ -340,7 +356,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_replyPassesFromIdentityToOptimisticMessage() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(
             sendService: sendService,
@@ -352,7 +368,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         )
         let completionExpectation = expectation(description: "reply send completes")
 
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let replyingTo = MessageBuilder()
             .withId("message-identity-1")
@@ -397,12 +413,12 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_replyUsesLatestConversationAndMessageValuesAfterRequestCreation() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
         let completionExpectation = expectation(description: "reply send completes")
 
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "before@example.com")
         let replyingTo = MessageBuilder()
             .withId("message-1")
@@ -483,15 +499,15 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_forwardBuildsCombinedBodiesUsesInlineSnapshotsAndRunsSendNew() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
         let completionExpectation = expectation(description: "forward send completes")
-        let attachmentBuilder = OutboundAttachmentContextBuilder(viewContext: coreDataStack.viewContext)
+        let attachmentBuilder = OutboundAttachmentContextBuilder(viewContext: viewContext)
         let sourceMessage = MessageBuilder()
             .withId("forward-source-message")
             .withAttachments()
-            .build(in: coreDataStack.viewContext)
+            .build(in: viewContext)
         let inlineAttachmentID = "inline-attachment"
         let inlinePath = AttachmentPaths.originalPath(
             messageId: sourceMessage.id,
@@ -507,7 +523,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             .withLocalURL(inlinePath)
             .downloaded()
             .forMessage(sourceMessage)
-            .build(in: coreDataStack.viewContext)
+            .build(in: viewContext)
         inlineAttachment.contentId = "cid-inline"
 
         let submission = try await coordinator.send(
@@ -550,7 +566,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_forwardWithoutUserBodyKeepsOptimisticPreviewEmptyAndSendsForwardedBody() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
         let completionExpectation = expectation(description: "forward send completes")
@@ -587,7 +603,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_invokesSuccessHooksAfterBackgroundSend() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
 
@@ -620,7 +636,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_backgroundFailureTracksFailedMutationAndInvokesFailureHook() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.sendNewError = GmailSendService.SendError.apiError("boom")
         let syncPerformer = MockCoordinatorSyncPerformer()
         let mutationTracker = MockOutboundSendMutationTracker()
@@ -660,7 +676,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_ambiguousOutcomeClearsPendingTrackerWithoutRecordingFailure() async throws {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.sendNewError = GmailSendService.SendError.ambiguousDelivery("connection reset")
         let mutationTracker = MockOutboundSendMutationTracker()
         let coordinator = makeCoordinator(
@@ -700,7 +716,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
     func testSend_waitsForPreflightAndTransmissionAdmissionBeforeReturning() async throws {
         let preflightGate = OutboundSendTestGate()
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.sendNewPreflightGate = preflightGate
         let coordinator = makeCoordinator(
             sendService: sendService,
@@ -735,7 +751,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
     func testSendPublishesDurableOptimisticResultBeforeTransmissionAdmission() async throws {
         let preflightGate = OutboundSendTestGate()
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.sendNewPreflightGate = preflightGate
         let coordinator = makeCoordinator(
             sendService: sendService,
@@ -788,7 +804,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
     func testSend_preflightFailureAfterOptimisticPublicationRollsBackAndClearsPendingMutation() async throws {
         let preflightGate = OutboundSendTestGate()
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.sendNewPreflightGate = preflightGate
         sendService.sendNewPreflightError = GmailSendService.SendError.apiError("preflight")
         let mutationTracker = MockOutboundSendMutationTracker()
@@ -856,7 +872,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_closedAdmissionRejectsBeforeOptimisticCreation() async {
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let coordinator = makeCoordinator(
             sendService: sendService,
             syncPerformer: MockCoordinatorSyncPerformer()
@@ -1103,7 +1119,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
     func testSend_accountTransitionDrainsRequestBuilderBeforeReopen() async {
         let requestBuilderGate = OutboundSendTestGate()
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let coordinator = makeCoordinator(
             sendService: sendService,
             syncPerformer: MockCoordinatorSyncPerformer()
@@ -1162,7 +1178,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
     func testSend_accountTransitionDrainsPreparationAndPreventsBackgroundHandoff() async {
         let optimisticGate = OutboundSendTestGate()
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.optimisticCreationGate = optimisticGate
         let coordinator = makeCoordinator(
             sendService: sendService,
@@ -1215,7 +1231,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
     func testSend_accountTransitionDuringPreflightCancelsWorkerAndPreventsGmailAdmission() async {
         let preflightGate = OutboundSendTestGate()
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.sendNewPreflightGate = preflightGate
         let coordinator = makeCoordinator(
             sendService: sendService,
@@ -1271,7 +1287,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
     func testSend_accountTransitionDoesNotCancelStartedGmailCallAndDrainsThroughSuccess() async throws {
         let sendGate = OutboundSendTestGate()
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.sendNewGate = sendGate
         let syncPerformer = MockCoordinatorSyncPerformer()
         let mutationTracker = MockOutboundSendMutationTracker()
@@ -1328,7 +1344,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     func testSend_emptyRecipientsThrowsBeforeCreatingOptimisticMessage() async throws {
         // Revert-check: OutboundMessageCoordinator.send's noRecipients guard
         // used to return nil, so the catch below was never reached.
-        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let sendService = MockOutboundMessageSendService(context: viewContext)
         let mutationTracker = MockOutboundSendMutationTracker()
         let coordinator = makeCoordinator(
             sendService: sendService,
@@ -1362,7 +1378,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
 
     func testSend_emptyListReplySurfacesErrorAndPreservesChatDraft() async throws {
         // Revert-check: returning nil for no recipients leaves sendErrorAlert nil.
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let sendService = MockOutboundMessageSendService(context: context)
         let coordinator = makeCoordinator(
@@ -1425,7 +1441,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     func testSend_noteToSelfRepliesToAccountAddress() async throws {
         // Revert-check: removing ReplyMetadataBuilder's self-only fallback
         // leaves no recipients and prevents this send from reaching transport.
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let authSession = makeTestAuthSession(userEmail: "me@example.com", userName: "Me")
         let sendService = MockOutboundMessageSendService(context: context)
         let coordinator = makeCoordinator(
@@ -1494,7 +1510,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_selfOnlyConversationDoesNotRedirectExternalTargetToSelf() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let sendService = MockOutboundMessageSendService(context: context)
         let coordinator = makeCoordinator(
             sendService: sendService,
@@ -1538,7 +1554,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_selfOnlyConversationDoesNotRedirectRowlessExternalTargetToSelf() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let sendService = MockOutboundMessageSendService(context: context)
         let coordinator = makeCoordinator(
             sendService: sendService,
@@ -1581,7 +1597,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_clearedTargetDoesNotRedirectRowlessExternalThreadToSelf() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let sendService = MockOutboundMessageSendService(context: context)
         let coordinator = makeCoordinator(
@@ -1643,7 +1659,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             syncPerformer: syncPerformer,
             messageFormatBuilder: MessageFormatBuilder(authSession: resolvedAuthSession),
             outboundReplyContextBuilder: OutboundReplyContextBuilder(
-                viewContext: coreDataStack.viewContext,
+                viewContext: viewContext,
                 replyMetadataBuilder: ReplyMetadataBuilder(authSession: resolvedAuthSession),
                 replyHTMLContentLoader: HTMLContentLoader(
                     contentHandler: htmlContentHandler,
@@ -1699,8 +1715,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let person = PersonBuilder()
             .withEmail(email)
             .noDisplayName()
-            .build(in: coreDataStack.viewContext)
-        let participant = coreDataStack.viewContext.insertTestObject(MessageParticipant.self)
+            .build(in: viewContext)
+        let participant = viewContext.insertTestObject(MessageParticipant.self)
         participant.id = UUID()
         participant.participantKind = kind
         participant.person = person

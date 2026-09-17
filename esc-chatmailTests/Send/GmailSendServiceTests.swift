@@ -2,9 +2,20 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `coreDataStack.viewContext`, which is private-queue.
+/// `GmailSendService` is `@MainActor` and fetches and saves its context
+/// directly, which is on-queue only for a main-queue context. See that helper
+/// for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class GmailSendServiceTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var viewContext: NSManagedObjectContext!
     private var apiClient: MockGmailAPIClient!
     private var authSession: AuthSession!
     private var sendService: GmailSendService!
@@ -12,12 +23,13 @@ final class GmailSendServiceTests: XCTestCase {
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
+        viewContext = coreDataStack.makeMainQueueViewContext()
         apiClient = MockGmailAPIClient()
         authSession = AuthSession()
         authSession.userEmail = "sender@example.com"
         authSession.userName = "Sender"
         sendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             apiClient: apiClient,
             authSession: authSession
         )
@@ -27,6 +39,7 @@ final class GmailSendServiceTests: XCTestCase {
         sendService = nil
         authSession = nil
         apiClient = nil
+        viewContext = nil
         coreDataStack = nil
         super.tearDown()
     }
@@ -1182,7 +1195,7 @@ final class GmailSendServiceTests: XCTestCase {
     }
 
     func testAttachmentSnapshot_doesNotMutateAttachmentState() {
-        let attachment = coreDataStack.viewContext.insertTestObject(Attachment.self)
+        let attachment = viewContext.insertTestObject(Attachment.self)
         attachment.id = "inline-1"
         attachment.filename = "inline.png"
         attachment.mimeType = "image/png"
