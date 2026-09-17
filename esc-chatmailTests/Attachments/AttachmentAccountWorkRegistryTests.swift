@@ -3,6 +3,10 @@ import XCTest
 
 @MainActor
 final class AttachmentAccountWorkRegistryTests: XCTestCase {
+    // Revert-check: fails if `cancelAndAwaitAll()` stops closing admission
+    // (`acceptsNewWork = false`), stops cancelling the operations it snapshotted,
+    // or stops draining them (`await operation.task.value`). Any of the three
+    // lets an old-account picker write land after teardown believed it was done.
     func testTeardownCancelsAndAwaitsUncooperativeWriterBeforeReopen() async throws {
         let registry = AttachmentAccountWorkRegistry(admissionOpen: true)
         let writerGate = AttachmentAccountWorkGate()
@@ -26,9 +30,14 @@ final class AttachmentAccountWorkRegistryTests: XCTestCase {
             await registry.cancelAndAwaitAll()
             teardownFinished.set()
         }
-        while registry.captureAdmissionToken() != nil {
-            await Task.yield()
-        }
+        // `cancelAndAwaitAll()` closes admission and snapshots the live
+        // operations under one lock, then cancels that snapshot *outside* the
+        // lock. Waiting only for `captureAdmissionToken() == nil` therefore
+        // releases the gate in a window where the writer's generation can still
+        // read as active — which is how this test flaked on loaded CI runners.
+        // The writer task's own cancellation is the later of the two steps and
+        // is ordered after `generation.cancel()`, so it proves both happened.
+        await waitUntil { writerTask.isCancelled }
 
         XCTAssertFalse(
             teardownFinished.isSet,
@@ -41,13 +50,17 @@ final class AttachmentAccountWorkRegistryTests: XCTestCase {
 
         await writerGate.release()
         await teardownTask.value
-        await writerTask.value
 
-        XCTAssertFalse(staleWrite.isSet)
+        // Asserted before awaiting the writer: that is what proves teardown
+        // drained it rather than merely outliving it.
         XCTAssertTrue(
             unresolvedArtifactsCleaned.isSet,
             "Teardown must not finish before cancelled picker artifacts are unwound"
         )
+
+        await writerTask.value
+
+        XCTAssertFalse(staleWrite.isSet)
         XCTAssertTrue(teardownFinished.isSet)
 
         XCTAssertTrue(registry.reopenAdmission())
@@ -60,6 +73,11 @@ final class AttachmentAccountWorkRegistryTests: XCTestCase {
         XCTAssertTrue(newWrite.isSet)
     }
 
+    // Revert-check: fails if `cancelAndAwaitAll()` stops closing admission
+    // (`acceptsNewWork = false`), stops cancelling the operations it snapshotted,
+    // or stops draining them (`await operation.task.value`). A detached file
+    // writer would then still be mid-write when teardown reports the account
+    // work closed.
     func testTeardownCancelsAndDrainsDetachedFileWriter() async throws {
         let registry = AttachmentAccountWorkRegistry(admissionOpen: true)
         let writerGate = AttachmentAccountWorkGate()
@@ -77,16 +95,25 @@ final class AttachmentAccountWorkRegistryTests: XCTestCase {
             await registry.cancelAndAwaitAll()
             teardownFinished.set()
         }
-        while registry.captureAdmissionToken() != nil {
-            await Task.yield()
-        }
+        // See the admission-vs-cancellation note above: closed admission alone
+        // does not mean this writer's generation was retired yet.
+        await waitUntil { writerTask.isCancelled }
+
+        XCTAssertNil(
+            registry.captureAdmissionToken(),
+            "Teardown must close admission before it cancels the account's writers"
+        )
         XCTAssertFalse(teardownFinished.isSet)
 
         await writerGate.release()
         await teardownTask.value
+
+        // Asserted before awaiting the writer: that is what proves teardown
+        // drained it rather than merely outliving it.
+        XCTAssertTrue(cleanupFinished.isSet)
+
         await writerTask.value
 
-        XCTAssertTrue(cleanupFinished.isSet)
         XCTAssertTrue(teardownFinished.isSet)
     }
 
@@ -150,6 +177,23 @@ final class AttachmentAccountWorkRegistryTests: XCTestCase {
         await currentTask.value
 
         XCTAssertTrue(currentWork.isSet)
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }
 
