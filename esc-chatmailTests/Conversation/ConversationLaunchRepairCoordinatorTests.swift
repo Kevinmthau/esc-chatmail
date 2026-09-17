@@ -280,7 +280,9 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
             ),
             conversationManager: ConversationManager(currentUserEmail: { "me@example.com" }),
             syncWaiter: syncWaiter,
-            notificationCenter: notificationCenter
+            notificationCenter: notificationCenter,
+            // Inherit the test's priority: see repairTaskPriority's doc.
+            repairTaskPriority: nil
         )
     }
 
@@ -295,9 +297,13 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         return conversation
     }
 
-    // The preview repair runs at .background priority; on a loaded CI runner
-    // its first poll success can take seconds, and a green run exits at the
-    // first successful poll anyway, so the deadline is generous. The 50ms
+    // Production runs the preview repair at .background priority; on a loaded
+    // CI VM that worker finished ~65s after this suite released it, past the
+    // 30s deadline (testCancel_whileAwaitingSyncWaiter_leavesRepairRerunnable,
+    // PR #235's CI run). A poll never raises the worker's priority, so
+    // makeCoordinator passes `repairTaskPriority: nil` and the worker inherits
+    // the test's priority instead. The deadline stays a generous liveness
+    // bound — a green run exits at the first successful poll — and the 50ms
     // interval keeps this MainActor fetch-and-refresh poll from contending
     // with the repair task's own MainActor hops.
     private func waitUntil(

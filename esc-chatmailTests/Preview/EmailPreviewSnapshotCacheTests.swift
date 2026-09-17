@@ -602,10 +602,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         let html = "<html><body>Cancelled preview</body></html>"
         let renderer = DelayedSnapshotRenderer()
         let viewModel = EmailPreviewSnapshotViewModel(cache: cache, renderer: renderer)
-        let renderStarted = expectation(description: "render started")
-        renderer.onStart = {
-            renderStarted.fulfill()
-        }
 
         let task = Task { @MainActor in
             await viewModel.loadSnapshot(
@@ -619,7 +615,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             )
         }
 
-        await fulfillment(of: [renderStarted], timeout: 1.0)
+        await waitUntil { renderer.isAwaitingResult }
         let request = try XCTUnwrap(renderer.requests.first)
         task.cancel()
         renderer.succeed(
@@ -651,10 +647,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         let html = "<html><body>Old account preview</body></html>"
         let renderer = DelayedSnapshotRenderer()
         let viewModel = EmailPreviewSnapshotViewModel(cache: cache, renderer: renderer)
-        let renderStarted = expectation(description: "old-account render started")
-        renderer.onStart = {
-            renderStarted.fulfill()
-        }
 
         let task = Task { @MainActor in
             await viewModel.loadSnapshot(
@@ -668,7 +660,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             )
         }
 
-        await fulfillment(of: [renderStarted], timeout: 1.0)
+        await waitUntil { renderer.isAwaitingResult }
         let request = try XCTUnwrap(renderer.requests.first)
 
         try await cache.closeAccountWorkAndClear()
@@ -714,19 +706,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         let secondHTML = "<html><body>Second current preview</body></html>"
         let renderer = KeyedDelayedSnapshotRenderer()
         let viewModel = EmailPreviewSnapshotViewModel(cache: cache, renderer: renderer)
-        let firstStarted = expectation(description: "first render started")
-        let secondStarted = expectation(description: "second render started")
-        var firstCacheKey: String?
-        var secondCacheKey: String?
-        renderer.onStart = { request in
-            if request.html == firstHTML {
-                firstCacheKey = request.cacheKey
-                firstStarted.fulfill()
-            } else if request.html == secondHTML {
-                secondCacheKey = request.cacheKey
-                secondStarted.fulfill()
-            }
-        }
 
         let firstTask = Task { @MainActor in
             await viewModel.loadSnapshot(
@@ -739,7 +718,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 containerWidth: 280
             )
         }
-        await fulfillment(of: [firstStarted], timeout: 1.0)
+        await waitUntil { renderer.pendingRequest(html: firstHTML) != nil }
+        let resolvedFirstCacheKey = try XCTUnwrap(renderer.pendingRequest(html: firstHTML)?.cacheKey)
 
         let secondTask = Task { @MainActor in
             await viewModel.loadSnapshot(
@@ -752,9 +732,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 containerWidth: 280
             )
         }
-        await fulfillment(of: [secondStarted], timeout: 1.0)
-
-        let resolvedSecondCacheKey = try XCTUnwrap(secondCacheKey)
+        await waitUntil { renderer.pendingRequest(html: secondHTML) != nil }
+        let resolvedSecondCacheKey = try XCTUnwrap(renderer.pendingRequest(html: secondHTML)?.cacheKey)
         renderer.succeed(
             cacheKey: resolvedSecondCacheKey,
             image: makeImage(color: .systemGreen),
@@ -769,7 +748,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         )
         XCTAssertGreaterThan(currentPixel.green, currentPixel.red)
 
-        let resolvedFirstCacheKey = try XCTUnwrap(firstCacheKey)
         renderer.succeed(
             cacheKey: resolvedFirstCacheKey,
             image: makeImage(color: .systemOrange),
@@ -792,9 +770,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
     @MainActor
     func testSnapshotRenderSchedulerRespectsMaxConcurrency() async throws {
         let scheduler = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 2)
-        let firstStarted = expectation(description: "first render started")
-        let secondStarted = expectation(description: "second render started")
-        let thirdStarted = expectation(description: "third render started")
         var continuations: [String: CheckedContinuation<EmailPreviewSnapshotResult, Error>] = [:]
         var activeCount = 0
         var maxActiveCount = 0
@@ -810,16 +785,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
 
                     return try await withCheckedThrowingContinuation { continuation in
                         continuations[cacheKey] = continuation
-                        switch cacheKey {
-                        case "scheduler-first":
-                            firstStarted.fulfill()
-                        case "scheduler-second":
-                            secondStarted.fulfill()
-                        case "scheduler-third":
-                            thirdStarted.fulfill()
-                        default:
-                            break
-                        }
                     }
                 }
             }
@@ -829,14 +794,16 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         let secondTask = scheduledTask(cacheKey: "scheduler-second")
         let thirdTask = scheduledTask(cacheKey: "scheduler-third")
 
-        await fulfillment(of: [firstStarted, secondStarted], timeout: 1.0)
+        await waitUntil {
+            continuations["scheduler-first"] != nil && continuations["scheduler-second"] != nil
+        }
         XCTAssertEqual(startedKeys, ["scheduler-first", "scheduler-second"])
         XCTAssertEqual(maxActiveCount, 2)
 
         continuations["scheduler-first"]?.resume(
             returning: makeSnapshotResult(cacheKey: "scheduler-first", color: .systemRed)
         )
-        await fulfillment(of: [thirdStarted], timeout: 1.0)
+        await waitUntil { continuations["scheduler-third"] != nil }
         XCTAssertEqual(startedKeys, ["scheduler-first", "scheduler-second", "scheduler-third"])
         XCTAssertEqual(maxActiveCount, 2)
 
@@ -856,7 +823,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
     @MainActor
     func testSnapshotRenderSchedulerCoalescesSameCacheKeyRequests() async throws {
         let scheduler = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 1)
-        let renderStarted = expectation(description: "coalesced render started")
         var continuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>?
         var startCount = 0
         let request = makeSnapshotRequest(cacheKey: "coalesced-snapshot")
@@ -867,7 +833,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                     startCount += 1
                     return try await withCheckedThrowingContinuation { renderContinuation in
                         continuation = renderContinuation
-                        renderStarted.fulfill()
                     }
                 }
             }
@@ -876,7 +841,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         let firstTask = scheduledTask()
         let secondTask = scheduledTask()
 
-        await fulfillment(of: [renderStarted], timeout: 1.0)
+        await waitUntil { continuation != nil }
         await Task.yield()
         XCTAssertEqual(startCount, 1)
 
@@ -894,7 +859,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
     @MainActor
     func testSnapshotRenderSchedulerCancelsQueuedRenderBeforeOperationStarts() async throws {
         let scheduler = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 1)
-        let firstStarted = expectation(description: "first render started")
         var firstContinuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>?
         var startedKeys: [String] = []
 
@@ -903,11 +867,10 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 startedKeys.append("queued-first")
                 return try await withCheckedThrowingContinuation { continuation in
                     firstContinuation = continuation
-                    firstStarted.fulfill()
                 }
             }
         }
-        await fulfillment(of: [firstStarted], timeout: 1.0)
+        await waitUntil { firstContinuation != nil }
 
         let queuedTask = Task { @MainActor in
             try await scheduler.render(request: makeSnapshotRequest(cacheKey: "queued-cancelled")) {
@@ -939,7 +902,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
     func testSnapshotRenderSchedulerCloseDrainsOldOperationBeforeReopen() async throws {
         let scheduler = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 1)
         let oldGeneration = try XCTUnwrap(scheduler.captureAccountGeneration())
-        let renderStarted = expectation(description: "old render operation started")
         var operationContinuation: CheckedContinuation<Void, Never>?
         var closeFinished = false
 
@@ -948,7 +910,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 request: makeSnapshotRequest(cacheKey: "old-account-render"),
                 expectedAccountGeneration: oldGeneration
             ) {
-                renderStarted.fulfill()
                 await withCheckedContinuation { continuation in
                     operationContinuation = continuation
                 }
@@ -958,7 +919,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 )
             }
         }
-        await fulfillment(of: [renderStarted], timeout: 1.0)
+        await waitUntil { operationContinuation != nil }
 
         let closeTask = Task { @MainActor in
             await scheduler.closeAccountWorkAndAwait()
@@ -999,30 +960,36 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         XCTAssertEqual(freshResult.cacheKey, "fresh-account-render")
     }
 
-    // WebKit's content processes spawn lazily on the first full render in the
-    // test host, and on a loaded CI runner that cold start alone can exceed
-    // the renderer's 5s budget (PR #115's run lost
-    // testRendererKeepsShortPreviewAtDefaultHeight to it at 5.165s). Warm once
-    // per process so the assertion renders measure warm-path behavior only.
+    // WebKit's content and GPU processes spawn lazily in the test host, and on
+    // a loaded CI runner that spawn is not bounded by any single render's 5s
+    // production budget. PR #115 added a one-shot warm-up render on the theory
+    // that the spawn it forced would leave WebKit warm; the CI runs for PRs
+    // #233 and #236 falsified that — testRendererKeepsShortPreviewAtDefaultHeight
+    // failed at 10.3s/10.5s with the warm-up AND the assertion render both
+    // timing out while WebKit logged "WebContent process ... took 4.09 seconds
+    // to launch" and WebProcessProxy::didBecomeUnresponsive. The GPU process
+    // also idle-exits between renders, so a "warm" render can still pay a
+    // relaunch (the next test took 4.1s in that run).
+    //
+    // These tests assert measured height and painted pixels, not the timeout
+    // budget (the timeout → MiniEmailWebView fallback is covered with stub
+    // renderers above), so a `.timeout` is retried until a wall-clock
+    // deadline instead of failing the test. Any other error fails at once, and
+    // a renderer that never succeeds still fails when the deadline passes. The
+    // production timeout is unchanged.
     @MainActor
-    private static var hasWarmedRenderer = false
-
-    @MainActor
-    private static func warmUpRendererIfNeeded() async {
-        guard !hasWarmedRenderer else { return }
-        hasWarmedRenderer = true
-
-        let request = EmailPreviewSnapshotRequest(
-            html: "<html><body>warm-up</body></html>",
-            cacheKey: "renderer-warm-up",
-            containerWidth: 280,
-            isDarkMode: false,
-            senderEmail: nil,
-            message: nil
-        )
-        // Even if a cold spawn consumes this render's own 5s timeout, the
-        // spawn it forces leaves WebKit warm for the real renders below.
-        _ = try? await EmailPreviewSnapshotRenderer.shared.render(request: request)
+    private func renderRetryingWebKitStartupTimeouts(
+        _ request: EmailPreviewSnapshotRequest,
+        timeout: TimeInterval = 45.0
+    ) async throws -> EmailPreviewSnapshotResult {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            do {
+                return try await EmailPreviewSnapshotRenderer.shared.render(request: request)
+            } catch EmailPreviewSnapshotRenderError.timeout where Date() < deadline {
+                continue
+            }
+        }
     }
 
     @MainActor
@@ -1055,8 +1022,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
 
     @MainActor
     func testRendererKeepsShortPreviewAtDefaultHeight() async throws {
-        await Self.warmUpRendererIfNeeded()
-
         let request = EmailPreviewSnapshotRequest(
             html: """
             <html>
@@ -1076,7 +1041,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             message: nil
         )
 
-        let result = try await EmailPreviewSnapshotRenderer.shared.render(request: request)
+        let result = try await renderRetryingWebKitStartupTimeouts(request)
 
         XCTAssertEqual(result.displayHeight, HTMLPreviewSizing.defaultPreviewHeight)
         XCTAssertLessThan(result.displayHeight, HTMLPreviewSizing.maximumPreviewHeight)
@@ -1084,8 +1049,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
 
     @MainActor
     func testRendererPaintsLowerRegionForTallPreview() async throws {
-        await Self.warmUpRendererIfNeeded()
-
         let request = EmailPreviewSnapshotRequest(
             html: """
             <div style="height: 420px; background: #ffffff;"></div>
@@ -1098,7 +1061,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             message: nil
         )
 
-        let result = try await EmailPreviewSnapshotRenderer.shared.render(request: request)
+        let result = try await renderRetryingWebKitStartupTimeouts(request)
 
         XCTAssertGreaterThan(result.displayHeight, HTMLPreviewSizing.defaultPreviewHeight)
         XCTAssertLessThanOrEqual(result.displayHeight, HTMLPreviewSizing.maximumPreviewHeight)
@@ -1113,6 +1076,32 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         XCTAssertLessThan(bottomPixel.green, 0.35)
         XCTAssertLessThan(bottomPixel.blue, 0.35)
         XCTAssertGreaterThan(bottomPixel.alpha, 0.9)
+    }
+
+    /// Bounds an event wait by a wall-clock deadline. These waits gate on a
+    /// `Task { @MainActor }` reaching a parked continuation through several
+    /// actor hops and a disk read; the old 1s `fulfillment` budget lost
+    /// testViewModelCancellationDoesNotUpdateStaleState on PR #239's CI run,
+    /// where the whole test process stalled after the WebKit renderer tests —
+    /// the next test, which has no waits at all, took 1.35s instead of ~0.01s.
+    /// The deadline is a liveness guard, not a latency assertion: green runs
+    /// exit at the first satisfied poll.
+    @MainActor
+    private func waitUntil(
+        timeout: TimeInterval = 10.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
     private func makeImage(color: UIColor) -> UIImage {
@@ -1206,10 +1195,15 @@ private final class StubSnapshotRenderer: EmailPreviewSnapshotRendering {
 
 @MainActor
 private final class DelayedSnapshotRenderer: EmailPreviewSnapshotRendering {
-    var onStart: (() -> Void)?
     private(set) var requests: [EmailPreviewSnapshotRequest] = []
     private var continuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>?
     private var didStartRender = false
+
+    /// True once the render is parked, so `succeed(with:)` is guaranteed to
+    /// deliver rather than resume nothing.
+    var isAwaitingResult: Bool {
+        continuation != nil
+    }
 
     func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult {
         requests.append(request)
@@ -1217,7 +1211,6 @@ private final class DelayedSnapshotRenderer: EmailPreviewSnapshotRendering {
             throw StubSnapshotRenderer.Error.unexpectedRender
         }
         didStartRender = true
-        onStart?()
         return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
         }
@@ -1231,15 +1224,19 @@ private final class DelayedSnapshotRenderer: EmailPreviewSnapshotRendering {
 
 @MainActor
 private final class KeyedDelayedSnapshotRenderer: EmailPreviewSnapshotRendering {
-    var onStart: ((EmailPreviewSnapshotRequest) -> Void)?
     private(set) var requests: [EmailPreviewSnapshotRequest] = []
     private var continuations: [String: CheckedContinuation<EmailPreviewSnapshotResult, Error>] = [:]
+
+    /// The parked request for `html`, or nil until its continuation is stored
+    /// (and again once `succeed(cacheKey:...)` has delivered it).
+    func pendingRequest(html: String) -> EmailPreviewSnapshotRequest? {
+        requests.first { $0.html == html && continuations[$0.cacheKey] != nil }
+    }
 
     func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult {
         requests.append(request)
         return try await withCheckedThrowingContinuation { continuation in
             continuations[request.cacheKey] = continuation
-            onStart?(request)
         }
     }
 

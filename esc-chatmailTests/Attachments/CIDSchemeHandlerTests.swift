@@ -463,7 +463,13 @@ final class CIDSchemeHandlerTests: XCTestCase {
 
     func testLegacySynthesizedInlineCIDRecoversOnlyAuthoritativeMessageBytes() async throws {
         AttachmentPaths.setupDirectories()
-        let messageID = "message-cid-legacy-inline-recovery"
+        // The Attachments directory is process-global and outlives the run on
+        // the simulator, so both file paths are UUID-isolated: the synthesized
+        // attachment ID hashes the Content-ID (legacy ID-only path) and the
+        // message ID keys the recovered message-scoped path.
+        let runID = UUID().uuidString.lowercased()
+        let messageID = "message-cid-legacy-inline-recovery-\(runID)"
+        let contentID = "legacy-recovery-\(runID)@example.com"
         let authoritativeData = Data([0x89, 0x50, 0x4E, 0x47, 0x45, 0x53, 0x43])
         let recoveredMessage = makeSynthesizedInlineMessage(
             messageID: messageID,
@@ -471,12 +477,28 @@ final class CIDSchemeHandlerTests: XCTestCase {
             partID: "2.1",
             filename: "inline.png",
             mimeType: "image/png",
-            contentID: "legacy-recovery@example.com"
+            contentID: contentID
         )
         let legacyPath = AttachmentPaths.originalPath(
             idOrUUID: recoveredMessage.attachmentID,
             ext: "png"
         )
+        let recoveredPath = AttachmentPaths.originalPath(
+            messageId: messageID,
+            attachmentId: recoveredMessage.attachmentID,
+            ext: "png"
+        )
+        let recoveredPreviewPath = AttachmentPaths.previewPath(
+            messageId: messageID,
+            attachmentId: recoveredMessage.attachmentID
+        )
+        // Registered before the handler starts: if the wait below ever times
+        // out, these are still the only paths recovery can write.
+        defer {
+            AttachmentPaths.deleteFile(at: legacyPath)
+            AttachmentPaths.deleteFile(at: recoveredPath)
+            AttachmentPaths.deleteFile(at: recoveredPreviewPath)
+        }
         let staleSiblingData = Data("stale sibling bytes".utf8)
         XCTAssertTrue(AttachmentPaths.saveData(staleSiblingData, to: legacyPath))
 
@@ -488,7 +510,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withId(recoveredMessage.attachmentID)
             .withFilename("inline.png")
             .withMimeType("image/png")
-            .withContentId("legacy-recovery@example.com")
+            .withContentId(contentID)
             .downloaded()
             .withLocalURL(legacyPath)
             .forMessage(message)
@@ -497,10 +519,9 @@ final class CIDSchemeHandlerTests: XCTestCase {
 
         let apiClient = MockGmailAPIClient()
         apiClient.getMessageResponses[messageID] = recoveredMessage.message
-        let didFinish = expectation(description: "legacy synthesized cid recovery finished")
         let task = MockURLSchemeTask(
-            url: try XCTUnwrap(URL(string: "cid:legacy-recovery@example.com")),
-            didComplete: { didFinish.fulfill() }
+            url: try XCTUnwrap(URL(string: "cid:\(contentID)")),
+            didComplete: {}
         )
         let stack = testStack!
         let handler = CIDSchemeHandler(
@@ -511,15 +532,22 @@ final class CIDSchemeHandlerTests: XCTestCase {
 
         handler.webView(WKWebView(), start: task)
 
-        await fulfillment(of: [didFinish], timeout: 2.0)
+        // Wall-clock deadline, not a latency budget. Recovery is the longest
+        // chain in this suite (MainActor task → background-context lookup →
+        // coalescer actor → getMessage → .utility detached file write and image
+        // decode → Core Data save → MainActor response), and the old 2s
+        // expectation lost it on main's CI run for PR #230, where the whole
+        // test process stalled for 1–3s at a time (synchronous neighbours such
+        // as CacheCoordinatorInvalidationPlanTests.testUpdatedAttachment_isNotCollected
+        // took 2.98s instead of ~0.1s). Green runs exit on the first poll after
+        // didFinish; bailing on timeout keeps one clear failure instead of four
+        // assertions reading a half-finished recovery.
+        guard try await waitUntil(timeout: 15.0, { task.isFinished }) else { return }
         let persistedPath: String? = try await testStack.performBackgroundTask { context in
             (try? context.existingObject(with: attachment.objectID) as? Attachment)?.localURL
         }
-        defer {
-            AttachmentPaths.deleteFile(at: legacyPath)
-            AttachmentPaths.deleteFile(at: persistedPath)
-        }
 
+        XCTAssertEqual(persistedPath, recoveredPath)
         XCTAssertNil(task.error)
         XCTAssertEqual(task.response?.mimeType, "image/png")
         XCTAssertEqual(task.receivedData, authoritativeData)
@@ -536,20 +564,22 @@ final class CIDSchemeHandlerTests: XCTestCase {
         XCTAssertEqual(AttachmentPaths.loadData(from: persistedPath), authoritativeData)
     }
 
+    @discardableResult
     private func waitUntil(
         timeout: TimeInterval,
         file: StaticString = #filePath,
         line: UInt = #line,
         _ predicate: @escaping () -> Bool
-    ) async throws {
+    ) async throws -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while !predicate() {
             if Date() >= deadline {
                 XCTFail("Timed out waiting for condition", file: file, line: line)
-                return
+                return false
             }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
+        return true
     }
 
     private func fetchAttachmentState(
@@ -662,6 +692,12 @@ private final class MockURLSchemeTask: NSObject, WKURLSchemeTask {
         lock.lock()
         defer { lock.unlock() }
         return didReceiveResponseCount + didReceiveDataCount + didFinishCount + didFailCount
+    }
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
     }
 
     func didReceive(_ response: URLResponse) {
