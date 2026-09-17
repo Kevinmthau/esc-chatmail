@@ -2,25 +2,39 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, reset, and assertion goes through the suite's
+/// `viewContext`, a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `coreDataStack.viewContext`, which is private-queue.
+/// `OutboundReplyContextBuilder` is `@MainActor` and fetches from its context
+/// directly, which is on-queue only for a main-queue context. See that helper
+/// for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class OutboundReplyContextBuilderTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var viewContext: NSManagedObjectContext!
     private var htmlContentHandler: HTMLContentHandler!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
+        viewContext = coreDataStack.makeMainQueueViewContext()
         htmlContentHandler = HTMLContentHandler()
     }
 
     override func tearDown() {
         htmlContentHandler = nil
+        viewContext = nil
         coreDataStack = nil
         super.tearDown()
     }
 
     func testBuild_createsStableReplyRequestContextAndConversationAnchor() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .visible()
             .recentlyActive()
@@ -45,7 +59,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_readsReplyMetadataFromManagedObjects() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let replyingTo = MessageBuilder()
             .withId("message-1")
@@ -170,7 +184,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_withoutTargetUsesAffirmedSelfOnlyThreadAnchor() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
         let note = MessageBuilder()
             .withId("self-note")
@@ -198,7 +212,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_withoutTargetPreservesSelfEvidenceAtThreadlessLocalBarrier() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
         try context.obtainPermanentIDs(for: [conversation])
         let sendService = GmailSendService(
@@ -233,7 +247,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_rowlessSelfMessageDoesNotManufactureRecipientForTargetOrAnchor() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "ME@example.com")
         let note = MessageBuilder()
             .withId("legacy-rowless-self-note")
@@ -262,7 +276,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_excludesHideMyEmailConversationParticipant() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         addConversationParticipant(
             email: "relay@icloud.com",
@@ -291,7 +305,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_defersOriginalHTMLResolution() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let replyingTo = MessageBuilder()
             .withId("deferred-html-message")
@@ -329,7 +343,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_targetedReplyDoesNotMaterializeConversationMessages() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let replyingTo = MessageBuilder()
             .withId("target-message")
@@ -349,10 +363,10 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
                 .build(in: context)
         }
 
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
         let conversationID = conversation.objectID
         let replyingToID = replyingTo.objectID
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let faultedConversation = try XCTUnwrap(
             try context.existingObject(with: conversationID) as? Conversation
         )
@@ -375,7 +389,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_targetedReplyUsesOlderHintAcrossPendingPageBoundary() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let account = AccountBuilder()
             .withEmail("me@example.com")
@@ -401,7 +415,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
                 .inConversation(conversation)
                 .build(in: context)
         }
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let replyingTo = MessageBuilder()
             .withId("newer-target-without-alias")
@@ -426,7 +440,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_targetWithoutThreadIdDoesNotUseConversationThread() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let replyingTo = MessageBuilder()
             .withId("message-without-thread")
@@ -463,7 +477,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_usesCurrentManagedObjectValuesAfterRequestCreation() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "before@example.com")
         let replyingTo = MessageBuilder()
             .withId("message-1")
@@ -525,7 +539,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_withoutReplyTargetUsesLatestInboundReplyFromAlias() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let account = AccountBuilder()
             .withEmail("me@example.com")
@@ -580,7 +594,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     func testBuildReplyMetadata_withoutTargetSkipsLocalSendsAndEmptyThreads() async throws {
         // Revert-check: ReplyConversationSnapshot's nonListMessages.first
         // fallback selects a local or thread-less row instead of the server row.
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         _ = MessageBuilder()
             .withThreadId("server-thread")
@@ -635,7 +649,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_withoutTargetThreadlessLocalSendBlocksOlderThread() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         _ = MessageBuilder()
             .withThreadId("unrelated-older-thread")
@@ -690,7 +704,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_withoutTargetPreservesLocalBarrierUntilReconciliation() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         _ = MessageBuilder()
             .withThreadId("unrelated-older-thread")
@@ -747,7 +761,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_backfillsReplyFromAliasFromLegacyTargetParticipants() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         let account = AccountBuilder()
             .withEmail("me@example.com")
@@ -781,7 +795,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_usesLegacyAccountAliasesWhenSendAsAliasesAreMissing() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
         _ = AccountBuilder()
             .withEmail("me@example.com")
@@ -820,11 +834,11 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             .withSender(email: "newest-sender@example.com", name: "Newest Sender")
             .withListId("list.example.com")
             .inConversation(fixture.conversation)
-            .build(in: coreDataStack.viewContext)
+            .build(in: viewContext)
         addMessageParticipant(email: "newest-sender@example.com", kind: .from, to: newestMatchingMessage)
         addMessageParticipant(email: "me@example.com", kind: .to, to: newestMatchingMessage)
         addMessageParticipant(email: "newest-list@example.com", kind: .to, to: newestMatchingMessage)
-        try coreDataStack.viewContext.obtainPermanentIDs(for: [newestMatchingMessage])
+        try viewContext.obtainPermanentIDs(for: [newestMatchingMessage])
 
         let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
             .init(
@@ -893,7 +907,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         let relay = PersonBuilder()
             .withEmail("participant-relay@icloud.com")
             .withDisplayName("Hide My Email")
-            .build(in: coreDataStack.viewContext)
+            .build(in: viewContext)
         addMessageParticipant(person: relay, kind: .cc, to: fixture.laterMessage)
 
         let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
@@ -979,9 +993,9 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             .withListId("list.example.com")
             .fromMe()
             .inConversation(fixture.conversation)
-            .build(in: coreDataStack.viewContext)
+            .build(in: viewContext)
         reconciledOptimisticMessage.messageId = "<optimistic@example.com>"
-        try coreDataStack.viewContext.obtainPermanentIDs(for: [reconciledOptimisticMessage])
+        try viewContext.obtainPermanentIDs(for: [reconciledOptimisticMessage])
 
         let metadata = try await makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
             .init(
@@ -1015,7 +1029,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             .withSender(email: "other-sender@example.com", name: "Other Sender")
             .withListId("other.example.com")
             .inConversation(fixture.conversation)
-            .build(in: coreDataStack.viewContext)
+            .build(in: viewContext)
         addMessageParticipant(email: "other-sender@example.com", kind: .from, to: newerOtherListMessage)
         addMessageParticipant(email: "other-list@example.com", kind: .to, to: newerOtherListMessage)
         let latestOutbound = MessageBuilder()
@@ -1026,10 +1040,10 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             .withListId("list.example.com")
             .fromMe()
             .inConversation(fixture.conversation)
-            .build(in: coreDataStack.viewContext)
+            .build(in: viewContext)
         addMessageParticipant(email: "me@example.com", kind: .from, to: latestOutbound)
         addMessageParticipant(email: "outbound-only@example.com", kind: .to, to: latestOutbound)
-        try coreDataStack.viewContext.obtainPermanentIDs(
+        try viewContext.obtainPermanentIDs(
             for: [newerOtherListMessage, latestOutbound]
         )
 
@@ -1060,7 +1074,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_listReplyWithoutMatchingInboundNeverUsesConversationParticipants() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .asList()
             .withListId("expected.example.com")
@@ -1121,7 +1135,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_rejectsTargetThatTransitionsToTerminalLocalSendState() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(
             in: context,
             friendEmail: "friend@example.com"
@@ -1189,8 +1203,8 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             .withListId("other.example.com")
             .withDisplayName("Other List")
             .visible()
-            .build(in: coreDataStack.viewContext)
-        try coreDataStack.viewContext.obtainPermanentIDs(for: [otherConversation])
+            .build(in: viewContext)
+        try viewContext.obtainPermanentIDs(for: [otherConversation])
         let replyContext = makeBuilder().build(
             conversationObjectID: fixture.conversation.objectID,
             replyingToMessageObjectID: fixture.laterMessage.objectID,
@@ -1234,7 +1248,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     }
 
     func testBuildReplyMetadata_nilTargetFailsClosedWhenConversationDrainsDuringAliasLoad() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(
             in: context,
             friendEmail: "friend@example.com"
@@ -1272,6 +1286,14 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         }
     }
 
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
+    }
+
     private func makeBuilder(
         userEmail: String = "me@example.com",
         userAliases: Set<String> = [],
@@ -1279,7 +1301,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         loadUserAliases: (@MainActor () async -> Set<String>)? = nil
     ) -> OutboundReplyContextBuilder {
         OutboundReplyContextBuilder(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             replyMetadataBuilder: ReplyMetadataBuilder(
                 authSession: makeTestAuthSession(userEmail: userEmail)
             ),
@@ -1332,7 +1354,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         threadId: String,
         date: Date
     ) throws -> (message: Message, record: OutboundSendMutationRecord) {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let localID = UUID().uuidString
         let message = MessageBuilder()
             .withId(localID)
@@ -1359,7 +1381,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         conversation: Conversation,
         laterMessage: Message
     ) {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .asList()
             .withListId("list.example.com")
@@ -1426,8 +1448,8 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         let person = PersonBuilder()
             .withEmail(email)
             .withDisplayName(displayName)
-            .build(in: coreDataStack.viewContext)
-        let participant = coreDataStack.viewContext.insertTestObject(ConversationParticipant.self)
+            .build(in: viewContext)
+        let participant = viewContext.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()
         participant.person = person
         participant.participantRole = .normal
@@ -1456,7 +1478,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         kind: ParticipantKind,
         to message: Message
     ) {
-        let participant = coreDataStack.viewContext.insertTestObject(MessageParticipant.self)
+        let participant = viewContext.insertTestObject(MessageParticipant.self)
         participant.id = UUID()
         participant.participantKind = kind
         participant.person = person
@@ -1471,7 +1493,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         let person = PersonBuilder()
             .withEmail(email)
             .noDisplayName()
-            .build(in: coreDataStack.viewContext)
+            .build(in: viewContext)
         addMessageParticipant(person: person, kind: kind, to: message)
     }
 

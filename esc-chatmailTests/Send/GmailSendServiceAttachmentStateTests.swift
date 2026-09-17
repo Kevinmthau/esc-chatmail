@@ -1,25 +1,39 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `coreDataStack.viewContext`, which is private-queue.
+/// `GmailSendService` is `@MainActor` and fetches and saves its context
+/// directly, which is on-queue only for a main-queue context. See that helper
+/// for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class GmailSendServiceAttachmentStateTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var viewContext: NSManagedObjectContext!
     private var sendService: GmailSendService!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
-        sendService = GmailSendService(viewContext: coreDataStack.viewContext)
+        viewContext = coreDataStack.makeMainQueueViewContext()
+        sendService = GmailSendService(viewContext: viewContext)
     }
 
     override func tearDown() {
         sendService = nil
+        viewContext = nil
         coreDataStack = nil
         super.tearDown()
     }
 
     func testMarkAttachmentsAsUploadingAndUploaded_resolvesLocalAttachmentReferences() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let attachment = AttachmentBuilder()
             .withId("local_attachment_1")
             .withFilename("photo.jpg")
@@ -27,7 +41,7 @@ final class GmailSendServiceAttachmentStateTests: XCTestCase {
             .withLocalURL("Attachments/photo.jpg")
             .queued()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let attachmentReference = LocalAttachmentReference(objectID: attachment.objectID)
 
@@ -39,7 +53,7 @@ final class GmailSendServiceAttachmentStateTests: XCTestCase {
     }
 
     func testHandleFailedOptimisticMessageByID_marksFallbackAttachmentsFailed() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let attachment = AttachmentBuilder()
             .withId("local_attachment_2")
             .withFilename("doc.pdf")
@@ -47,7 +61,7 @@ final class GmailSendServiceAttachmentStateTests: XCTestCase {
             .withLocalURL("Attachments/doc.pdf")
             .downloading()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         sendService.handleFailedOptimisticMessage(
             byID: "missing-optimistic-message",
@@ -55,5 +69,13 @@ final class GmailSendServiceAttachmentStateTests: XCTestCase {
         )
 
         XCTAssertEqual(attachment.state, .failed)
+    }
+
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
     }
 }

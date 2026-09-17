@@ -1,22 +1,36 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
+/// Every fixture and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `coreDataStack.viewContext`, which is private-queue.
+/// `OutboundAttachmentContextBuilder` is `@MainActor` and obtains permanent IDs
+/// on its context directly, which is on-queue only for a main-queue context.
+/// See that helper for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class OutboundAttachmentContextBuilderTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var viewContext: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
+        viewContext = coreDataStack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
+        viewContext = nil
         coreDataStack = nil
         super.tearDown()
     }
 
     func testBuildSendAttachments_promotesTemporaryIDsAndCapturesAttachmentInfo() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let builder = OutboundAttachmentContextBuilder(viewContext: context)
 
         let attachment = context.insertTestObject(Attachment.self)
@@ -41,7 +55,7 @@ final class OutboundAttachmentContextBuilderTests: XCTestCase {
     }
 
     func testBuildSendAttachments_rejectsUnfinishedPlaceholderBeforePromotingObjectID() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let builder = OutboundAttachmentContextBuilder(viewContext: context)
         let attachment = context.insertTestObject(Attachment.self)
         attachment.id = "local_unfinished"
@@ -62,7 +76,7 @@ final class OutboundAttachmentContextBuilderTests: XCTestCase {
     }
 
     func testBuildersRejectLegacyRemotePathForForwardingOrSend() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let builder = OutboundAttachmentContextBuilder(viewContext: context)
         let message = MessageBuilder()
             .withId("forward-source")
