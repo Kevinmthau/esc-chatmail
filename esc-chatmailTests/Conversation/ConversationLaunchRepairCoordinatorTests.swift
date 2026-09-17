@@ -8,10 +8,23 @@ import CoreData
 /// re-runnability after `cancel()`. The VM-level integration sequences
 /// (forwarders, combined empty-drain-then-rearm flow) stay pinned by
 /// `ConversationNameRefreshMigrationTests`.
+///
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue.
+/// `ConversationLaunchRepairCoordinator` is `@MainActor` and counts
+/// conversations on `storage.viewContext` directly, which is on-queue only for
+/// a main-queue context. See that helper for what the private-queue shape
+/// races. Background contexts stay private-queue and belong to the repair
+/// passes.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
     private var stack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
     private var migrationFlags: InMemoryMigrationFlagStore!
     private var notificationCenter: NotificationCenter!
     private var syncWaiter: MockForegroundSyncEngine!
@@ -19,7 +32,7 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
         migrationFlags = InMemoryMigrationFlagStore()
         // Private center: production posts .syncCompleted on .default, so a
         // suite-owned instance keeps concurrent sync tests from re-arming
@@ -32,7 +45,7 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         syncWaiter = nil
         notificationCenter = nil
         migrationFlags = nil
-        context = nil
+        viewContext = nil
         stack = nil
         super.tearDown()
     }
@@ -66,14 +79,14 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         let broken = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("coordinator-rearm-repairs")
             .withDate(date)
             .withSnippet("Recovered by notification sweep")
             .inConversation(broken)
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         // Constructed only — never poked directly. The subscription must be
         // live from init (a sync can finish before the list first appears),
@@ -103,14 +116,14 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         let repaired = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("coordinator-completed-launch")
             .withDate(date)
             .withSnippet("Repaired at launch")
             .inConversation(repaired)
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         let coordinator = makeCoordinator()
         coordinator.runLaunchRepairsIfNeeded()
@@ -129,14 +142,14 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         let brokenLater = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("coordinator-post-completion")
             .withDate(date)
             .withSnippet("Landed after completion")
             .inConversation(brokenLater)
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         notificationCenter.post(name: .syncCompleted, object: nil)
 
@@ -159,13 +172,13 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
             .withCreatedAt(oldDate)
             .withLastMessageDate(oldDate)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         let pendingShellID = pendingShell.id
-        let pendingRecord = context.insertTestObject(OutboundSendMutationRecord.self)
+        let pendingRecord = viewContext.insertTestObject(OutboundSendMutationRecord.self)
         pendingRecord.id = "launch-repair-pending-send"
         pendingRecord.createdAt = Date()
         pendingRecord.conversationId = pendingShellID
-        try context.save()
+        try viewContext.save()
 
         let coordinator = makeCoordinator()
         coordinator.repairMissingConversationPreviews()
@@ -180,7 +193,7 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         XCTAssertNil(preserved.archivedAt)
         XCTAssertFalse(preserved.hidden)
         XCTAssertEqual(
-            try context.fetch(OutboundSendMutationRecord.fetchRequest())
+            try viewContext.fetch(OutboundSendMutationRecord.fetchRequest())
                 .compactMap(\.conversationId),
             [pendingShellID]
         )
@@ -219,14 +232,14 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         let broken = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("coordinator-cancel-rerun")
             .withDate(date)
             .withSnippet("Recovered after cancel")
             .inConversation(broken)
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         let gate = AsyncGate()
         syncWaiter.onWaitForCurrentSyncToComplete = { await gate.wait() }
@@ -271,7 +284,7 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         let stack: TestCoreDataStack = self.stack
         return ConversationLaunchRepairCoordinator(
             storage: StorageDependencies(
-                viewContext: stack.viewContext,
+                viewContext: viewContext,
                 makeBackgroundContext: makeBackgroundContext ?? { stack.newBackgroundContext() },
                 saveIfNeeded: { stack.saveIfNeeded(context: $0) },
                 migrationFlags: migrationFlags,
@@ -292,8 +305,8 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         // The (default) test context does not auto-merge sibling saves;
         // refresh so reads reflect background-context changes persisted to
         // the store.
-        let conversation = try XCTUnwrap(context.existingObject(with: objectID) as? Conversation)
-        context.refresh(conversation, mergeChanges: false)
+        let conversation = try XCTUnwrap(viewContext.existingObject(with: objectID) as? Conversation)
+        viewContext.refresh(conversation, mergeChanges: false)
         return conversation
     }
 
