@@ -2,8 +2,6 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
-extension TestCoreDataStack: MessageActionsCoreDataStacking {}
-
 /// Every fixture, save, and assertion goes through the suite's `viewContext`,
 /// the main-queue context of `MainQueueMessageActionsCoreDataStack`, never
 /// `coreDataStack.viewContext`, which is private-queue. `MessageActions` is

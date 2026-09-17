@@ -14,6 +14,9 @@ import CoreData
 /// wrapped stack.
 ///
 /// Create it on the main actor and use `viewContext` only from there.
+/// `TestCoreDataStack` deliberately no longer conforms to
+/// `MessageActionsCoreDataStacking` itself: the private-queue context that
+/// conformance vended is the bug this type exists to avoid.
 final class MainQueueMessageActionsCoreDataStack: MessageActionsCoreDataStacking {
     let stack: TestCoreDataStack
     let viewContext: NSManagedObjectContext
