@@ -162,6 +162,40 @@ final class TestCoreDataStack: @unchecked Sendable {
         testViewContext
     }
 
+    /// Creates a main-queue context on this stack's coordinator, for
+    /// `@MainActor` suites whose code under test touches its context directly
+    /// (fetch/save with no `perform`), as production's main-queue view context
+    /// allows.
+    ///
+    /// Never hand `viewContext` to such code: it is private-queue, so every
+    /// direct call from the main actor is off-queue and traps under
+    /// `-com.apple.CoreData.ConcurrencyDebug 1`. Without that flag it races
+    /// whatever Core Data itself runs on the context's queue (such as the
+    /// deferred release of managed objects freed off-queue) and is the likely
+    /// cause of the test-runner crash in
+    /// GmailSendServiceOptimisticFailureTests (CI run 34426575844). The
+    /// run-loop hazard described in init does not apply here: the main-queue
+    /// observer runs on the main thread, serialized with a main-actor test
+    /// body.
+    ///
+    /// Use the returned context only from the main actor, and route that
+    /// suite's fixtures, saves, resets, and assertions through it rather than
+    /// `viewContext` / `saveViewContext()` / `resetViewContext()`, which act
+    /// on a different context. It is retired to the graveyard as soon as it is
+    /// created. The graveyard never shrinks, so it gets the same lifetime
+    /// `viewContext` gets at teardown.
+    @MainActor
+    func makeMainQueueViewContext() -> NSManagedObjectContext {
+        let context = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
+        context.persistentStoreCoordinator = persistentContainer.persistentStoreCoordinator
+        context.automaticallyMergesChangesFromParent = false
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        Self.creationLock.lock()
+        Self.graveyard.append(context)
+        Self.creationLock.unlock()
+        return context
+    }
+
     /// Creates a new background context for testing background operations
     func newBackgroundContext() -> NSManagedObjectContext {
         let context = persistentContainer.newBackgroundContext()

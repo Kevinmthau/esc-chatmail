@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import CoreData
 
 private struct ComposePendingAttachmentWrite {
     var originalPath: String?
