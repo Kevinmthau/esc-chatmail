@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A1B2C3D4E5F6789012345678 /* esc_chatmailUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F67890123456789A /* esc_chatmailUITests.swift */; };
 		F939A03B2E674AB400A7578D /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = F939A03A2E674AB400A7578D /* GoogleSignIn */; };
 		F939A03D2E674AB400A7578D /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = F939A03C2E674AB400A7578D /* GoogleSignInSwift */; };
 		F9550001AB00000000000001 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = F9550000AB00000000000001 /* SwiftSoup */; };
@@ -21,20 +20,11 @@
 			remoteGlobalIDString = F9399FE02E66521800A7578D;
 			remoteInfo = "esc-chatmail";
 		};
-		F9399FFD2E66521800A7578D /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = F9399FD92E66521800A7578D /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = F9399FE02E66521800A7578D;
-			remoteInfo = "esc-chatmail";
-		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		B2C3D4E5F67890123456789A /* esc_chatmailUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = esc_chatmailUITests.swift; sourceTree = "<group>"; };
 		F9399FE12E66521800A7578D /* esc-chatmail.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "esc-chatmail.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F9399FF22E66521800A7578D /* esc-chatmailTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "esc-chatmailTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
-		F9399FFC2E66521800A7578D /* esc-chatmailUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "esc-chatmailUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -85,30 +75,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		F9399FF92E66521800A7578D /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		C3D4E5F6789012345678901B /* esc-chatmailUITests */ = {
-			isa = PBXGroup;
-			children = (
-				B2C3D4E5F67890123456789A /* esc_chatmailUITests.swift */,
-			);
-			path = "esc-chatmailUITests";
-			sourceTree = "<group>";
-		};
 		F9399FD82E66521800A7578D = {
 			isa = PBXGroup;
 			children = (
 				F9399FE32E66521800A7578D /* esc-chatmail */,
 				F9TESTS0012E66521800A7578D /* esc-chatmailTests */,
-				C3D4E5F6789012345678901B /* esc-chatmailUITests */,
 				F9399FE22E66521800A7578D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -118,7 +92,6 @@
 			children = (
 				F9399FE12E66521800A7578D /* esc-chatmail.app */,
 				F9399FF22E66521800A7578D /* esc-chatmailTests.xctest */,
-				F9399FFC2E66521800A7578D /* esc-chatmailUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -174,26 +147,6 @@
 			productReference = F9399FF22E66521800A7578D /* esc-chatmailTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		F9399FFB2E66521800A7578D /* esc-chatmailUITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = F939A00D2E66521800A7578D /* Build configuration list for PBXNativeTarget "esc-chatmailUITests" */;
-			buildPhases = (
-				F9399FF82E66521800A7578D /* Sources */,
-				F9399FF92E66521800A7578D /* Frameworks */,
-				F9399FFA2E66521800A7578D /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				F9399FFE2E66521800A7578D /* PBXTargetDependency */,
-			);
-			name = "esc-chatmailUITests";
-			packageProductDependencies = (
-			);
-			productName = "esc-chatmailUITests";
-			productReference = F9399FFC2E66521800A7578D /* esc-chatmailUITests.xctest */;
-			productType = "com.apple.product-type.bundle.ui-testing";
-		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -208,10 +161,6 @@
 						CreatedOnToolsVersion = 16.4;
 					};
 					F9399FF12E66521800A7578D = {
-						CreatedOnToolsVersion = 16.4;
-						TestTargetID = F9399FE02E66521800A7578D;
-					};
-					F9399FFB2E66521800A7578D = {
 						CreatedOnToolsVersion = 16.4;
 						TestTargetID = F9399FE02E66521800A7578D;
 					};
@@ -237,7 +186,6 @@
 			targets = (
 				F9399FE02E66521800A7578D /* esc-chatmail */,
 				F9399FF12E66521800A7578D /* esc-chatmailTests */,
-				F9399FFB2E66521800A7578D /* esc-chatmailUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -251,13 +199,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		F9399FF02E66521800A7578D /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		F9399FFA2E66521800A7578D /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -281,14 +222,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		F9399FF82E66521800A7578D /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				A1B2C3D4E5F6789012345678 /* esc_chatmailUITests.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -296,11 +229,6 @@
 			isa = PBXTargetDependency;
 			target = F9399FE02E66521800A7578D /* esc-chatmail */;
 			targetProxy = F9399FF32E66521800A7578D /* PBXContainerItemProxy */;
-		};
-		F9399FFE2E66521800A7578D /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = F9399FE02E66521800A7578D /* esc-chatmail */;
-			targetProxy = F9399FFD2E66521800A7578D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -548,46 +476,6 @@
 			};
 			name = Release;
 		};
-		F939A00E2E66521800A7578D /* Debug */ = {
-			isa = XCBuildConfiguration;
-			baseConfigurationReferenceAnchor = F9399FE32E66521800A7578D /* esc-chatmail */;
-			baseConfigurationReferenceRelativePath = Configuration/Debug.xcconfig;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 3JXY2MS2Y3;
-				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.mushpot.esc-chatmailUITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_STRICT_CONCURRENCY = minimal;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = "esc-chatmail";
-			};
-			name = Debug;
-		};
-		F939A00F2E66521800A7578D /* Release */ = {
-			isa = XCBuildConfiguration;
-			baseConfigurationReferenceAnchor = F9399FE32E66521800A7578D /* esc-chatmail */;
-			baseConfigurationReferenceRelativePath = Configuration/Release.xcconfig;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 3JXY2MS2Y3;
-				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.mushpot.esc-chatmailUITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_STRICT_CONCURRENCY = minimal;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = "esc-chatmail";
-			};
-			name = Release;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -614,15 +502,6 @@
 			buildConfigurations = (
 				F939A00B2E66521800A7578D /* Debug */,
 				F939A00C2E66521800A7578D /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		F939A00D2E66521800A7578D /* Build configuration list for PBXNativeTarget "esc-chatmailUITests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				F939A00E2E66521800A7578D /* Debug */,
-				F939A00F2E66521800A7578D /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

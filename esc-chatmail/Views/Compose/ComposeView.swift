@@ -42,10 +42,6 @@ struct ComposeView: View {
         presentationStyle == .iMessage && viewModel.mode == .newMessage
     }
 
-    private var isRunningUITests: Bool {
-        ProcessInfo.processInfo.arguments.contains("UI_TEST_MODE")
-    }
-
     private var shouldOpenExistingConversationOnSelection: Bool {
         usesIMessagePresentation && onOpenConversation != nil
     }
@@ -174,7 +170,6 @@ struct ComposeView: View {
             )
         }
         .task {
-            guard !isRunningUITests else { return }
             await viewModel.requestContactsAccess()
         }
         .onAppear {

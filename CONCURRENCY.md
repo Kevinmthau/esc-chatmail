@@ -1,6 +1,7 @@
 # Concurrency Convention
 
-Last updated: 2026-07-05 (ORG3 step 1 of `consolidation.md`)
+Last updated: 2026-09-17 (`@unchecked Sendable` holder list removed; written
+2026-07-05 as ORG3 step 1 of `docs/archive/consolidation.md`)
 
 One page: the convention the sync layer already follows implicitly, now
 stated. New code conforms; existing code migrates opportunistically when
@@ -18,11 +19,12 @@ touched for other reasons.
 - **`Sendable` final classes / enums** for stateless utilities and namespaces
   (`TextProcessing`, `AttachmentDisplayFilter`, pattern namespaces). Pure
   functions + immutable stored properties only.
-- **`@unchecked Sendable`** is a debt marker, not a convention. The three
-  current holders (`CoreDataStack`, `GmailAPIClient`, `MessageFetcher`) carry
-  internal synchronization (Core Data queues / URLSession / bounded task
-  groups); do not add new ones without a comment stating the synchronization
-  that justifies it.
+- **`@unchecked Sendable`** is a debt marker, not a convention. Holders carry
+  internal synchronization (Core Data queues, URLSession, locks, bounded task
+  groups). The set has grown well past the original three, so grep
+  `@unchecked Sendable` for the current holders rather than keeping a list
+  here; do not add new ones without a `///` comment stating the
+  synchronization that justifies it.
 - **NSLock'd classes** are acceptable only where a synchronous API is
   structurally required. The canonical example is `HTMLContentResultCache`:
   NSCache's delegate re-enters synchronously on eviction, which an actor

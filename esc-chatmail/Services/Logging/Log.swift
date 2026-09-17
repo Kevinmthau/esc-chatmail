@@ -93,62 +93,6 @@ enum Log {
         log(level: level, message: message(), category: category, error: nil, file: file, function: function, line: line)
     }
 
-    // MARK: - Specialized Logging Methods
-
-    /// Log a performance measurement
-    static func performance(
-        _ operation: String,
-        duration: TimeInterval,
-        itemCount: Int? = nil,
-        file: String = #file,
-        function: String = #function,
-        line: Int = #line
-    ) {
-        var message = "\(operation) completed in \(String(format: "%.2f", duration))s"
-        if let count = itemCount, duration > 0 {
-            let throughput = Double(count) / duration
-            message += " (\(count) items, \(String(format: "%.0f", throughput)) items/sec)"
-        }
-        log(level: .info, message: message, category: .performance, error: nil, file: file, function: function, line: line)
-    }
-
-    /// Log an API request/response
-    static func api(
-        _ method: String,
-        endpoint: String,
-        statusCode: Int? = nil,
-        error: Error? = nil,
-        file: String = #file,
-        function: String = #function,
-        line: Int = #line
-    ) {
-        var message = "\(method) \(endpoint)"
-        if let code = statusCode {
-            message += " -> \(code)"
-        }
-        let level: LogLevel = error != nil ? .error : (statusCode ?? 200) >= 400 ? .warning : .debug
-        log(level: level, message: message, category: .api, error: error, file: file, function: function, line: line)
-    }
-
-    /// Log sync progress
-    static func sync(
-        _ phase: String,
-        progress: Double? = nil,
-        detail: String? = nil,
-        file: String = #file,
-        function: String = #function,
-        line: Int = #line
-    ) {
-        var message = phase
-        if let progress = progress {
-            message += " (\(Int(progress * 100))%)"
-        }
-        if let detail = detail {
-            message += " - \(detail)"
-        }
-        log(level: .info, message: message, category: .sync, error: nil, file: file, function: function, line: line)
-    }
-
     // MARK: - Core Logging
 
     private static func log(
@@ -226,35 +170,4 @@ enum Log {
         print(parts.joined(separator: " "))
     }
     #endif
-}
-
-// MARK: - Convenience Extensions
-
-extension Log {
-
-    /// Measure and log the duration of an operation
-    static func measure<T>(
-        _ operation: String,
-        category: LogCategory = .performance,
-        block: () throws -> T
-    ) rethrows -> T {
-        let start = CFAbsoluteTimeGetCurrent()
-        let result = try block()
-        let duration = CFAbsoluteTimeGetCurrent() - start
-        performance(operation, duration: duration)
-        return result
-    }
-
-    /// Measure and log the duration of an async operation
-    static func measureAsync<T>(
-        _ operation: String,
-        category: LogCategory = .performance,
-        block: () async throws -> T
-    ) async rethrows -> T {
-        let start = CFAbsoluteTimeGetCurrent()
-        let result = try await block()
-        let duration = CFAbsoluteTimeGetCurrent() - start
-        performance(operation, duration: duration)
-        return result
-    }
 }

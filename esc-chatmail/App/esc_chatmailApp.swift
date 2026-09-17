@@ -24,16 +24,8 @@ struct esc_chatmailApp: App {
 
     @State private var isInitialized = false
 
-    private var isRunningUITests: Bool {
-        ProcessInfo.processInfo.arguments.contains("UI_TEST_MODE")
-    }
-
     private var isRunningUnitTests: Bool {
         RuntimeEnvironment.isRunningUnitTests
-    }
-
-    private var shouldForceAuthenticatedUITestState: Bool {
-        ProcessInfo.processInfo.arguments.contains("UI_TEST_AUTHENTICATED")
     }
 
     init() {
@@ -136,11 +128,9 @@ struct esc_chatmailApp: App {
         // must not gate auth restore or the first frame — a wedged scheduler
         // daemon would otherwise pin the app on AppLoadingView forever.
         // Launch-handler registration already happened in App.init().
-        if !isRunningUITests {
-            Task { @MainActor in
-                await DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
-                logStartupTiming("Database maintenance scheduled")
-            }
+        Task { @MainActor in
+            await DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
+            logStartupTiming("Database maintenance scheduled")
         }
 
         // 3. Restore auth session (after cleanup complete). A cold background
@@ -150,7 +140,6 @@ struct esc_chatmailApp: App {
             logStartupTiming("Auth bootstrap failed")
             return
         }
-        applyUITestLaunchStateIfNeeded()
         logStartupTiming("Auth restored")
 
         if reconcileAbandonedOptimisticSendsIfAuthenticated() {
@@ -167,7 +156,7 @@ struct esc_chatmailApp: App {
         // armed. Gated on canAccessMailbox (not isAuthenticated): revoked
         // credentials must start no sync work in either direction, matching
         // the reauthentication flow's contract.
-        if dependencies.authSession.canAccessMailbox && !isRunningUITests {
+        if dependencies.authSession.canAccessMailbox {
             // `scenePhase` cannot be consulted here: this method runs inside
             // AppLoadingView's `.task` closure, which captured the App-struct
             // copy from the launch render — `@Environment` stores its resolved
@@ -195,12 +184,10 @@ struct esc_chatmailApp: App {
         logStartupTiming("initializeApp() complete")
 
         // 5. Prewarm WebKit after UI becomes available to avoid launch-path contention.
-        if !isRunningUITests {
-            Task { @MainActor in
-                guard await Task.sleepUnlessCancelled(nanoseconds: 2_000_000_000) else { return }
-                AppPrewarmer.prewarmWebKitIfNeeded()
-                logStartupTiming("WebKit prewarm triggered (post-init)")
-            }
+        Task { @MainActor in
+            guard await Task.sleepUnlessCancelled(nanoseconds: 2_000_000_000) else { return }
+            AppPrewarmer.prewarmWebKitIfNeeded()
+            logStartupTiming("WebKit prewarm triggered (post-init)")
         }
     }
 
@@ -226,7 +213,7 @@ struct esc_chatmailApp: App {
         // can fire in the unit-test host; keep the app's machinery idle there
         // for the same reasons `initializeApp()` no-ops (touching the shared
         // Dependencies graph mid-suite races the tests).
-        if isRunningUnitTests || isRunningUITests { return }
+        if isRunningUnitTests { return }
 
         switch newPhase {
         case .background:
@@ -262,8 +249,6 @@ struct esc_chatmailApp: App {
     }
 
     private func handleAuthStateChange(_ isAuthenticated: Bool) {
-        if isRunningUITests { return }
-
         if isAuthenticated,
            dependencies.authSession.canAccessMailbox,
            scenePhase == .active {
@@ -279,8 +264,6 @@ struct esc_chatmailApp: App {
     }
 
     private func handleReauthenticationRequirementChange(_ isRequired: Bool) {
-        if isRunningUITests { return }
-
         if isRequired {
             dependencies.foregroundSyncCoordinator.stop(reason: "reauthenticationRequired")
         } else if dependencies.authSession.canAccessMailbox && scenePhase == .active {
@@ -324,17 +307,6 @@ struct esc_chatmailApp: App {
                     )
                 }
             }
-        }
-    }
-
-    private func applyUITestLaunchStateIfNeeded() {
-        guard isRunningUITests, shouldForceAuthenticatedUITestState else { return }
-        dependencies.authSession.isAuthenticated = true
-        if dependencies.authSession.userEmail == nil {
-            dependencies.authSession.userEmail = "uitest@example.com"
-        }
-        if dependencies.authSession.userName == nil {
-            dependencies.authSession.userName = "UI Test"
         }
     }
 }
