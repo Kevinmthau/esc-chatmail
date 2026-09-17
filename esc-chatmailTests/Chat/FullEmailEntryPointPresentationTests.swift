@@ -11,14 +11,29 @@ import XCTest
 /// ConversationListView owns no message-driven sheet state.
 @MainActor
 final class FullEmailEntryPointPresentationTests: XCTestCase {
+    func testStoredPropertyNames_stateBackingStorage_reportsDeclaredPropertyName() {
+        // Anchors every absence assertion in this suite: if SwiftUI renames
+        // @State backing storage again, this fails instead of letting
+        // `XCTAssertFalse(names.contains(...))` pass vacuously, as the raw
+        // `_name` label checks silently did under Xcode 27.
+        // Revert-check: dropping the underscore stripping in
+        // storedPropertyNames(of:) makes this fail.
+        let names = storedPropertyNames(of: StoredPropertyNamingProbe())
+
+        XCTAssertTrue(names.contains("isShowingSheet"), "Stored properties: \(names.sorted())")
+        XCTAssertTrue(names.contains("dismiss"), "Stored properties: \(names.sorted())")
+    }
+
     func testConversationListViewDoesNotStoreMessageDrivenSheetState() {
         let deps = makeDependencies()
         let view = ConversationListView(deps: deps)
 
-        let labels = storedPropertyLabels(of: view)
+        let names = storedPropertyNames(of: view)
 
-        XCTAssertFalse(labels.contains("_selectedMessage"))
-        XCTAssertFalse(labels.contains("_showingWebView"))
+        // Revert-check: adding `@State private var selectedMessage: Message?`
+        // to ConversationListView makes this fail.
+        XCTAssertFalse(names.contains("selectedMessage"))
+        XCTAssertFalse(names.contains("showingWebView"))
     }
 
     func testConversationListViewRendersWithInjectedDependencies() {
@@ -44,12 +59,22 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
             )
         )
 
-        let labels = storedPropertyLabels(of: view)
+        let names = storedPropertyNames(of: view)
 
-        XCTAssertTrue(labels.contains("_presentedSheetDestination"))
-        XCTAssertFalse(labels.contains("_selectedMessage"))
-        XCTAssertFalse(labels.contains("_showingWebView"))
-        XCTAssertFalse(labels.contains("_messageToViewInFull"))
+        // HONEST SCOPE: destination routing (openEmailReader, dismissDestination)
+        // is pinned by ChatViewModelTests, and the presented-sheet cover by
+        // testChatVisibilityRemainsCoveredUntilPresentedSheetFinishesDismissing.
+        // No API exposes which presentation state the view stores, so this
+        // half needs reflection.
+        // Revert-check: adding `@State private var showingWebView = false` to
+        // ChatView makes this fail.
+        XCTAssertTrue(
+            names.contains("presentedSheetDestination"),
+            "Stored properties: \(names.sorted())"
+        )
+        XCTAssertFalse(names.contains("selectedMessage"))
+        XCTAssertFalse(names.contains("showingWebView"))
+        XCTAssertFalse(names.contains("messageToViewInFull"))
     }
 
     func testChatVisibilityRemainsCoveredUntilPresentedSheetFinishesDismissing() {
@@ -155,8 +180,16 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         )
     }
 
-    private func storedPropertyLabels<T>(of value: T) -> Set<String> {
-        Set(Mirror(reflecting: value).children.compactMap(\.label))
+    /// Mirror's stored-property labels with leading underscores removed, so a
+    /// declared `foo` matches regardless of how its backing storage is named.
+    /// Xcode 26's `@State` property wrapper stores `_foo`; Xcode 27's `@State`
+    /// macro stores `__foo` (a `LazyState`) and synthesizes `_foo`/`$foo` as
+    /// computed accessors, which Mirror never lists. Other property wrappers
+    /// (`@StateObject`, `@FocusState`, `@Environment`) still store `_foo`.
+    private func storedPropertyNames<T>(of value: T) -> Set<String> {
+        Set(Mirror(reflecting: value).children.compactMap { child in
+            child.label.map { String($0.drop { $0 == "_" }) }
+        })
     }
 
     private func makeDependencies() -> Dependencies {
@@ -175,6 +208,17 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
             tokenManager: tokenManager,
             gmailAPIClient: GmailAPIClient(tokenManager: tokenManager)
         )
+    }
+}
+
+/// Declares one `@State` and one real property wrapper so
+/// `storedPropertyNames(of:)` is checked against both storage naming schemes.
+private struct StoredPropertyNamingProbe: View {
+    @State private var isShowingSheet = false
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        EmptyView()
     }
 }
 
