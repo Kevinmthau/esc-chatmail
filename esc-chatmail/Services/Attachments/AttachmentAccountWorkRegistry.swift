@@ -133,6 +133,19 @@ final class AttachmentAccountWorkRegistry: @unchecked Sendable {
         _ = lock.withLock { operations.removeValue(forKey: id) }
     }
 
+    /// Closes admission and drains every registered operation.
+    ///
+    /// Closing admission and retiring the snapshotted generations are
+    /// deliberately *not* one atomic step: the lock covers only the admission
+    /// flip and the snapshot, because `Task.cancel()` runs cancellation
+    /// handlers synchronously and this lock is not reentrant. A caller that
+    /// observes `captureAdmissionToken() == nil` therefore cannot conclude that
+    /// the live operations have been cancelled yet — only that no new one can
+    /// register. Nothing downstream may act on that weaker ordering: the
+    /// no-leak guarantee is the drain below, which returns only once every
+    /// snapshotted operation has fully unwound, and account cleanup runs after
+    /// it. Tests must wait on an operation's own cancellation, never on
+    /// admission alone.
     func cancelAndAwaitAll() async {
         let activeOperations = lock.withLock {
             acceptsNewWork = false
