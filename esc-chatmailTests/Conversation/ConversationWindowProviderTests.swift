@@ -9,19 +9,34 @@ import CoreData
 /// archive / delete handling and the paging loop's limit stop. The two
 /// pending-insert tests moved here from `ConversationListViewModelTests`,
 /// which now covers only view-model-routed windowing.
+///
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue.
+/// `ConversationWindowProvider` is not actor-isolated itself, but it fetches
+/// and reads pending objects on whatever context it is given
+/// (`ConversationWindowProvider.swift:60`) on the caller's thread — here this
+/// `@MainActor` test body, and in production `ConversationListViewModel` on
+/// the main-queue view context. Either way the context must be main-queue for
+/// those accesses to be on-queue. See that helper for what the private-queue
+/// shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationWindowProviderTests: XCTestCase {
     private var stack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
-        context = nil
+        viewContext = nil
         stack = nil
         super.tearDown()
     }
@@ -39,19 +54,19 @@ final class ConversationWindowProviderTests: XCTestCase {
                 savedMatchCandidate = conversation
             }
         }
-        try stack.saveViewContext()
+        try saveViewContext()
 
         let pendingMatch = makeConversation(
             name: "Pending",
             snippet: "optimistic",
             date: 2_000
         )
-        context.processPendingChanges()
+        viewContext.processPendingChanges()
         let savedMatch = try XCTUnwrap(savedMatchCandidate)
         let matchingIDs = Set([pendingMatch.objectID, savedMatch.objectID])
 
         let window = makeProvider().fetchWindow(
-            in: context,
+            in: viewContext,
             limit: 2,
             searchText: "",
             filter: .contacts,
@@ -71,10 +86,10 @@ final class ConversationWindowProviderTests: XCTestCase {
                 date: TimeInterval(300 - index)
             )
         }
-        try stack.saveViewContext()
+        try saveViewContext()
 
         let window = makeProvider().fetchWindow(
-            in: context,
+            in: viewContext,
             limit: 2,
             searchText: "",
             filter: .contacts,
@@ -105,17 +120,17 @@ final class ConversationWindowProviderTests: XCTestCase {
             }
         }
         let carol = makeConversation(name: "Carol", date: 100)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         // Pending re-sort: the update is deliberately unsaved, so the
         // persisted pages still hold Carol at date 100 while her in-memory
         // sort key says she now leads the list.
         carol.lastMessageDate = Date(timeIntervalSince1970: 2_000)
-        context.processPendingChanges()
+        viewContext.processPendingChanges()
 
         let newestSaved = try XCTUnwrap(newestSavedCandidate)
         let window = makeProvider().fetchWindow(
-            in: context,
+            in: viewContext,
             limit: 2,
             searchText: "",
             filter: .contacts,
@@ -133,15 +148,15 @@ final class ConversationWindowProviderTests: XCTestCase {
     func testFetchWindow_pendingArchive_excludesRowFromFilteredWindow() throws {
         let alice = makeConversation(name: "Alice", date: 300)
         let bob = makeConversation(name: "Bob", date: 200)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         // Unsaved archive: SQLite still holds archivedAt == nil for Bob, so
         // the store predicate alone cannot exclude him.
         bob.archivedAt = Date(timeIntervalSince1970: 500)
-        context.processPendingChanges()
+        viewContext.processPendingChanges()
 
         let window = makeProvider().fetchWindow(
-            in: context,
+            in: viewContext,
             limit: 2,
             searchText: "",
             filter: .contacts,
@@ -159,14 +174,14 @@ final class ConversationWindowProviderTests: XCTestCase {
     func testFetchWindow_pendingDelete_excludesRowFromFilteredWindow() throws {
         let alice = makeConversation(name: "Alice", date: 300)
         let bob = makeConversation(name: "Bob", date: 200)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         // Unsaved delete: SQLite still returns Bob's row until save.
-        context.delete(bob)
-        context.processPendingChanges()
+        viewContext.delete(bob)
+        viewContext.processPendingChanges()
 
         let window = makeProvider().fetchWindow(
-            in: context,
+            in: viewContext,
             limit: 2,
             searchText: "",
             filter: .contacts,
@@ -189,11 +204,11 @@ final class ConversationWindowProviderTests: XCTestCase {
                 makeConversation(name: "Saved \(index)", date: TimeInterval(1_000 - index))
             )
         }
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var visibilityChecks = 0
         let window = makeProvider().fetchWindow(
-            in: context,
+            in: viewContext,
             limit: 2,
             searchText: "",
             filter: .contacts,
@@ -217,6 +232,14 @@ final class ConversationWindowProviderTests: XCTestCase {
     /// Small window: `limit * contactFilterCandidateMultiplier` yields a
     /// candidate batch of 10 at limit 2, so ten-and-eleven-row fixtures
     /// exercise batch boundaries without hundreds of rows.
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
+    }
+
     private func makeProvider() -> ConversationWindowProvider {
         ConversationWindowProvider(
             configuration: ConversationListWindowConfiguration(
@@ -238,6 +261,6 @@ final class ConversationWindowProviderTests: XCTestCase {
             .withSnippet(snippet)
             .visible()
             .withLastMessageDate(Date(timeIntervalSince1970: date))
-            .build(in: context)
+            .build(in: viewContext)
     }
 }

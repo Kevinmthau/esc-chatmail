@@ -559,23 +559,35 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
     }
 
+    /// The only `@MainActor` test here: it drives `MessageActions`, which
+    /// fetches, mutates, and saves its stack's view context directly on the
+    /// main actor. It therefore takes its fixtures and its `MessageActions`
+    /// from `MainQueueMessageActionsCoreDataStack`, never `stack.viewContext`,
+    /// which is private-queue and would make every one of those accesses
+    /// off-queue (see `TestCoreDataStack.makeMainQueueViewContext()`).
+    ///
+    /// HONEST SCOPE: this test cannot reproduce that race on demand. With
+    /// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this
+    /// shape runs clean.
     @MainActor
     func testProcessHistoryChangesPreservesReadFirstAgainstPreparedStaleMessage() async throws {
         await ModificationTracker.shared.reset()
 
         let stack = TestCoreDataStack()
+        let messageActionsStack = MainQueueMessageActionsCoreDataStack(wrapping: stack)
+        let viewContext: NSManagedObjectContext = messageActionsStack.viewContext
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(0)
-            .build(in: stack.viewContext)
-        let inboxLabel = LabelBuilder().inbox().build(in: stack.viewContext)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("read-first-stale-sync")
             .read()
             .inConversation(conversation)
-            .build(in: stack.viewContext)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try stack.saveViewContext()
+        try viewContext.save()
         let messageObjectID = message.objectID
 
         let backgroundContext = stack.newBackgroundContext()
@@ -585,7 +597,7 @@ final class BackgroundMessageProcessorTests: XCTestCase {
 
         message.isUnread = true
         conversation.inboxUnreadCount = 1
-        try stack.saveViewContext()
+        try viewContext.save()
 
         let coordinator = PreparedStaleMessageCoordinator(
             conversationID: conversation.objectID,
@@ -613,7 +625,7 @@ final class BackgroundMessageProcessorTests: XCTestCase {
             rollupMutationSerializer: serializer
         )
         let actions = MessageActions(
-            coreDataStack: stack,
+            coreDataStack: messageActionsStack,
             pendingActionsManager: MockPendingActionsManager(),
             rollupMutationSerializer: serializer
         )

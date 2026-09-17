@@ -92,17 +92,25 @@ extension XCTestCase {
 
     /// Measures an async operation using XCTest performance metrics.
     /// Keeps the call sites concise for service-level async benchmarks.
+    ///
+    /// The operation is `@MainActor`: the measured paths (list open, chat
+    /// thread open, bubble and HTML loading) are main-actor paths in
+    /// production, and their `NSManagedObjectContext` is the main-queue view
+    /// context, which only the main actor may touch directly. A non-isolated
+    /// operation ran on a cooperative thread, so every context access inside
+    /// it was off-queue. `wait(for:)` below spins the main run loop, which
+    /// drains the main actor, so the measured task still runs to completion.
     func measureAsync(
         metrics: [XCTMetric],
         options: XCTMeasureOptions,
         timeout: TimeInterval = 10.0,
-        _ operation: @escaping () async throws -> Void
+        _ operation: @escaping @MainActor () async throws -> Void
     ) {
         measure(metrics: metrics, options: options) {
             let expectation = expectation(description: "Measured async operation")
             var operationError: Error?
 
-            Task {
+            Task { @MainActor in
                 do {
                     try await operation()
                 } catch {

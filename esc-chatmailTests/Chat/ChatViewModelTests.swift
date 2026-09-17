@@ -3,6 +3,18 @@ import Combine
 import XCTest
 @testable import esc_chatmail
 
+/// The tests that own a `TestCoreDataStack` take their context from
+/// `makeMainQueueViewContext()`, never `stack.viewContext`, which is
+/// private-queue: `ChatViewModel`, `ChatComposerState`, and `MessageActions`
+/// are `@MainActor` and fetch, delete, and save that context directly
+/// (`ChatViewModel.swift:248`), which is on-queue only for a main-queue
+/// context. See that helper for what the private-queue shape races. The rest
+/// of the suite runs against `Dependencies.viewContext`, which is already
+/// main-queue.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ChatViewModelTests: XCTestCase {
     private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {
@@ -107,7 +119,7 @@ final class ChatViewModelTests: XCTestCase {
 
     func testDiscardUnsentAttachmentsDeletesDraftObjectsAndFiles() throws {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = stack.makeMainQueueViewContext()
         AttachmentPaths.setupDirectories()
         let attachmentID = "local_\(UUID().uuidString)"
         let originalPath = AttachmentPaths.originalPath(
@@ -136,7 +148,7 @@ final class ChatViewModelTests: XCTestCase {
 
     func testDiscardUnsentAttachmentsDoesNotDeleteAttachmentAdoptedByMessage() {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = stack.makeMainQueueViewContext()
         let message = MessageBuilder()
             .withId("optimistic-reply")
             .build(in: context)
@@ -157,7 +169,7 @@ final class ChatViewModelTests: XCTestCase {
 
     func testAttachmentDiscardRequestedDuringSendRunsAfterSendFinishes() {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = stack.makeMainQueueViewContext()
         let attachment = context.insertTestObject(Attachment.self)
         attachment.id = "local_\(UUID().uuidString)"
         attachment.filename = "draft.jpg"
@@ -179,7 +191,7 @@ final class ChatViewModelTests: XCTestCase {
 
     func testAttachmentDiscardRequestedDuringSendPreservesAdoptedAttachment() {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = stack.makeMainQueueViewContext()
         let message = MessageBuilder()
             .withId("optimistic-reply")
             .build(in: context)
@@ -301,7 +313,7 @@ final class ChatViewModelTests: XCTestCase {
 
     func testRetainedOutboundFailureCannotBecomeAutomaticOrManualReplyTarget() throws {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = stack.makeMainQueueViewContext()
         let baseDependencies = makeDependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com")
         ).makeChatDependencies()
@@ -335,13 +347,15 @@ final class ChatViewModelTests: XCTestCase {
         record.id = optimisticID
         record.createdAt = Date()
         record.remoteCommittedMessageId = OutboundSendRemoteState.notSentMessageID
-        try stack.saveViewContext()
+        try context.save()
         let conversationObjectID = conversation.objectID
         let messageObjectID = notSentMessage.objectID
 
         // Exercise the same cold registered-object state used when a retained
         // optimistic row becomes the latest message after relaunch.
-        stack.resetViewContext()
+        // `TestCoreDataStack.resetViewContext()` would reset the stack's
+        // private-queue context, not this test's context.
+        context.reset()
         let coldConversation = try XCTUnwrap(
             try context.existingObject(with: conversationObjectID) as? Conversation
         )
@@ -363,7 +377,7 @@ final class ChatViewModelTests: XCTestCase {
             try context.fetch(OutboundSendMutationRecord.fetchRequest()).first
         )
         coldRecord.remoteCommittedMessageId = OutboundSendRemoteState.ambiguousMessageID
-        try stack.saveViewContext()
+        try context.save()
         viewModel.setReplyingTo(coldNotSentMessage)
         XCTAssertNil(viewModel.replyingTo)
     }
@@ -558,11 +572,17 @@ final class ChatViewModelTests: XCTestCase {
     }
 
     func testBackgroundReadLeavesLaterUnreadCountDurableForBlueDot() async throws {
-        let stack = TestCoreDataStack(automaticallyMergesChanges: true)
-        let context = stack.viewContext
+        let stack = TestCoreDataStack()
+        let messageActionsStack = MainQueueMessageActionsCoreDataStack(wrapping: stack)
+        let context: NSManagedObjectContext = messageActionsStack.viewContext
+        // Merge-driven assertions: the view model's row snapshots refresh when
+        // the background read's save merges into the view context. On a
+        // main-queue context the merge runs on the main queue, so it lands
+        // while this test is suspended in its polls.
+        context.automaticallyMergesChangesFromParent = true
         let pendingActionsManager = MockPendingActionsManager()
         let messageActions = MessageActions(
-            coreDataStack: stack,
+            coreDataStack: messageActionsStack,
             pendingActionsManager: pendingActionsManager
         )
         let baseDependencies = makeDependencies(
@@ -597,7 +617,7 @@ final class ChatViewModelTests: XCTestCase {
             .inConversation(conversation)
             .build(in: context)
         initialMessage.addToLabels(inboxLabel)
-        try stack.saveViewContext()
+        try context.save()
 
         let viewModel = ChatViewModel(
             conversation: conversation,
@@ -614,7 +634,7 @@ final class ChatViewModelTests: XCTestCase {
             .build(in: context)
         laterMessage.addToLabels(inboxLabel)
         conversation.inboxUnreadCount = 2
-        try stack.saveViewContext()
+        try context.save()
 
         viewModel.markConversationAsRead(messageObjectIDs: initialUnreadSnapshot)
         await waitUntil {
@@ -625,7 +645,7 @@ final class ChatViewModelTests: XCTestCase {
             .markAsRead()
             .forMessage("pending-action-activity")
             .build(in: context)
-        try stack.saveViewContext()
+        try context.save()
 
         let verificationContext = stack.newBackgroundContext()
         let conversationObjectID = conversation.objectID
@@ -1265,9 +1285,13 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
     init() {
         let coreDataStack = TestCoreDataStack()
         self.coreDataStack = coreDataStack
-        let message = coreDataStack.viewContext.insertTestObject(Message.self)
+        // Main-queue context: this initializer runs on the main actor and
+        // inserts directly, which is off-queue on the stack's private-queue
+        // viewContext.
+        let viewContext = coreDataStack.makeMainQueueViewContext()
+        let message = viewContext.insertTestObject(Message.self)
         message.id = "optimistic-1"
-        try! coreDataStack.viewContext.obtainPermanentIDs(for: [message])
+        try! viewContext.obtainPermanentIDs(for: [message])
         self.sendResult = .init(
             optimisticMessageID: message.id,
             optimisticMessageObjectID: message.objectID,

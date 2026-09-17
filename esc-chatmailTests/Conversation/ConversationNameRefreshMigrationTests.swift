@@ -2,25 +2,36 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue. `ConversationListViewModel`
+/// and `ConversationLaunchRepairCoordinator` are `@MainActor` and fetch and
+/// count on that context directly, which is on-queue only for a main-queue
+/// context. See that helper for what the private-queue shape races. Background
+/// contexts stay private-queue.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationNameRefreshMigrationTests: XCTestCase {
     private static let legacyConversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
     private static let legacyConversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV1"
 
     private var stack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
     private var migrationFlags: InMemoryMigrationFlagStore!
 
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
         migrationFlags = InMemoryMigrationFlagStore()
     }
 
     override func tearDown() {
         migrationFlags = nil
-        context = nil
+        viewContext = nil
         stack = nil
         super.tearDown()
     }
@@ -28,9 +39,10 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
     func testOnAppear_refreshesNamesWithoutRecomputingRollupsOrReorderingConversations() async throws {
         // This test verifies merge-driven behavior: the view model's row
         // snapshots refresh when the background migration's save merges into
-        // the view context, so it needs an automerge-enabled stack.
-        stack = TestCoreDataStack(automaticallyMergesChanges: true)
-        context = stack.viewContext
+        // the view context, so it opts that context into automerge. On a
+        // main-queue context the merge runs on the main queue, so it lands
+        // only while this test is suspended in the polls below.
+        viewContext.automaticallyMergesChangesFromParent = true
 
         let aliceDate = Date(timeIntervalSince1970: 100)
         let bobDate = Date(timeIntervalSince1970: 200)
@@ -42,32 +54,32 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withUnreadCount(7)
             .visible()
             .withParticipant(makePerson(email: "alice@example.com"))
-            .build(in: context)
+            .build(in: viewContext)
         let bob = ConversationBuilder()
             .withDisplayName("bob")
             .withSnippet("Bob preview")
             .withLastMessageDate(bobDate)
             .visible()
             .withParticipant(makePerson(email: "bob@example.com"))
-            .build(in: context)
+            .build(in: viewContext)
 
         _ = MessageBuilder()
             .withSnippet("Newest Alice message")
             .withDate(Date(timeIntervalSince1970: 300))
             .inConversation(alice)
-            .build(in: context)
+            .build(in: viewContext)
         // Bob needs a persisted message: the per-launch repair archives stale
         // message-less conversation shells, and this test asserts bob stays active.
         _ = MessageBuilder()
             .withSnippet("Newest Bob message")
             .withDate(bobDate)
             .inConversation(bob)
-            .build(in: context)
+            .build(in: viewContext)
 
-        try context.save()
+        try viewContext.save()
 
         let viewModel = makeViewModel()
-        viewModel.onAppear(in: context)
+        viewModel.onAppear(in: viewContext)
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [bob.objectID, alice.objectID])
 
@@ -108,8 +120,8 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withDisplayName("Unknown Contact")
             .visible()
             .withParticipant(makePerson(email: "alice@example.com"))
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         let viewModel = makeViewModel()
         viewModel.refreshConversationNames()
@@ -145,8 +157,8 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withDisplayName("Unknown Contact")
             .visible()
             .withParticipant(makePerson(email: "alice@example.com"))
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         viewModel.refreshConversationNames()
 
@@ -172,14 +184,14 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withDisplayName("MTAyMjYwMTUtMjM1ODc3LTA=")
             .visible()
             .withParticipant(makePerson(email: "news@email-newsletters.timeout.com"))
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("list-title-repair-launch-pass")
             .withSender(email: "news@email-newsletters.timeout.com", name: "Time Out")
             .withDate(Date(timeIntervalSince1970: 100))
             .inConversation(conversation)
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         let viewModel = makeViewModel()
         viewModel.repairListConversationTitles()
@@ -221,14 +233,14 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let conversation = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("preview-repair-rearm")
             .withDate(date)
             .withSnippet("Recovered after sync")
             .inConversation(conversation)
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         NotificationCenter.default.post(name: .syncCompleted, object: nil)
 
@@ -251,14 +263,14 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let repaired = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("preview-repair-completed-launch")
             .withDate(date)
             .withSnippet("Repaired at launch")
             .inConversation(repaired)
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         let viewModel = makeViewModel()
         viewModel.repairMissingConversationPreviews()
@@ -276,14 +288,14 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let brokenLater = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("preview-repair-post-completion")
             .withDate(date)
             .withSnippet("Landed after completion")
             .inConversation(brokenLater)
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         NotificationCenter.default.post(name: .syncCompleted, object: nil)
 
@@ -300,18 +312,18 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             let conversation = ConversationBuilder()
                 .withLastMessageDate(date)
                 .visible()
-                .build(in: context)
+                .build(in: viewContext)
             MessageBuilder()
                 .withId("preview-repair-batch-\(index)")
                 .withDate(date)
                 .withSnippet("Repair preview \(index)")
                 .inConversation(conversation)
-                .build(in: context)
+                .build(in: viewContext)
 
             createdConversations.append((conversation, "Repair preview \(index)"))
         }
 
-        try context.save()
+        try viewContext.save()
         let expectedSnippets = createdConversations.map { ($0.conversation.objectID, $0.expectedSnippet) }
         let viewModel = makeViewModel()
 
@@ -349,18 +361,18 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let conversation = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         let message = MessageBuilder()
             .withId("preview-repair-v2-chat-preview")
             .withDate(date)
             .withSubject("Subject fallback")
             .withSnippet(" \n\t ")
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.cleanedSnippet = nil
         message.chatPreviewText = "Recovered chat preview.\n\nSecond line."
 
-        try context.save()
+        try viewContext.save()
 
         let viewModel = makeViewModel()
         viewModel.repairMissingConversationPreviews()
@@ -391,15 +403,15 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let conversation = ConversationBuilder()
             .withLastMessageDate(date)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
         MessageBuilder()
             .withId("preview-repair-reruns-after-flag")
             .withDate(date)
             .withSnippet("Recovered preview")
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
 
-        try context.save()
+        try viewContext.save()
 
         let viewModel = makeViewModel()
         viewModel.repairMissingConversationPreviews()
@@ -421,9 +433,9 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let shell = ConversationBuilder()
             .withLastMessageDate(staleDate)
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
 
-        try context.save()
+        try viewContext.save()
 
         let viewModel = makeViewModel()
         viewModel.repairMissingConversationPreviews()
@@ -450,10 +462,10 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withUnreadCount(3)
             .visible()
             .withParticipant(makePerson(email: "alice@example.com"))
-            .build(in: context)
+            .build(in: viewContext)
         conversation.latestInboxDate = latestInboxDate
         conversation.pinned = true
-        try context.save()
+        try viewContext.save()
 
         let manager = makeConversationManager()
         let backgroundContext = stack.newBackgroundContext()
@@ -487,8 +499,8 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withUnreadCount(1)
             .visible()
             .withParticipant(makePerson(email: "friend@example.com"))
-            .build(in: context)
-        try context.save()
+            .build(in: viewContext)
+        try viewContext.save()
 
         let updater = ConversationRollupUpdater()
         let backgroundContext = stack.newBackgroundContext()
@@ -502,7 +514,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         conversation.inboxUnreadCount = 9
         conversation.latestInboxDate = syncedDate
         conversation.archivedAt = archivedDate
-        try context.save()
+        try viewContext.save()
 
         backgroundContext.performAndWait {
             guard let staleConversation = try? backgroundContext.existingObject(with: conversationObjectID) as? Conversation else {
@@ -530,6 +542,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         ConversationListViewModel(
             dependencies: .forTesting(
                 stack: stack,
+                viewContext: viewContext,
                 migrationFlags: migrationFlags,
                 contactEmailLoader: { _ in [] },
                 conversationManager: makeConversationManager(currentUserEmail: currentUserEmail),
@@ -548,7 +561,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         PersonBuilder()
             .withEmail(email)
             .withDisplayName(displayName)
-            .build(in: context)
+            .build(in: viewContext)
     }
 
     private func filteredConversationIDs(
@@ -566,12 +579,12 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
     private func fetchConversation(
         _ objectID: NSManagedObjectID
     ) throws -> Conversation {
-        // The (default) test context does not auto-merge sibling saves;
+        // The suite's context does not auto-merge sibling saves by default;
         // refresh so reads reflect background-context changes persisted to
         // the store. The automerge-enabled test only calls this after its
-        // polls confirm the merge has landed, so the context queue is idle.
-        let conversation = try XCTUnwrap(context.existingObject(with: objectID) as? Conversation)
-        context.refresh(conversation, mergeChanges: false)
+        // polls confirm the merge has landed.
+        let conversation = try XCTUnwrap(viewContext.existingObject(with: objectID) as? Conversation)
+        viewContext.refresh(conversation, mergeChanges: false)
         return conversation
     }
 

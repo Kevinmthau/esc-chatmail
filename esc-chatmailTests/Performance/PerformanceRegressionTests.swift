@@ -2,22 +2,36 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture and measured fetch goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue. The measured paths are
+/// `@MainActor` production paths — `ConversationListViewModel.onAppear(in:)`
+/// re-runs the window fetch (`ConversationWindowProvider.swift:60`),
+/// `ParticipantLoader` and `MessageBubbleLoader` are main-actor — and they use
+/// that context directly, which is on-queue only for a main-queue context. See
+/// that helper for what the private-queue shape races. `measureAsync` runs its
+/// operation on the main actor for the same reason (see its doc comment).
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean. These tests run only under `./Scripts/codex-test.sh
+/// --performance`.
 @MainActor
 final class PerformanceRegressionTests: XCTestCase {
     private var stack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
     private var contentHandler: HTMLContentHandler!
 
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
         contentHandler = HTMLContentHandler()
     }
 
     override func tearDown() {
         contentHandler = nil
-        context = nil
+        viewContext = nil
         stack = nil
         super.tearDown()
     }
@@ -29,7 +43,7 @@ final class PerformanceRegressionTests: XCTestCase {
     /// view model to the context's objectsDidChange, resetting that context segfaulted
     /// inside -[NSManagedObjectContext reset] while it tore down registered objects.
     func testPerformance_conversationListOpen_fetchSnapshotAndRefresh_largeInboxDataset() throws {
-        let context = try XCTUnwrap(context)
+        let context: NSManagedObjectContext = viewContext
         let conversations = try PerformanceFixtureFactory.seedConversationList(in: context)
         let searchService = ConversationSearchService(debounceInterval: 60_000_000_000)
         // The inert contactEmailLoader keeps the deferred contacts-cache load
@@ -41,6 +55,7 @@ final class PerformanceRegressionTests: XCTestCase {
         let viewModel = ConversationListViewModel(
             dependencies: .forTesting(
                 stack: stack,
+                viewContext: viewContext,
                 searchService: searchService,
                 filterService: filterService
             ),
@@ -71,7 +86,7 @@ final class PerformanceRegressionTests: XCTestCase {
     /// row snapshots and ordering without rebuilding the whole visible list model.
     func testPerformance_conversationListIncrementalRefresh_smallChangedSubset_largeInboxDataset() throws {
         let seededConversations = try PerformanceFixtureFactory.seedConversationList(
-            in: context,
+            in: viewContext,
             conversationCount: 220
         )
         let changedObjectIDs = Array(seededConversations.prefix(8)).map(\.objectID)
@@ -85,12 +100,14 @@ final class PerformanceRegressionTests: XCTestCase {
         let viewModel = ConversationListViewModel(
             dependencies: .forTesting(
                 stack: stack,
+                viewContext: viewContext,
                 searchService: searchService,
                 filterService: filterService
             ),
             windowProvider: windowProvider
         )
         let options = makePerformanceOptions(iterationCount: 5)
+        let context: NSManagedObjectContext = viewContext
 
         viewModel.onAppear(in: context)
         XCTAssertEqual(viewModel.filteredConversationItems.count, windowProvider.initialLimit)
@@ -122,7 +139,7 @@ final class PerformanceRegressionTests: XCTestCase {
     /// large window of conversations without involving Contacts or avatar I/O.
     func testPerformance_conversationRowParticipantHydration_scrollWindow() throws {
         let conversations = try PerformanceFixtureFactory.seedConversationList(
-            in: context,
+            in: viewContext,
             conversationCount: 220
         )
         let snapshots = Array(conversations.prefix(120)).map(ConversationSnapshot.init(from:))
@@ -145,7 +162,7 @@ final class PerformanceRegressionTests: XCTestCase {
             for snapshot in snapshots {
                 let info = await loader.loadParticipants(
                     from: snapshot.objectID,
-                    in: self.context,
+                    in: self.viewContext,
                     currentUserEmail: PerformanceFixtureFactory.currentUserEmail,
                     maxParticipants: 4,
                     participantHash: snapshot.participantHash,
@@ -157,7 +174,7 @@ final class PerformanceRegressionTests: XCTestCase {
             for snapshot in snapshots {
                 let info = await loader.loadParticipants(
                     from: snapshot.objectID,
-                    in: self.context,
+                    in: self.viewContext,
                     currentUserEmail: PerformanceFixtureFactory.currentUserEmail,
                     maxParticipants: 4,
                     participantHash: snapshot.participantHash,
@@ -174,10 +191,10 @@ final class PerformanceRegressionTests: XCTestCase {
     /// Protects the chat-thread open path by fetching a long thread, deriving sender grouping keys,
     /// and preparing visible bubble content for the most recent messages.
     func testPerformance_chatThreadOpen_fetchGroupingAndVisibleBubbleLoading_longConversation() throws {
-        let context = try XCTUnwrap(context)
+        let context: NSManagedObjectContext = viewContext
         let contentHandler = try XCTUnwrap(contentHandler)
         let seededThread = try PerformanceFixtureFactory.seedLongThread(
-            in: context,
+            in: viewContext,
             htmlContentHandler: contentHandler
         )
         defer {
