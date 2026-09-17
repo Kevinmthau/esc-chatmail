@@ -731,12 +731,6 @@ final class SyncReconciliation: Sendable {
     }
 
     /// Result of reconciling a single message
-    private struct MessageReconcileResult {
-        var hadMismatch = false
-        var wasUpdated = false
-        var notInLocalDB = false
-    }
-
     /// Processes reconciliation mismatches using pre-fetched data
     /// Returns stats and conversation ObjectIDs that were modified
     private func processReconciliationMismatches(
