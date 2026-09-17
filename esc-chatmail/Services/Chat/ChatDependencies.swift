@@ -16,7 +16,6 @@ struct ChatSessionDependencies {
 
 struct ChatContentDependencies {
     let htmlContentHandler: HTMLContentHandler
-    let processedTextCache: ProcessedTextCache
     let originalEmailSourceWarmer: any OriginalEmailSourceWarming
     /// Factory retained for API stability. The loader is a stateless Sendable
     /// class (no longer an actor), so bubble loads never serialize through a

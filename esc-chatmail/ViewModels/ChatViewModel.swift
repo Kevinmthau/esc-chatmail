@@ -140,7 +140,6 @@ final class ChatViewModel: ObservableObject {
     private let conversationContext: NSManagedObjectContext?
     private let conversationDisplayNameHint: String?
     private let replyOptimisticConversation: OptimisticConversationReference
-    private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
     private var cancellables = Set<AnyCancellable>()
 
@@ -193,7 +192,6 @@ final class ChatViewModel: ObservableObject {
         self.replyOptimisticConversation = .existingConversation(
             ConversationReference(objectID: conversation.objectID)
         )
-        self.processedTextCache = chatDependencies.content.processedTextCache
         self.contactsResolver = chatDependencies.contacts.contactsResolver
         self.messageActions = chatDependencies.messaging.messageActions
         self.outboundMessageCoordinator = chatDependencies.messaging.outboundMessageCoordinator
@@ -489,17 +487,10 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Prefetch Operations
 
-    /// Prefetches legacy fallback text content and contacts for the given messages.
-    /// Call from ChatView.onAppear with recent messages.
-    func prefetchRecentContent(messageIds: [String], senderEmails: [String]) {
-        // Only old records without chatPreviewText should reach this text prefetch path.
-        if !messageIds.isEmpty {
-            let processedTextCache = self.processedTextCache
-            prefetchTaskManager.runDetached("prefetchText") {
-                await processedTextCache.prefetch(messageIds: messageIds)
-            }
-        }
-
+    /// Prefetches contacts for the senders of recently visible messages.
+    /// Bubble text needs no prefetch: stored `chatPreviewText` covers current
+    /// rows, and the legacy derivation memoizes in RenderedMessageCache on load.
+    func prefetchSenderContacts(senderEmails: [String]) {
         // Batch prefetch contacts to avoid thundering herd on first load
         let uniqueEmails = Array(Set(senderEmails))
         if !uniqueEmails.isEmpty {

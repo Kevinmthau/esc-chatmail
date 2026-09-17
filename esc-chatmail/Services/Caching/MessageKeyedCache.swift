@@ -18,12 +18,6 @@ protocol MessageKeyedCache {
     func invalidate(messageId: String, reason: MessageCacheInvalidationReason) async
 }
 
-extension ProcessedTextCache: MessageKeyedCache {
-    func invalidate(messageId: String, reason: MessageCacheInvalidationReason) async {
-        await invalidate(messageId: messageId)
-    }
-}
-
 extension RenderedMessageCache: MessageKeyedCache {
     func invalidate(messageId: String, reason: MessageCacheInvalidationReason) {
         invalidate(messageId: messageId, sourceSignature: nil, reason: .explicit)

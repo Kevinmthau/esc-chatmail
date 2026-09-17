@@ -106,7 +106,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let initializeReplyingTo: (Message?) -> Void
     private let updateReplyingToIfNewSubject: (Message?) -> Void
     private let loadResolvedDisplayName: () -> Void
-    private let prefetchRecentContent: ([String], [String]) -> Void
+    private let prefetchSenderContacts: ([String]) -> Void
     private let cancelPrefetch: () -> Void
     private let loadSenderGroupingKeys: SenderGroupingLoader
     private let invalidateContactsCache: AsyncAction
@@ -186,8 +186,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.loadResolvedDisplayName = {
             viewModel.loadResolvedDisplayName()
         }
-        self.prefetchRecentContent = { messageIds, senderEmails in
-            viewModel.prefetchRecentContent(messageIds: messageIds, senderEmails: senderEmails)
+        self.prefetchSenderContacts = { senderEmails in
+            viewModel.prefetchSenderContacts(senderEmails: senderEmails)
         }
         self.cancelPrefetch = {
             viewModel.cancelPrefetch()
@@ -210,7 +210,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         initializeReplyingTo: @escaping (Message?) -> Void,
         updateReplyingToIfNewSubject: @escaping (Message?) -> Void,
         loadResolvedDisplayName: @escaping () -> Void,
-        prefetchRecentContent: @escaping ([String], [String]) -> Void,
+        prefetchSenderContacts: @escaping ([String]) -> Void,
         cancelPrefetch: @escaping () -> Void,
         loadSenderGroupingKeys: @escaping SenderGroupingLoader,
         invalidateContactsCache: @escaping AsyncAction,
@@ -226,7 +226,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.initializeReplyingTo = initializeReplyingTo
         self.updateReplyingToIfNewSubject = updateReplyingToIfNewSubject
         self.loadResolvedDisplayName = loadResolvedDisplayName
-        self.prefetchRecentContent = prefetchRecentContent
+        self.prefetchSenderContacts = prefetchSenderContacts
         self.cancelPrefetch = cancelPrefetch
         self.loadSenderGroupingKeys = loadSenderGroupingKeys
         self.invalidateContactsCache = invalidateContactsCache
@@ -1171,16 +1171,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         let config = VirtualScrollConfiguration.default
         let prefetchLimit = config.visibleItemCount + config.bufferSize
         let recentMessages = visibleMessages.suffix(prefetchLimit)
-        let messageIds = recentMessages
-            .filter { message in
-                message.chatPreviewText?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .isEmpty ?? true
-            }
-            .map(\.id)
         let senderEmails = recentMessages.compactMap(\.senderEmail)
 
-        prefetchRecentContent(messageIds, senderEmails)
+        prefetchSenderContacts(senderEmails)
     }
 
     private func refreshSenderGroupingKeys(using visibleMessages: [ChatMessageRowModel]) {

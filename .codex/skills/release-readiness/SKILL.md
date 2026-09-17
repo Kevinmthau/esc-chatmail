@@ -38,7 +38,7 @@ Produce a concrete ship/no-ship readout for this app with the top risks and the 
 4. Review performance-sensitive areas.
    - WebKit prewarm in `WebKitPrewarmer`
    - `ChatMessagesView` scroll task sequencing
-   - `MessageBubbleLoader` / `ProcessedTextCache` / participant prefetching
+   - `MessageBubbleLoader` / `RenderedMessageCache` / participant prefetching
    - Core Data `FetchRequest` batch sizes and prefetching in inbox/chat lists
 
 5. Prefer the smallest credible fix list.

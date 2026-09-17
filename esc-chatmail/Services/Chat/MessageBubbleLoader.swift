@@ -4,7 +4,6 @@ struct MessageBubbleAccountWorkContext: Sendable {
     let htmlContent: HTMLContentAccountGeneration
     let htmlAnalysis: MessageBubbleHTMLAnalysisAccountGeneration
     let parsedEmail: ParsedEmailAccountGeneration?
-    let processedText: ProcessedTextCacheAccountGeneration
     let renderedMessage: RenderedMessageCacheAccountGeneration
     let recovery: HTMLContentRecoveryAccountGeneration
 }
@@ -17,7 +16,6 @@ struct MessageBubbleAccountWorkContext: Sendable {
 /// holds as long as this class stays free of mutable stored state.
 final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
     private let contactsResolver: any ContactsResolving
-    let processedTextCache: ProcessedTextCache
     let htmlContentHandler: HTMLContentHandler
     let htmlContentLoader: HTMLContentLoader
     let htmlContentRecoveryService: any HTMLContentRecovering
@@ -27,7 +25,6 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
 
     init(
         contactsResolver: any ContactsResolving = ContactsResolver.shared,
-        processedTextCache: ProcessedTextCache = .shared,
         htmlContentHandler: HTMLContentHandler = .shared,
         htmlContentLoader: HTMLContentLoader = .shared,
         htmlContentRecoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared,
@@ -36,7 +33,6 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
         renderedMessageCache: RenderedMessageCache = .shared
     ) {
         self.contactsResolver = contactsResolver
-        self.processedTextCache = processedTextCache
         self.htmlContentHandler = htmlContentHandler
         self.htmlContentLoader = htmlContentLoader
         self.htmlContentRecoveryService = htmlContentRecoveryService
@@ -129,7 +125,6 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
     func captureAccountWorkContext() async -> MessageBubbleAccountWorkContext? {
         guard let htmlContent = htmlContentHandler.captureAccountGeneration(),
               let htmlAnalysis = htmlAnalysisCache.captureAccountGeneration(),
-              let processedText = await processedTextCache.captureAccountGeneration(),
               let renderedMessage = await renderedMessageCache.captureAccountGeneration(),
               let recovery = await htmlContentRecoveryService.captureAccountGeneration() else {
             return nil
@@ -140,7 +135,6 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
             htmlContent: htmlContent,
             htmlAnalysis: htmlAnalysis,
             parsedEmail: parsedEmail,
-            processedText: processedText,
             renderedMessage: renderedMessage,
             recovery: recovery
         )
@@ -150,7 +144,6 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
     func isAccountWorkContextCurrent(_ context: MessageBubbleAccountWorkContext) async -> Bool {
         guard htmlContentHandler.isAccountGenerationCurrent(context.htmlContent),
               htmlAnalysisCache.isAccountGenerationCurrent(context.htmlAnalysis),
-              await processedTextCache.isAccountGenerationCurrent(context.processedText),
               await renderedMessageCache.isAccountGenerationCurrent(context.renderedMessage),
               await htmlContentRecoveryService.isAccountGenerationCurrent(context.recovery) else {
             return false

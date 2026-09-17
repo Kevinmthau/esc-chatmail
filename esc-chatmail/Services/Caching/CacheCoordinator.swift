@@ -15,7 +15,8 @@ import Combine
 ///
 /// The coordinator automatically invalidates:
 /// - PersonCache when Person entities are updated/deleted
-/// - ProcessedTextCache when Message entities are deleted
+/// - HTMLContentLoader's derived-content caches (including RenderedMessageCache)
+///   when Message entities are deleted
 @MainActor
 final class CacheCoordinator {
     static let shared = CacheCoordinator()
@@ -273,7 +274,7 @@ final class CacheCoordinator {
         }
 
         if !plan.messageIdsToInvalidate.isEmpty {
-            Log.debug("Queued invalidation for \(plan.messageIdsToInvalidate.count) processed text cache entries", category: .coreData)
+            Log.debug("Queued invalidation for \(plan.messageIdsToInvalidate.count) message content cache entries", category: .coreData)
         }
 
         if !plan.attachmentPathsToDelete.isEmpty || !plan.attachmentIdentitiesToInvalidate.isEmpty {
@@ -316,21 +317,17 @@ final class CacheCoordinator {
 
         let needsMessageInvalidation =
             !plan.messageIdsToInvalidate.isEmpty || !plan.deletedHTMLArtifacts.isEmpty
-        let processedTextGeneration: ProcessedTextCacheAccountGeneration?
         let htmlInvalidationContext: HTMLContentInvalidationAccountContext?
         if needsMessageInvalidation {
-            processedTextGeneration = await ProcessedTextCache.shared.captureAccountGeneration()
             htmlInvalidationContext = await HTMLContentLoader.shared.captureInvalidationAccountContext(
                 expectedAccountGeneration: accountContext.htmlContent
             )
-            guard processedTextGeneration != nil,
-                  htmlInvalidationContext != nil,
+            guard htmlInvalidationContext != nil,
                   !Task.isCancelled,
                   isAccountContextCurrent(accountContext) else {
                 return
             }
         } else {
-            processedTextGeneration = nil
             htmlInvalidationContext = nil
         }
 
@@ -348,14 +345,9 @@ final class CacheCoordinator {
             attachmentGeneration = nil
         }
 
-        if let processedTextGeneration, let htmlInvalidationContext {
+        if let htmlInvalidationContext {
             for messageId in plan.messageIdsToInvalidate {
                 guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
-                await ProcessedTextCache.shared.invalidate(
-                    messageId: messageId,
-                    expectedAccountGeneration: processedTextGeneration,
-                    invalidatesRenderedMessage: false
-                )
                 await HTMLContentLoader.shared.invalidateContent(
                     messageId: messageId,
                     accountContext: htmlInvalidationContext

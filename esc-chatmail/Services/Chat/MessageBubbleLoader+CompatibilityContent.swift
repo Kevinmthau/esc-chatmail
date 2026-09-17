@@ -23,15 +23,6 @@ extension MessageBubbleLoader {
             variantKey: variantKey,
             expectedAccountGeneration: accountContext.renderedMessage
         ) {
-            if let cached = await self.processedTextCache.get(
-                messageId: request.messageID,
-                sourceSignature: sourceSignature,
-                previewMode: MessageBubbleContentSource.richContentAnalysisMode,
-                expectedAccountGeneration: accountContext.processedText
-            ) {
-                return cached.hasRichContent
-            }
-
             let hasRichContent = MessageBubbleContentSource.classifyRichContent(
                 messageId: request.messageID,
                 bodyStorageURI: request.bodyStorageURI,
@@ -39,21 +30,10 @@ extension MessageBubbleLoader {
                 handler: self.htmlContentHandler,
                 expectedAccountGeneration: accountContext.htmlContent
             )
-            let resolvedHasRichContent = hasRichContent || (
+            return hasRichContent || (
                 resolvedHasHTMLSource &&
                 self.looksLikeNewsletterFallbackText(request.bodyText ?? request.snippet)
             )
-
-            await self.processedTextCache.set(
-                messageId: request.messageID,
-                sourceSignature: sourceSignature,
-                previewMode: MessageBubbleContentSource.richContentAnalysisMode,
-                plainText: nil,
-                hasRichContent: resolvedHasRichContent,
-                expectedAccountGeneration: accountContext.processedText
-            )
-
-            return resolvedHasRichContent
         } ?? false
     }
 
@@ -133,48 +113,6 @@ extension MessageBubbleLoader {
             }
         }
 
-        if let cached = await processedTextCache.get(
-            messageId: request.messageID,
-            sourceSignature: sourceSignature,
-            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-            expectedAccountGeneration: accountContext.processedText
-        ) {
-            let requiresURIRecompute =
-                resolvedHasHTMLSource &&
-                cached.plainText == nil &&
-                request.bodyStorageURI != nil &&
-                !htmlContentHandler.htmlFileExists(
-                    for: request.messageID,
-                    expectedGeneration: accountContext.htmlContent
-                )
-            let requiresBodyFallbackRecompute =
-                cached.plainText == nil &&
-                !cached.hasRichContent &&
-                resolveFallbackSourceSignature() != sourceSignature
-            let shouldBypassCachedNewsletterFallback = isStaleNewsletterFallback(
-                plainText: cached.plainText,
-                hasRichContent: cached.hasRichContent
-            )
-
-            if !requiresURIRecompute && !requiresBodyFallbackRecompute && !shouldBypassCachedNewsletterFallback {
-                await renderedMessageCache.storeChatBubbleText(
-                    RenderedMessageChatBubbleText(
-                        plainText: cached.plainText,
-                        hasRichContent: cached.hasRichContent,
-                        quotedParts: cached.quotedParts
-                    ),
-                    messageId: request.messageID,
-                    sourceSignature: sourceSignature,
-                    variantKey: chatVariantKey,
-                    expectedAccountGeneration: accountContext.renderedMessage
-                )
-                return (
-                    cached.plainText,
-                    cached.hasRichContent
-                )
-            }
-        }
-
         let resolvedFallbackSourceSignature = resolveFallbackSourceSignature()
         if resolvedFallbackSourceSignature != sourceSignature,
            let cached = await renderedMessageCache.cachedChatBubbleText(
@@ -197,45 +135,6 @@ extension MessageBubbleLoader {
             )
 
             if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
-                return (
-                    cached.plainText,
-                    cached.hasRichContent
-                )
-            }
-        }
-
-        if resolvedFallbackSourceSignature != sourceSignature,
-           let cached = await processedTextCache.get(
-               messageId: request.messageID,
-               sourceSignature: resolvedFallbackSourceSignature,
-               previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-               expectedAccountGeneration: accountContext.processedText
-           ) {
-            let requiresURIRecompute =
-                resolvedHasHTMLSource &&
-                cached.plainText == nil &&
-                request.bodyStorageURI != nil &&
-                !htmlContentHandler.htmlFileExists(
-                    for: request.messageID,
-                    expectedGeneration: accountContext.htmlContent
-                )
-            let shouldBypassCachedNewsletterFallback = isStaleNewsletterFallback(
-                plainText: cached.plainText,
-                hasRichContent: cached.hasRichContent
-            )
-
-            if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
-                await renderedMessageCache.storeChatBubbleText(
-                    RenderedMessageChatBubbleText(
-                        plainText: cached.plainText,
-                        hasRichContent: cached.hasRichContent,
-                        quotedParts: cached.quotedParts
-                    ),
-                    messageId: request.messageID,
-                    sourceSignature: resolvedFallbackSourceSignature,
-                    variantKey: chatVariantKey,
-                    expectedAccountGeneration: accountContext.renderedMessage
-                )
                 return (
                     cached.plainText,
                     cached.hasRichContent
@@ -285,15 +184,6 @@ extension MessageBubbleLoader {
             let recoveredHasRichContent =
                 recoveredResult.hasRichContent || shouldAttemptNewsletterFallbackRecovery
 
-            await processedTextCache.set(
-                messageId: request.messageID,
-                sourceSignature: sourceSignature,
-                previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-                plainText: recoveredResult.mainText,
-                hasRichContent: recoveredHasRichContent,
-                quotedParts: recoveredResult.quotedParts,
-                expectedAccountGeneration: accountContext.processedText
-            )
             await renderedMessageCache.storeChatBubbleText(
                 RenderedMessageChatBubbleText(
                     plainText: recoveredResult.mainText,
@@ -385,15 +275,6 @@ extension MessageBubbleLoader {
             cacheSourceSignature = fallbackSourceSignature
         }
 
-        await processedTextCache.set(
-            messageId: request.messageID,
-            sourceSignature: cacheSourceSignature,
-            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-            plainText: processedResult.plainText,
-            hasRichContent: processedResult.hasRichContent,
-            quotedParts: processedResult.quotedParts,
-            expectedAccountGeneration: accountContext.processedText
-        )
         await renderedMessageCache.storeChatBubbleText(
             RenderedMessageChatBubbleText(
                 plainText: processedResult.plainText,

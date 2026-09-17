@@ -55,7 +55,6 @@ final class Dependencies: ObservableObject {
 
     private let _attachmentCache: AttachmentCacheActor
     private let _pendingActionsManager: PendingActionsManager
-    private let _processedTextCache: ProcessedTextCache
     private let _profilePhotoResolver: ProfilePhotoResolver
     private let _htmlContentRecoveryService: HTMLContentRecoveryService
 
@@ -69,10 +68,6 @@ final class Dependencies: ObservableObject {
     /// Use `await` when calling methods on this actor.
     nonisolated var pendingActionsManager: PendingActionsManager {
         _pendingActionsManager
-    }
-
-    nonisolated var processedTextCache: ProcessedTextCache {
-        _processedTextCache
     }
 
     nonisolated var profilePhotoResolver: ProfilePhotoResolver {
@@ -257,13 +252,11 @@ final class Dependencies: ObservableObject {
     ) -> ChatDependencies {
         let contactsResolver = self.contactsResolver
         let personCache = self.personCache
-        let processedTextCache = self.processedTextCache
         let htmlContentHandler = self.htmlContentHandler
         let htmlContentRecoveryService = self.htmlContentRecoveryService
         let makeMessageBubbleLoader = {
             MessageBubbleLoader(
                 contactsResolver: contactsResolver,
-                processedTextCache: processedTextCache,
                 htmlContentHandler: htmlContentHandler,
                 htmlContentRecoveryService: htmlContentRecoveryService
             )
@@ -275,7 +268,6 @@ final class Dependencies: ObservableObject {
             ),
             content: ChatContentDependencies(
                 htmlContentHandler: htmlContentHandler,
-                processedTextCache: processedTextCache,
                 originalEmailSourceWarmer: OriginalEmailSourceLoader.shared,
                 makeMessageBubbleLoader: makeMessageBubbleLoader
             ),
@@ -332,7 +324,6 @@ final class Dependencies: ObservableObject {
     func makeMessageBubbleLoader() -> MessageBubbleLoader {
         MessageBubbleLoader(
             contactsResolver: contactsResolver,
-            processedTextCache: processedTextCache,
             htmlContentHandler: htmlContentHandler,
             htmlContentRecoveryService: htmlContentRecoveryService
         )
@@ -374,7 +365,6 @@ final class Dependencies: ObservableObject {
         contactsResolver: (any ContactsResolving)? = nil,
         attachmentCache: AttachmentCacheActor = AttachmentCacheActor.shared,
         pendingActionsManager: PendingActionsManager = PendingActionsManager.shared,
-        processedTextCache: ProcessedTextCache = .shared,
         profilePhotoResolver: ProfilePhotoResolver = .shared,
         htmlContentHandler: HTMLContentHandler = .shared,
         htmlContentRecoveryService: HTMLContentRecoveryService = .shared,
@@ -407,7 +397,6 @@ final class Dependencies: ObservableObject {
         self.htmlContentHandler = htmlContentHandler
         self._attachmentCache = attachmentCache
         self._pendingActionsManager = pendingActionsManager
-        self._processedTextCache = processedTextCache
         self._profilePhotoResolver = profilePhotoResolver
         self._htmlContentRecoveryService = htmlContentRecoveryService
         self.syncEngine = resolvedSyncEngine

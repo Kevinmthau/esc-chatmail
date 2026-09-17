@@ -8,16 +8,14 @@ final class MessageKeyedCacheTests: XCTestCase {
 
     func testAllMessageKeyedCachesShareTheContract() {
         // Compile-level guarantee: every message-keyed cache can be handled
-        // through the shared protocol. (RenderedMessageCache and
-        // ProcessedTextCache are actors; building the array exercises their
-        // conformances too.)
+        // through the shared protocol. (RenderedMessageCache is an actor;
+        // building the array exercises its conformance too.)
         let caches: [any MessageKeyedCache] = [
-            ProcessedTextCache.shared,
             RenderedMessageCache.shared,
             HTMLContentLoader.shared,
             HTMLContentResultCache()
         ]
-        XCTAssertEqual(caches.count, 4)
+        XCTAssertEqual(caches.count, 3)
     }
 
     func testHTMLContentResultCache_invalidateThroughContract_dropsEveryVariant() {

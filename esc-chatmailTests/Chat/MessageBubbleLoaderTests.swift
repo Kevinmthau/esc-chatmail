@@ -161,7 +161,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_incomingMessagePrefersChatPreviewTextOverRuntimeBodyText() async {
         let messageId = "bubble-chat-preview-primary-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -193,7 +193,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_populatedChatPreviewTextUsesStoredTextWithoutHTMLRecovery() async {
         let messageId = "bubble-chat-preview-no-recovery-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
@@ -237,7 +237,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_htmlMessageMissingChatPreviewTextUsesDOMFallback() async {
         let messageId = "bubble-html-dom-fallback-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
@@ -287,7 +287,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_plainTextOnlyMessageUsesNarrowLegacyCleanup() async {
         let messageId = "bubble-plain-text-only-fallback-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -325,7 +325,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingOptimisticChatPreviewPreservesParagraphBreaks() async {
         let messageId = "bubble-outgoing-optimistic-preview-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -364,7 +364,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_legacyRecordWithNilChatPreviewTextUsesBodyFallback() async {
         let messageId = "bubble-legacy-nil-chat-preview-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -400,7 +400,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_blankChatPreviewTextFallsBackToProcessedLegacyText() async {
         let messageId = "bubble-blank-chat-preview-fallback-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -432,7 +432,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_incomingMessageFallsBackToRecoveredHTMLTextWhenChatPreviewMissing() async {
         let messageId = "bubble-recovered-preview-fallback-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
@@ -475,7 +475,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_incomingMessageKeepsStoredChatPreviewWhenRecoveryFindsHTML() async {
         let messageId = "bubble-recovered-preview-primary-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
@@ -518,7 +518,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_storedChatPreviewClassifiesDirectHTMLBodyFallback() async {
         let messageId = "bubble-direct-html-rich-preview-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
@@ -571,7 +571,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_storedChatPreviewCleansQuotesBeforeRichClassification() async {
         let messageId = "bubble-rich-quote-cleanup-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
@@ -629,7 +629,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_rawEmailSourceWithEmbeddedHTML_marksRichContent() async {
         let messageId = "bubble-raw-html-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
 
         let loader = MessageBubbleLoader(
@@ -706,24 +706,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_staleNewsletterFallbackText_recoversRichHTML() async throws {
         let messageId = "bubble-stale-fallback-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
-        await ProcessedTextCache.shared.set(
-            messageId: messageId,
-            plainText: """
-            American Museum of Natural History
-            https://e.wordfly.com/click?sid=abc123
-
-            View in Browser
-            https://e.wordfly.com/view?sid=abc123
-
-            Manage Subscriptions
-            https://e.wordfly.com/preferences?sid=abc123
-
-            Privacy Policy
-            https://e.wordfly.com/privacy?sid=abc123
-            """,
-            hasRichContent: false
-        )
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let staleFallbackURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("bubble-stale-fallback-\(UUID().uuidString).html")
@@ -791,7 +774,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_cachedEmptySourceFalseUsesCurrentNewsletterSnippetFallback() async throws {
         let messageId = "bubble-empty-source-newsletter-fallback-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
 
         let sourceSignature = MessageBubbleContentSource.contentSourceSignature(
@@ -802,12 +785,13 @@ final class MessageBubbleLoaderTests: XCTestCase {
         )
         XCTAssertEqual(sourceSignature, "empty")
 
-        await ProcessedTextCache.shared.set(
+        // Revert-check: the stale-newsletter bypass (`isStaleNewsletterFallback`)
+        // on the RenderedMessageCache hit in loadCompatibilityContent.
+        await RenderedMessageCache.shared.storeChatBubbleText(
+            RenderedMessageChatBubbleText(plainText: "Ordinary cached preview", hasRichContent: false),
             messageId: messageId,
             sourceSignature: sourceSignature,
-            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-            plainText: "Ordinary cached preview",
-            hasRichContent: false
+            variantKey: RenderedMessageVariantKey(MessageBubbleContentSource.chatBubblePreviewMode)
         )
 
         let loader = MessageBubbleLoader(
@@ -863,12 +847,12 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.fullTextContent?.contains("Recovered newsletter preview") == true)
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
 
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
     }
 
     func testLoadContent_outgoingForwardedMessage_returnsStructuredForwardPreview() async {
         let messageId = "bubble-forwarded-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -916,7 +900,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_incomingForwardedMessage_returnsStructuredForwardPreview() async {
         let messageId = "bubble-incoming-forwarded-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -967,7 +951,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_incomingLongForwardedMessage_returnsCompactStructuredSummary() async {
         let messageId = "bubble-incoming-long-forward-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1022,7 +1006,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_structuredChatPreviewForward_keepsPreviewSnippetOverRawBodyTail() async {
         let messageId = "bubble-forwarded-structured-preview-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1080,7 +1064,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_incomingForwardedMessageWithOutlookHeaders_returnsStructuredForwardPreview() async {
         let messageId = "bubble-incoming-forwarded-outlook-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1132,7 +1116,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_forwardedMessagePrefersStructuredChatPreviewOverStaleBodyText() async {
         let messageId = "bubble-forwarded-chat-preview-primary-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1192,7 +1176,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_forwardedMessageUsesChatPreviewLeadInWithBodyHeaderFallback() async {
         let messageId = "bubble-forwarded-chat-preview-lead-in-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1237,7 +1221,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_forwardedMessageWithBlankChatPreviewUsesBodyTextFallback() async {
         let messageId = "bubble-forwarded-blank-chat-preview-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1280,7 +1264,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_forwardedMessageUsesCleanedSnippetBeforeSnippet() async {
         let messageId = "bubble-forwarded-cleaned-snippet-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1317,7 +1301,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_forwardedMessageWithUnparseableBodyDoesNotProduceStructuredPreview() async {
         let messageId = "bubble-unparseable-forwarded-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1349,7 +1333,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_incomingUnparsedForwardedStoredPreviewClassifiesBodyFallbackHTML() async {
         let messageId = "bubble-unparsed-forwarded-rich-html-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
@@ -1413,7 +1397,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingReplyPrefersFullBodyOverStoredHTMLWhenChatPreviewMissing() async throws {
         let messageId = "bubble-outgoing-reply-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let htmlURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("bubble-outgoing-reply-\(UUID().uuidString).html")
@@ -1469,7 +1453,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingSnippetBodyKeepsLoadedHTMLText() async throws {
         let messageId = "bubble-outgoing-snippet-body-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let htmlURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("bubble-outgoing-snippet-body-\(UUID().uuidString).html")
@@ -1521,7 +1505,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingStoredChatPreviewWinsOverRicherBodyText() async throws {
         let messageId = "bubble-outgoing-chat-preview-comparison-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1559,7 +1543,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingStoredChatPreviewWinsWhenBodyIsNotPrefixExpansion() async throws {
         let messageId = "bubble-outgoing-chat-preview-canonical-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1595,7 +1579,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingStoredChatPreviewWinsOverTruncatedLoadedPrefix() async throws {
         let messageId = "bubble-outgoing-long-token-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let htmlURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("bubble-outgoing-long-token-\(UUID().uuidString).html")
@@ -1637,7 +1621,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingLongSingleTokenBodyBeatsTruncatedLoadedPrefixWhenChatPreviewMissing() async throws {
         let messageId = "bubble-outgoing-long-token-no-preview-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let htmlURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("bubble-outgoing-long-token-no-preview-\(UUID().uuidString).html")
@@ -1678,7 +1662,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingForwardedMessageWithoutLeadIn_avoidsRawSnippetFallback() async {
         let messageId = "bubble-forwarded-empty-note-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1720,7 +1704,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingForwardedMessageSuppressesChatPreviewEchoFromForwardedBody() async {
         let messageId = "bubble-forwarded-echo-preview-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1765,7 +1749,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingForwardedMessageKeepsTypedChatPreviewLeadIn() async {
         let messageId = "bubble-forwarded-typed-preview-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1806,7 +1790,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_outgoingForwardedMessageSnippetFallback_parsesFlattenedHeaders() async {
         let messageId = "bubble-forwarded-snippet-only-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])
@@ -1843,7 +1827,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_resolvesHTMLAnalysisFromStoredHTMLSource() async throws {
         let messageId = "bubble-html-analysis-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
 
         let htmlURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("bubble-html-analysis-\(UUID().uuidString).html")
@@ -1926,9 +1910,9 @@ final class MessageBubbleLoaderTests: XCTestCase {
         )
     }
 
-    func testLoadContent_sourceSignatureRefreshesProcessedTextWhenStoredHTMLChanges() async throws {
+    func testLoadContent_sourceSignatureRefreshesBubbleTextWhenStoredHTMLChanges() async throws {
         let messageId = "bubble-source-refresh-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
         }
@@ -1979,7 +1963,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
     func testLoadContent_emptyStoredHTMLKeysBodyFallbackByBodyText() async throws {
         let messageId = "bubble-empty-html-body-fallback-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
         }
@@ -2019,12 +2003,12 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(first.fullTextContent, "FIRST_BODY_TOKEN")
         XCTAssertEqual(second.fullTextContent, "SECOND_BODY_TOKEN")
 
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
     }
 
     func testLoadContent_cachedRichHTMLWithoutTextIsPreservedOverBodyFallback() async throws {
         let messageId = "bubble-rich-html-cache-\(UUID().uuidString)"
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
         defer {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
         }
@@ -2040,12 +2024,13 @@ final class MessageBubbleLoaderTests: XCTestCase {
             bodyText: nil,
             handler: HTMLContentHandler.shared
         )
-        await ProcessedTextCache.shared.set(
+        // Revert-check: `!cached.hasRichContent` in `requiresBodyFallbackRecompute`
+        // on the RenderedMessageCache hit in loadCompatibilityContent.
+        await RenderedMessageCache.shared.storeChatBubbleText(
+            RenderedMessageChatBubbleText(plainText: nil, hasRichContent: true),
             messageId: messageId,
             sourceSignature: sourceSignature,
-            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-            plainText: nil,
-            hasRichContent: true
+            variantKey: RenderedMessageVariantKey(MessageBubbleContentSource.chatBubblePreviewMode)
         )
 
         let loader = MessageBubbleLoader(
@@ -2076,7 +2061,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.hasRichHTMLContent)
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
 
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
     }
 
     @MainActor
@@ -2168,7 +2153,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
         let recovery = MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:])
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
-            processedTextCache: ProcessedTextCache(),
             htmlContentHandler: handler,
             htmlContentLoader: HTMLContentLoader(contentHandler: handler, recoveryService: recovery),
             htmlContentRecoveryService: recovery,
@@ -2214,7 +2198,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MessageBubbleLoaderAccountBoundary-\(UUID().uuidString)", isDirectory: true)
         let handler = HTMLContentHandler(messagesDirectory: directory)
-        let processedTextCache = ProcessedTextCache()
         let renderedMessageCache = RenderedMessageCache()
         let htmlAnalysisCache = MessageBubbleHTMLAnalysisCache()
         let recoveryService = CountingHTMLContentRecoverer(recoveredHTMLByMessageID: [
@@ -2227,7 +2210,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
         )
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
-            processedTextCache: processedTextCache,
             htmlContentHandler: handler,
             htmlContentLoader: htmlContentLoader,
             htmlContentRecoveryService: recoveryService,
@@ -2271,7 +2253,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
         handler.closeAccountWork()
         try await handler.deleteAllHTMLFromClosedAccount()
         htmlAnalysisCache.closeAccountWorkAndClear()
-        await processedTextCache.closeAccountWorkAndClear()
         let renderedCacheCloseTask = Task {
             await renderedMessageCache.closeAccountWorkAndClear()
         }
@@ -2281,7 +2262,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
         try handler.reopenAccountWork()
         htmlAnalysisCache.reopenAccountWork()
-        await processedTextCache.reopenAccountWork()
         await renderedMessageCache.reopenAccountWork()
 
         let result = await loadTask.value
@@ -2294,15 +2274,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
         let recoveryCallCount = await recoveryService.recoveryCallCount()
         XCTAssertEqual(recoveryCallCount, 0)
 
-        let capturedProcessedGeneration = await processedTextCache.captureAccountGeneration()
-        let freshProcessedGeneration = try XCTUnwrap(capturedProcessedGeneration)
-        let processedEntry = await processedTextCache.get(
-            messageId: "shared-message",
-            sourceSignature: "empty",
-            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-            expectedAccountGeneration: freshProcessedGeneration
-        )
-        XCTAssertNil(processedEntry)
         let renderedArtifacts = await renderedMessageCache.artifacts(
             messageId: "shared-message",
             sourceSignature: "empty"
@@ -2373,7 +2344,6 @@ private struct BubbleRetryFixture {
         let recovery = MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:])
         loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
-            processedTextCache: ProcessedTextCache(),
             htmlContentHandler: handler,
             htmlContentLoader: HTMLContentLoader(contentHandler: handler, recoveryService: recovery),
             htmlContentRecoveryService: recovery,

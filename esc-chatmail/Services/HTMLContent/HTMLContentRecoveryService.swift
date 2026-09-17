@@ -404,8 +404,6 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
             // `htmlGeneration` came from.
             guard let invalidationContext = await HTMLContentLoader.shared
                 .captureInvalidationAccountContext(),
-                let processedTextGeneration = await ProcessedTextCache.shared
-                    .captureAccountGeneration(),
                 isCurrent(key, htmlGeneration: htmlGeneration) else {
                 return .failed
             }
@@ -426,15 +424,6 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                 await HTMLContentLoader.shared.invalidateContent(
                     messageId: messageId,
                     accountContext: invalidationContext
-                )
-                // `invalidateContent` already evicts RenderedMessageCache under
-                // the captured generation. ProcessedTextCache's own rendered hop
-                // is unscoped, so it must stay off here or it reintroduces the
-                // cross-account eviction this capture exists to prevent.
-                await ProcessedTextCache.shared.invalidate(
-                    messageId: messageId,
-                    expectedAccountGeneration: processedTextGeneration,
-                    invalidatesRenderedMessage: false
                 )
                 guard isCurrent(key, htmlGeneration: htmlGeneration) else {
                     return .failed

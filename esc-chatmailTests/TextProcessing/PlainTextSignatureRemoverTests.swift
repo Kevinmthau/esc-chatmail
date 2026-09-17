@@ -4,7 +4,7 @@ import XCTest
 /// CX2 characterization: pins PlainTextSignatureRemover's current
 /// signature-detection behavior before its pattern definitions move to
 /// shared TextPatterns namespaces. Previously covered only indirectly via
-/// ProcessedTextCacheTests.
+/// the chat-bubble text processing tests.
 final class PlainTextSignatureRemoverTests: XCTestCase {
 
     // MARK: - Degenerate inputs
