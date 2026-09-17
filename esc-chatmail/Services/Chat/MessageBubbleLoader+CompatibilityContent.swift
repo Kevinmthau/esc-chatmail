@@ -15,7 +15,7 @@ extension MessageBubbleLoader {
             for: request,
             accountContext: accountContext
         )
-        let variantKey = RenderedMessageVariantKey(ProcessedTextCache.richContentAnalysisMode)
+        let variantKey = RenderedMessageVariantKey(MessageBubbleContentSource.richContentAnalysisMode)
 
         return await renderedMessageCache.richContentClassification(
             messageId: request.messageID,
@@ -26,13 +26,13 @@ extension MessageBubbleLoader {
             if let cached = await self.processedTextCache.get(
                 messageId: request.messageID,
                 sourceSignature: sourceSignature,
-                previewMode: ProcessedTextCache.richContentAnalysisMode,
+                previewMode: MessageBubbleContentSource.richContentAnalysisMode,
                 expectedAccountGeneration: accountContext.processedText
             ) {
                 return cached.hasRichContent
             }
 
-            let hasRichContent = ProcessedTextCache.classifyRichContent(
+            let hasRichContent = MessageBubbleContentSource.classifyRichContent(
                 messageId: request.messageID,
                 bodyStorageURI: request.bodyStorageURI,
                 bodyText: request.bodyText,
@@ -47,7 +47,7 @@ extension MessageBubbleLoader {
             await self.processedTextCache.set(
                 messageId: request.messageID,
                 sourceSignature: sourceSignature,
-                previewMode: ProcessedTextCache.richContentAnalysisMode,
+                previewMode: MessageBubbleContentSource.richContentAnalysisMode,
                 plainText: nil,
                 hasRichContent: resolvedHasRichContent,
                 expectedAccountGeneration: accountContext.processedText
@@ -72,7 +72,7 @@ extension MessageBubbleLoader {
             for: request,
             accountContext: accountContext
         )
-        let chatVariantKey = RenderedMessageVariantKey(ProcessedTextCache.chatBubblePreviewMode)
+        let chatVariantKey = RenderedMessageVariantKey(MessageBubbleContentSource.chatBubblePreviewMode)
 
         var fallbackSourceSignature: String?
         func resolveFallbackSourceSignature() -> String {
@@ -80,7 +80,7 @@ extension MessageBubbleLoader {
                 return fallbackSourceSignature
             }
 
-            let signature = ProcessedTextCache.fallbackContentSourceSignature(
+            let signature = MessageBubbleContentSource.fallbackContentSourceSignature(
                 messageId: request.messageID,
                 bodyStorageURI: request.bodyStorageURI,
                 bodyText: request.bodyText,
@@ -136,7 +136,7 @@ extension MessageBubbleLoader {
         if let cached = await processedTextCache.get(
             messageId: request.messageID,
             sourceSignature: sourceSignature,
-            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
             expectedAccountGeneration: accountContext.processedText
         ) {
             let requiresURIRecompute =
@@ -208,7 +208,7 @@ extension MessageBubbleLoader {
            let cached = await processedTextCache.get(
                messageId: request.messageID,
                sourceSignature: resolvedFallbackSourceSignature,
-               previewMode: ProcessedTextCache.chatBubblePreviewMode,
+               previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
                expectedAccountGeneration: accountContext.processedText
            ) {
             let requiresURIRecompute =
@@ -288,7 +288,7 @@ extension MessageBubbleLoader {
             await processedTextCache.set(
                 messageId: request.messageID,
                 sourceSignature: sourceSignature,
-                previewMode: ProcessedTextCache.chatBubblePreviewMode,
+                previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
                 plainText: recoveredResult.mainText,
                 hasRichContent: recoveredHasRichContent,
                 quotedParts: recoveredResult.quotedParts,
@@ -352,7 +352,7 @@ extension MessageBubbleLoader {
         fallbackSourceSignature: String,
         accountContext: MessageBubbleAccountWorkContext
     ) async -> (plainText: String?, hasRichContent: Bool) {
-        var processedResult = ProcessedTextCache.processMessage(
+        var processedResult = MessageBubbleContentSource.processMessage(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
             handler: htmlContentHandler,
@@ -388,7 +388,7 @@ extension MessageBubbleLoader {
         await processedTextCache.set(
             messageId: request.messageID,
             sourceSignature: cacheSourceSignature,
-            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
             plainText: processedResult.plainText,
             hasRichContent: processedResult.hasRichContent,
             quotedParts: processedResult.quotedParts,
@@ -402,7 +402,7 @@ extension MessageBubbleLoader {
             ),
             messageId: request.messageID,
             sourceSignature: cacheSourceSignature,
-            variantKey: RenderedMessageVariantKey(ProcessedTextCache.chatBubblePreviewMode),
+            variantKey: RenderedMessageVariantKey(MessageBubbleContentSource.chatBubblePreviewMode),
             expectedAccountGeneration: accountContext.renderedMessage
         )
 

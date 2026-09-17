@@ -108,7 +108,7 @@ final class RepeatedCorporateSignatureTests: XCTestCase {
         let html = Fixture.html()
         XCTAssertNotNil(handler.saveHTML(html, for: messageID))
 
-        let preview = ProcessedTextCache.processMessage(messageId: messageID, handler: handler)
+        let preview = MessageBubbleContentSource.processMessage(messageId: messageID, handler: handler)
 
         XCTAssertEqual(normalized(preview.plainText), normalized(Fixture.expectedChatText))
         XCTAssertEqual(try XCTUnwrap(handler.loadHTML(for: messageID)), html)

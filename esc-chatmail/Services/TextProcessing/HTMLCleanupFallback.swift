@@ -4,7 +4,7 @@ import Foundation
 /// removal mode in order and keep the first output that still has meaningful
 /// content, falling back to the original HTML when every mode wipes it.
 ///
-/// Previously three verbatim copies: `ProcessedTextCache
+/// Previously three verbatim copies: `ChatBubbleTextProcessor
 /// .cleanedHTMLForProcessing`, `HTMLContentLoader.prepareHTMLForDisplay`, and
 /// `MessageBubbleHTMLAnalysisBuilder.cleanedHTMLForAttachmentFiltering`.
 enum HTMLCleanupFallback {

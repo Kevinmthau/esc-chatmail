@@ -1868,7 +1868,7 @@ final class GoldenCorpusReplayTests: XCTestCase {
                 _ = handler.saveHTML(scenario.inputHTML, for: messageId)
                 defer { handler.deleteHTML(for: messageId) }
 
-                let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+                let result = MessageBubbleContentSource.processMessage(messageId: messageId, handler: handler)
 
                 XCTAssertEqual(
                     result.hasRichContent,

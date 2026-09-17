@@ -1,7 +1,7 @@
 // Golden-corpus replay for the message display policy and rich-HTML detection.
 // Mirrors the iOS GoldenCorpusReplayTests entry points: displayPolicyCases run
 // against the MessageDisplayPolicy port, richHTMLDetectionCases against the
-// ProcessedTextCache.processMessage path (htmlCompatibilityFallback with
+// MessageBubbleContentSource.processMessage path (htmlCompatibilityFallback with
 // classifyRichContent, which routes through hasGenuineRichContent).
 
 import { describe, expect, it } from 'vitest'

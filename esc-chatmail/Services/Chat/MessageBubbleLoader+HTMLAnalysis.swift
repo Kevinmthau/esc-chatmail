@@ -178,7 +178,7 @@ extension MessageBubbleLoader {
         for request: MessageBubbleContentRequest,
         accountContext: MessageBubbleAccountWorkContext? = nil
     ) -> String {
-        ProcessedTextCache.contentSourceSignature(
+        MessageBubbleContentSource.contentSourceSignature(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
             bodyText: request.bodyText,
