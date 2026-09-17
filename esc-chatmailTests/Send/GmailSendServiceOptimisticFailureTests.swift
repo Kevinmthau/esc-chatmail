@@ -2,25 +2,44 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, reset, and assertion goes through the suite's
+/// `viewContext`, a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `coreDataStack.viewContext`, which is private-queue. `GmailSendService` is
+/// `@MainActor` and fetches and saves its context directly, which is on-queue
+/// only for a main-queue context. With the private-queue one, every access in
+/// this suite was off-queue, and the runner crashed in CI mid
+/// testColdRecovery_ambiguousMarkerStopsAttachmentSpinnerWithoutRetry, right
+/// after cold recovery logged "Retaining ambiguous optimistic send".
+/// Background contexts (`newBackgroundContext()`) stay private-queue and are
+/// only touched inside `perform`/`performAndWait`.
+///
+/// HONEST SCOPE: the crash needs Core Data's own queue work to overlap a
+/// main-thread access, so no test here can reproduce it on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps in every test
+/// and this shape runs clean.
 @MainActor
 final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var viewContext: NSManagedObjectContext!
     private var sendService: GmailSendService!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
-        sendService = GmailSendService(viewContext: coreDataStack.viewContext)
+        viewContext = coreDataStack.makeMainQueueViewContext()
+        sendService = GmailSendService(viewContext: viewContext)
     }
 
     override func tearDown() {
         sendService = nil
+        viewContext = nil
         coreDataStack = nil
         super.tearDown()
     }
 
     func testHandleFailedOptimisticMessage_withoutLocalAttachments_deletesOptimisticMessage() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .visible()
             .recentlyActive()
@@ -33,7 +52,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .inConversation(conversation)
             .build(in: context)
 
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
         XCTAssertNotNil(sendService.fetchMessageSync(byID: messageID))
 
         sendService.handleFailedOptimisticMessage(message)
@@ -42,7 +61,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testHandleFailedOptimisticMessage_withoutLocalAttachments_deletesNewEmptyOptimisticConversation() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "new-thread@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
 
@@ -64,7 +83,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testHandleFailedOptimisticMessage_afterOptimisticUnarchive_restoresArchivedConversationState() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "archived-thread@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
         let archivedAt = Date(timeIntervalSince1970: 100)
@@ -92,7 +111,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .build(in: context)
         previousMessage.addToLabels(nonInboxLabel)
 
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let handle = try await sendService.createOptimisticMessage(
             to: [recipient],
@@ -115,7 +134,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testHandleFailedOptimisticMessage_keepsNewerRemainingMessageRollupAndVisibility() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "newer-message-thread@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
         let archivedAt = Date(timeIntervalSince1970: 300)
@@ -138,7 +157,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .inConversation(archivedConversation)
             .build(in: context)
 
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let handle = try await sendService.createOptimisticMessage(
             to: [recipient],
@@ -166,7 +185,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testHandleFailedOptimisticMessage_afterPersistedOptimisticUnarchive_restoresDurableConversationSnapshot() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "persisted-archived-thread@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
         let archivedAt = Date(timeIntervalSince1970: 200)
@@ -194,15 +213,15 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .build(in: context)
         previousMessage.addToLabels(nonInboxLabel)
 
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let handle = try await sendService.createOptimisticMessage(
             to: [recipient],
             body: "Persisted failed reply",
             optimisticConversation: .participantHash(participantHash)
         )
-        try coreDataStack.saveViewContext()
-        coreDataStack.resetViewContext()
+        try saveViewContext()
+        viewContext.reset()
 
         let optimisticMessage = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         let persistedConversation = try XCTUnwrap(optimisticMessage.conversation)
@@ -223,7 +242,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testUpdateOptimisticMessage_retainsCommittedRouteUntilExactSync() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "success-clear@example.com"
 
         let handle = try await sendService.createOptimisticMessage(
@@ -257,7 +276,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testRemoteCommittedSendResultReadsFreshStoreState() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         context.automaticallyMergesChangesFromParent = false
 
         let recipient = "fresh-remote-commit@example.com"
@@ -292,7 +311,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testRemoteCommitRefreshesRegisteredAdmissionMarkerWithoutPendingOverwrite() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         context.automaticallyMergesChangesFromParent = false
         let remoteResult = GmailSendService.SendResult(
             messageId: "gmail-after-admission-id",
@@ -327,8 +346,8 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(registeredRecord.remoteCommittedMessageId, remoteResult.messageId)
         XCTAssertEqual(registeredRecord.remoteCommittedThreadId, remoteResult.threadId)
         XCTAssertFalse(context.hasChanges)
-        try coreDataStack.saveViewContext()
-        coreDataStack.resetViewContext()
+        try saveViewContext()
+        viewContext.reset()
 
         let durableRecord = try XCTUnwrap(
             optimisticMutationRecord(in: context, id: handle.optimisticMessageID)
@@ -338,7 +357,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testReconcileAbandonedOptimisticSendMutations_remoteCommittedRecordWaitsForExactSync() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "remote-committed@example.com"
         let remoteResult = GmailSendService.SendResult(
             messageId: "gmail-remote-committed-id",
@@ -388,7 +407,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             session: StubURLProtocol.makeSession()
         )
         let productionSendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             apiClient: productionAPIClient,
             authSession: authSession
         )
@@ -400,7 +419,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
                 calculateParticipantHash(from: [normalizedEmail(recipient)])
             )
         )
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let sendTask = ComposeSendOrchestrator(
             sendService: productionSendService,
@@ -423,15 +442,15 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requestCount, 1)
         XCTAssertNotNil(productionSendService.fetchMessageSync(byID: handle.optimisticMessageID))
 
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let coldStartAPIClient = MockGmailAPIClient()
         let coldStartSendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             apiClient: coldStartAPIClient
         )
         let durableRecord = try XCTUnwrap(
             optimisticMutationRecord(
-                in: coreDataStack.viewContext,
+                in: viewContext,
                 id: handle.optimisticMessageID
             )
         )
@@ -444,7 +463,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID),
             "Cold recovery must retain an ambiguous optimistic send rather than classify it as failed"
         )
-        XCTAssertEqual(try optimisticMutationRecordCount(in: coreDataStack.viewContext), 1)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: viewContext), 1)
         XCTAssertEqual(coldStartAPIClient.sendMessageCallCount, 0)
     }
 
@@ -484,14 +503,14 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         // Simulate a fresh recovery session while messages.send is suspended
         // with no success or error response. The pre-send barrier must already
         // be durable, so recovery cannot classify this as definite failure.
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let coldStartSendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             apiClient: MockGmailAPIClient()
         )
         let durableRecord = try XCTUnwrap(
             optimisticMutationRecord(
-                in: coreDataStack.viewContext,
+                in: viewContext,
                 id: handle.optimisticMessageID
             )
         )
@@ -508,18 +527,18 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         )
         XCTAssertEqual(
             try optimisticMutationRecord(
-                in: coreDataStack.viewContext,
+                in: viewContext,
                 id: handle.optimisticMessageID
             )?.remoteCommittedMessageId,
             OutboundSendRemoteState.ambiguousMessageID
         )
-        XCTAssertEqual(try optimisticMutationRecordCount(in: coreDataStack.viewContext), 1)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: viewContext), 1)
         XCTAssertEqual(gatedSendService.sendCallCount, 1)
 
         await gate.release()
         await sendTask.task.value
 
-        XCTAssertEqual(try optimisticMutationRecordCount(in: coreDataStack.viewContext), 1)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: viewContext), 1)
         let committedOptimistic = try XCTUnwrap(
             coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID)
         )
@@ -527,7 +546,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertNil(coldStartSendService.fetchMessageSync(byID: "gated-sent-id"))
         XCTAssertEqual(
             try optimisticMutationRecord(
-                in: coreDataStack.viewContext,
+                in: viewContext,
                 id: handle.optimisticMessageID
             )?.remoteCommittedMessageId,
             "gated-sent-id"
@@ -548,7 +567,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         let authSession = AuthSession()
         authSession.userEmail = "me@example.com"
         let productionSendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             apiClient: apiClient,
             authSession: authSession
         )
@@ -558,7 +577,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             syncPerformer: NoOpIncrementalSyncPerformer(),
             messageFormatBuilder: MessageFormatBuilder(authSession: authSession),
             outboundReplyContextBuilder: OutboundReplyContextBuilder(
-                viewContext: coreDataStack.viewContext,
+                viewContext: viewContext,
                 replyMetadataBuilder: ReplyMetadataBuilder(authSession: authSession),
                 replyHTMLContentLoader: HTMLContentLoader(
                     contentHandler: HTMLContentHandler(),
@@ -631,7 +650,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         let authSession = AuthSession()
         authSession.userEmail = "me@example.com"
         let productionSendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             apiClient: apiClient,
             authSession: authSession
         )
@@ -697,10 +716,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         try await syncContext.perform {
             try syncContext.save()
         }
-        let viewContext = coreDataStack.viewContext
-        viewContext.performAndWait {
-            viewContext.refreshAllObjects()
-        }
+        viewContext.refreshAllObjects()
 
         XCTAssertEqual(try durableMutationRecordCount(), 0)
         XCTAssertNil(try durableMessageState(id: handle.optimisticMessageID))
@@ -719,8 +735,15 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         // NSInMemoryStore crashes inside Core Data's deletion-conflict merge
         // once the optimistic message owns cascade participant rows. SQLite is
         // the production store and exercises the intended sibling-save race.
+        // This is a store bug, not the off-queue race described on the type:
+        // with every access on-queue and ConcurrencyDebug on, the in-memory
+        // store still throws on the first run at syncContext.save() below
+        // ("-[NSDictionaryMapNode valueForPropertyDescription:]: unrecognized
+        // selector", from -[NSMergePolicy
+        // _mergeDeletionWithStoreChangesForObject:withRecord:]).
         coreDataStack = TestCoreDataStack(storeKind: .sqlite)
-        sendService = GmailSendService(viewContext: coreDataStack.viewContext)
+        viewContext = coreDataStack.makeMainQueueViewContext()
+        sendService = GmailSendService(viewContext: viewContext)
 
         let recipient = "api-reconcile-during-sync@example.com"
         let remoteMessageID = "gmail-api-reconcile-race-id"
@@ -843,7 +866,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertTrue(AttachmentPaths.saveData(originalData, to: localOriginalPath))
         XCTAssertTrue(AttachmentPaths.saveData(previewData, to: localPreviewPath))
 
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let localAttachment = AttachmentBuilder()
             .withId(localAttachmentID)
             .asImage(width: 320, height: 180)
@@ -985,9 +1008,9 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             optimisticMessageID: handle.optimisticMessageID
         )
 
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let coldStartSendService = GmailSendService(
-            viewContext: coreDataStack.viewContext,
+            viewContext: viewContext,
             apiClient: MockGmailAPIClient()
         )
         coldStartSendService.reconcileAbandonedOptimisticSendMutations()
@@ -1046,7 +1069,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testColdRecovery_missingOptimisticListReplyRetainsRouteUntilSentSyncConsumesItAtomically() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let listId = "list.example.com"
         let listConversation = ConversationBuilder()
             .asList()
@@ -1058,7 +1081,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .visible()
             .recentlyActive()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
         let anchoredConversationID = listConversation.id
         let remoteResult = GmailSendService.SendResult(
             messageId: "gmail-cold-list-reply",
@@ -1086,9 +1109,9 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         )
         context.delete(optimisticMessage)
         try context.save()
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let coldStartSendService = GmailSendService(
-            viewContext: coreDataStack.viewContext
+            viewContext: viewContext
         )
         XCTAssertNil(
             coldStartSendService.fetchMessageSync(byID: handle.optimisticMessageID)
@@ -1148,7 +1171,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testColdRecovery_remoteListReplyAlreadyFetchedElsewhereRehomesBeforeClearingRoute() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let listId = "list.example.com"
         let listConversation = ConversationBuilder()
             .asList()
@@ -1160,7 +1183,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .visible()
             .recentlyActive()
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
         let anchoredConversationID = listConversation.id
         let remoteResult = GmailSendService.SendResult(
             messageId: "gmail-prefetched-list-reply",
@@ -1179,7 +1202,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             optimisticMessageID: handle.optimisticMessageID,
             result: remoteResult
         )
-        coreDataStack.resetViewContext()
+        viewContext.reset()
 
         let wrongConversation = ConversationBuilder()
             .withParticipantHash(
@@ -1200,7 +1223,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .fromMe()
             .inConversation(wrongConversation)
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let coldStartSendService = GmailSendService(viewContext: context)
         coldStartSendService.reconcileAbandonedOptimisticSendMutations()
@@ -1215,7 +1238,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testReconcileAbandonedOptimisticSendMutations_remoteMessageAlreadyFetchedDeletesOptimisticDuplicate() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "remote-fetched@example.com"
         let remoteResult = GmailSendService.SendResult(
             messageId: "gmail-already-fetched-id",
@@ -1242,7 +1265,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .fromMe()
             .inConversation(conversation)
             .build(in: context)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         sendService.reconcileAbandonedOptimisticSendMutations()
 
@@ -1253,7 +1276,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testReconcileAbandonedOptimisticSendMutations_remoteMessageInDifferentConversationDeletesPersistedOptimisticConversation() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "remote-fetched-different-conversation@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
         let remoteResult = GmailSendService.SendResult(
@@ -1266,7 +1289,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             body: "Remote send fetched into another conversation",
             optimisticConversation: .participantHash(participantHash)
         )
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         try sendService.recordRemoteCommittedSend(
             optimisticMessageID: handle.optimisticMessageID,
@@ -1283,8 +1306,8 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .fromMe()
             .inConversation(fetchedConversation)
             .build(in: context)
-        try coreDataStack.saveViewContext()
-        coreDataStack.resetViewContext()
+        try saveViewContext()
+        viewContext.reset()
 
         sendService.reconcileAbandonedOptimisticSendMutations()
 
@@ -1295,7 +1318,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testColdRecovery_nilRemoteStateRetainsMessageAsNotSent() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let recipient = "abandoned-new-thread@example.com"
         let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
 
@@ -1305,7 +1328,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             subject: "Preserved subject",
             optimisticConversation: .participantHash(participantHash)
         )
-        coreDataStack.resetViewContext()
+        viewContext.reset()
 
         XCTAssertNotNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         XCTAssertEqual(try conversationCount(in: context), 1)
@@ -1330,7 +1353,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testColdRecovery_legacyNilStateStampsLocalIdentityAndShowsDeliveryUnknown() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let optimisticID = UUID().uuidString
         let conversation = ConversationBuilder()
             .withDisplayName("Legacy optimistic send")
@@ -1354,7 +1377,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         legacyRecord.newlyInsertedConversation = false
         try context.save()
 
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let apiClient = MockGmailAPIClient()
         let coldStartSendService = GmailSendService(
             viewContext: context,
@@ -1380,7 +1403,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testRollbackBeforeTransmission_removesOptimisticBubbleAndRequeuesComposerAttachment() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let attachment = AttachmentBuilder()
             .withId("local_preflight_rollback")
             .asImage()
@@ -1422,7 +1445,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testRetainDefinitelyUnsentOptimisticMessage_preservesBodySubjectAndAttachments() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let attachment = AttachmentBuilder()
             .withId("local_definite_failure")
             .asImage()
@@ -1450,7 +1473,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             byID: handle.optimisticMessageID,
             fallbackAttachmentReferences: attachmentContexts.map(\.localAttachmentReference)
         )
-        coreDataStack.resetViewContext()
+        viewContext.reset()
 
         let retainedMessage = try XCTUnwrap(
             sendService.fetchMessageSync(byID: handle.optimisticMessageID)
@@ -1470,7 +1493,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testColdRecovery_ambiguousMarkerStopsAttachmentSpinnerWithoutRetry() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let attachment = AttachmentBuilder()
             .withId("local_ambiguous_attachment")
             .asImage()
@@ -1495,7 +1518,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             optimisticMessageID: handle.optimisticMessageID
         )
 
-        coreDataStack.resetViewContext()
+        viewContext.reset()
         let apiClient = MockGmailAPIClient()
         let coldStartSendService = GmailSendService(
             viewContext: context,
@@ -1519,7 +1542,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testHandleFailedOptimisticMessage_withLocalAttachments_marksOnlyLocalAttachmentsFailed() throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()
             .withDisplayName("Active Thread")
             .visible()
@@ -1548,7 +1571,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             .forMessage(message)
             .build(in: context)
 
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         sendService.handleFailedOptimisticMessage(message)
 
@@ -1562,7 +1585,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
     }
 
     func testHandleFailedOptimisticMessage_withLocalAttachments_keepsFailedBubbleAndRecomputesRollup() async throws {
-        let context = coreDataStack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let attachmentBuilder = OutboundAttachmentContextBuilder(viewContext: context)
         let attachment = AttachmentBuilder()
             .withId("local_attachment_rollup")
@@ -1599,6 +1622,14 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertNil(persistedConversation.archivedAt)
         XCTAssertFalse(persistedConversation.hidden)
         XCTAssertEqual(try conversationCount(in: context), 1)
+    }
+
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
     }
 
     private func conversationCount(in context: NSManagedObjectContext) throws -> Int {
