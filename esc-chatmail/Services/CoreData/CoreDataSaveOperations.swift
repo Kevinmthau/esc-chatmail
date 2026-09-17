@@ -10,8 +10,12 @@ extension CoreDataStack {
     /// - Returns: true if save succeeded or no changes were needed, false if save failed
     @discardableResult
     func saveIfNeeded(context: NSManagedObjectContext, caller: String = #function) -> Bool {
-        guard context.hasChanges else { return true }
-
+        // No `hasChanges` fast path before `performAndWait`: callers pass
+        // background contexts from whatever thread they are on (the launch
+        // repair passes call this from the main actor), and `hasChanges` on a
+        // private-queue context is an off-queue access that traps under
+        // `-com.apple.CoreData.ConcurrencyDebug 1`. The check below is the
+        // same test, taken on the context's own queue.
         var saveSucceeded = false
 
         context.performAndWait {
@@ -50,11 +54,8 @@ extension CoreDataStack {
 
     /// Async version of saveIfNeeded that returns success status via completion
     func saveIfNeededAsync(context: NSManagedObjectContext, caller: String = #function, completion: ((Bool) -> Void)? = nil) {
-        guard context.hasChanges else {
-            completion?(true)
-            return
-        }
-
+        // No `hasChanges` fast path outside `perform`, for the same
+        // off-queue reason as `saveIfNeeded(context:caller:)` above.
         context.perform {
             guard context.hasChanges else {
                 completion?(true)
