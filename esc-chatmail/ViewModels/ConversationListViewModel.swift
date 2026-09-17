@@ -91,7 +91,8 @@ final class ConversationListViewModel: ObservableObject {
             storage: resolvedDependencies.storage,
             conversationManager: resolvedDependencies.conversationManager,
             syncWaiter: resolvedDependencies.syncWaiter,
-            notificationCenter: resolvedDependencies.notificationCenter
+            notificationCenter: resolvedDependencies.notificationCenter,
+            repairTaskPriority: resolvedDependencies.launchRepairTaskPriority
         )
         self.windowProvider = windowProvider
         self.loadedConversationLimit = windowProvider.initialLimit

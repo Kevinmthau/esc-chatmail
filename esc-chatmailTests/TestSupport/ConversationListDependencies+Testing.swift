@@ -32,6 +32,10 @@ extension ConversationListDependencies {
     ///   - notificationCenter: Source of `.syncCompleted` for the launch
     ///     repair's re-arm. Defaults to `.default`, matching the existing
     ///     suites that post the notification on the default center.
+    ///   - launchRepairTaskPriority: Priority of the launch repair's store
+    ///     sweeps. Defaults to `nil` (inherit the test's priority) rather than
+    ///     production's `.background`, which a loaded CI runner can leave
+    ///     unscheduled for longer than any poll deadline.
     ///   - searchService: Optional service override returned by the bundle's
     ///     search factory (e.g. to shorten the debounce interval).
     ///   - selectionService: Optional service override returned by the
@@ -48,6 +52,7 @@ extension ConversationListDependencies {
         conversationManager: ConversationManager? = nil,
         syncWaiter: (any ForegroundSyncPerforming)? = nil,
         notificationCenter: NotificationCenter = .default,
+        launchRepairTaskPriority: TaskPriority? = nil,
         searchService: ConversationSearchService? = nil,
         selectionService: ConversationSelectionService? = nil,
         filterService: ConversationFilterService? = nil
@@ -78,6 +83,7 @@ extension ConversationListDependencies {
             foregroundSyncCoordinator: Dependencies.shared.foregroundSyncCoordinator,
             conversationManager: resolvedConversationManager,
             notificationCenter: notificationCenter,
+            launchRepairTaskPriority: launchRepairTaskPriority,
             makeConversationSearchService: { resolvedSearchService },
             makeConversationSelectionService: { resolvedSelectionService },
             makeConversationFilterService: { resolvedFilterService }
