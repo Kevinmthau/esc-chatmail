@@ -20,19 +20,32 @@ import Combine
 /// updates for unregistered objects too, which would mask a broken
 /// didSaveObjectIDs subscription. With no merge, that subscription is the
 /// only possible delivery path, so these tests fail if it regresses.
+///
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue. `ConversationListViewModel`
+/// is `@MainActor` and fetches its window and resolves rows on the observed
+/// context directly (`ConversationWindowProvider.fetchWindow`,
+/// `existingObject(with:)`), which is on-queue only for a main-queue context.
+/// See that helper for what the private-queue shape races. Background contexts
+/// stay private-queue and are only touched inside `perform`/`performAndWait`.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
     private var stack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
-        context = nil
+        viewContext = nil
         stack = nil
         super.tearDown()
     }
@@ -51,17 +64,17 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
                 .visible()
                 .withLastMessageDate(Date(timeIntervalSince1970: 300))
                 .withCreatedAt(Date())
-                .build(in: context)
-            try context.save()
+                .build(in: viewContext)
+            try viewContext.save()
             conversationID = conversation.objectID
-            viewModel.onAppear(in: context)
+            viewModel.onAppear(in: viewContext)
         }
 
         XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.inboxUnreadCount, 0)
         // Bug precondition: the row's Conversation must have deallocated, or
         // the registered-object merge path would mask the delivery gap.
         XCTAssertFalse(
-            context.registeredObjects.contains { $0.objectID == conversationID },
+            viewContext.registeredObjects.contains { $0.objectID == conversationID },
             "displayed conversation must be unregistered to exercise the delivery gap"
         )
 
@@ -102,11 +115,11 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
             let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
             let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
             let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
-            try context.save()
+            try viewContext.save()
             aliceID = alice.objectID
             bobID = bob.objectID
             carolID = carol.objectID
-            viewModel.onAppear(in: context)
+            viewModel.onAppear(in: viewContext)
         }
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [aliceID, bobID])
@@ -137,10 +150,10 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         try autoreleasepool {
             let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
             let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
-            try context.save()
+            try viewContext.save()
             aliceID = alice.objectID
             bobID = bob.objectID
-            viewModel.onAppear(in: context)
+            viewModel.onAppear(in: viewContext)
         }
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [aliceID, bobID])
@@ -167,11 +180,11 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
             let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
             let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
             let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
-            try context.save()
+            try viewContext.save()
             aliceID = alice.objectID
             bobID = bob.objectID
             carolID = carol.objectID
-            viewModel.onAppear(in: context)
+            viewModel.onAppear(in: viewContext)
         }
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [aliceID, bobID, carolID])
@@ -221,11 +234,11 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
             let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
             let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
             let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
-            try context.save()
+            try viewContext.save()
             aliceID = alice.objectID
             bobID = bob.objectID
             carolID = carol.objectID
-            viewModel.onAppear(in: context)
+            viewModel.onAppear(in: viewContext)
         }
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [aliceID, bobID, carolID])
@@ -263,17 +276,17 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
     // MARK: - didSaveObjectIDs relevance guard
 
     func testSaveRelevanceGuard_messageOnlyObjectIDs_areIrrelevant() throws {
-        let conversation = ConversationBuilder().visible().build(in: context)
-        let message = MessageBuilder().inConversation(conversation).build(in: context)
-        try context.save()
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        let message = MessageBuilder().inConversation(conversation).build(in: viewContext)
+        try viewContext.save()
 
         let userInfo: [AnyHashable: Any] = [NSUpdatedObjectIDsKey: Set([message.objectID])]
         XCTAssertFalse(ConversationListViewModel.isRelevantConversationSave(userInfo))
     }
 
     func testSaveRelevanceGuard_conversationObjectIDs_areRelevantInEverySet() throws {
-        let conversation = ConversationBuilder().visible().build(in: context)
-        try context.save()
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        try viewContext.save()
 
         for key in [NSInsertedObjectIDsKey, NSUpdatedObjectIDsKey, NSDeletedObjectIDsKey] {
             let userInfo: [AnyHashable: Any] = [key: Set([conversation.objectID])]
@@ -303,6 +316,7 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         ConversationListViewModel(
             dependencies: .forTesting(
                 stack: stack,
+                viewContext: viewContext,
                 contactEmailLoader: { _ in [] }
             ),
             windowProvider: windowProvider
@@ -321,7 +335,7 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
             .visible()
             .withLastMessageDate(Date(timeIntervalSince1970: date))
             .withCreatedAt(Date())
-            .build(in: context)
+            .build(in: viewContext)
     }
 
     private func filteredConversationIDs(in viewModel: ConversationListViewModel) -> [NSManagedObjectID] {
