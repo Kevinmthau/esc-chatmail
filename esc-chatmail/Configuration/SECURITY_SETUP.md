@@ -32,7 +32,7 @@ Only replace those values if you intentionally want to build against a different
 - **xcconfig files**: Store build-time configuration values outside of code
 - **Info.plist**: References configuration values using `$(VARIABLE_NAME)`
 - **Constants.swift**: Reads values from Info.plist at runtime
-- **Git**: Configuration files are excluded from version control
+- **Git**: `Debug.xcconfig` and `Release.xcconfig` are tracked on purpose — they hold public OAuth client identifiers, not secrets. User credentials and tokens are never committed; they live in the Keychain
 
 ### Keychain Service
 The `KeychainService` provides centralized, secure storage for:

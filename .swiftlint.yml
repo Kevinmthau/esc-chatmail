@@ -10,7 +10,6 @@ included:
 
 excluded:
   - esc-chatmailTests
-  - esc-chatmailUITests
   - .build
   - build
   - DerivedData
