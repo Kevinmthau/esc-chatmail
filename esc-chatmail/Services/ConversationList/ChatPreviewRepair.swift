@@ -1,9 +1,23 @@
 import CoreData
 import Foundation
 
-/// Re-derives only received, HTML-backed previews. The caller owns the account
-/// lease, pending-send serialization, save, and durable cursor checkpoint.
+/// Rewrites persisted `Message.chatPreviewText` in ID-ordered batches. The
+/// caller owns the account lease, pending-send serialization, save, and durable
+/// cursor checkpoint. Messages in conversations with a pending
+/// `OutboundSendMutationRecord` are deferred, never rewritten.
 struct ChatPreviewRepair {
+    enum Pass: Sendable {
+        /// Re-derives received, HTML-backed previews after a derivation change
+        /// (keyed by `CacheVersioning.chatPreviewDerivationVersion`).
+        case receivedHTMLRederivation
+        /// Fills blank previews with exactly the text the bubble loader's
+        /// compatibility path already shows, from local sources only, so those
+        /// rows stop re-deriving on every load. Rows whose bubble depends on
+        /// something a stored preview would change are left blank; see
+        /// `backfilledPreview`.
+        case blankPreviewBackfill
+    }
+
     struct Batch: Sendable {
         var lastMessageID: String?
         var changedMessageIDs: Set<String> = []
@@ -29,6 +43,7 @@ struct ChatPreviewRepair {
     }
 
     let htmlContentHandler: HTMLContentHandler
+    var pass: Pass = .receivedHTMLRederivation
 
     func prepareBatch(
         in context: NSManagedObjectContext,
@@ -43,7 +58,7 @@ struct ChatPreviewRepair {
                     .compactMap(\.conversationId)
             )
             let request = Message.fetchRequest()
-            var predicates = [NSPredicate(format: "isFromMe == NO AND bodyStorageURI != nil")]
+            var predicates = [Self.basePredicate(for: pass)]
             if let messageID {
                 predicates.append(NSPredicate(format: "id > %@", messageID))
             }
@@ -67,10 +82,7 @@ struct ChatPreviewRepair {
                     batch.lastMessageID = message.id
                     continue
                 }
-                let html = htmlContentHandler.loadHTML(for: message.id) ??
-                    message.bodyStorageURI.flatMap(StorageURIResolver.resolve)
-                        .flatMap { htmlContentHandler.loadHTML(from: $0) }
-                if let preview = MessageProcessor.deriveHTMLChatPreview(from: html),
+                if let preview = derivedPreview(for: message),
                    !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    preview != message.chatPreviewText {
                     message.chatPreviewText = preview
@@ -82,5 +94,70 @@ struct ChatPreviewRepair {
             }
             return batch
         }
+    }
+
+    private static func basePredicate(for pass: Pass) -> NSPredicate {
+        switch pass {
+        case .receivedHTMLRederivation:
+            return NSPredicate(format: "isFromMe == NO AND bodyStorageURI != nil")
+        case .blankPreviewBackfill:
+            // Whitespace-only counts as blank, matching the loader's `nonEmptyText`.
+            return NSPredicate(
+                format: "chatPreviewText == nil OR chatPreviewText == '' OR chatPreviewText MATCHES %@",
+                #"^\s+$"#
+            )
+        }
+    }
+
+    private func derivedPreview(for message: Message) -> String? {
+        switch pass {
+        case .receivedHTMLRederivation:
+            let html = htmlContentHandler.loadHTML(for: message.id) ??
+                message.bodyStorageURI.flatMap(StorageURIResolver.resolve)
+                    .flatMap { htmlContentHandler.loadHTML(from: $0) }
+            return MessageProcessor.deriveHTMLChatPreview(from: html)
+        case .blankPreviewBackfill:
+            return Self.backfilledPreview(
+                messageId: message.id,
+                isFromMe: message.isFromMe,
+                subject: message.subject,
+                bodyStorageURI: message.bodyStorageURI,
+                bodyText: message.bodyText,
+                handler: htmlContentHandler
+            )
+        }
+    }
+
+    /// The text `MessageBubbleLoader.loadContent` shows for a blank-preview row,
+    /// or nil when storing a preview would change that bubble. Built from the
+    /// loader's own shared steps so the two cannot drift.
+    static func backfilledPreview(
+        messageId: String,
+        isFromMe: Bool,
+        subject: String?,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        handler: HTMLContentHandler
+    ) -> String? {
+        // A blank preview makes forwarded bubbles parse their lead-in from the
+        // body; a stored preview would replace that lead-in.
+        guard !MessagePreviewText.isForwardedSubject(subject) else { return nil }
+        let storedHTMLText = MessageBubbleContentSource.processMessage(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            handler: handler
+        ).plainText
+        guard isFromMe else {
+            // Received rows without usable local HTML stay on the loader's
+            // compatibility path, which can still recover HTML over the network.
+            return storedHTMLText
+        }
+        // Outgoing rows never recover over the network, so the loader's result
+        // is fully local: stored HTML text, else the body-text fallback, unless
+        // the legacy outgoing body is richer.
+        let loadedText = storedHTMLText ?? bodyText.flatMap {
+            MessageBubbleContentSource.bodyTextFallback(from: $0).mainText
+        }
+        return LegacyOutgoingBodyTextFallback.preferredBodyText(fromBody: bodyText, over: loadedText) ?? loadedText
     }
 }

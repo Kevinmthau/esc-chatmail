@@ -251,22 +251,7 @@ extension MessageBubbleLoader {
         var cacheSourceSignature = sourceSignature
 
         if processedResult.plainText == nil, let text = request.bodyText {
-            let fallbackContent = RawEmailSourceSanitizer.extractHTMLText(from: text) ?? text
-            let fallbackInputKind: ChatBubbleTextInputKind =
-                fallbackContent == text ? .autoDetectHTML : .html
-            let fallbackResult: ChatBubbleTextProcessingResult
-            if fallbackInputKind == .html {
-                fallbackResult = ChatBubbleTextProcessor.htmlCompatibilityFallback(
-                    from: fallbackContent,
-                    classifyRichContent: true
-                )
-            } else {
-                fallbackResult = ChatBubbleTextProcessor.legacyAutoDetectedFallback(
-                    from: fallbackContent,
-                    sanitizeRawEmailSource: true,
-                    classifyRichContent: true
-                )
-            }
+            let fallbackResult = MessageBubbleContentSource.bodyTextFallback(from: text)
             processedResult = (
                 fallbackResult.mainText,
                 fallbackResult.hasRichContent,

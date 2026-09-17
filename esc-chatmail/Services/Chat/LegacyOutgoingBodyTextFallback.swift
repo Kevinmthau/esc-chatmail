@@ -4,6 +4,21 @@ import Foundation
 /// populated from the composed body. Normal outgoing bubbles use the persisted
 /// chatPreviewText and do not need this body-vs-loaded-text comparison.
 enum LegacyOutgoingBodyTextFallback {
+    /// Runs the persisted outgoing `bodyText` through the legacy cleanup, then
+    /// keeps it only when it is richer than `loadedText`. Shared by the bubble
+    /// loader and the blank-preview backfill.
+    static func preferredBodyText(
+        fromBody bodyText: String?,
+        over loadedText: String?
+    ) -> String? {
+        let result = ChatBubbleTextProcessor.legacyAutoDetectedFallback(
+            from: bodyText,
+            sanitizeRawEmailSource: true,
+            classifyRichContent: false
+        )
+        return preferredBodyText(result.mainText, over: loadedText)
+    }
+
     static func preferredBodyText(
         _ outgoingBodyText: String?,
         over loadedText: String?
