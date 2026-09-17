@@ -40,7 +40,7 @@ export function useRichHtmlContent(message: MessageRow): boolean {
     const cached = richContentCache.get(message.id)
     if (cached !== undefined) return cached
     if (typeof bodyHtml !== 'string' || bodyHtml.length === 0) return false
-    // Same entry point as the iOS ProcessedTextCache path: classifyRichContent
+    // Same entry point as the iOS MessageBubbleContentSource path: classifyRichContent
     // routes through mime/richContent.hasGenuineRichContent.
     const verdict = htmlCompatibilityFallback(bodyHtml, true).hasRichContent
     cacheRichVerdict(message.id, verdict)

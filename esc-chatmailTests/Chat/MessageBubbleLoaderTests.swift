@@ -794,7 +794,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
 
-        let sourceSignature = ProcessedTextCache.contentSourceSignature(
+        let sourceSignature = MessageBubbleContentSource.contentSourceSignature(
             messageId: messageId,
             bodyStorageURI: nil,
             bodyText: nil,
@@ -805,7 +805,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         await ProcessedTextCache.shared.set(
             messageId: messageId,
             sourceSignature: sourceSignature,
-            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
             plainText: "Ordinary cached preview",
             hasRichContent: false
         )
@@ -2034,7 +2034,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
             for: messageId
         )
 
-        let sourceSignature = ProcessedTextCache.contentSourceSignature(
+        let sourceSignature = MessageBubbleContentSource.contentSourceSignature(
             messageId: messageId,
             bodyStorageURI: nil,
             bodyText: nil,
@@ -2043,7 +2043,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         await ProcessedTextCache.shared.set(
             messageId: messageId,
             sourceSignature: sourceSignature,
-            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
             plainText: nil,
             hasRichContent: true
         )
@@ -2299,7 +2299,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         let processedEntry = await processedTextCache.get(
             messageId: "shared-message",
             sourceSignature: "empty",
-            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
             expectedAccountGeneration: freshProcessedGeneration
         )
         XCTAssertNil(processedEntry)

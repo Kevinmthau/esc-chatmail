@@ -1,5 +1,5 @@
 // Rich-content classification and the HTML cleanup degradation chain.
-// Ports: ProcessedTextCache.hasGenuineRichContent (+ helpers),
+// Ports: RichContentClassifier.hasGenuineRichContent (+ helpers),
 // HTMLMeaningfulContentChecker, HTMLCleanupFallback.
 
 import { removeQuotesFromHtml, type QuoteRemovalMode } from './html'
@@ -96,7 +96,7 @@ export function cleanedHtmlForCleanupModes(
 }
 
 /**
- * ProcessedTextCache.cleanedHTMLForProcessing: try quote+signature removal,
+ * ChatBubbleTextProcessor.cleanedHTMLForProcessing: try quote+signature removal,
  * then quote-only, falling back to the original HTML.
  */
 export function cleanedHtmlForProcessing(html: string): HtmlProcessingCleanupResult {

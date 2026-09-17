@@ -4,7 +4,7 @@ import Foundation
 ///
 /// These were previously duplicated verbatim across
 /// `PlainTextSignatureRemover`, `EmailDOMQuoteRemover+Signatures`,
-/// `PlainTextQuoteRemover`, `ProcessedTextCache`, `TextProcessing`, and
+/// `PlainTextQuoteRemover`, `ChatBubbleTextProcessor`, `TextProcessing`, and
 /// `RawEmailSourceSanitizer`. Callers keep their own matching logic and alias
 /// these definitions, so each pattern has exactly one home.
 
@@ -99,7 +99,8 @@ enum SignaturePatterns {
 
 /// Localized quoted-reply header prefixes (lowercased), grouped by header
 /// role. Shared by the plain-text quote remover's structural header-block
-/// detection and the residual-HTML-text cleanup in ProcessedTextCache.
+/// detection and the residual-HTML-text cleanup in
+/// `ChatBubbleTextProcessor+HTMLTextExtraction`.
 enum QuoteHeaderPatterns {
     static let fromPrefixes: [String] = [
         "from:", "von:", "de:", "de :", "da:", "van:"

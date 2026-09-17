@@ -295,7 +295,7 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
         await processedTextCache.set(
             messageId: messageId,
             sourceSignature: "new-source",
-            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
             plainText: "new account",
             hasRichContent: true,
             expectedAccountGeneration: freshProcessedGeneration
@@ -315,7 +315,7 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
         let freshProcessedEntry = await processedTextCache.get(
             messageId: messageId,
             sourceSignature: "new-source",
-            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
             expectedAccountGeneration: freshProcessedGeneration
         )
         XCTAssertEqual(freshProcessedEntry?.plainText, "new account")

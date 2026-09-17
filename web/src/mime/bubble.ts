@@ -1,5 +1,5 @@
 // Chat-bubble text processing pipeline.
-// Ports ChatBubbleTextProcessor and the ProcessedTextCache HTML→plain-text
+// Ports ChatBubbleTextProcessor and its HTML→plain-text extraction
 // helpers (removeConsecutivePlainTextQuoteLines, residual quote markers,
 // header quote blocks).
 
@@ -177,7 +177,7 @@ function processPlainText(
   }
 }
 
-// MARK: - HTML → bubble text (ProcessedTextCache.extractPlainTextFromHTML)
+// MARK: - HTML → bubble text (ChatBubbleTextProcessor.extractPlainTextFromHTML)
 
 // Retained tables, headings, lists and media carry context lost by text extraction.
 // Leave those documents to DOM cleanup, including its content-preservation guards.
