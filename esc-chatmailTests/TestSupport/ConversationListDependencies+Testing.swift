@@ -22,9 +22,9 @@ extension ConversationListDependencies {
     ///     directly on the main actor: `ConversationListViewModel` fetches its
     ///     window and resolves rows on it, and the launch repair counts
     ///     conversations on it. Pass the suite's
-    ///     `stack.makeMainQueueViewContext()`. The `nil` default falls back to
-    ///     `stack.viewContext`, which is private-queue, so every such access is
-    ///     off-queue; it remains only for the suites not yet converted.
+    ///     `stack.makeMainQueueViewContext()`; `stack.viewContext` is
+    ///     private-queue, so every such access would be off-queue. Required so
+    ///     no caller can fall back to it by omission.
     ///   - migrationFlags: Test-owned migration flag storage. Defaults to a
     ///     fresh `InMemoryMigrationFlagStore`, so one-shot launch guards start
     ///     unset for every test.
@@ -54,7 +54,7 @@ extension ConversationListDependencies {
     @MainActor
     static func forTesting(
         stack: TestCoreDataStack,
-        viewContext: NSManagedObjectContext? = nil,
+        viewContext: NSManagedObjectContext,
         migrationFlags: MigrationFlagStore = InMemoryMigrationFlagStore(),
         contactEmailLoader: ConversationFilterService.ContactEmailLoader? = nil,
         conversationManager: ConversationManager? = nil,
@@ -65,11 +65,10 @@ extension ConversationListDependencies {
         selectionService: ConversationSelectionService? = nil,
         filterService: ConversationFilterService? = nil
     ) -> ConversationListDependencies {
-        let resolvedViewContext = viewContext ?? stack.viewContext
         let resolvedSearchService = searchService ?? ConversationSearchService()
         let resolvedSelectionService = selectionService ?? ConversationSelectionService(
             messageActions: Dependencies.shared.makeMessageActions(),
-            viewContext: resolvedViewContext
+            viewContext: viewContext
         )
         let resolvedFilterService = filterService ?? ConversationFilterService(
             contactEmailLoader: contactEmailLoader ?? { _ in [] }
@@ -80,7 +79,7 @@ extension ConversationListDependencies {
 
         return ConversationListDependencies(
             storage: StorageDependencies(
-                viewContext: resolvedViewContext,
+                viewContext: viewContext,
                 makeBackgroundContext: { stack.newBackgroundContext() },
                 saveIfNeeded: { stack.saveIfNeeded(context: $0) },
                 migrationFlags: migrationFlags,
