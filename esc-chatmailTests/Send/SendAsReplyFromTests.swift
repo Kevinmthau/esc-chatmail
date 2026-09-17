@@ -2,16 +2,29 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue. `GmailSendService` and
+/// `OutboundReplyContextBuilder` are `@MainActor` and use their context
+/// directly, which is on-queue only for a main-queue context. See that helper
+/// for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class SendAsReplyFromTests: XCTestCase {
     private var stack: TestCoreDataStack!
+    private var viewContext: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
+        viewContext = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
+        viewContext = nil
         stack = nil
         super.tearDown()
     }
@@ -200,7 +213,7 @@ final class SendAsReplyFromTests: XCTestCase {
     }
 
     func testReplyMetadata_unconfiguredDeliveredToAddressSurfacesSendAsError() async throws {
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context)
         let account = AccountBuilder()
             .withEmail("primary@gmail.com")
@@ -239,7 +252,7 @@ final class SendAsReplyFromTests: XCTestCase {
     }
 
     func testReplyMetadata_gmailPlusDeliveredToFallsBackToPrimaryAlias() async throws {
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let conversation = makeReplyConversation(in: context)
         let account = AccountBuilder()
             .withEmail("primary@gmail.com")
@@ -271,7 +284,7 @@ final class SendAsReplyFromTests: XCTestCase {
 
     func testSendAsAliasManager_usesLegacyAccountAliasesWhenStoredSendAsAliasesAreMissing() async throws {
         await SendAsAliasManager.shared.invalidate()
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = viewContext
         _ = AccountBuilder()
             .withEmail("primary@gmail.com")
             .withAliases(["alias@customdomain.com"])
@@ -288,7 +301,7 @@ final class SendAsReplyFromTests: XCTestCase {
         let apiClient = MockGmailAPIClient()
         let authSession = makeAuthSession()
         let sendService = GmailSendService(
-            viewContext: stack.viewContext,
+            viewContext: viewContext,
             apiClient: apiClient,
             authSession: authSession
         )
@@ -315,7 +328,7 @@ final class SendAsReplyFromTests: XCTestCase {
     }
 
     func testMessagePersister_persistsReplyFromFieldsAndPreservesSenderDisplayName() async throws {
-        let context = stack.viewContext
+        let context: NSManagedObjectContext = viewContext
         let message = makeGmailMessage(
             id: "persist-reply-from",
             headers: [
@@ -418,7 +431,7 @@ final class SendAsReplyFromTests: XCTestCase {
 
     private func makeReplyContextBuilder() -> OutboundReplyContextBuilder {
         OutboundReplyContextBuilder(
-            viewContext: stack.viewContext,
+            viewContext: viewContext,
             replyMetadataBuilder: ReplyMetadataBuilder(authSession: makeAuthSession()),
             replyHTMLContentLoader: HTMLContentLoader(
                 contentHandler: HTMLContentHandler(),
