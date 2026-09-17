@@ -8,12 +8,10 @@ import Foundation
 /// HTMLContentResultCache) version implicitly through the signature and have
 /// no constant here.
 enum CacheVersioning {
-    /// Embedded in every ProcessedTextCache key. Bump when text-processing
-    /// output changes shape (classification, signature/quote removal, chat
-    /// preview derivation).
-    static let processedTextProcessingVersion = "2026-09-10-repeated-signature-v1"
-
-    /// Versions persisted received-HTML bubble text, independently of runtime caches.
+    /// Versions persisted received-HTML bubble text. Bump when chat preview
+    /// derivation output changes shape (classification, signature/quote
+    /// removal) so `ChatPreviewRepair` re-derives stored previews. The
+    /// in-memory caches need no constant: they start empty on every launch.
     static let chatPreviewDerivationVersion = "2026-09-10-repeated-signature-v1"
 
     /// Embedded in email preview snapshot cache keys. Bump when the preview

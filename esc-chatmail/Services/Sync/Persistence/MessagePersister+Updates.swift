@@ -571,7 +571,9 @@ extension MessagePersister {
         )
 
         if result.shouldInvalidateRenderedContent {
-            await ProcessedTextCache.shared.invalidate(messageId: processedMessage.id)
+            // Also evicts RenderedMessageCache, under a generation captured
+            // before the eviction so an account transition cannot clear the
+            // reopened account's entries.
             await HTMLContentLoader.shared.invalidateContent(messageId: processedMessage.id)
         }
 

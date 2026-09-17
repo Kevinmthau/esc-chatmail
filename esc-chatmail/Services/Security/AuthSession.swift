@@ -375,7 +375,6 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                 firstError = error
             }
             await HTMLContentRecoveryService.shared.closeAccountWorkAndAwait()
-            await ProcessedTextCache.shared.closeAccountWorkAndClear()
             await HTMLContentLoader.shared.closeAccountWorkAndClearCaches()
             MessageBubbleHTMLAnalysisCache.shared.closeAccountWorkAndClear()
             await EmailPreviewSnapshotRenderer.shared.closeAccountWorkAndAwait()
@@ -396,7 +395,6 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             await CacheCoordinator.shared.closeAccountWorkAndAwait()
             try HTMLContentHandler.shared.reopenAccountWork()
             HTMLContentRecoveryService.shared.reopenAccountWork()
-            ProcessedTextCache.shared.reopenAccountWork()
             await HTMLContentLoader.shared.reopenAccountWork()
             MessageBubbleHTMLAnalysisCache.shared.reopenAccountWork()
             try EmailPreviewSnapshotCache.shared.reopenAccountWork()

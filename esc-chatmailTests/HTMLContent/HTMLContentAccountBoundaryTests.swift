@@ -256,7 +256,6 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
             contentHandler: handler,
             recoveryService: AccountBoundaryNoopRecoverer()
         )
-        let processedTextCache = ProcessedTextCache()
         defer {
             try? handler.reopenAccountWork()
             try? FileManager.default.removeItem(at: directory)
@@ -267,15 +266,11 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
             expectedAccountGeneration: oldHTMLGeneration
         )
         let oldInvalidationContext = try XCTUnwrap(capturedInvalidationContext)
-        let capturedProcessedGeneration = await processedTextCache.captureAccountGeneration()
-        let oldProcessedGeneration = try XCTUnwrap(capturedProcessedGeneration)
 
         handler.closeAccountWork()
         try await handler.deleteAllHTMLFromClosedAccount()
-        await processedTextCache.closeAccountWorkAndClear()
         await loader.closeAccountWorkAndClearCaches()
         try handler.reopenAccountWork()
-        await processedTextCache.reopenAccountWork()
         await loader.reopenAccountWork()
 
         let messageId = "shared-message"
@@ -290,101 +285,38 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
         XCTAssertNotNil(loaded.html)
         XCTAssertGreaterThan(loader.debugCachedVariantCount(for: messageId), 0)
 
-        let capturedFreshProcessedGeneration = await processedTextCache.captureAccountGeneration()
-        let freshProcessedGeneration = try XCTUnwrap(capturedFreshProcessedGeneration)
-        await processedTextCache.set(
+        // The loader's close/reopen above also cycles RenderedMessageCache.shared,
+        // so this entry belongs to the reopened account.
+        let bubbleVariant = RenderedMessageVariantKey(MessageBubbleContentSource.chatBubblePreviewMode)
+        let bubbleSourceSignature = "new-source-\(UUID().uuidString)"
+        await RenderedMessageCache.shared.storeChatBubbleText(
+            RenderedMessageChatBubbleText(plainText: "new account", hasRichContent: true),
             messageId: messageId,
-            sourceSignature: "new-source",
-            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-            plainText: "new account",
-            hasRichContent: true,
-            expectedAccountGeneration: freshProcessedGeneration
+            sourceSignature: bubbleSourceSignature,
+            variantKey: bubbleVariant
         )
-
         await loader.invalidateContent(
             messageId: messageId,
             accountContext: oldInvalidationContext
         )
-        await processedTextCache.invalidate(
-            messageId: messageId,
-            expectedAccountGeneration: oldProcessedGeneration,
-            invalidatesRenderedMessage: false
-        )
 
         XCTAssertGreaterThan(loader.debugCachedVariantCount(for: messageId), 0)
-        let freshProcessedEntry = await processedTextCache.get(
+        // Revert-check: stale-context rejection in
+        // `HTMLContentLoader.invalidateContent(messageId:accountContext:)`.
+        // HONEST SCOPE: rejection is layered — the up-front generation guards,
+        // then `expectedAccountGeneration:` on the RenderedMessageCache eviction —
+        // so this assertion fails only when both layers are removed.
+        let freshBubble = await RenderedMessageCache.shared.cachedChatBubbleText(
             messageId: messageId,
-            sourceSignature: "new-source",
-            previewMode: MessageBubbleContentSource.chatBubblePreviewMode,
-            expectedAccountGeneration: freshProcessedGeneration
+            sourceSignature: bubbleSourceSignature,
+            variantKey: bubbleVariant
         )
-        XCTAssertEqual(freshProcessedEntry?.plainText, "new account")
-    }
+        XCTAssertEqual(freshBubble?.plainText, "new account")
 
-    // Pins the contract that `HTMLContentRecoveryService.performRecoveryToCompletion`
-    // depends on when it passes `invalidatesRenderedMessage: false`: that flag must
-    // suppress ProcessedTextCache's own RenderedMessageCache hop, which is UNSCOPED
-    // (it calls `RenderedMessageCache.shared.invalidate(messageId:reason:)` with no
-    // expected generation) and would therefore reach across an account transition.
-    // This test fails if the flag stops being honored — i.e. if the rendered hop is
-    // made unconditional again — because the seeded rendered artifact would be evicted.
-    // A fresh `ProcessedTextCache()` is used (not `.shared`) so the surrounding
-    // close/reopen-sensitive singleton state is untouched, matching
-    // `testStaleInvalidationContextDoesNotEvictReopenedAccountCaches` above.
-    func testProcessedTextInvalidationWithoutRenderedFlagLeavesRenderedCacheUntouched() async throws {
-        let messageId = "processed-text-rendered-flag-\(UUID().uuidString)"
-        let sourceSignature = "rendered-flag-source-\(UUID().uuidString)"
-        let variantKey: RenderedMessageVariantKey = "processed-text-rendered-flag"
-        let processedTextCache = ProcessedTextCache()
-
-        await RenderedMessageCache.shared.storeChatBubbleText(
-            RenderedMessageChatBubbleText(plainText: "rendered survives", hasRichContent: false),
+        await RenderedMessageCache.shared.invalidate(
             messageId: messageId,
-            sourceSignature: sourceSignature,
-            variantKey: variantKey
+            sourceSignature: bubbleSourceSignature
         )
-        let seededBubble = await RenderedMessageCache.shared.cachedChatBubbleText(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            variantKey: variantKey
-        )
-        XCTAssertNotNil(seededBubble, "Precondition: the rendered artifact must be cached before invalidation")
-
-        let capturedProcessedGeneration = await processedTextCache.captureAccountGeneration()
-        let processedGeneration = try XCTUnwrap(capturedProcessedGeneration)
-        await processedTextCache.set(
-            messageId: messageId,
-            plainText: "processed text",
-            hasRichContent: false,
-            expectedAccountGeneration: processedGeneration
-        )
-
-        await processedTextCache.invalidate(
-            messageId: messageId,
-            expectedAccountGeneration: processedGeneration,
-            invalidatesRenderedMessage: false
-        )
-
-        // The invalidation itself must have run — otherwise the rendered entry
-        // would survive for the wrong reason (a generation-rejected no-op).
-        let invalidatedProcessedEntry = await processedTextCache.get(
-            messageId: messageId,
-            expectedAccountGeneration: processedGeneration
-        )
-        XCTAssertNil(invalidatedProcessedEntry)
-
-        let survivingBubble = await RenderedMessageCache.shared.cachedChatBubbleText(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            variantKey: variantKey
-        )
-        XCTAssertEqual(
-            survivingBubble?.plainText,
-            "rendered survives",
-            "invalidatesRenderedMessage: false must suppress ProcessedTextCache's unscoped rendered eviction"
-        )
-
-        await RenderedMessageCache.shared.invalidate(messageId: messageId)
     }
 }
 

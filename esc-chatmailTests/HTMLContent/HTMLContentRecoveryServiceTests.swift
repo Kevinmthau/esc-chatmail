@@ -467,71 +467,24 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
         XCTAssertEqual(mockAPIClient.getAttachmentCallCount, 0)
     }
 
-    func testRecoverHTMLContent_invalidatesProcessedTextCacheForRecoveredMessage() async {
-        let messageId = "html-recovery-cache-invalidation-\(UUID().uuidString)"
-        let attachmentId = "html-body-\(UUID().uuidString)"
-        let html = """
-        <!DOCTYPE html>
-        <html>
-        <body>
-          <h1>AMNH_INVALIDATION_TOKEN</h1>
-          <p>Recovered newsletter body.</p>
-        </body>
-        </html>
-        """
-
-        await ProcessedTextCache.shared.set(
-            messageId: messageId,
-            plainText: "Stale fallback",
-            hasRichContent: false
-        )
-
-        let mockAPIClient = MockGmailAPIClient()
-        mockAPIClient.getMessageResponses[messageId] = makeHTMLAttachmentMessage(
-            id: messageId,
-            attachmentId: attachmentId
-        )
-        mockAPIClient.attachmentResponses["\(messageId):\(attachmentId)"] = Data(html.utf8)
-
-        let contentHandler = HTMLContentHandler()
-        defer { contentHandler.deleteHTML(for: messageId) }
-
-        let service = HTMLContentRecoveryService(
-            gmailAPIClientProvider: { mockAPIClient },
-            contentHandler: contentHandler
-        )
-
-        let recoveredHTML = await service.recoverHTMLContent(messageId: messageId)
-
-        XCTAssertEqual(recoveredHTML, html)
-        let cached = await ProcessedTextCache.shared.get(messageId: messageId)
-        XCTAssertNil(cached)
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
-    }
-
-    // Guards the EVICTION half of the scoped-invalidation change in
-    // `HTMLContentRecoveryService.performRecoveryToCompletion`: recovery passes
-    // `invalidatesRenderedMessage: false` to ProcessedTextCache because the
-    // scoped `HTMLContentLoader.shared.invalidateContent(messageId:accountContext:)`
-    // hop is what evicts RenderedMessageCache. This test fails if that hop is
-    // dropped, so a future change cannot silently stop evicting the stale
-    // rendered chat-bubble artifact.
+    // Guards the EVICTION half of the scoped invalidation in
+    // `HTMLContentRecoveryService.performRecoveryToCompletion`: the scoped
+    // `HTMLContentLoader.shared.invalidateContent(messageId:accountContext:)`
+    // hop is what evicts RenderedMessageCache after recovery rewrites the HTML.
+    // This test fails if that hop is dropped, so a future change cannot
+    // silently stop evicting the stale rendered chat-bubble artifact.
     //
     // HONEST SCOPE — this is NOT a revert-check for the account-SCOPING half.
-    // Verified empirically: reverting both hunks of that fix (back to the
-    // unscoped `invalidateContent(messageId:)` + `invalidate(messageId:)`
-    // pair, with no pre-write capture) leaves this test GREEN, because the
-    // unscoped calls evict the same entry in a single-account test.
-    // The scoping only diverges when an account transition lands between the
-    // capture and the invalidation — a window bounded by two `await`s inside
-    // this actor with no injection point, since the method reaches
-    // `HTMLContentLoader.shared`/`ProcessedTextCache.shared` directly rather
-    // than through the injectable `contentHandler`. Covering it needs a
-    // production seam; until then that half rests on parity with the reviewed
-    // implementation in `CanonicalEmailContentLoader.loadCanonicalEmailContent`.
-    // (The companion test in HTMLContentAccountBoundaryTests does pin the
-    // separable half: `invalidatesRenderedMessage: false` really does suppress
-    // ProcessedTextCache's own unscoped rendered hop.)
+    // Reverting to the unscoped `invalidateContent(messageId:)` call with no
+    // pre-write capture leaves this test GREEN (verified when the scoping
+    // landed), because the unscoped call evicts the same entry in a
+    // single-account test. The scoping only diverges when an account
+    // transition lands between the capture and the invalidation — a window
+    // with no injection point, since the method reaches
+    // `HTMLContentLoader.shared` directly rather than through the injectable
+    // `contentHandler`. Covering it needs a production seam; until then that
+    // half rests on parity with `CanonicalEmailContentLoader.loadCanonicalEmailContent`
+    // and on the stale-context test in HTMLContentAccountBoundaryTests.
     func testRecoverHTMLContent_stillEvictsRenderedMessageArtifactsAfterScopedInvalidation() async {
         let messageId = "html-recovery-rendered-eviction-\(UUID().uuidString)"
         let attachmentId = "html-body-\(UUID().uuidString)"
@@ -552,11 +505,6 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
             messageId: messageId,
             sourceSignature: staleSourceSignature,
             variantKey: variantKey
-        )
-        await ProcessedTextCache.shared.set(
-            messageId: messageId,
-            plainText: "Stale fallback",
-            hasRichContent: false
         )
 
         let seededBubble = await RenderedMessageCache.shared.cachedChatBubbleText(
@@ -598,10 +546,6 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
             "The scoped invalidateContent hop must still evict rendered artifacts after recovery rewrites the HTML"
         )
 
-        let cachedProcessedText = await ProcessedTextCache.shared.get(messageId: messageId)
-        XCTAssertNil(cachedProcessedText)
-
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
         await RenderedMessageCache.shared.invalidate(messageId: messageId)
     }
 

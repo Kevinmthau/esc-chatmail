@@ -208,7 +208,7 @@ final class PerformanceRegressionTests: XCTestCase {
             timeout: 45.0
         ) {
             for messageID in recentMessageIDs {
-                await ProcessedTextCache.shared.invalidate(messageId: messageID)
+                await RenderedMessageCache.shared.invalidate(messageId: messageID)
             }
 
             context.performAndWait { context.reset() }

@@ -305,7 +305,6 @@ final class MessagePersisterUpdateTests: XCTestCase {
         let subject = "Stable subject"
         let senderEmail = "sender@example.com"
 
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
         await RenderedMessageCache.shared.invalidate(messageId: messageId)
         await ParsedEmailProvider.shared.invalidate(messageId: messageId)
         defer {
@@ -432,7 +431,6 @@ final class MessagePersisterUpdateTests: XCTestCase {
         let subject = "Stable subject"
         let senderEmail = "sender@example.com"
 
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
         await RenderedMessageCache.shared.invalidate(messageId: messageId)
         await ParsedEmailProvider.shared.invalidate(messageId: messageId)
         defer {
@@ -544,7 +542,6 @@ final class MessagePersisterUpdateTests: XCTestCase {
         let subject = "Stable subject"
         let senderEmail = "sender@example.com"
 
-        await ProcessedTextCache.shared.invalidate(messageId: messageId)
         await RenderedMessageCache.shared.invalidate(messageId: messageId)
         await ParsedEmailProvider.shared.invalidate(messageId: messageId)
         defer {

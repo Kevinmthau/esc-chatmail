@@ -10,7 +10,7 @@ touched for other reasons.
 ## Roles
 
 - **Actors** for stateful services touched from multiple tasks — caches and
-  trackers with mutable indexes (`ProcessedTextCache`, `RenderedMessageCache`,
+  trackers with mutable indexes (`RenderedMessageCache`,
   `RateLimitTracker`, `PersonCache`). If a type owns mutable state and its
   callers are async, it should be an actor, not a locked class.
 - **`@MainActor`** for UI-coupled orchestrators and anything SwiftUI observes

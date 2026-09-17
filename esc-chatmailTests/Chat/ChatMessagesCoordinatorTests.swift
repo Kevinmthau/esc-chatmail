@@ -38,7 +38,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -94,7 +94,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -155,7 +155,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                 updatedReplyTargets.append(lastMessage?.id)
             },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -238,7 +238,6 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var markConversationAsReadCount = 0
         var initializedReplyTargets: [String?] = []
         var loadResolvedDisplayNameCount = 0
-        var prefetchedMessageBatches: [[String]] = []
         var prefetchedSenderEmailBatches: [[String]] = []
         var groupingRequests: [[String]] = []
         var sleepCalls: [UInt64] = []
@@ -258,8 +257,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { messageIds, senderEmails in
-                prefetchedMessageBatches.append(messageIds)
+            prefetchSenderContacts: { senderEmails in
                 prefetchedSenderEmailBatches.append(senderEmails)
             },
             cancelPrefetch: {},
@@ -324,7 +322,6 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(markConversationAsReadCount, 1)
         XCTAssertEqual(initializedReplyTargets, [messages.last?.id])
         XCTAssertEqual(loadResolvedDisplayNameCount, 1)
-        XCTAssertEqual(prefetchedMessageBatches, [messages.map(\.id)])
         XCTAssertEqual(
             prefetchedSenderEmailBatches,
             [[
@@ -389,7 +386,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var markConversationAsReadCount = 0
         var initializedReplyTargets: [String?] = []
         var loadResolvedDisplayNameCount = 0
-        var prefetchedMessageBatches: [[String]] = []
+        var prefetchedSenderEmailBatches: [[String]] = []
         var groupingRequests: [[String]] = []
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
@@ -407,8 +404,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { messageIds, _ in
-                prefetchedMessageBatches.append(messageIds)
+            prefetchSenderContacts: { senderEmails in
+                prefetchedSenderEmailBatches.append(senderEmails)
             },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { senderEmails in
@@ -441,7 +438,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(markConversationAsReadCount, 1)
         XCTAssertEqual(initializedReplyTargets, [messages.last?.id])
         XCTAssertEqual(loadResolvedDisplayNameCount, 1)
-        XCTAssertEqual(prefetchedMessageBatches, [[]])
+        XCTAssertEqual(prefetchedSenderEmailBatches, [[]])
         XCTAssertEqual(groupingRequests, [[]])
 
         coordinator.handleInitialWindowLoaded(
@@ -1019,7 +1016,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -1527,7 +1524,6 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         let (_, messages) = try makeConversationWithMessages(senderEmails: senderEmails)
         let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
-        var prefetchedMessageBatches: [[String]] = []
         var prefetchedSenderEmailBatches: [[String]] = []
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
@@ -1537,8 +1533,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { messageIds, senderEmails in
-                prefetchedMessageBatches.append(messageIds)
+            prefetchSenderContacts: { senderEmails in
                 prefetchedSenderEmailBatches.append(senderEmails)
             },
             cancelPrefetch: {},
@@ -1561,66 +1556,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         await waitUntil {
-            prefetchedMessageBatches.count == 1
+            prefetchedSenderEmailBatches.count == 1
         }
 
         XCTAssertTrue(anchorSteps.isEmpty)
         let expectedPrefetchMessages = Array(messages.suffix(30))
-        XCTAssertEqual(prefetchedMessageBatches, [expectedPrefetchMessages.map(\.id)])
         XCTAssertEqual(prefetchedSenderEmailBatches, [expectedPrefetchMessages.compactMap(\.senderEmail)])
-    }
-
-    func testHandleDisplayedMessagesChange_prefetchesOnlyMessagesMissingChatPreviewText() async throws {
-        let senderEmails = [
-            "has-preview@example.com",
-            "blank-preview@example.com",
-            "missing-preview@example.com",
-            "also-has-preview@example.com"
-        ]
-        let (_, messages) = try makeConversationWithMessages(senderEmails: senderEmails)
-        messages[0].chatPreviewText = "Stored chat preview"
-        messages[1].chatPreviewText = " \n\t "
-        messages[2].chatPreviewText = nil
-        messages[3].chatPreviewText = "Another stored preview"
-        try viewContext.save()
-        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
-
-        var prefetchedMessageBatches: [[String]] = []
-        var prefetchedSenderEmailBatches: [[String]] = []
-
-        let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: { _ in },
-            markConversationAsReadIfNeeded: {},
-            initializeReplyingTo: { _ in },
-            updateReplyingToIfNewSubject: { _ in },
-            loadResolvedDisplayName: {},
-            prefetchRecentContent: { messageIds, senderEmails in
-                prefetchedMessageBatches.append(messageIds)
-                prefetchedSenderEmailBatches.append(senderEmails)
-            },
-            cancelPrefetch: {},
-            loadSenderGroupingKeys: { _ in [:] },
-            invalidateContactsCache: {},
-            clearPersonCache: {},
-            sleep: { _ in }
-        )
-
-        coordinator.handleDisplayedMessagesChange(
-            oldIDs: [],
-            newIDs: rows.map(\.objectID),
-            visibleMessages: rows,
-            senderGroupingMessages: rows,
-            messageCount: messages.count,
-            totalMessageCount: messages.count,
-            isInitialWindowLoaded: true
-        ) { _ in }
-
-        await waitUntil {
-            prefetchedMessageBatches.count == 1
-        }
-
-        XCTAssertEqual(prefetchedMessageBatches, [[messages[1].id, messages[2].id]])
-        XCTAssertEqual(prefetchedSenderEmailBatches, [senderEmails])
     }
 
     func testScrollHandlers_doNotScheduleBottomAnchorsBeforeInitialWindowLoaded() async throws {
@@ -1644,7 +1585,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -1704,7 +1645,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { senderEmails in
                 groupingRequests.append(senderEmails)
@@ -1767,7 +1708,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { senderEmails in
                 groupingRequests.append(senderEmails)
@@ -1821,7 +1762,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -1892,7 +1833,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -1965,7 +1906,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -2064,7 +2005,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -2221,7 +2162,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -2281,7 +2222,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -2358,7 +2299,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -3667,7 +3608,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -3760,7 +3701,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -3814,7 +3755,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -3931,7 +3872,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -4021,7 +3962,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},
@@ -4123,7 +4064,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadResolvedDisplayName: {
                 loadResolvedDisplayNameCount += 1
             },
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { senderEmails in
                 groupingRequests.append(senderEmails)
@@ -5453,7 +5394,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
-            prefetchRecentContent: { _, _ in },
+            prefetchSenderContacts: { _ in },
             cancelPrefetch: {},
             loadSenderGroupingKeys: { _ in [:] },
             invalidateContactsCache: {},

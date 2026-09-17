@@ -264,12 +264,6 @@ struct UIConfig {
 
 // MARK: - Cache Configuration
 struct CacheConfig {
-    /// Maximum items in processed text cache
-    static let textCacheSize = 500
-
-    /// Maximum memory in bytes for processed text cache (5 MB)
-    static let textCacheMaxBytes = 5 * 1024 * 1024
-
     /// Maximum items in profile photo cache
     static let photoCacheSize = 500
 

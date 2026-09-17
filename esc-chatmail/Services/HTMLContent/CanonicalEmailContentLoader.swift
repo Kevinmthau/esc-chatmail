@@ -161,8 +161,6 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                     .captureInvalidationAccountContext(
                         expectedAccountGeneration: accountGeneration
                     ),
-                    let processedTextGeneration = await ProcessedTextCache.shared
-                        .captureAccountGeneration(),
                     contentHandler.isAccountGenerationCurrent(accountGeneration) else {
                     return nil
                 }
@@ -183,11 +181,6 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                     await HTMLContentLoader.shared.invalidateContent(
                         messageId: messageId,
                         accountContext: invalidationContext
-                    )
-                    await ProcessedTextCache.shared.invalidate(
-                        messageId: messageId,
-                        expectedAccountGeneration: processedTextGeneration,
-                        invalidatesRenderedMessage: false
                     )
                     guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
                         return nil
