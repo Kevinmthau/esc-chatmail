@@ -37,8 +37,15 @@ private actor IncrementalSyncResultRecorder {
 /// - IncrementalSyncOrchestrator: Delta sync using History API
 /// - SyncReconciliation: Catch missed changes
 /// - SyncFailureTracker: Handle failures gracefully
+///
+/// `Sendable` is declared explicitly rather than left implied by `@MainActor`:
+/// `BackgroundSyncMessageCoordinating` and `BackgroundMailboxSyncExecuting`
+/// inherit `Sendable` and are conformed to beside their protocols, and a
+/// class's `Sendable` conformance must be declared in the class's own source
+/// file. Xcode 27's compiler no longer exempts `@MainActor` classes from that
+/// rule, and warnings-as-errors turns the violation into a build failure.
 @MainActor
-final class SyncEngine: ObservableObject {
+final class SyncEngine: ObservableObject, Sendable {
     static let shared = SyncEngine()
 
     /// Published UI state - use this for UI bindings
