@@ -172,11 +172,9 @@ struct ChatPreviewRepair {
             return recoversNewsletterFallback ? nil : storedHTMLText
         }
         // Outgoing rows never recover over the network, so the loader's result
-        // is fully local: stored HTML text, else the body-text fallback, unless
-        // the legacy outgoing body is richer.
-        let loadedText = storedHTMLText ?? bodyText.flatMap {
+        // is fully local: stored HTML text, else the body-text fallback.
+        return storedHTMLText ?? bodyText.flatMap {
             MessageBubbleContentSource.bodyTextFallback(from: $0).mainText
         }
-        return LegacyOutgoingBodyTextFallback.preferredBodyText(fromBody: bodyText, over: loadedText) ?? loadedText
     }
 }

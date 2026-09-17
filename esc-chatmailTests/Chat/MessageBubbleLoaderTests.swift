@@ -1395,62 +1395,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
         )
     }
 
-    func testLoadContent_outgoingReplyPrefersFullBodyOverStoredHTMLWhenChatPreviewMissing() async throws {
-        let messageId = "bubble-outgoing-reply-\(UUID().uuidString)"
-        await RenderedMessageCache.shared.invalidate(messageId: messageId)
-
-        let htmlURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("bubble-outgoing-reply-\(UUID().uuidString).html")
-        defer {
-            try? FileManager.default.removeItem(at: htmlURL)
-        }
-
-        try "<html><body><p>Can we please see alts for:</p></body></html>"
-            .write(to: htmlURL, atomically: true, encoding: .utf8)
-
-        let loader = MessageBubbleLoader(
-            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
-        )
-
-        let replyBody = """
-        Can we please see alts for:
-
-        Primary bedroom drapery
-        Kitchen backsplash
-
-        Thank you!
-
-        On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
-        > Original request that should stay out of the bubble.
-        """
-
-        let result = await loader.loadContent(
-            from: MessageBubbleContentRequest(
-                messageID: messageId,
-                bodyText: replyBody,
-                bodyStorageURI: htmlURL.absoluteString,
-                cleanedSnippet: "Can we please see alts for:",
-                snippet: "Can we please see alts for:",
-                subject: "Re: Finish options",
-                senderName: "Me",
-                hasHTMLSource: true,
-                hasAttachments: false,
-                isFromMe: true,
-                isForwardedEmail: false,
-                isLikelyCalendarInvite: false,
-                effectiveSenderEmail: "me@example.com",
-                attachmentSnapshots: []
-            )
-        )
-
-        let visibleText = try XCTUnwrap(result.fullTextContent)
-        XCTAssertTrue(visibleText.contains("Can we please see alts for:\n\nPrimary bedroom drapery"))
-        XCTAssertTrue(visibleText.contains("Kitchen backsplash"))
-        XCTAssertTrue(visibleText.contains("Thank you!"))
-        XCTAssertFalse(visibleText.contains("Original request that should stay out of the bubble."))
-        XCTAssertNotEqual(visibleText, "Can we please see alts for:")
-    }
-
     func testLoadContent_outgoingSnippetBodyKeepsLoadedHTMLText() async throws {
         let messageId = "bubble-outgoing-snippet-body-\(UUID().uuidString)"
         await RenderedMessageCache.shared.invalidate(messageId: messageId)
@@ -1601,47 +1545,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 messageID: messageId,
                 bodyText: "Runtime body should not replace the canonical preview.",
                 chatPreviewText: fullURL,
-                bodyStorageURI: htmlURL.absoluteString,
-                cleanedSnippet: truncatedURL,
-                snippet: truncatedURL,
-                subject: "Shared link",
-                senderName: "Me",
-                hasHTMLSource: true,
-                hasAttachments: false,
-                isFromMe: true,
-                isForwardedEmail: false,
-                isLikelyCalendarInvite: false,
-                effectiveSenderEmail: "me@example.com",
-                attachmentSnapshots: []
-            )
-        )
-
-        XCTAssertEqual(result.fullTextContent, fullURL)
-    }
-
-    func testLoadContent_outgoingLongSingleTokenBodyBeatsTruncatedLoadedPrefixWhenChatPreviewMissing() async throws {
-        let messageId = "bubble-outgoing-long-token-no-preview-\(UUID().uuidString)"
-        await RenderedMessageCache.shared.invalidate(messageId: messageId)
-
-        let htmlURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("bubble-outgoing-long-token-no-preview-\(UUID().uuidString).html")
-        defer {
-            try? FileManager.default.removeItem(at: htmlURL)
-        }
-
-        let fullURL = "https://example.com/shared/document/abcdefghijklmnopqrstuvwxyz"
-        let truncatedURL = "https://example.com/shared/document/abc"
-        try "<html><body><p>\(truncatedURL)</p></body></html>"
-            .write(to: htmlURL, atomically: true, encoding: .utf8)
-
-        let loader = MessageBubbleLoader(
-            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
-        )
-
-        let result = await loader.loadContent(
-            from: MessageBubbleContentRequest(
-                messageID: messageId,
-                bodyText: fullURL,
                 bodyStorageURI: htmlURL.absoluteString,
                 cleanedSnippet: truncatedURL,
                 snippet: truncatedURL,
