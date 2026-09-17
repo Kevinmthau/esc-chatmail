@@ -7,8 +7,12 @@ import Foundation
 /// `OutboundSendMutationRecord` are deferred, never rewritten.
 struct ChatPreviewRepair {
     enum Pass: Sendable {
-        /// Re-derives received, HTML-backed previews after a derivation change
-        /// (keyed by `CacheVersioning.chatPreviewDerivationVersion`).
+        /// Re-derives received previews from local HTML after a derivation
+        /// change (keyed by `CacheVersioning.chatPreviewDerivationVersion`).
+        /// Scans every received row, not just `bodyStorageURI` ones: recovery
+        /// stores HTML under the message ID alone, and those rows must not be
+        /// stranded on an old derivation. Rows with no local HTML derive
+        /// nothing and keep their saved preview.
         case receivedHTMLRederivation
         /// Fills blank previews with exactly the text the bubble loader's
         /// compatibility path already shows, from local sources only, so those
@@ -99,7 +103,7 @@ struct ChatPreviewRepair {
     private static func basePredicate(for pass: Pass) -> NSPredicate {
         switch pass {
         case .receivedHTMLRederivation:
-            return NSPredicate(format: "isFromMe == NO AND bodyStorageURI != nil")
+            return NSPredicate(format: "isFromMe == NO")
         case .blankPreviewBackfill:
             // Whitespace-only counts as blank, matching the loader's `nonEmptyText`.
             return NSPredicate(
@@ -121,6 +125,7 @@ struct ChatPreviewRepair {
                 messageId: message.id,
                 isFromMe: message.isFromMe,
                 subject: message.subject,
+                senderEmail: message.senderEmail,
                 bodyStorageURI: message.bodyStorageURI,
                 bodyText: message.bodyText,
                 handler: htmlContentHandler
@@ -135,6 +140,7 @@ struct ChatPreviewRepair {
         messageId: String,
         isFromMe: Bool,
         subject: String?,
+        senderEmail: String?,
         bodyStorageURI: String?,
         bodyText: String?,
         handler: HTMLContentHandler
@@ -142,15 +148,28 @@ struct ChatPreviewRepair {
         // A blank preview makes forwarded bubbles parse their lead-in from the
         // body; a stored preview would replace that lead-in.
         guard !MessagePreviewText.isForwardedSubject(subject) else { return nil }
-        let storedHTMLText = MessageBubbleContentSource.processMessage(
+        let stored = MessageBubbleContentSource.processMessage(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             handler: handler
-        ).plainText
+        )
+        let storedHTMLText = stored.plainText
         guard isFromMe else {
-            // Received rows without usable local HTML stay on the loader's
-            // compatibility path, which can still recover HTML over the network.
-            return storedHTMLText
+            // Received rows stay with the loader whenever it could still
+            // replace this text with HTML recovered over the network: with no
+            // local text at all, for trusted transactional senders, and when
+            // the body reads like a newsletter's HTML-only fallback. Mirrors
+            // the recovery conditions in `loadCompatibilityContent`.
+            guard let storedHTMLText,
+                  !MessageDisplayPolicy.isTrustedTransactionalSender(senderEmail) else {
+                return nil
+            }
+            // The loader's check also falls back to `snippet`, but only when
+            // there is no local text at all — which the guard above already
+            // returned to the loader.
+            let recoversNewsletterFallback = !stored.hasRichContent &&
+                NewsletterFallbackText.looksLikeFallbackText(bodyText ?? storedHTMLText)
+            return recoversNewsletterFallback ? nil : storedHTMLText
         }
         // Outgoing rows never recover over the network, so the loader's result
         // is fully local: stored HTML text, else the body-text fallback, unless
