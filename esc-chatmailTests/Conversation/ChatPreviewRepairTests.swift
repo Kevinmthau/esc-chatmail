@@ -340,7 +340,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         """
         let trustedTransactionalSender = try blankMessage("009")
         trustedTransactionalSender.senderEmail = "noreply@members.ebay.com"
-        try context.save()
+        try viewContext.save()
 
         let allFixtures = [
             receivedIDOnlyHTML, receivedWithoutHTML, sentWithHTML, sentWithoutHTML,
@@ -353,7 +353,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         }
 
         try await drainBackfill()
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
 
         // Filled: the stored preview is exactly what the bubble showed.
         for message in [receivedIDOnlyHTML, sentWithHTML, sentWithoutHTML, sentRicherBody, whitespacePreview] {
@@ -389,14 +389,14 @@ final class ChatPreviewRepairTests: XCTestCase {
         let idOnlyHTML = try message("001", storedHTML: false)
         _ = try XCTUnwrap(handler.saveHTML(html, for: "001"))
         let plainTextOnly = try message("002", storedHTML: false)
-        try context.save()
+        try viewContext.save()
 
         let background = stack.newBackgroundContext()
         let batch = try await ChatPreviewRepair(htmlContentHandler: handler).prepareBatch(in: background, after: nil)
         XCTAssertEqual(batch.changedMessageIDs, ["001"])
         XCTAssertTrue(stack.saveIfNeeded(context: background))
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(idOnlyHTML.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         XCTAssertEqual(plainTextOnly.chatPreviewText, "Old preview", "No local HTML derives nothing")
     }
@@ -407,20 +407,20 @@ final class ChatPreviewRepairTests: XCTestCase {
     // re-derivation pass completing would strand every blank row.
     func testCoordinatorBackfillCompletesWhileRederivationDefers() async throws {
         let deferredByPendingSend = try message("001")
-        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
         record.id = "pending-send"
         record.createdAt = Date()
         record.conversationId = deferredByPendingSend.conversation?.id
         let blankSent = try blankMessage("002", storedHTML: false)
         blankSent.isFromMe = true
         blankSent.bodyText = "Sent body text."
-        try context.save()
+        try viewContext.save()
 
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey))
         XCTAssertEqual(deferredByPendingSend.chatPreviewText, "Old preview")
@@ -435,17 +435,17 @@ final class ChatPreviewRepairTests: XCTestCase {
         let blank = try blankMessage("001", storedHTML: false)
         blank.isFromMe = true
         blank.bodyText = "Sent body text."
-        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
         record.id = "pending-send"
         record.createdAt = Date()
         record.conversationId = blank.conversation?.id
-        try context.save()
+        try viewContext.save()
 
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertNil(blank.chatPreviewText)
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey))
         withExtendedLifetime(repair) {}
