@@ -2,6 +2,17 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue.
+/// `ChatMessageRowModelMapper.map` is `@MainActor` and fetches the
+/// optimistic-send records on each message's `managedObjectContext` directly,
+/// which is on-queue only for a main-queue context. See that helper for what
+/// the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ChatMessageRowModelTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -10,7 +21,7 @@ final class ChatMessageRowModelTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        viewContext = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {

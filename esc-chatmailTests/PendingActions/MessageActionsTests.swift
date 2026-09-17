@@ -4,46 +4,61 @@ import CoreData
 
 extension TestCoreDataStack: MessageActionsCoreDataStacking {}
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`,
+/// the main-queue context of `MainQueueMessageActionsCoreDataStack`, never
+/// `coreDataStack.viewContext`, which is private-queue. `MessageActions` is
+/// `@MainActor` and fetches, mutates, and saves its stack's view context
+/// directly, which is on-queue only for a main-queue context. See
+/// `TestCoreDataStack.makeMainQueueViewContext()` for what the private-queue
+/// shape races. Background contexts (`newBackgroundContext()`) stay
+/// private-queue and are only touched inside `perform`.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class MessageActionsTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var messageActionsStack: MainQueueMessageActionsCoreDataStack!
     private var pendingActionsManager: MockPendingActionsManager!
     private var messageActions: MessageActions!
     private var rollupMutationSerializer: ConversationRollupMutationSerializer!
     private var syncRunCoordinator: SyncRunCoordinator!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
+        messageActionsStack = MainQueueMessageActionsCoreDataStack(wrapping: coreDataStack)
+        viewContext = messageActionsStack.viewContext
         pendingActionsManager = MockPendingActionsManager()
         rollupMutationSerializer = ConversationRollupMutationSerializer()
         syncRunCoordinator = SyncRunCoordinator()
         messageActions = MessageActions(
-            coreDataStack: coreDataStack,
+            coreDataStack: messageActionsStack,
             pendingActionsManager: pendingActionsManager,
             rollupMutationSerializer: rollupMutationSerializer,
             syncRunCoordinator: syncRunCoordinator
         )
-        context = coreDataStack.viewContext
     }
 
     override func tearDown() {
-        context = nil
+        viewContext = nil
         messageActions = nil
         rollupMutationSerializer = nil
         syncRunCoordinator = nil
         pendingActionsManager = nil
+        messageActionsStack = nil
         coreDataStack = nil
         super.tearDown()
     }
 
     func testStar_addsStarredLabelMarksLocalModificationAndQueuesPendingAction() async throws {
-        let starredLabel = LabelBuilder().starred().build(in: context)
+        let starredLabel = LabelBuilder().starred().build(in: viewContext)
         let message = MessageBuilder()
             .withId("message-to-star")
-            .build(in: context)
-        try coreDataStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         await messageActions.star(message: message)
 
@@ -57,12 +72,12 @@ final class MessageActionsTests: XCTestCase {
     }
 
     func testUnstar_removesStarredLabelMarksLocalModificationAndQueuesPendingAction() async throws {
-        let starredLabel = LabelBuilder().starred().build(in: context)
+        let starredLabel = LabelBuilder().starred().build(in: viewContext)
         let message = MessageBuilder()
             .withId("message-to-unstar")
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(starredLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         await messageActions.unstar(message: message)
 
@@ -76,12 +91,12 @@ final class MessageActionsTests: XCTestCase {
     }
 
     func testStar_doesNothingWhenMessageAlreadyStarred() async throws {
-        let starredLabel = LabelBuilder().starred().build(in: context)
+        let starredLabel = LabelBuilder().starred().build(in: viewContext)
         let message = MessageBuilder()
             .withId("already-starred")
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(starredLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         await messageActions.star(message: message)
 
@@ -96,11 +111,11 @@ final class MessageActionsTests: XCTestCase {
     /// test, so `star(message:)` would never return. The non-exclusive
     /// `acquireAccountWorkLease(kind:for:)` grants immediately.
     func testStarCompletesWhileForegroundSyncRunIsActive() async throws {
-        let starredLabel = LabelBuilder().starred().build(in: context)
+        let starredLabel = LabelBuilder().starred().build(in: viewContext)
         let message = MessageBuilder()
             .withId("star-during-sync")
-            .build(in: context)
-        try coreDataStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         guard let blockingRun = await syncRunCoordinator.beginRun(kind: .foregroundIncremental) else {
             return XCTFail("Expected a foreground run to hold the exclusive boundary")
@@ -125,11 +140,11 @@ final class MessageActionsTests: XCTestCase {
     /// all). Once account teardown owns the boundary, no optimistic mutation may
     /// touch the store that is about to be replaced.
     func testStarRequestedDuringAccountTransitionDoesNotMutateOrQueue() async throws {
-        let starredLabel = LabelBuilder().starred().build(in: context)
+        let starredLabel = LabelBuilder().starred().build(in: viewContext)
         let message = MessageBuilder()
             .withId("stale-star-during-sign-out")
-            .build(in: context)
-        try coreDataStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         // Nothing holds the boundary, so teardown acquires it immediately.
         await syncRunCoordinator.beginQuiescence()
@@ -153,19 +168,19 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(0)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("lease-held-during-sign-out")
             .read()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let gatingManager = BlockingReadStatePendingActionsManager()
         let actions = MessageActions(
-            coreDataStack: coreDataStack,
+            coreDataStack: messageActionsStack,
             pendingActionsManager: gatingManager,
             rollupMutationSerializer: rollupMutationSerializer,
             syncRunCoordinator: syncRunCoordinator
@@ -209,14 +224,14 @@ final class MessageActionsTests: XCTestCase {
     func testArchiveConversationSurvivesCallerCancellationDuringSync() async throws {
         let conversation = ConversationBuilder()
             .visible()
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("archive-during-sync")
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         guard let blockingRun = await syncRunCoordinator.beginRun(kind: .foregroundIncremental) else {
             return XCTFail("Expected a foreground run to hold the exclusive boundary")
@@ -236,13 +251,13 @@ final class MessageActionsTests: XCTestCase {
     }
 
     func testStar_doesNotQueuePendingActionWhenLocalSaveFails() async throws {
-        _ = LabelBuilder().starred().build(in: context)
+        _ = LabelBuilder().starred().build(in: viewContext)
         let message = MessageBuilder()
             .withId("message-save-fails")
-            .build(in: context)
-        try coreDataStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
-        let failingStack = FailingSaveCoreDataStack(wrapping: coreDataStack)
+        let failingStack = FailingSaveCoreDataStack(wrapping: messageActionsStack)
         let actions = MessageActions(
             coreDataStack: failingStack,
             pendingActionsManager: pendingActionsManager,
@@ -261,28 +276,28 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(2)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let includedMessage = MessageBuilder()
             .withId("message-to-read")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         includedMessage.addToLabels(inboxLabel)
         let excludedMessage = MessageBuilder()
             .withId("draft-message")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
-        let draftLabel = LabelBuilder().draft().build(in: context)
+            .build(in: viewContext)
+        let draftLabel = LabelBuilder().draft().build(in: viewContext)
         excludedMessage.addToLabels(draftLabel)
 
         let nonInboxMessage = MessageBuilder()
             .withId("sent-message")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
-        try coreDataStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
         let messageIDs = messageActions.snapshotUnreadInboxMessageObjectIDs(
             conversationID: conversation.id
         )
@@ -293,7 +308,7 @@ final class MessageActionsTests: XCTestCase {
         )
 
         await waitUntil {
-            self.context.refreshAllObjects()
+            self.viewContext.refreshAllObjects()
             return !includedMessage.isUnread &&
                 excludedMessage.isUnread &&
                 nonInboxMessage.isUnread &&
@@ -314,20 +329,20 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(1)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("serialized-single-read")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         await messageActions.markAsRead(message: message)
 
         await waitUntil {
-            self.context.refreshAllObjects()
+            self.viewContext.refreshAllObjects()
             return !message.isUnread && conversation.inboxUnreadCount == 0
         }
 
@@ -340,20 +355,20 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(1)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("serialized-object-id-read")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         await messageActions.markAsRead(messageID: message.objectID)
 
         await waitUntil {
-            self.context.refreshAllObjects()
+            self.viewContext.refreshAllObjects()
             return !message.isUnread && conversation.inboxUnreadCount == 0
         }
 
@@ -363,23 +378,23 @@ final class MessageActionsTests: XCTestCase {
     }
 
     func testMarkMessagesAsReadBatchRevalidatesInboxAndConversation() async throws {
-        let sourceConversation = ConversationBuilder().visible().build(in: context)
-        let otherConversation = ConversationBuilder().visible().build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let sourceConversation = ConversationBuilder().visible().build(in: viewContext)
+        let otherConversation = ConversationBuilder().visible().build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("revalidate-read-target")
             .unread()
             .inConversation(sourceConversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         await messageActions.markMessagesAsReadBatch(
             messageIDs: [message.objectID],
             conversationID: otherConversation.objectID
         )
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertTrue(message.isUnread)
         let queuedConversationActions = await pendingActionsManager.queuedConversationActions
         XCTAssertTrue(queuedConversationActions.isEmpty)
@@ -389,15 +404,15 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(1)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let initialMessage = MessageBuilder()
             .withId("message-visible-at-open")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         initialMessage.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let messageIDsAtOpen = messageActions.snapshotUnreadInboxMessageObjectIDs(
             conversationID: conversation.id
@@ -407,10 +422,10 @@ final class MessageActionsTests: XCTestCase {
             .withId("message-arrived-later")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         laterMessage.addToLabels(inboxLabel)
         conversation.inboxUnreadCount = 2
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         await messageActions.markMessagesAsReadBatch(
             messageIDs: messageIDsAtOpen,
@@ -418,7 +433,7 @@ final class MessageActionsTests: XCTestCase {
         )
 
         await waitUntil {
-            self.context.refreshAllObjects()
+            self.viewContext.refreshAllObjects()
             return !initialMessage.isUnread &&
                 laterMessage.isUnread &&
                 conversation.inboxUnreadCount == 1
@@ -438,21 +453,21 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(2)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let firstMessage = MessageBuilder()
             .withId("first-concurrent-read")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         firstMessage.addToLabels(inboxLabel)
         let secondMessage = MessageBuilder()
             .withId("second-concurrent-read")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         secondMessage.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let conversationObjectID = conversation.objectID
         let firstMessageObjectID = firstMessage.objectID
@@ -472,7 +487,7 @@ final class MessageActionsTests: XCTestCase {
         await firstTask.value
         await secondTask.value
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertFalse(firstMessage.isUnread)
         XCTAssertFalse(secondMessage.isUnread)
         XCTAssertEqual(conversation.inboxUnreadCount, 0)
@@ -484,20 +499,20 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(0)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("serialized-pending-action-order")
             .read()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let orderingManager = BlockingReadStatePendingActionsManager()
         let serializer = ConversationRollupMutationSerializer()
         let actions = MessageActions(
-            coreDataStack: coreDataStack,
+            coreDataStack: messageActionsStack,
             pendingActionsManager: orderingManager,
             rollupMutationSerializer: serializer,
             syncRunCoordinator: syncRunCoordinator
@@ -543,15 +558,15 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(1)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("read-during-sync-rollup")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let conversationObjectID = conversation.objectID
         let messageObjectID = message.objectID
@@ -625,15 +640,15 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(1)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("read-before-stale-sync-save")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
         let messageObjectID = message.objectID
 
         let staleContext = coreDataStack.newBackgroundContext()
@@ -661,31 +676,31 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(2)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let firstMessage = MessageBuilder()
             .withId("inbox-unread-1")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         firstMessage.addToLabels(inboxLabel)
         let secondMessage = MessageBuilder()
             .withId("inbox-unread-2")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         secondMessage.addToLabels(inboxLabel)
         let nonInboxMessage = MessageBuilder()
             .withId("sent-unread")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
-        try coreDataStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         await messageActions.markConversationAsRead(conversation: conversation)
 
         await waitUntil {
-            self.context.refreshAllObjects()
+            self.viewContext.refreshAllObjects()
             return !firstMessage.isUnread &&
                 !secondMessage.isUnread &&
                 nonInboxMessage.isUnread &&
@@ -709,13 +724,13 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(0)
-            .build(in: context)
+            .build(in: viewContext)
         let nonInboxMessage = MessageBuilder()
             .withId("sent-message")
             .read()
             .inConversation(conversation)
-            .build(in: context)
-        try coreDataStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         await messageActions.markConversationAsUnread(conversation: conversation)
 
@@ -729,32 +744,32 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(2)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let eligibleArrival = MessageBuilder()
             .withId("eligible-arrival")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         eligibleArrival.addToLabels(inboxLabel)
         let unrelatedUnread = MessageBuilder()
             .withId("preserved-unread")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         unrelatedUnread.addToLabels(inboxLabel)
         let nonInboxArrival = MessageBuilder()
             .withId("non-inbox-arrival")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         let readInboxArrival = MessageBuilder()
             .withId("read-inbox-arrival")
             .read()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         readInboxArrival.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let snapshot = messageActions.snapshotUnreadInboxMessageObjectIDs(
             messageObjectIDs: [
@@ -772,18 +787,18 @@ final class MessageActionsTests: XCTestCase {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(1)
-            .build(in: context)
-        let inboxLabel = LabelBuilder().inbox().build(in: context)
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let message = MessageBuilder()
             .withId("message-to-keep-unread")
             .unread()
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try coreDataStack.saveViewContext()
+        try saveViewContext()
 
         let failingActions = MessageActions(
-            coreDataStack: coreDataStack,
+            coreDataStack: messageActionsStack,
             pendingActionsManager: pendingActionsManager,
             unreadInboxMessageCounter: { _, _ in
                 throw MessageActionsTestError.unreadCountFailed
@@ -799,11 +814,19 @@ final class MessageActionsTests: XCTestCase {
             conversationID: conversation.objectID
         )
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertTrue(message.isUnread)
         XCTAssertEqual(conversation.inboxUnreadCount, 1)
         let queuedActions = await pendingActionsManager.queuedConversationActions
         XCTAssertTrue(queuedActions.isEmpty)
+    }
+
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
     }
 
     private func waitUntil(
@@ -941,9 +964,9 @@ private enum MessageActionsTestError: Error {
 /// Wraps a real test stack but reports every `saveIfNeeded` as failed, to exercise the
 /// "don't sync remotely when the local save failed" gating in `MessageActions`.
 private final class FailingSaveCoreDataStack: MessageActionsCoreDataStacking {
-    private let wrapped: TestCoreDataStack
+    private let wrapped: MainQueueMessageActionsCoreDataStack
 
-    init(wrapping wrapped: TestCoreDataStack) {
+    init(wrapping wrapped: MainQueueMessageActionsCoreDataStack) {
         self.wrapped = wrapped
     }
 

@@ -10,13 +10,24 @@ import Combine
 /// The batch-action tests drive a real `MessageActions` over
 /// `MockPendingActionsManager`, so "the batch call received the resolved
 /// conversations" is observed as the queued pending action's message IDs.
-/// `TestCoreDataStack`'s `MessageActionsCoreDataStacking` conformance and
-/// `MockPendingActionsManager` are declared in `MessageActionsTests.swift`
-/// (both target-wide).
+/// `MockPendingActionsManager` is declared in `MessageActionsTests.swift`
+/// (target-wide).
+///
+/// Every fixture and save goes through the suite's `viewContext`, the
+/// main-queue context of `MainQueueMessageActionsCoreDataStack`, never
+/// `stack.viewContext`, which is private-queue. `ConversationSelectionService`
+/// and `MessageActions` are `@MainActor` and resolve, fetch, and save that
+/// context directly, which is on-queue only for a main-queue context. See
+/// `TestCoreDataStack.makeMainQueueViewContext()` for what the private-queue
+/// shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationSelectionServiceTests: XCTestCase {
     private var stack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
     private var pendingActionsManager: MockPendingActionsManager!
     private var service: ConversationSelectionService!
     private var cancellables: Set<AnyCancellable>!
@@ -24,17 +35,18 @@ final class ConversationSelectionServiceTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        let messageActionsStack = MainQueueMessageActionsCoreDataStack(wrapping: stack)
+        viewContext = messageActionsStack.viewContext
         pendingActionsManager = MockPendingActionsManager()
         let messageActions = MessageActions(
-            coreDataStack: stack,
+            coreDataStack: messageActionsStack,
             pendingActionsManager: pendingActionsManager,
             rollupMutationSerializer: ConversationRollupMutationSerializer(),
             syncRunCoordinator: SyncRunCoordinator()
         )
         service = ConversationSelectionService(
             messageActions: messageActions,
-            viewContext: context
+            viewContext: viewContext
         )
         cancellables = []
     }
@@ -43,7 +55,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
         cancellables = nil
         service = nil
         pendingActionsManager = nil
-        context = nil
+        viewContext = nil
         stack = nil
         super.tearDown()
     }
@@ -65,7 +77,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
     // insert branch — an unselected identifier must join the selection.
     func testToggleSelection_unselectedIdentifier_addsItToSelection() throws {
         let alice = makeConversation(name: "Alice")
-        try stack.saveViewContext()
+        try saveViewContext()
 
         service.toggleSelection(for: alice.objectID)
 
@@ -77,7 +89,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
     func testToggleSelection_selectedIdentifier_removesItFromSelection() throws {
         let alice = makeConversation(name: "Alice")
         let bob = makeConversation(name: "Bob")
-        try stack.saveViewContext()
+        try saveViewContext()
         service.toggleSelection(for: alice.objectID)
         service.toggleSelection(for: bob.objectID)
 
@@ -93,7 +105,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
     func testSelectAll_partialSelection_selectsAllGivenIdentifiers() throws {
         let alice = makeConversation(name: "Alice")
         let bob = makeConversation(name: "Bob")
-        try stack.saveViewContext()
+        try saveViewContext()
         service.toggleSelection(for: alice.objectID)
 
         service.selectAll(conversationIDs: [alice.objectID, bob.objectID])
@@ -107,7 +119,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
     func testSelectAll_selectionEqualsGivenIdentifiers_clearsSelection() throws {
         let alice = makeConversation(name: "Alice")
         let bob = makeConversation(name: "Bob")
-        try stack.saveViewContext()
+        try saveViewContext()
         service.selectAll(conversationIDs: [alice.objectID, bob.objectID])
 
         service.selectAll(conversationIDs: [alice.objectID, bob.objectID])
@@ -124,7 +136,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
         let alice = makeConversation(name: "Alice")
         let bob = makeConversation(name: "Bob")
         let carol = makeConversation(name: "Carol")
-        try stack.saveViewContext()
+        try saveViewContext()
         // Stale state: two selected rows, of which only Bob is still among
         // the visible identifiers handed to selectAll. (Production keeps the
         // selection a subset of visible rows via retainSelection(within:);
@@ -145,7 +157,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
     // mode must not leak the previous selection into the next session.
     func testToggleSelectionMode_exitingSelectionMode_clearsSelection() throws {
         let alice = makeConversation(name: "Alice")
-        try stack.saveViewContext()
+        try saveViewContext()
         service.toggleSelectionMode()
         XCTAssertTrue(service.isSelecting)
         service.toggleSelection(for: alice.objectID)
@@ -165,7 +177,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
         let alice = makeConversation(name: "Alice")
         let bob = makeConversation(name: "Bob")
         let carol = makeConversation(name: "Carol")
-        try stack.saveViewContext()
+        try saveViewContext()
         service.toggleSelection(for: alice.objectID)
         service.toggleSelection(for: bob.objectID)
 
@@ -182,7 +194,7 @@ final class ConversationSelectionServiceTests: XCTestCase {
     func testRetainSelection_selectionAlreadySubsetOfVisible_doesNotRepublishSelection() throws {
         let alice = makeConversation(name: "Alice")
         let bob = makeConversation(name: "Bob")
-        try stack.saveViewContext()
+        try saveViewContext()
         service.toggleSelection(for: alice.objectID)
 
         var emissions = 0
@@ -208,12 +220,12 @@ final class ConversationSelectionServiceTests: XCTestCase {
     // queue nothing (the bounded wait below times out); clearing only after
     // the async batch would fail the immediate empty-selection assertions.
     func testArchiveSelectedConversations_resolvesSelectionThenClearsSynchronouslyAndQueuesOneBatchAction() async throws {
-        _ = LabelBuilder().inbox().build(in: context)
+        _ = LabelBuilder().inbox().build(in: viewContext)
         let alice = makeConversation(name: "Alice")
         let bob = makeConversation(name: "Bob")
-        _ = MessageBuilder().withId("alice-1").inConversation(alice).build(in: context)
-        _ = MessageBuilder().withId("bob-1").inConversation(bob).build(in: context)
-        try stack.saveViewContext()
+        _ = MessageBuilder().withId("alice-1").inConversation(alice).build(in: viewContext)
+        _ = MessageBuilder().withId("bob-1").inConversation(bob).build(in: viewContext)
+        try saveViewContext()
 
         service.toggleSelectionMode()
         service.toggleSelection(for: alice.objectID)
@@ -240,8 +252,8 @@ final class ConversationSelectionServiceTests: XCTestCase {
     // the selection synchronously like its twin.
     func testReportSpamSelectedConversations_clearsSynchronouslyAndQueuesReportSpamAction() async throws {
         let alice = makeConversation(name: "Alice")
-        _ = MessageBuilder().withId("alice-1").inConversation(alice).build(in: context)
-        try stack.saveViewContext()
+        _ = MessageBuilder().withId("alice-1").inConversation(alice).build(in: viewContext)
+        try saveViewContext()
 
         service.toggleSelectionMode()
         service.toggleSelection(for: alice.objectID)
@@ -282,7 +294,15 @@ final class ConversationSelectionServiceTests: XCTestCase {
             .visible()
             .withLastMessageDate(Date())
             .withCreatedAt(Date())
-            .build(in: context)
+            .build(in: viewContext)
+    }
+
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
     }
 
     /// Deadline-poll wait copied from ChatViewModelTests (async-condition

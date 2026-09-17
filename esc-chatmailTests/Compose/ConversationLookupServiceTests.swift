@@ -2,23 +2,33 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `testStack.viewContext`, which is private-queue.
+/// `ConversationLookupService` is `@MainActor` and fetches from its context
+/// directly, which is on-queue only for a main-queue context. See that helper
+/// for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationLookupServiceTests: XCTestCase {
 
     private var testStack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
     private var service: ConversationLookupService!
 
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
-        service = ConversationLookupService(context: context)
+        viewContext = testStack.makeMainQueueViewContext()
+        service = ConversationLookupService(context: viewContext)
     }
 
     override func tearDown() {
         service = nil
-        context = nil
+        viewContext = nil
         testStack = nil
         super.tearDown()
     }
@@ -31,15 +41,15 @@ final class ConversationLookupServiceTests: XCTestCase {
             .withParticipantHash(participantHash)
             .withDisplayName("Expected")
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
 
         _ = ConversationBuilder()
             .withParticipantHash("different-hash")
             .withDisplayName("Other")
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let result = service.findActiveConversation(forRecipients: ["USER.NAME@GMAIL.COM"], myAliases: [])
 
@@ -54,9 +64,9 @@ final class ConversationLookupServiceTests: XCTestCase {
             .withParticipantHash(participantHash)
             .withDisplayName("Archived")
             .archived()
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let result = service.findActiveConversation(forRecipients: [recipient], myAliases: [])
 
@@ -71,9 +81,9 @@ final class ConversationLookupServiceTests: XCTestCase {
             .withParticipantHash(participantHash)
             .withDisplayName("Group")
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let result = service.findActiveConversation(
             forRecipients: ["BOB@example.com", "alice@example.com", "alice@example.com"],
@@ -99,9 +109,9 @@ final class ConversationLookupServiceTests: XCTestCase {
             .withParticipantHash(participantHash)
             .withDisplayName("Paul")
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let result = service.findActiveConversation(
             forRecipients: [recipient, myAlias],
@@ -122,9 +132,9 @@ final class ConversationLookupServiceTests: XCTestCase {
             .withParticipantHash(participantHash)
             .withDisplayName("Me")
             .visible()
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let result = service.findActiveConversation(
             forRecipients: ["me@example.com"],
@@ -152,5 +162,13 @@ final class ConversationLookupServiceTests: XCTestCase {
 
         XCTAssertEqual(recipientIdentity?.participantHash, headerIdentity.participantHash)
         XCTAssertEqual(recipientIdentity?.participants ?? [], headerIdentity.participants)
+    }
+
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
     }
 }

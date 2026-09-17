@@ -3,19 +3,29 @@ import CoreGraphics
 import XCTest
 @testable import esc_chatmail
 
+/// Every fixture goes through the suite's `viewContext`, a main-queue context
+/// from `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. `EmailReaderViewModel` is
+/// `@MainActor` and resolves its routed message on that context directly,
+/// which is on-queue only for a main-queue context. See that helper for what
+/// the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class EmailReaderViewModelTests: XCTestCase {
     private var testStack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        viewContext = testStack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
-        context = nil
+        viewContext = nil
         testStack = nil
         super.tearDown()
     }
@@ -93,7 +103,7 @@ final class EmailReaderViewModelTests: XCTestCase {
 
         return EmailReaderViewModel(
             route: route,
-            viewContext: context,
+            viewContext: viewContext,
             fullEmailReaderCoordinator: FullEmailReaderCoordinator(
                 fullEmailOpener: opener
             )
@@ -105,7 +115,7 @@ final class EmailReaderViewModelTests: XCTestCase {
             .withDisplayName("Test Chat")
             .visible()
             .recentlyActive()
-            .build(in: context)
+            .build(in: viewContext)
     }
 
     private func makeMessage(
@@ -119,7 +129,7 @@ final class EmailReaderViewModelTests: XCTestCase {
             .withSender(email: "sender@example.com", name: "Sender")
             .withBody("\(subject) body")
             .inConversation(conversation)
-            .build(in: context)
+            .build(in: viewContext)
     }
 
     private func makeArtifact(message: Message) -> EmailReaderArtifact {
