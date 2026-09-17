@@ -68,20 +68,3 @@ final class AppNetworkMonitor: NetworkMonitorProtocol {
         Log.debug("Network monitor stopped", category: .sync)
     }
 }
-
-// MARK: - Mock Network Monitor for Testing
-
-#if DEBUG
-final class MockNetworkMonitor: NetworkMonitorProtocol {
-    var isConnected: Bool = true
-    var onConnectivityChange: ((Bool) -> Void)?
-
-    func start() {}
-    func stop() {}
-
-    func simulateConnectivityChange(_ connected: Bool) {
-        isConnected = connected
-        onConnectivityChange?(connected)
-    }
-}
-#endif
