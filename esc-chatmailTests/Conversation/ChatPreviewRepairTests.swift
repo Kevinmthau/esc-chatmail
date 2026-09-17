@@ -320,12 +320,12 @@ final class ChatPreviewRepairTests: XCTestCase {
         let sentWithoutHTML = try blankMessage("004", storedHTML: false)
         sentWithoutHTML.isFromMe = true
         sentWithoutHTML.bodyText = "Sent body text.\n\nThanks,\nMe"
-        let sentHTMLShorterThanBody = try blankMessage("005", storedHTML: false)
-        sentHTMLShorterThanBody.isFromMe = true
-        sentHTMLShorterThanBody.bodyStorageURI = try XCTUnwrap(
+        let sentRicherBody = try blankMessage("005", storedHTML: false)
+        sentRicherBody.isFromMe = true
+        sentRicherBody.bodyStorageURI = try XCTUnwrap(
             handler.saveHTML("<div>Short</div>", for: "005")
         ).absoluteString
-        sentHTMLShorterThanBody.bodyText = "Short and then a much longer tail that the HTML lost."
+        sentRicherBody.bodyText = "Short and then a much longer tail that the HTML lost."
         let forwarded = try blankMessage("006")
         forwarded.subject = "Fwd: Quarterly numbers"
         let whitespacePreview = try blankMessage("007")
@@ -344,7 +344,7 @@ final class ChatPreviewRepairTests: XCTestCase {
 
         let allFixtures = [
             receivedIDOnlyHTML, receivedWithoutHTML, sentWithHTML, sentWithoutHTML,
-            sentHTMLShorterThanBody, forwarded, whitespacePreview, newsletterFallbackBody,
+            sentRicherBody, forwarded, whitespacePreview, newsletterFallbackBody,
             trustedTransactionalSender
         ]
         var bubbleTextBefore: [String: String?] = [:]
@@ -356,11 +356,20 @@ final class ChatPreviewRepairTests: XCTestCase {
         viewContext.refreshAllObjects()
 
         // Filled: the stored preview is exactly what the bubble showed.
-        for message in [receivedIDOnlyHTML, sentWithHTML, sentWithoutHTML, sentHTMLShorterThanBody, whitespacePreview] {
+        for message in [receivedIDOnlyHTML, sentWithHTML, sentWithoutHTML, whitespacePreview] {
             let before = try XCTUnwrap(bubbleTextBefore[message.id] ?? nil, "Fixture \(message.id) had no bubble text")
             XCTAssertEqual(message.chatPreviewText, before, "Backfilled preview for \(message.id)")
         }
-        XCTAssertEqual(sentHTMLShorterThanBody.chatPreviewText, "Short", "Sent rows store their HTML-derived text")
+        // Revert-check: the richer-body comparison in `backfilledPreview`. The
+        // loader no longer runs it, so this row is the one case where the
+        // backfill stores something BETTER than the bubble showed — the fuller
+        // authored body that nothing can recover once a preview is stored.
+        XCTAssertEqual(
+            sentRicherBody.chatPreviewText,
+            "Short and then a much longer tail that the HTML lost.",
+            "The backfill must migrate the richer authored body"
+        )
+        XCTAssertEqual(bubbleTextBefore[sentRicherBody.id] ?? nil, "Short", "Precondition: the loader alone derives only the HTML text")
 
         // Skipped: the loader still owns these rows.
         XCTAssertNil(receivedWithoutHTML.chatPreviewText, "Received rows without local HTML can still recover over the network")
@@ -374,11 +383,14 @@ final class ChatPreviewRepairTests: XCTestCase {
             "Trusted transactional senders can still recover HTML"
         )
 
-        // The bubble is unchanged for every row.
-        for message in allFixtures {
+        // The bubble is unchanged for every row, except the richer-body row,
+        // whose bubble improves to the migrated text.
+        for message in allFixtures where message.id != sentRicherBody.id {
             let after = await bubbleText(for: message)
             XCTAssertEqual(after, bubbleTextBefore[message.id] ?? nil, "Bubble text changed for \(message.id)")
         }
+        let richerAfter = await bubbleText(for: sentRicherBody)
+        XCTAssertEqual(richerAfter, "Short and then a much longer tail that the HTML lost.")
     }
 
     // Revert-check: `.receivedHTMLRederivation` must select every received row,
