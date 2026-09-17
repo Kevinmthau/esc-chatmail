@@ -8,7 +8,6 @@ import CoreData
 ///
 /// The implementation is split across multiple files:
 /// - `CoreData/BatchOperations/BatchConfiguration.swift`: Error enum, config, ProcessedConversation
-/// - `CoreData/BatchOperations/MessageBatchOperations.swift`: Message insert/update/delete
 /// - `CoreData/BatchOperations/ConversationBatchOperations.swift`: Conversation insert
 struct CoreDataBatchOperations: Sendable {
 

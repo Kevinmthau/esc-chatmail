@@ -9,19 +9,37 @@ import CoreData
 /// - Attachment state transitions
 /// - Core Data entity handling
 /// - Cleanup logic validation
+///
+/// Every fixture and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `testStack.viewContext`, which is private-queue. The class is not
+/// `@MainActor`, but every test here runs on the main thread: XCTest invokes
+/// the synchronous ones there, and every async one is `@MainActor` — including
+/// testPendingSweepRecoversLegacySynthesizedInlineStorageForForwarding, which
+/// hands this context to `OutboundAttachmentContextBuilder`, a `@MainActor`
+/// type that fetches it directly. On a private-queue context all of that is
+/// off-queue; see that helper for what it races. A future async test that is
+/// NOT `@MainActor` must not touch this context outside `perform`.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 final class AttachmentDownloaderTests: XCTestCase {
 
     var testStack: TestCoreDataStack!
-    var context: NSManagedObjectContext!
+    var viewContext: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        // `assumeIsolated`: XCTest runs this synchronous setUp on the main
+        // thread, which is the main actor's executor, but the override cannot
+        // declare that isolation.
+        viewContext = MainActor.assumeIsolated { testStack.makeMainQueueViewContext() }
     }
 
     override func tearDown() {
-        context = nil
+        viewContext = nil
         testStack = nil
         super.tearDown()
     }
@@ -34,7 +52,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withFilename("test.txt")
             .withMimeType("text/plain")
             .queued()
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertEqual(attachment.id, "att-123")
         XCTAssertEqual(attachment.filename, "test.txt")
@@ -48,7 +66,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .downloaded()
             .withLocalURL("Attachments/photo.jpg")
             .withPreviewURL("Previews/photo.jpg")
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertEqual(attachment.mimeType, "image/jpeg")
         XCTAssertEqual(attachment.width, 1920)
@@ -62,7 +80,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let attachment = AttachmentBuilder()
             .asPDF(pageCount: 5)
             .downloaded()
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertEqual(attachment.mimeType, "application/pdf")
         XCTAssertEqual(attachment.pageCount, 5)
@@ -73,12 +91,12 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("msg-123")
             .withSubject("Test with attachment")
-            .build(in: context)
+            .build(in: viewContext)
 
         let attachment = AttachmentBuilder()
             .withId("att-456")
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertEqual(attachment.message?.id, "msg-123")
     }
@@ -88,33 +106,33 @@ final class AttachmentDownloaderTests: XCTestCase {
     func testAttachmentState_transitionsFromQueuedToDownloaded() throws {
         let attachment = AttachmentBuilder()
             .queued()
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertEqual(attachment.state, .queued)
 
         attachment.state = .downloaded
         XCTAssertEqual(attachment.state, .downloaded)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Verify persistence
-        let fetchedAttachment = try context.existingObject(with: attachment.objectID) as? Attachment
+        let fetchedAttachment = try viewContext.existingObject(with: attachment.objectID) as? Attachment
         XCTAssertEqual(fetchedAttachment?.state, .downloaded)
     }
 
     func testAttachmentState_transitionsFromQueuedToFailed() throws {
         let attachment = AttachmentBuilder()
             .queued()
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertEqual(attachment.state, .queued)
 
         attachment.state = .failed
         XCTAssertEqual(attachment.state, .failed)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedAttachment = try context.existingObject(with: attachment.objectID) as? Attachment
+        let fetchedAttachment = try viewContext.existingObject(with: attachment.objectID) as? Attachment
         XCTAssertEqual(fetchedAttachment?.state, .failed)
     }
 
@@ -122,7 +140,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         // Simulates retry scenario
         let attachment = AttachmentBuilder()
             .failed()
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertEqual(attachment.state, .failed)
 
@@ -136,15 +154,15 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-download-retry-failure")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachment = AttachmentBuilder()
             .withId("att-download-retry-failure")
             .withFilename("missing.png")
             .withMimeType("image/png")
             .queued()
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let apiClient = MockGmailAPIClient()
         let downloader = AttachmentDownloader(
@@ -185,15 +203,15 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-cancelled-automatic-download")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachment = AttachmentBuilder()
             .withId("att-cancelled-automatic-download")
             .withFilename("cancelled.txt")
             .withMimeType("text/plain")
             .queued()
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let request = SuspendedAttachmentRequest(outcome: .success(Data("old account".utf8)))
         let apiClient = MockGmailAPIClient()
@@ -262,15 +280,15 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-cancelled-automatic-retry")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachment = AttachmentBuilder()
             .withId("att-cancelled-automatic-retry")
             .withFilename("cancelled.dat")
             .withMimeType("application/octet-stream")
             .queued()
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let request = SuspendedAttachmentRequest(outcome: .failure)
         let apiClient = MockGmailAPIClient()
@@ -322,15 +340,15 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-cid-read-drain")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachment = AttachmentBuilder()
             .withId("att-cid-read-drain")
             .withFilename("cid.txt")
             .withMimeType("text/plain")
             .queued()
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let downloadedData = Data("old account CID".utf8)
         let apiClient = MockGmailAPIClient()
@@ -387,15 +405,15 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-concurrent-cid")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachment = AttachmentBuilder()
             .withId("att-concurrent-cid")
             .withFilename("inline.txt")
             .withMimeType("text/plain")
             .queued()
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let downloadedData = Data("shared CID bytes".utf8)
         let request = SuspendedAttachmentRequest(outcome: .success(downloadedData))
@@ -460,15 +478,15 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-cancelled-cid-waiter")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachment = AttachmentBuilder()
             .withId("att-cancelled-cid-waiter")
             .withFilename("inline.txt")
             .withMimeType("text/plain")
             .queued()
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let downloadedData = Data("owner CID bytes".utf8)
         let request = SuspendedAttachmentRequest(outcome: .success(downloadedData))
@@ -557,7 +575,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageID)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachment = AttachmentBuilder()
             .withId(recoveredMessage.attachmentID)
             .withFilename("forwarded.txt")
@@ -566,8 +584,8 @@ final class AttachmentDownloaderTests: XCTestCase {
             .downloaded()
             .withLocalURL(legacyPath)
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let apiClient = MockGmailAPIClient()
         apiClient.getMessageResponses[messageID] = recoveredMessage.message
@@ -602,9 +620,9 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(apiClient.getMessageCallCountSnapshot(), 1)
         XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 0)
 
-        context.refresh(attachment, mergeChanges: true)
+        viewContext.refresh(attachment, mergeChanges: true)
         let forwardingInfo = try XCTUnwrap(
-            OutboundAttachmentContextBuilder(viewContext: context)
+            OutboundAttachmentContextBuilder(viewContext: viewContext)
                 .buildInlineAttachmentInfos(from: [attachment])
                 .first
         )
@@ -657,7 +675,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageID)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let firstAttachment = AttachmentBuilder()
             .withId(firstRecovered.attachmentID)
             .withFilename("first.txt")
@@ -665,7 +683,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withContentId("first-inline@example.com")
             .queued()
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
         let secondAttachment = AttachmentBuilder()
             .withId(secondRecovered.attachmentID)
             .withFilename("second.txt")
@@ -673,8 +691,8 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withContentId("second-inline@example.com")
             .queued()
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let firstPath = AttachmentPaths.originalPath(
             messageId: messageID,
@@ -788,7 +806,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-cid-legacy-failure")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachmentID = "attachment-cid-legacy-failure"
         let legacyPath = AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "png")
         let attachment = AttachmentBuilder()
@@ -798,8 +816,8 @@ final class AttachmentDownloaderTests: XCTestCase {
             .downloaded()
             .withLocalURL(legacyPath)
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let staleBytes = Data("another message's bytes".utf8)
         let downloader = AttachmentDownloader(
@@ -831,7 +849,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-preview-migration")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachmentID = "attachment-preview-migration-\(UUID().uuidString)"
         let attachment = AttachmentBuilder()
             .withId(attachmentID)
@@ -841,8 +859,8 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withLocalURL(AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "png"))
             .withPreviewURL(AttachmentPaths.previewPath(idOrUUID: attachmentID))
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let apiClient = MockGmailAPIClient()
         apiClient.attachmentResponses["\(message.id):\(attachmentID)"] = Data("not an image".utf8)
@@ -878,7 +896,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(persistedState.localURL, expectedOriginalPath)
         XCTAssertNil(persistedState.previewURL)
 
-        context.refresh(attachment, mergeChanges: true)
+        viewContext.refresh(attachment, mergeChanges: true)
         XCTAssertFalse(attachment.needsRedownload)
     }
 
@@ -888,37 +906,37 @@ final class AttachmentDownloaderTests: XCTestCase {
         let firstMessage = MessageBuilder()
             .withId("message-shared-attachment-first")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let secondMessage = MessageBuilder()
             .withId("message-shared-attachment-second")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let failingMessage = MessageBuilder()
             .withId("message-shared-attachment-failing")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let firstAttachment = AttachmentBuilder()
             .withId(sharedAttachmentID)
             .withFilename("first.dat")
             .withMimeType("application/octet-stream")
             .queued()
             .forMessage(firstMessage)
-            .build(in: context)
+            .build(in: viewContext)
         let secondAttachment = AttachmentBuilder()
             .withId(sharedAttachmentID)
             .withFilename("second.dat")
             .withMimeType("application/octet-stream")
             .queued()
             .forMessage(secondMessage)
-            .build(in: context)
+            .build(in: viewContext)
         let failingAttachment = AttachmentBuilder()
             .withId(sharedAttachmentID)
             .withFilename("failing.dat")
             .withMimeType("application/octet-stream")
             .queued()
             .forMessage(failingMessage)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let firstData = Data("first message bytes".utf8)
         let secondData = Data("second message bytes".utf8)
@@ -1105,15 +1123,15 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-reopen-refusal")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
         let attachment = AttachmentBuilder()
             .withId(attachmentID)
             .withFilename("outstanding.dat")
             .withMimeType("application/octet-stream")
             .queued()
             .forMessage(message)
-            .build(in: context)
-        try testStack.saveViewContext()
+            .build(in: viewContext)
+        try saveViewContext()
 
         let requestGate = MessageScopedAttachmentRequestGate(
             outcomes: [message.id: .failure]
@@ -1161,25 +1179,25 @@ final class AttachmentDownloaderTests: XCTestCase {
         let _ = AttachmentBuilder()
             .withId("att-queued")
             .queued()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-downloaded")
             .downloaded()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-failed")
             .failed()
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Fetch queued only (like AttachmentDownloader.enqueueAllPendingAttachments)
         let request = Attachment.fetchRequest()
         request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
 
-        let results = try context.fetch(request)
+        let results = try viewContext.fetch(request)
 
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.id, "att-queued")
@@ -1190,25 +1208,25 @@ final class AttachmentDownloaderTests: XCTestCase {
         let _ = AttachmentBuilder()
             .withId("att-queued")
             .queued()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-downloaded")
             .downloaded()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-failed")
             .failed()
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Fetch queued or failed (downloadable attachments)
         let request = Attachment.fetchRequest()
         request.predicate = NSPredicate(format: "stateRaw == %@ OR stateRaw == %@", "queued", "failed")
 
-        let results = try context.fetch(request)
+        let results = try viewContext.fetch(request)
 
         XCTAssertEqual(results.count, 2)
         let ids = Set(results.compactMap { $0.id })
@@ -1221,51 +1239,51 @@ final class AttachmentDownloaderTests: XCTestCase {
     func testAttachment_isImage_returnsCorrectly() throws {
         let jpegAttachment = AttachmentBuilder()
             .withMimeType("image/jpeg")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertTrue(jpegAttachment.isImage)
 
         let pngAttachment = AttachmentBuilder()
             .withMimeType("image/png")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertTrue(pngAttachment.isImage)
 
         let pdfAttachment = AttachmentBuilder()
             .withMimeType("application/pdf")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertFalse(pdfAttachment.isImage)
 
         let textAttachment = AttachmentBuilder()
             .withMimeType("text/plain")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertFalse(textAttachment.isImage)
     }
 
     func testAttachment_isPDF_returnsCorrectly() throws {
         let pdfAttachment = AttachmentBuilder()
             .withMimeType("application/pdf")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertTrue(pdfAttachment.isPDF)
 
         let imageAttachment = AttachmentBuilder()
             .withMimeType("image/jpeg")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertFalse(imageAttachment.isPDF)
     }
 
     func testAttachment_isVideo_returnsCorrectly() throws {
         let mp4Attachment = AttachmentBuilder()
             .withMimeType("video/mp4")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertTrue(mp4Attachment.isVideo)
 
         let movAttachment = AttachmentBuilder()
             .withMimeType("video/quicktime")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertTrue(movAttachment.isVideo)
 
         let pdfAttachment = AttachmentBuilder()
             .withMimeType("application/pdf")
-            .build(in: context)
+            .build(in: viewContext)
         XCTAssertFalse(pdfAttachment.isVideo)
     }
 
@@ -1276,7 +1294,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let smallAttachment = AttachmentBuilder()
             .asImage(width: 200, height: 100)
             .withByteSize(5000) // 5KB
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertTrue(smallAttachment.isLikelySignatureImage, "Small image under 10KB should be likely signature")
     }
@@ -1286,7 +1304,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let smallDimensionsAttachment = AttachmentBuilder()
             .asImage(width: 80, height: 80)
             .withByteSize(50000) // 50KB - larger than threshold
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertTrue(smallDimensionsAttachment.isLikelySignatureImage, "Image with dimensions <= 100px should be likely signature")
     }
@@ -1296,7 +1314,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let normalAttachment = AttachmentBuilder()
             .asImage(width: 800, height: 600)
             .withByteSize(500000) // 500KB
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertFalse(normalAttachment.isLikelySignatureImage, "Normal sized image should not be detected as signature")
     }
@@ -1306,7 +1324,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let pdfAttachment = AttachmentBuilder()
             .asPDF()
             .withByteSize(5000) // Small but not an image
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertFalse(pdfAttachment.isLikelySignatureImage, "Non-image attachment should not be detected as signature")
     }
@@ -1336,7 +1354,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("msg-with-attachments")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         // Add a normal image
         let _ = AttachmentBuilder()
@@ -1344,7 +1362,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 800, height: 600)
             .withByteSize(100000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         // Add a signature image (small bytes)
         let _ = AttachmentBuilder()
@@ -1352,12 +1370,12 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 200, height: 50)
             .withByteSize(5000) // Under 10KB
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Fetch fresh message
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let fetchedMessage = try viewContext.existingObject(with: message.objectID) as? Message
 
         let displayable = fetchedMessage.map {
             $0.displayableAttachments(using: builtHTMLAnalysis(for: $0), hidingInlineReferencedInHTML: true)
@@ -1373,7 +1391,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageId)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         // Attachment referenced by cid: in HTML should be hidden when `hidingInlineReferencedInHTML` is true.
         let _ = AttachmentBuilder()
@@ -1383,7 +1401,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 800, height: 600)
             .withByteSize(100000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         // Attachment not referenced by cid: should remain visible.
         let _ = AttachmentBuilder()
@@ -1393,14 +1411,14 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 800, height: 600)
             .withByteSize(100000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let handler = HTMLContentHandler.shared
         _ = handler.saveHTML("<html><body><img src=\"cid:CID_INLINE\"></body></html>", for: messageId)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let analysis = builtHTMLAnalysis(for: fetchedMessage)
         let hiddenInline = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: true)
         XCTAssertEqual(hiddenInline.compactMap { $0.id }.sorted(), ["att-regular"])
@@ -1416,7 +1434,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageId)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-inline")
@@ -1425,7 +1443,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 800, height: 600)
             .withByteSize(100000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-regular")
@@ -1434,16 +1452,16 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 800, height: 600)
             .withByteSize(100000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let handler = HTMLContentHandler.shared
         _ = handler.saveHTML("<html><body><img src=\"cid:CID_INLINE\"></body></html>", for: messageId)
         defer { handler.deleteHTML(for: messageId) }
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let fetchedMessage = try XCTUnwrap(
-            context.existingObject(with: message.objectID) as? Message
+            viewContext.existingObject(with: message.objectID) as? Message
         )
         let htmlAnalysis = MessageBubbleHTMLAnalysisBuilder.build(
             messageID: fetchedMessage.id,
@@ -1484,7 +1502,7 @@ final class AttachmentDownloaderTests: XCTestCase {
                 """
             )
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         // The live analysis only reports calendar-card support for messages
         // that actually have HTML (no HTML → placeholder analysis → nothing
@@ -1503,7 +1521,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withMimeType("text/calendar")
             .withByteSize(2_048)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-notes")
@@ -1511,11 +1529,11 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asPDF()
             .withByteSize(45_000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let analysis = builtHTMLAnalysis(for: fetchedMessage)
 
         let previewAttachments = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: true)
@@ -1533,7 +1551,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withSnippet("Please review the attached invite")
             .withBody("Please review the attached invite.")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-calendar")
@@ -1541,7 +1559,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withMimeType("text/calendar")
             .withByteSize(2_048)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-notes")
@@ -1549,15 +1567,15 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asPDF()
             .withByteSize(45_000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let handler = HTMLContentHandler.shared
         _ = handler.saveHTML("<html><body><div>Please review the attached invite.</div></body></html>", for: messageId)
         defer { handler.deleteHTML(for: messageId) }
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let analysis = builtHTMLAnalysis(for: fetchedMessage)
 
         XCTAssertEqual(fetchedMessage.isLikelyCalendarInvite, true)
@@ -1588,7 +1606,7 @@ final class AttachmentDownloaderTests: XCTestCase {
                 """
             )
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-calendar")
@@ -1596,11 +1614,11 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withMimeType("text/calendar")
             .withByteSize(2_048)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let analysis = builtHTMLAnalysis(for: fetchedMessage)
 
         XCTAssertTrue(fetchedMessage.isLikelyCalendarInvite)
@@ -1615,7 +1633,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageId)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         // Signature/logo CID image should be hidden even in plain bubble mode.
         let _ = AttachmentBuilder()
@@ -1625,7 +1643,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 512, height: 512) // Not caught by size/dimension signature heuristic alone
             .withByteSize(31_639)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         // Real inline body image should still be shown in plain bubble mode.
         let _ = AttachmentBuilder()
@@ -1635,7 +1653,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 1200, height: 900)
             .withByteSize(350_000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         // Regular non-inline attachment should always remain visible.
         let _ = AttachmentBuilder()
@@ -1644,7 +1662,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asPDF()
             .withByteSize(45_000)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let handler = HTMLContentHandler.shared
         _ = handler.saveHTML(
@@ -1661,9 +1679,9 @@ final class AttachmentDownloaderTests: XCTestCase {
             for: messageId
         )
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let displayable = fetchedMessage.displayableAttachments(
             using: builtHTMLAnalysis(for: fetchedMessage),
             hidingInlineReferencedInHTML: false
@@ -1679,7 +1697,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageId)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         // Outlook/Word signature logo (generic image001 filename + CID) should not show as attachment.
         let _ = AttachmentBuilder()
@@ -1689,7 +1707,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 134, height: 53)
             .withByteSize(192_520)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         // Real file attachment should remain visible.
         let _ = AttachmentBuilder()
@@ -1698,7 +1716,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 1024, height: 1536)
             .withByteSize(3_467_325)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let handler = HTMLContentHandler.shared
         _ = handler.saveHTML(
@@ -1716,9 +1734,9 @@ final class AttachmentDownloaderTests: XCTestCase {
             for: messageId
         )
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let displayable = fetchedMessage.displayableAttachments(
             using: builtHTMLAnalysis(for: fetchedMessage),
             hidingInlineReferencedInHTML: false
@@ -1734,7 +1752,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageId)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-signature-uri-inline")
@@ -1743,7 +1761,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withContentId("image001.png@01DCA5AF.35846080")
             .withByteSize(192_520)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-real-uri-file")
@@ -1751,7 +1769,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .withFilename("ABT x Casa Tua Invitation.png")
             .withByteSize(3_467_325)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let html = """
         <html><body>
@@ -1773,9 +1791,9 @@ final class AttachmentDownloaderTests: XCTestCase {
         handler.deleteHTML(for: messageId)
         message.bodyStorageURI = tempURL.absoluteString
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let displayable = fetchedMessage.displayableAttachments(
             using: builtHTMLAnalysis(for: fetchedMessage),
             hidingInlineReferencedInHTML: false
@@ -1791,7 +1809,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageId)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-inline-body-image")
@@ -1800,7 +1818,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             .asImage(width: 220, height: 90)
             .withByteSize(192_520)
             .forMessage(message)
-            .build(in: context)
+            .build(in: viewContext)
 
         let handler = HTMLContentHandler.shared
         _ = handler.saveHTML(
@@ -1814,9 +1832,9 @@ final class AttachmentDownloaderTests: XCTestCase {
             for: messageId
         )
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let displayable = fetchedMessage.displayableAttachments(
             using: builtHTMLAnalysis(for: fetchedMessage),
             hidingInlineReferencedInHTML: false
@@ -1832,7 +1850,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId(messageId)
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         for suffix in 1...3 {
             let _ = AttachmentBuilder()
@@ -1842,7 +1860,7 @@ final class AttachmentDownloaderTests: XCTestCase {
                 .asImage(width: 1200, height: 1200)
                 .withByteSize(350_000)
                 .forMessage(message)
-                .build(in: context)
+                .build(in: viewContext)
         }
 
         let handler = HTMLContentHandler.shared
@@ -1857,9 +1875,9 @@ final class AttachmentDownloaderTests: XCTestCase {
             for: messageId
         )
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let displayable = fetchedMessage.displayableAttachments(
             using: builtHTMLAnalysis(for: fetchedMessage),
             hidingInlineReferencedInHTML: false
@@ -1875,7 +1893,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         let message = MessageBuilder()
             .withId("msg-duplicate-regular-files-\(UUID().uuidString)")
             .withAttachments()
-            .build(in: context)
+            .build(in: viewContext)
 
         for suffix in 1...2 {
             let _ = AttachmentBuilder()
@@ -1884,7 +1902,7 @@ final class AttachmentDownloaderTests: XCTestCase {
                 .withMimeType("application/pdf")
                 .withByteSize(91_248)
                 .forMessage(message)
-                .build(in: context)
+                .build(in: viewContext)
         }
 
         for suffix in 1...2 {
@@ -1894,12 +1912,12 @@ final class AttachmentDownloaderTests: XCTestCase {
                 .withMimeType("application/pdf")
                 .withByteSize(88_032)
                 .forMessage(message)
-                .build(in: context)
+                .build(in: viewContext)
         }
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
-        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let fetchedMessage = try XCTUnwrap(viewContext.existingObject(with: message.objectID) as? Message)
         let displayable = fetchedMessage.displayableAttachments(
             using: builtHTMLAnalysis(for: fetchedMessage),
             hidingInlineReferencedInHTML: false
@@ -1918,13 +1936,13 @@ final class AttachmentDownloaderTests: XCTestCase {
         // Local attachments have IDs starting with "local_" (underscore, not hyphen)
         let localAttachment = AttachmentBuilder()
             .withId("local_uuid-123")
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertTrue(localAttachment.isLocalAttachment)
 
         let remoteAttachment = AttachmentBuilder()
             .withId("gmail-attachment-456")
-            .build(in: context)
+            .build(in: viewContext)
 
         XCTAssertFalse(remoteAttachment.isLocalAttachment)
     }
@@ -1932,16 +1950,16 @@ final class AttachmentDownloaderTests: XCTestCase {
     // MARK: - Batch Size Tests
 
     func testFetchAttachments_usesBatchSize() throws {
-        try context.performAndWait {
+        try viewContext.performAndWait {
             // Create many attachments
             for i in 0..<100 {
                 let _ = AttachmentBuilder()
                     .withId("att-\(i)")
                     .queued()
-                    .build(in: context)
+                    .build(in: viewContext)
             }
 
-            try context.save()
+            try viewContext.save()
 
             // Fetch with batch size (like AttachmentDownloader does)
             let request = Attachment.fetchRequest()
@@ -1951,7 +1969,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             // Keep the fetched managed objects scoped to their context queue;
             // releasing a large batch off-queue can race Core Data's async
             // reference-queue cleanup during XCTest teardown.
-            let results = try context.fetch(request)
+            let results = try viewContext.fetch(request)
             XCTAssertEqual(results.count, 100)
         }
     }
@@ -1965,24 +1983,24 @@ final class AttachmentDownloaderTests: XCTestCase {
             .downloaded()
             .withLocalURL("Attachments/file1.jpg")
             .withPreviewURL("Previews/file1.jpg")
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-2")
             .downloaded()
             .withLocalURL("Attachments/file2.pdf")
-            .build(in: context)
+            .build(in: viewContext)
 
         let _ = AttachmentBuilder()
             .withId("att-3")
             .queued() // No files yet
-            .build(in: context)
+            .build(in: viewContext)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Collect valid file paths (like cleanupOrphanedFiles does)
         let request = Attachment.fetchRequest()
-        let attachments = try context.fetch(request)
+        let attachments = try viewContext.fetch(request)
 
         let validFiles = Set(attachments.compactMap { attachment -> [String] in
             var files: [String] = []
@@ -2020,6 +2038,14 @@ final class AttachmentDownloaderTests: XCTestCase {
                 attachment.previewURL
             )
         }
+    }
+
+    /// Saves the suite's main-queue context directly; every test body here is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead (see the type comment).
+    private func saveViewContext() throws {
+        guard viewContext.hasChanges else { return }
+        try viewContext.save()
     }
 
     private func makeSynthesizedInlineMessage(

@@ -3,6 +3,24 @@ import CoreData
 import Combine
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue. `VirtualScrollState` is
+/// `@MainActor` and re-resolves its row cache on that context directly
+/// (`VirtualScrollState+RowCache.swift:41`), which is on-queue only for a
+/// main-queue context. See that helper for what the private-queue shape races.
+/// Background contexts (`newBackgroundContext()`) stay private-queue and are
+/// only touched inside `perform`, including by the page loaders.
+///
+/// The merge-driven tests opt this context into automerge instead of building
+/// an `automaticallyMergesChanges: true` stack (which configures the stack's
+/// private-queue context, not this one). On a main-queue context the merge
+/// runs on the main queue, so it lands while the test is suspended in its
+/// polls.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class VirtualScrollStateTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -11,7 +29,7 @@ final class VirtualScrollStateTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        viewContext = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
@@ -1694,8 +1712,7 @@ final class VirtualScrollStateTests: XCTestCase {
     }
 
     func testBackgroundInsertionDuringLatestLoadCannotPublishStaleWindow() async throws {
-        stack = TestCoreDataStack(automaticallyMergesChanges: true)
-        viewContext = stack.viewContext
+        viewContext.automaticallyMergesChangesFromParent = true
         let (conversation, messages) = try makeConversationWithMessages(count: 10)
         let configuration = VirtualScrollConfiguration(
             visibleItemCount: 3,
@@ -3421,8 +3438,7 @@ final class VirtualScrollStateTests: XCTestCase {
     }
 
     func testBackgroundInternalDateMergeReordersLatestWindow() async throws {
-        stack = TestCoreDataStack(automaticallyMergesChanges: true)
-        viewContext = stack.viewContext
+        viewContext.automaticallyMergesChangesFromParent = true
         let (conversation, messages) = try makeConversationWithMessages(count: 5)
         let configuration = VirtualScrollConfiguration(
             visibleItemCount: 3,
@@ -3465,8 +3481,7 @@ final class VirtualScrollStateTests: XCTestCase {
     }
 
     func testBackgroundOffWindowReadMergeDoesNotReloadLatestWindow() async throws {
-        stack = TestCoreDataStack(automaticallyMergesChanges: true)
-        viewContext = stack.viewContext
+        viewContext.automaticallyMergesChangesFromParent = true
         let viewContext = self.viewContext!
         let fixture = try await viewContext.perform {
             let conversation = ConversationBuilder()
@@ -3553,8 +3568,7 @@ final class VirtualScrollStateTests: XCTestCase {
     }
 
     func testPostSyncReconcilesOffWindowMessageMovedOutOfConversation() async throws {
-        stack = TestCoreDataStack(automaticallyMergesChanges: true)
-        viewContext = stack.viewContext
+        viewContext.automaticallyMergesChangesFromParent = true
         let viewContext = self.viewContext!
         let fixture = try await viewContext.perform {
             let conversation = ConversationBuilder()

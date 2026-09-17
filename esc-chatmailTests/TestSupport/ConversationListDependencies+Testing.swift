@@ -16,8 +16,15 @@ extension ConversationListDependencies {
     /// `Dependencies.shared` because no test seam exists for them yet.
     ///
     /// - Parameters:
-    ///   - stack: The suite's `TestCoreDataStack`; supplies the view context,
-    ///     background contexts, and saves.
+    ///   - stack: The suite's `TestCoreDataStack`; supplies background
+    ///     contexts and saves.
+    ///   - viewContext: The view context the view model and its services use
+    ///     directly on the main actor: `ConversationListViewModel` fetches its
+    ///     window and resolves rows on it, and the launch repair counts
+    ///     conversations on it. Pass the suite's
+    ///     `stack.makeMainQueueViewContext()`; `stack.viewContext` is
+    ///     private-queue, so every such access would be off-queue. Required so
+    ///     no caller can fall back to it by omission.
     ///   - migrationFlags: Test-owned migration flag storage. Defaults to a
     ///     fresh `InMemoryMigrationFlagStore`, so one-shot launch guards start
     ///     unset for every test.
@@ -47,6 +54,7 @@ extension ConversationListDependencies {
     @MainActor
     static func forTesting(
         stack: TestCoreDataStack,
+        viewContext: NSManagedObjectContext,
         migrationFlags: MigrationFlagStore = InMemoryMigrationFlagStore(),
         contactEmailLoader: ConversationFilterService.ContactEmailLoader? = nil,
         conversationManager: ConversationManager? = nil,
@@ -60,7 +68,7 @@ extension ConversationListDependencies {
         let resolvedSearchService = searchService ?? ConversationSearchService()
         let resolvedSelectionService = selectionService ?? ConversationSelectionService(
             messageActions: Dependencies.shared.makeMessageActions(),
-            viewContext: stack.viewContext
+            viewContext: viewContext
         )
         let resolvedFilterService = filterService ?? ConversationFilterService(
             contactEmailLoader: contactEmailLoader ?? { _ in [] }
@@ -71,7 +79,7 @@ extension ConversationListDependencies {
 
         return ConversationListDependencies(
             storage: StorageDependencies(
-                viewContext: stack.viewContext,
+                viewContext: viewContext,
                 makeBackgroundContext: { stack.newBackgroundContext() },
                 saveIfNeeded: { stack.saveIfNeeded(context: $0) },
                 migrationFlags: migrationFlags,

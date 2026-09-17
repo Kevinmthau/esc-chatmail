@@ -2,10 +2,22 @@ import CoreData
 import XCTest
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue. These `@MainActor` test
+/// bodies build, save, refresh, and read managed objects on that context
+/// directly, which is on-queue only for a main-queue context. The chat preview
+/// repair itself works in background contexts, which stay private-queue; the
+/// coordinator's `storage.viewContext` gets the suite's context too. See that
+/// helper for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ChatPreviewRepairTests: XCTestCase {
     private var stack: TestCoreDataStack!
-    private var context: NSManagedObjectContext!
+    private var viewContext: NSManagedObjectContext!
     private var flags: InMemoryMigrationFlagStore!
     private var handler: HTMLContentHandler!
     private var directory: URL!
@@ -16,7 +28,7 @@ final class ChatPreviewRepairTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack(storeKind: .sqlite)
-        context = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
         flags = InMemoryMigrationFlagStore()
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         handler = HTMLContentHandler(messagesDirectory: directory)
@@ -30,7 +42,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         accountWork = nil
         syncWaiter = nil
         flags = nil
-        context = nil
+        viewContext = nil
         stack = nil
         super.tearDown()
     }
@@ -49,7 +61,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         let missing = try message("004", storedHTML: false)
         missing.bodyStorageURI = directory.appendingPathComponent("missing.html").absoluteString
         let last = try message("005")
-        try context.save()
+        try viewContext.save()
 
         let repair = ChatPreviewRepair(htmlContentHandler: handler)
         let background = stack.newBackgroundContext()
@@ -68,7 +80,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         let drained = try await repair.prepareBatch(in: background, after: third.lastMessageID, limit: 2)
         XCTAssertTrue(drained.didDrain)
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         XCTAssertEqual(last.chatPreviewText, received.chatPreviewText)
         XCTAssertTrue(received.isUnread)
@@ -91,14 +103,14 @@ final class ChatPreviewRepairTests: XCTestCase {
         let canonicalURL = try XCTUnwrap(handler.saveHTML(f12HTML, for: "001"))
         received.bodyStorageURI = canonicalURL.absoluteString
         let canonicalData = try Data(contentsOf: canonicalURL)
-        try context.save()
+        try viewContext.save()
         flags.set(true, forKey: "chatPreviewRepair.2026-09-09-signature-cleanup-v1")
 
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
 
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nJane Doe")
         XCTAssertEqual(received.bodyStorageURI, canonicalURL.absoluteString)
@@ -117,13 +129,13 @@ final class ChatPreviewRepairTests: XCTestCase {
         received.bodyStorageURI = canonicalURL.absoluteString
         received.chatPreviewText = RepeatedCorporateSignatureFixture.plainText(includeHistory: false)
         let canonicalData = try Data(contentsOf: canonicalURL)
-        try context.save()
+        try viewContext.save()
         flags.set(true, forKey: "chatPreviewRepair.2026-09-10-signature-contact-links-v1")
 
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
 
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         XCTAssertEqual(received.chatPreviewText, RepeatedCorporateSignatureFixture.expectedChatText)
@@ -137,11 +149,11 @@ final class ChatPreviewRepairTests: XCTestCase {
         _ = try message("001")
         let protected = try message("002")
         let unrelated = try message("003")
-        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
         record.id = "pending-send"
         record.createdAt = Date()
         record.conversationId = protected.conversation?.id
-        try context.save()
+        try viewContext.save()
         let repair = ChatPreviewRepair(htmlContentHandler: handler)
         let background = stack.newBackgroundContext()
         let first = try await repair.prepareBatch(in: background, after: nil)
@@ -150,11 +162,11 @@ final class ChatPreviewRepairTests: XCTestCase {
         XCTAssertEqual(first.lastMessageID, "003")
         XCTAssertEqual(first.changedMessageIDs, ["001", "003"])
         XCTAssertTrue(stack.saveIfNeeded(context: background))
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(protected.chatPreviewText, "Old preview")
         XCTAssertEqual(unrelated.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
-        context.delete(record)
-        try context.save()
+        viewContext.delete(record)
+        try viewContext.save()
 
         let resumed = try await repair.prepareBatch(in: stack.newBackgroundContext(), after: nil, startingAt: first.firstDeferredMessageID)
         XCTAssertNil(resumed.firstDeferredMessageID)
@@ -166,11 +178,11 @@ final class ChatPreviewRepairTests: XCTestCase {
         _ = try message("001")
         let protected = try message("002")
         let unrelated = try message("003")
-        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
         record.id = "retained-ambiguous-send"
         record.createdAt = Date()
         record.conversationId = protected.conversation?.id
-        try context.save()
+        try viewContext.save()
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
@@ -180,16 +192,16 @@ final class ChatPreviewRepairTests: XCTestCase {
             )).resumeAtMessageID,
             "002"
         )
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(protected.chatPreviewText, "Old preview")
         XCTAssertEqual(unrelated.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
-        context.delete(record)
-        try context.save()
+        viewContext.delete(record)
+        try viewContext.save()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(protected.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         withExtendedLifetime(repair) {}
     }
@@ -198,7 +210,7 @@ final class ChatPreviewRepairTests: XCTestCase {
     func testEmptyHTMLPreservesSavedPreview() async throws {
         let empty = try message("001")
         empty.bodyStorageURI = try XCTUnwrap(handler.saveHTML("<div></div>", for: "001")).absoluteString
-        try context.save()
+        try viewContext.save()
         let background = stack.newBackgroundContext()
         let batch = try await ChatPreviewRepair(htmlContentHandler: handler).prepareBatch(in: background, after: nil)
         XCTAssertTrue(batch.changedMessageIDs.isEmpty)
@@ -209,13 +221,13 @@ final class ChatPreviewRepairTests: XCTestCase {
     // Revert-check: checkpoints are only persisted after a successful save; failed work stays rerunnable.
     func testFailedSaveDoesNotAdvanceCursorAndNextCoordinatorResumes() async throws {
         let received = try message("001")
-        try context.save()
+        try viewContext.save()
         var attemptedSave = false
         let failing = coordinator(save: { _ in attemptedSave = true; return false })
         failing.repairPersistedChatPreviews()
         await failing.waitForChatPreviewRepairCompletion()
         XCTAssertTrue(attemptedSave)
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Old preview")
         XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey))
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
@@ -224,7 +236,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         resumed.repairPersistedChatPreviews()
         await resumed.waitForChatPreviewRepairCompletion()
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey))
         withExtendedLifetime((failing, resumed)) {}
@@ -234,14 +246,14 @@ final class ChatPreviewRepairTests: XCTestCase {
     func testSavedCursorResumesAndCompletedVersionDoesNotRunAgain() async throws {
         let alreadyProcessed = try message("001")
         let next = try message("002")
-        try context.save()
+        try viewContext.save()
         flags.setString(ChatPreviewRepair.Checkpoint(afterMessageID: "001").encoded,
                         forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey)
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(alreadyProcessed.chatPreviewText, "Old preview")
         XCTAssertEqual(next.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         let previousWaits = syncWaiter.waitForCurrentSyncToCompleteCalls
@@ -253,7 +265,7 @@ final class ChatPreviewRepairTests: XCTestCase {
     // Revert-check: a sync-idle signal cannot be lost before the repair starts waiting.
     func testRepairContinuesWhenSyncGateOpensBeforeWaitStarts() async throws {
         let received = try message("001")
-        try context.save()
+        try viewContext.save()
         let gate = ChatPreviewRepairGate()
         syncWaiter.onWaitForCurrentSyncToComplete = { await gate.wait() }
         let repair = coordinator()
@@ -262,7 +274,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
 
         withExtendedLifetime(repair) {}
@@ -271,7 +283,7 @@ final class ChatPreviewRepairTests: XCTestCase {
     // Revert-check: a request captured before account teardown cannot acquire a lease in the next account.
     func testAccountTransitionWhileWaitingDoesNotWriteOrMarkCompletion() async throws {
         let received = try message("001")
-        try context.save()
+        try viewContext.save()
         let gate = ChatPreviewRepairGate()
         syncWaiter.onWaitForCurrentSyncToComplete = { await gate.wait() }
         let repair = coordinator()
@@ -283,14 +295,14 @@ final class ChatPreviewRepairTests: XCTestCase {
         // Join the original worker before checking account isolation so the
         // later retry cannot hide an unsafe write or completion marker.
         await repair.waitForChatPreviewRepairCompletion()
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Old preview")
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         syncWaiter.onWaitForCurrentSyncToComplete = nil
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(received.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         withExtendedLifetime(repair) {}
     }
@@ -328,7 +340,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         """
         let trustedTransactionalSender = try blankMessage("009")
         trustedTransactionalSender.senderEmail = "noreply@members.ebay.com"
-        try context.save()
+        try viewContext.save()
 
         let allFixtures = [
             receivedIDOnlyHTML, receivedWithoutHTML, sentWithHTML, sentWithoutHTML,
@@ -341,7 +353,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         }
 
         try await drainBackfill()
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
 
         // Filled: the stored preview is exactly what the bubble showed.
         for message in [receivedIDOnlyHTML, sentWithHTML, sentWithoutHTML, sentHTMLShorterThanBody, whitespacePreview] {
@@ -377,14 +389,14 @@ final class ChatPreviewRepairTests: XCTestCase {
         let idOnlyHTML = try message("001", storedHTML: false)
         _ = try XCTUnwrap(handler.saveHTML(html, for: "001"))
         let plainTextOnly = try message("002", storedHTML: false)
-        try context.save()
+        try viewContext.save()
 
         let background = stack.newBackgroundContext()
         let batch = try await ChatPreviewRepair(htmlContentHandler: handler).prepareBatch(in: background, after: nil)
         XCTAssertEqual(batch.changedMessageIDs, ["001"])
         XCTAssertTrue(stack.saveIfNeeded(context: background))
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertEqual(idOnlyHTML.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
         XCTAssertEqual(plainTextOnly.chatPreviewText, "Old preview", "No local HTML derives nothing")
     }
@@ -395,20 +407,20 @@ final class ChatPreviewRepairTests: XCTestCase {
     // re-derivation pass completing would strand every blank row.
     func testCoordinatorBackfillCompletesWhileRederivationDefers() async throws {
         let deferredByPendingSend = try message("001")
-        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
         record.id = "pending-send"
         record.createdAt = Date()
         record.conversationId = deferredByPendingSend.conversation?.id
         let blankSent = try blankMessage("002", storedHTML: false)
         blankSent.isFromMe = true
         blankSent.bodyText = "Sent body text."
-        try context.save()
+        try viewContext.save()
 
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey))
         XCTAssertEqual(deferredByPendingSend.chatPreviewText, "Old preview")
@@ -423,17 +435,17 @@ final class ChatPreviewRepairTests: XCTestCase {
         let blank = try blankMessage("001", storedHTML: false)
         blank.isFromMe = true
         blank.bodyText = "Sent body text."
-        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
         record.id = "pending-send"
         record.createdAt = Date()
         record.conversationId = blank.conversation?.id
-        try context.save()
+        try viewContext.save()
 
         let repair = coordinator()
         repair.repairPersistedChatPreviews()
         await repair.waitForChatPreviewRepairCompletion()
 
-        context.refreshAllObjects()
+        viewContext.refreshAllObjects()
         XCTAssertNil(blank.chatPreviewText)
         XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey))
         withExtendedLifetime(repair) {}
@@ -482,8 +494,8 @@ final class ChatPreviewRepairTests: XCTestCase {
     }
 
     private func message(_ id: String, storedHTML: Bool = true) throws -> Message {
-        let conversation = ConversationBuilder().build(in: context)
-        let message = MessageBuilder().withId(id).inConversation(conversation).build(in: context)
+        let conversation = ConversationBuilder().build(in: viewContext)
+        let message = MessageBuilder().withId(id).inConversation(conversation).build(in: viewContext)
         message.chatPreviewText = "Old preview"
         if storedHTML { message.bodyStorageURI = try XCTUnwrap(handler.saveHTML(html, for: id)).absoluteString }
         return message
@@ -493,7 +505,7 @@ final class ChatPreviewRepairTests: XCTestCase {
         let stack = self.stack!
         return ConversationLaunchRepairCoordinator(
             storage: StorageDependencies(
-                viewContext: stack.viewContext,
+                viewContext: viewContext,
                 makeBackgroundContext: { stack.newBackgroundContext() },
                 saveIfNeeded: save ?? { stack.saveIfNeeded(context: $0) },
                 migrationFlags: flags,

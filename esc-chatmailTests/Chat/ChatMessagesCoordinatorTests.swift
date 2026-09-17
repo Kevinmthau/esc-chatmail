@@ -2,6 +2,19 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `viewContext`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `stack.viewContext`, which is private-queue. These `@MainActor` test
+/// bodies build and save managed objects on it directly, and
+/// `testReplyPublicationAndAdmissionPublishTargetWithRealVirtualScrollState`
+/// hands it to `VirtualScrollState`, which
+/// re-resolves its row cache on that context (`VirtualScrollState+RowCache.swift:41`)
+/// — both on-queue only for a main-queue context. See that helper for what the
+/// private-queue shape races. Background contexts stay private-queue.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ChatMessagesCoordinatorTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -10,7 +23,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        viewContext = stack.viewContext
+        viewContext = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
