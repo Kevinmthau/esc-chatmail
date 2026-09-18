@@ -164,64 +164,6 @@ extension MessagePersister {
             try context.save()
         }
     }
-
-    /// Updates account's history ID in a SEPARATE transaction
-    /// WARNING: Use setAccountHistoryId(_:in:) for transactional sync updates
-    /// This method is only for standalone historyId updates outside of sync
-    /// - Parameter historyId: The new history ID to save
-    /// - Returns: true if the save succeeded, false if it failed after retries
-    @available(*, deprecated, message: "Use setAccountHistoryId(_:in:) for transactional sync updates")
-    @discardableResult
-    func updateAccountHistoryId(_ historyId: String) async -> Bool {
-        var lastError: Error?
-
-        // First attempt
-        do {
-            try await coreDataStack.performBackgroundTask { [weak self] context in
-                guard let self = self else { return }
-                let request = Account.fetchRequest()
-                request.fetchLimit = 1
-                if let account = try context.fetch(request).first {
-                    account.historyId = historyId
-                    try self.coreDataStack.save(context: context)
-                    Log.debug("Successfully updated history ID to: \(historyId)", category: .sync)
-                } else {
-                    Log.warning("No account found to update history ID", category: .sync)
-                }
-            }
-            return true
-        } catch {
-            lastError = error
-            Log.warning("Failed to save history ID (attempt 1): \(error.localizedDescription)", category: .sync)
-        }
-
-        // Retry with backoff
-        for attempt in 2...3 {
-            do {
-                // Exponential backoff: 500ms, 1s
-                let delay = UInt64(250_000_000 * (1 << (attempt - 1)))
-                try await Task.sleep(nanoseconds: delay)
-
-                try await coreDataStack.performBackgroundTask { [weak self] context in
-                    guard let self = self else { return }
-                    let request = Account.fetchRequest()
-                    request.fetchLimit = 1
-                    if let account = try context.fetch(request).first {
-                        account.historyId = historyId
-                        try self.coreDataStack.save(context: context)
-                        Log.debug("Successfully saved history ID on retry attempt \(attempt)", category: .sync)
-                    }
-                }
-                return true
-            } catch {
-                lastError = error
-                Log.warning("Failed to save history ID (attempt \(attempt)): \(error.localizedDescription)", category: .sync)
-            }
-        }
-
-        Log.error("Failed to save history ID after all retries. Last error: \(lastError?.localizedDescription ?? "unknown")", category: .sync)
-        return false
-    }
 }
 
 private extension MessagePersister {

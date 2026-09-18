@@ -133,7 +133,7 @@ Product principles:
 - Avoid introducing view-driven N+1 work when loaders/caches already exist.
 - Repeated HTML sanitization, wrapping, or recovery passes are a regression risk.
 - `MiniEmailWebView` height changes can destabilize scrolling. Keep preview heights predictable.
-- `WebKitPrewarmer` exists because first-use `WKWebView` startup is expensive.
+- `AppPrewarmer` exists because first-use `WKWebView` startup is expensive.
 
 ## UI And UX Guardrails
 
