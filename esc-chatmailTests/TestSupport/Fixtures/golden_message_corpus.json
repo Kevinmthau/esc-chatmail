@@ -416,9 +416,9 @@
     },
     {
       "id": "plain_bare_host_after_signoff_not_preserved_as_name",
-      "notes": "A host name passes the name-shape check but is a contact row, so the sign-off/name preservation must not keep it. Revert-check: PlainTextSignatureRemover.preservingSignOff hasContactInfo guard / web preservingSignOff.",
+      "notes": "A host name passes the name-shape check but is a contact row, so it is not kept as the name; the unpaired closing stays. Revert-check: PlainTextSignatureRemover.preservingSignOff hasContactInfo guard / web preservingSignOff.",
       "input": "See you then.\n\nThanks,\nacmeadvisory.com\nDirect: 415-555-1212\nEmail: jane@acmeadvisory.com",
-      "expected": "See you then."
+      "expected": "See you then.\n\nThanks,"
     },
     {
       "id": "plain_thanks_again_signature_removed",
@@ -455,6 +455,24 @@
       "notes": "An authored list of domains after the sign-off and name is not a signature: bare hosts never anchor. Revert-check: contactSignals > bareHostSignals gate in PlainTextSignatureRemover.removeSignature / web removeSignature.",
       "input": "Here are the three domains I'd like to register.\n\nThanks,\nKevin\n\nKevinsbakery.com\nKevinsbakery.co\nKevinsbakery.shop",
       "expected": "Here are the three domains I'd like to register.\n\nThanks,\nKevin\n\nKevinsbakery.com\n\nKevinsbakery.co\n\nKevinsbakery.shop"
+    },
+    {
+      "id": "plain_unpaired_gratitude_closing_pipe_title_kept",
+      "notes": "A gratitude closing with no preservable name below it stays; the pipe-title signature is removed. Rows start uppercase so unwrapEmailLineBreaks keeps them apart. Revert-check: PlainTextSignatureRemover.preservingSignOff unpaired index+1 / web preservingSignOff.",
+      "input": "Hi Bob,\n\nThank you so much!\nJane Doe | Director of Sales\nAcme Inc.\nPhone: 555-123-4567\nEmail: jane@acme.com",
+      "expected": "Hi Bob,\n\nThank you so much!"
+    },
+    {
+      "id": "plain_gratitude_only_pipe_title_kept",
+      "notes": "A gratitude-only reply must not be wiped: emptying the body used to leak the whole signature through the HTML fallback. Revert-check: PlainTextSignatureRemover.preservingSignOff unpaired index+1 / web preservingSignOff.",
+      "input": "Thank you so much!\nJane Doe | Director of Sales\nAcme Inc.\nPhone: 555-123-4567\nEmail: jane@acme.com",
+      "expected": "Thank you so much!"
+    },
+    {
+      "id": "plain_referral_card_then_own_signature_keeps_card",
+      "notes": "A colon lead-in owns the referral card even when the sender's own signature follows. Labeled Phone/Email rows start uppercase so unwrap keeps them apart. Revert-check: PlainTextSignatureRemover.removeSignature colon lead-in clamp / web removeSignature.",
+      "input": "Here is the contact info for the plumber:\n\nMike Jones\nPhone: 555-123-4567\nEmail: mike@jonesplumbing.com\n\nThanks,\nJohn Smith\nPhone: 555-987-6543\nEmail: john@acme.com",
+      "expected": "Here is the contact info for the plumber:\n\nMike Jones\n\nPhone: 555-123-4567\n\nEmail: mike@jonesplumbing.com\n\nThanks,\nJohn Smith"
     }
   ],
   "htmlToBubbleTextCases": [
@@ -925,6 +943,24 @@
       "notes": "Extensions that double as country codes match the bare-host pattern, so a bare host corroborates a contact block but never anchors one. Revert-check: bareHostContactLineCount guard in EmailDOMQuoteRemover.truncateTrailingContactSignature / web truncateTrailingContactSignature.",
       "inputHTML": "<div>Attached are the two files.</div><div>Best,</div><div>Jane</div><div><br></div><div>Brand.ai</div><div>Logo.ai</div><div>Main.tf</div>",
       "expected": "Attached are the two files.\n\nBest,\nJane\n\nBrand.ai\n\nLogo.ai\n\nMain.tf"
+    },
+    {
+      "id": "html_unpaired_gratitude_closing_pipe_title_kept",
+      "notes": "A gratitude closing with no preservable name below it stays; hoisting signatureStart onto the unpaired closing would delete it and, when it is the whole reply, leak the signature through the cleanup fallback. Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature sign-off hoist / web truncateTrailingContactSignature.",
+      "inputHTML": "<div>Hi Bob,</div><div>Thank you so much!</div><div>Jane Doe | Director of Sales</div><div>Acme Inc.</div><div>415-555-1234</div><div><a href=\"mailto:jane@acme.com\">jane@acme.com</a></div>",
+      "expected": "Hi Bob,\n\nThank you so much!"
+    },
+    {
+      "id": "html_gratitude_only_pipe_title_kept",
+      "notes": "A gratitude-only HTML reply must keep the closing so HTMLCleanupFallback does not fall back to the uncleaned signature. Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature sign-off hoist / web truncateTrailingContactSignature.",
+      "inputHTML": "<div>Thank you so much!</div><div>Jane Doe | Director of Sales</div><div>Acme Inc.</div><div>415-555-1234</div><div><a href=\"mailto:jane@acme.com\">jane@acme.com</a></div>",
+      "expected": "Thank you so much!"
+    },
+    {
+      "id": "html_gratitude_sentence_company_first_signature_kept",
+      "notes": "An authored gratitude sentence stays when the first signature row is a company line rather than a bare name. Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature sign-off hoist / web truncateTrailingContactSignature.",
+      "inputHTML": "<div>Received, I will process the payment today.</div><div>Thank you very much.</div><div>Acme Plumbing LLC</div><div>555-123-4567</div><div><a href=\"mailto:info@acmeplumbing.com\">info@acmeplumbing.com</a></div>",
+      "expected": "Received, I will process the payment today.\n\nThank you very much."
     }
   ],
   "rawSourceHTMLRecoveryCases": [

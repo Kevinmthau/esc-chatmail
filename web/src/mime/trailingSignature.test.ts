@@ -64,7 +64,7 @@ const cases = [
   [
     'role_after_signoff',
     'The contract is ready.\n\nSincerely,\nPartner\njane@example.com\n404-555-0142',
-    'The contract is ready.',
+    'The contract is ready.\n\nSincerely,',
   ],
   [
     'titled_contact_only_document',

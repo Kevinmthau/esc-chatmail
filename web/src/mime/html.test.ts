@@ -421,12 +421,11 @@ describe('signature sub-lines and sign-off policy', () => {
   it.each(['Partner', 'Threash Insurance Agency'])(
     'does not preserve a title/company as a name: %s',
     (name) => {
-      for (const signature of [
-        `<div class="gmail_signature">Best,<br>${name}<br>john@example.test<br>415-555-1212</div>`,
-        `<p>Best,</p><p>${name}</p><p>john@example.test</p><p>415-555-1212</p>`,
-      ]) {
-        expect(cleanedText('<p>Current reply.</p>' + signature)).toBe('Current reply.')
-      }
+      const wrapper = `<div class="gmail_signature">Best,<br>${name}<br>john@example.test<br>415-555-1212</div>`
+      expect(cleanedText('<p>Current reply.</p>' + wrapper)).toBe('Current reply.')
+
+      const heuristic = `<p>Best,</p><p>${name}</p><p>john@example.test</p><p>415-555-1212</p>`
+      expect(cleanedText('<p>Current reply.</p>' + heuristic)).toBe('Current reply.\n\nBest,')
     },
   )
 })
@@ -648,6 +647,33 @@ describe('Front core: bare hosts, owned media, wrapper name preservation, lead-i
       '<div>Attached are the two files.</div><div>Best,</div><div>Jane Doe</div>' +
       '<div><a href="mailto:jane@brand.ai">jane@brand.ai</a></div><div>Brand.ai</div>'
     expect(cleanedText(anchored)).toBe('Attached are the two files.\n\nBest,\nJane Doe')
+  })
+
+  // Revert-check: truncateTrailingContactSignature only hoists signatureStart onto the
+  // sign-off when the following name is actually re-emitted.
+  it('keeps an unpaired gratitude closing above a pipe-title signature', () => {
+    const pipe =
+      '<div>Hi Bob,</div><div>Thank you so much!</div><div>Jane Doe | Director of Sales</div>' +
+      '<div>Acme Inc.</div><div>415-555-1234</div><div><a href="mailto:jane@acme.com">jane@acme.com</a></div>'
+    expect(cleanedText(pipe)).toBe('Hi Bob,\n\nThank you so much!')
+
+    const gratitudeOnly =
+      '<div>Thank you so much!</div><div>Jane Doe | Director of Sales</div>' +
+      '<div>Acme Inc.</div><div>415-555-1234</div><div><a href="mailto:jane@acme.com">jane@acme.com</a></div>'
+    expect(cleanedText(gratitudeOnly)).toBe('Thank you so much!')
+
+    const companyFirst =
+      '<div>Received, I will process the payment today.</div><div>Thank you very much.</div>' +
+      '<div>Acme Plumbing LLC</div><div>555-123-4567</div>' +
+      '<div><a href="mailto:info@acmeplumbing.com">info@acmeplumbing.com</a></div>'
+    expect(cleanedText(companyFirst)).toBe(
+      'Received, I will process the payment today.\n\nThank you very much.',
+    )
+
+    const sharedBlock =
+      '<div>Hi Bob,</div><div>Thank you so much!<br>Jane Doe | Director of Sales<br>Acme Inc.' +
+      '<br>415-555-1234<br><a href="mailto:jane@acme.com">jane@acme.com</a></div>'
+    expect(cleanedText(sharedBlock)).toBe('Hi Bob,\n\nThank you so much!')
   })
 
   // Revert-check: 'div.gmail_signature_prefix' ordered before 'div.gmail_signature' in

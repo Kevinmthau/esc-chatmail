@@ -282,9 +282,10 @@ describe('Front core parity', () => {
   })
 
   // Revert-check: the hasContactInfo guard in signature.ts preservingSignOff.
+  // The host is not a name, but an unpaired closing stays.
   it('does not preserve a bare host after the sign-off as a name', () => {
     const text = 'See you then.\n\nThanks,\nacmeadvisory.com\njane@acmeadvisory.com\n415-555-1212'
-    expect(removeSignature(text)).toBe('See you then.')
+    expect(removeSignature(text)).toBe('See you then.\n\nThanks,')
   })
 
   // Revert-check: isAuthoredLeadInLine veto in removeSignature (Pass 2).
@@ -325,6 +326,46 @@ describe('Front core parity', () => {
     expect(
       removeSignature('Sounds good.\n\nThanks!\nJane Doe\nCEO\njane@example.test\n415-555-1212'),
     ).toBe('Sounds good.\n\nThanks!\nJane Doe')
+  })
+
+  // Revert-check: preservingSignOff returns index + 1 when the line after the closing
+  // is not a name, so the closing stays and only the signature rows below it go.
+  it('keeps an unpaired gratitude closing and drops a pipe-title signature', () => {
+    expect(
+      removeSignature(
+        'Hi Bob,\n\nThank you so much!\nJane Doe | Director of Sales\nAcme Inc.\n555-123-4567\njane@acme.com',
+      ),
+    ).toBe('Hi Bob,\n\nThank you so much!')
+    expect(
+      removeSignature(
+        'Thank you so much!\nJane Doe | Director of Sales\nAcme Inc.\n555-123-4567\njane@acme.com',
+      ),
+    ).toBe('Thank you so much!')
+    expect(
+      removeSignature(
+        'Received, I will process the payment today.\n\nThank you very much.\nAcme Plumbing LLC\n555-123-4567\ninfo@acmeplumbing.com',
+      ),
+    ).toBe('Received, I will process the payment today.\n\nThank you very much.')
+  })
+
+  // Revert-check: the colon lead-in clamp in removeSignature (Pass 2). A referral
+  // card under a colon intro stays when the sender's own signature follows.
+  it('keeps a referral card when the sender signature follows a colon lead-in', () => {
+    const text = [
+      'Here is the contact info for the plumber:',
+      '',
+      'Mike Jones',
+      '555-123-4567',
+      'mike@jonesplumbing.com',
+      '',
+      'Thanks,',
+      'John Smith',
+      '555-987-6543',
+      'john@acme.com',
+    ].join('\n')
+    expect(removeSignature(text)).toBe(
+      'Here is the contact info for the plumber:\n\nMike Jones\n555-123-4567\nmike@jonesplumbing.com\n\nThanks,\nJohn Smith',
+    )
   })
 
   // Revert-check: text.ts SIGN_OFF_WORDS derives from SIGN_OFF_PHRASES (longest first,

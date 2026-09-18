@@ -306,18 +306,33 @@ enum PlainTextSignatureRemover {
             }
         }
 
-        if let startLine = signatureStartLine {
+        if var startLine = signatureStartLine {
             if contactSignals == 0 &&
                 signatureSupportSignals == 0 &&
                 hasBodyLikeContentAfterPotentialSignOff(startingAt: startLine, lines: lines, lastNonEmpty: lastNonEmpty) {
                 return trimmed
             }
-            // Without a closing above it, a block introduced by an authored lead-in
-            // ("Please send the check to:") is the author's content, not a signature.
-            if !sawSignOffLine,
-               let introIndex = previousNonEmptyLineIndex(before: startLine, in: lines),
+            // A colon lead-in owns the block it introduces. If that block is the
+            // author's own signature (it starts at the closing), strip as usual.
+            // If a referral card sits between the lead-in and a later closing,
+            // clamp to the closing so the card stays and only the sender's
+            // signature is removed. Skipping the veto whenever any sign-off
+            // exists used to swallow the card.
+            if let introIndex = previousNonEmptyLineIndex(before: startLine, in: lines),
                SignatureSignOffPolicy.isAuthoredLeadInLine(lines[introIndex]) {
-                return trimmed
+                let firstContentIndex = (startLine...lastNonEmpty).first {
+                    !lines[$0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                if let firstContentIndex,
+                   !isSignOffLineForSignatureContext(lines[firstContentIndex]) {
+                    if let signOffIndex = (startLine...lastNonEmpty).first(where: {
+                        isSignOffLineForSignatureContext(lines[$0])
+                    }) {
+                        startLine = signOffIndex
+                    } else {
+                        return trimmed
+                    }
+                }
             }
             guard signatureLineCount >= 3,
                   // Links or descriptive phone labels can be an authored resource list.
@@ -429,13 +444,16 @@ enum PlainTextSignatureRemover {
             while nameIndex <= end && lines[nameIndex].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 nameIndex += 1
             }
-            guard nameIndex <= end else { return start }
+            // Keep an unpaired closing. Returning `start` would delete "Thanks!" when
+            // the next row is a title, company, host or legal line, wiping a
+            // gratitude-only reply.
+            guard nameIndex <= end else { return index + 1 }
             let name = lines[nameIndex].trimmingCharacters(in: .whitespacesAndNewlines)
             // A host name passes the name-shape check; it is a contact row, not a name.
             if SignatureSignOffPolicy.shouldPreserveNameLine(name), !evaluateLine(name).hasContactInfo {
                 return nameIndex + 1
             }
-            return start
+            return index + 1
         }
         return start
     }

@@ -332,12 +332,28 @@ export function removeSignature(text: string): string {
     ) {
       return trimmed
     }
-    // Without a closing above it, a block introduced by an authored lead-in
-    // ("Please send the check to:") is the author's content, not a signature.
-    if (!sawSignOffLine) {
-      const introIndex = previousNonEmptyLineIndex(signatureStartLine, lines)
-      if (introIndex !== null && isAuthoredLeadInLine(lines[introIndex]!)) {
-        return trimmed
+    // A colon lead-in owns the block it introduces. If that block is the
+    // author's own signature (it starts at the closing), strip as usual.
+    // If a referral card sits between the lead-in and a later closing,
+    // clamp to the closing so the card stays and only the sender's
+    // signature is removed. Skipping the veto whenever any sign-off
+    // exists used to swallow the card.
+    const introIndex = previousNonEmptyLineIndex(signatureStartLine, lines)
+    if (introIndex !== null && isAuthoredLeadInLine(lines[introIndex]!)) {
+      const firstContentIndex = lines
+        .slice(signatureStartLine, lastNonEmpty + 1)
+        .findIndex((line) => line.trim().length > 0)
+      const firstContentAbsolute =
+        firstContentIndex === -1 ? null : signatureStartLine + firstContentIndex
+      if (
+        firstContentAbsolute !== null &&
+        !isSignOffLineForSignatureContext(lines[firstContentAbsolute]!)
+      ) {
+        const relativeSignOff = lines
+          .slice(signatureStartLine, lastNonEmpty + 1)
+          .findIndex((line) => isSignOffLineForSignatureContext(line))
+        if (relativeSignOff === -1) return trimmed
+        signatureStartLine = signatureStartLine + relativeSignOff
       }
     }
     if (
@@ -478,12 +494,15 @@ function preservingSignOff(start: number, end: number, lines: string[]): number 
     if (!isSignOffLineForSignatureContext(lines[index]!)) continue
     let nameIndex = index + 1
     while (nameIndex <= end && lines[nameIndex]!.trim().length === 0) nameIndex++
-    if (nameIndex > end) return start
+    // Keep an unpaired closing. Returning `start` would delete "Thanks!" when
+    // the next row is a title, company, host or legal line, wiping a
+    // gratitude-only reply.
+    if (nameIndex > end) return index + 1
     const name = lines[nameIndex]!.trim()
     // A host name passes the name-shape check; it is a contact row, not a name.
     if (shouldPreserveSignatureNameLine(name) && !evaluateLine(name).hasContactInfo)
       return nameIndex + 1
-    return start
+    return index + 1
   }
   return start
 }

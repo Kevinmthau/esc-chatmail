@@ -425,8 +425,12 @@ extension EmailDOMQuoteRemover {
             if SignatureSignOffPolicy.shouldPreserveNameLine(lines[signatureStart].text),
                !isContactSignatureLine(lines[signatureStart].text), linkedContactEvidence(in: lines[signatureStart]) == nil {
                 preservedHTML = "<div>\(escapedHTML(lines[scanIndex].text))<br>\(escapedHTML(lines[signatureStart].text))</div>"
+                // Only hoist onto the closing when the name is actually re-emitted.
+                // An unpaired closing ("Thank you so much!" above "Name | Title") must
+                // stay in the body; claiming it empties a gratitude-only reply and
+                // HTMLCleanupFallback then leaks the uncleaned signature.
+                signatureStart = scanIndex
             }
-            signatureStart = scanIndex
         }
         // Preserve unmarked media after the signature; only explicit wrappers and
         // signature-owned icons, pixels and small linked logos (`isSignatureOwnedMedia`)

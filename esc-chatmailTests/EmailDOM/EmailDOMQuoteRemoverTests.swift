@@ -1100,11 +1100,14 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
 
     func testSignatureSignOffPolicyExcludesTitlesAndCompanyNames() {
         // Revert-check: the wrapper and inferred block use the same personal-name exclusion.
+        // A sign-off inside a vendor wrapper is removed with the wrapper when the next
+        // row is not a name. On the heuristic route the unpaired closing stays.
         for name in ["Partner", "Threash Insurance Agency"] {
-            for signature in ["<div class='gmail_signature'>Best,<br>\(name)<br>john@example.test<br>415-555-1212</div>", "<p>Best,</p><p>\(name)</p><p>john@example.test</p><p>415-555-1212</p>"] {
-                let html = "<p>Current reply.</p>" + signature
-                XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Current reply.")
-            }
+            let wrapper = "<p>Current reply.</p><div class='gmail_signature'>Best,<br>\(name)<br>john@example.test<br>415-555-1212</div>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: wrapper, mode: .quotedAndSignatures)), "Current reply.")
+
+            let heuristic = "<p>Current reply.</p><p>Best,</p><p>\(name)</p><p>john@example.test</p><p>415-555-1212</p>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: heuristic, mode: .quotedAndSignatures)), "Current reply.\n\nBest,")
         }
     }
 
@@ -1775,6 +1778,38 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         let anchored = "<div>Attached are the two files.</div><div>Best,</div><div>Jane Doe</div>" +
             "<div><a href=\"mailto:jane@brand.ai\">jane@brand.ai</a></div><div>Brand.ai</div>"
         XCTAssertEqual(plainText(try trailingContactHTML(anchored)), "Attached are the two files.\n\nBest,\nJane Doe")
+    }
+
+    // Revert-check: truncateTrailingContactSignature only hoists signatureStart onto the
+    // sign-off when the following name is actually re-emitted.
+    func testTrailingContactSignature_unpairedGratitudeClosingStays() throws {
+        let pipe = """
+        <div>Hi Bob,</div><div>Thank you so much!</div><div>Jane Doe | Director of Sales</div>\
+        <div>Acme Inc.</div><div>415-555-1234</div><div><a href="mailto:jane@acme.com">jane@acme.com</a></div>
+        """
+        XCTAssertEqual(plainText(try trailingContactHTML(pipe)), "Hi Bob,\n\nThank you so much!")
+
+        let gratitudeOnly = """
+        <div>Thank you so much!</div><div>Jane Doe | Director of Sales</div>\
+        <div>Acme Inc.</div><div>415-555-1234</div><div><a href="mailto:jane@acme.com">jane@acme.com</a></div>
+        """
+        XCTAssertEqual(plainText(try trailingContactHTML(gratitudeOnly)), "Thank you so much!")
+
+        let companyFirst = """
+        <div>Received, I will process the payment today.</div><div>Thank you very much.</div>\
+        <div>Acme Plumbing LLC</div><div>555-123-4567</div>\
+        <div><a href="mailto:info@acmeplumbing.com">info@acmeplumbing.com</a></div>
+        """
+        XCTAssertEqual(
+            plainText(try trailingContactHTML(companyFirst)),
+            "Received, I will process the payment today.\n\nThank you very much."
+        )
+
+        let sharedBlock = """
+        <div>Hi Bob,</div><div>Thank you so much!<br>Jane Doe | Director of Sales<br>Acme Inc.\
+        <br>415-555-1234<br><a href="mailto:jane@acme.com">jane@acme.com</a></div>
+        """
+        XCTAssertEqual(plainText(try trailingContactHTML(sharedBlock)), "Hi Bob,\n\nThank you so much!")
     }
 
     // Revert-check: "div.gmail_signature_prefix" ordered before "div.gmail_signature" in
