@@ -8,5 +8,7 @@ green / 90-minute timeout") are no longer true.
 - `decomposition.md`: phase-2 service decomposition campaign.
 - `performance-reliability-plan.md`: the v2 performance/reliability plan behind PR #94.
 - `PR-DESCRIPTION.md`: PR #94's description.
-- `consolidation.md`: phase-3 cross-cutting consolidation campaign. Its ORG2
-  section still records the pending `ProcessedTextCache` disposition.
+- `consolidation.md`: phase-3 cross-cutting consolidation campaign. ORG2's
+  `ProcessedTextCache` retirement later shipped; that section is a snapshot of
+  the investigation, not current status. `ChatPreviewRepair` is the remaining
+  compatibility pass.

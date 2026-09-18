@@ -83,6 +83,3 @@ enum AppPrewarmer {
         }
     }
 }
-
-// Keep old name for compatibility
-typealias WebKitPrewarmer = AppPrewarmer

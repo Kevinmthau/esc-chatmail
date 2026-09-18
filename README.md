@@ -69,7 +69,7 @@ For example:
 
 ### State Management
 
-- Shared app services are provided by `esc-chatmail/Services/Dependencies.swift` through SwiftUI environment objects.
+- Shared app services are provided by `esc-chatmail/Services/Dependencies/Dependencies.swift` through SwiftUI environment objects.
 - Screen state is usually owned by `@StateObject` view models such as `ConversationListViewModel`, `ChatViewModel`, and `ComposeViewModel`.
 - View models compose smaller services instead of pushing business logic into the view layer.
 - `ViewModelTaskManager` is the common helper for cancelling or deduplicating async UI work.

@@ -17,18 +17,18 @@ Find the failing layer quickly, keep preview and full-message behavior separated
 
 1. Classify the surface first.
    - Full message: `esc-chatmail/Views/Chat/HTMLMessageView.swift`, `esc-chatmail/Views/Components/EmailContent/HTMLFullWebView.swift`, `BaseEmailWebView` in `.fullInteractive`
-   - Chat preview: `esc-chatmail/Views/Components/EmailContent/EmailContentSection.swift`, `MiniEmailWebView.swift`, `HTMLPreviewWebView.swift`, `BaseEmailWebView` in preview modes
+   - Chat preview: `esc-chatmail/Views/Components/EmailContent/EmailContentSection.swift`, `MiniEmailWebView.swift`, `BaseEmailWebView` in preview modes
 
 2. Trace content generation separately from WebKit.
-   - Source selection and recovery: `esc-chatmail/Services/HTMLContentLoader.swift`, `HTMLContentHandler.swift`, `HTMLContentRecoveryService`
-   - Sanitization and wrapping: `esc-chatmail/Services/HTMLSanitizerService.swift`, `esc-chatmail/Services/HTMLSanitization/HTMLDisplayWrapper.swift`
+   - Source selection and recovery: `esc-chatmail/Services/HTMLContent/HTMLContentLoader.swift`, `HTMLContentHandler.swift`, `HTMLContentRecoveryService`
+   - Sanitization and wrapping: `esc-chatmail/Services/HTMLSanitization/HTMLSanitizerService.swift`, `esc-chatmail/Services/HTMLSanitization/HTMLDisplayWrapper.swift`
    - Remote image fixes: `esc-chatmail/Services/HTMLSanitization/HTMLRemoteImageAttachmentFallback.swift`
    - Preview routing/model generation: `EmailPreviewClassifier.swift`, `NewsletterPreviewBuilder.swift`, `TransactionalPreviewBuilder.swift`
 
 3. Trace the WKWebView lifecycle.
    - Main view wrapper: `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`
-   - Inline attachment loading: `esc-chatmail/Services/CIDSchemeHandler.swift`
-   - Prewarm behavior: `esc-chatmail/Services/WebKitPrewarmer.swift`
+   - Inline attachment loading: `esc-chatmail/Services/Attachments/CIDSchemeHandler.swift`
+   - Prewarm behavior: `AppPrewarmer` in `esc-chatmail/Services/HTMLContent/WebKitPrewarmer.swift`
    - Check mode-specific settings: JavaScript, data detectors, base URL, user agent, and navigation policy
 
 4. Trace sizing and measurement independently.

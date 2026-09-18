@@ -44,9 +44,6 @@ class MessageProcessor: @unchecked Sendable {
         guard let payload = gmailMessage.payload,
               let headers = payload.headers else { return nil }
 
-        // Debug: dump MIME structure to understand attachment handling
-        dumpMimeStructure(payload, messageId: gmailMessage.id)
-
         var processedMessage = ProcessedMessage()
         processedMessage.id = gmailMessage.id
         processedMessage.gmThreadId = gmailMessage.threadId ?? ""
@@ -1043,26 +1040,6 @@ class MessageProcessor: @unchecked Sendable {
 
         return cleaned
     }
-    
-    /// Debug helper to dump MIME structure
-    private func dumpMimeStructure(_ part: MessagePart, messageId: String, depth: Int = 0) {
-        #if DEBUG
-        let indent = String(repeating: "  ", count: depth)
-        let attachId = part.body?.attachmentId ?? "none"
-        let filename = part.filename ?? ""
-        let size = part.body?.size ?? 0
-        let mime = part.mimeType ?? "unknown"
-        let partCount = part.parts?.count ?? 0
-
-        Log.debug("MIME_DEBUG \(indent)[\(messageId)] mime=\(mime) file='\(filename)' attachId=\(attachId != "none" ? "YES" : "no") size=\(size) parts=\(partCount)", category: .sync)
-
-        if let subparts = part.parts {
-            for subpart in subparts {
-                dumpMimeStructure(subpart, messageId: messageId, depth: depth + 1)
-            }
-        }
-        #endif
-    }
 
     private func checkForAttachments(in part: MessagePart) -> Bool {
         if part.body?.attachmentId != nil {
@@ -1082,15 +1059,6 @@ class MessageProcessor: @unchecked Sendable {
         var seenInlineFingerprints: Set<String> = []
 
         func traverse(_ part: MessagePart) {
-            #if DEBUG
-            // Log parts that have attachment indicators for debugging
-            let hasAttachmentId = part.body?.attachmentId != nil
-            let hasFilename = part.filename.map { !$0.isEmpty } ?? false
-            if hasAttachmentId || hasFilename {
-                Log.debug("ATTACH_DEBUG Part: mime=\(part.mimeType ?? "nil") file=\(part.filename ?? "nil") attachId=\(hasAttachmentId) size=\(part.body?.size ?? 0)", category: .sync)
-            }
-            #endif
-
             let trimmedFilename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let mimeType = part.mimeType ?? "application/octet-stream"
 
@@ -1155,7 +1123,6 @@ class MessageProcessor: @unchecked Sendable {
         if attachments.isEmpty && checkForAttachments(in: part) {
             Log.debug("checkForAttachments=true but extractAttachments=0. Part structure may need review.", category: .sync)
         }
-        Log.debug("ATTACH_DEBUG extractAttachments result: \(attachments.count) attachments found", category: .sync)
         #endif
 
         return attachments

@@ -36,7 +36,7 @@ Produce a concrete ship/no-ship readout for this app with the top risks and the 
    - Attachments, inline `cid:` assets, and remote image fallbacks
 
 4. Review performance-sensitive areas.
-   - WebKit prewarm in `WebKitPrewarmer`
+   - WebKit prewarm in `AppPrewarmer`
    - `ChatMessagesView` scroll task sequencing
    - `MessageBubbleLoader` / `RenderedMessageCache` / participant prefetching
    - Core Data `FetchRequest` batch sizes and prefetching in inbox/chat lists

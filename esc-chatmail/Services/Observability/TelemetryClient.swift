@@ -2,20 +2,10 @@ import Foundation
 
 enum TelemetryEventName: String, Sendable {
     case appLaunch
-    case syncCompleted
-    case syncFailed
-    case rateLimited
-    case webViewRenderFailed
-    case coreDataRecovery
-    case backgroundTaskCompleted
 }
 
 enum TelemetryAttributeKey: String, Sendable {
-    case syncType
     case outcome
-    case errorClass
-    case mailboxSizeBucket
-    case taskType
 }
 
 struct TelemetryEvent: Equatable, Sendable {
