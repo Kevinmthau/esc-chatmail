@@ -333,8 +333,12 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
     }
 
     func testInlineAttachmentStyleImages_returnsWithinBudgetWhenRequestExecutorHangs() async {
+        let hungRequestCompleted = RemoteImageFallbackThreadSafeFlag()
         let service = HTMLRemoteImageAttachmentFallback { _ in
-            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            // Only a sleep that runs to completion counts; a cancelled one is not a finished request.
+            if (try? await Task.sleep(nanoseconds: 60_000_000_000)) != nil {
+                hungRequestCompleted.set()
+            }
             throw URLError(.timedOut)
         }
 
@@ -349,14 +353,26 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(startedAt)
 
         XCTAssertEqual(result, html)
-        XCTAssertLessThan(elapsed, 2.0)
+        // Ordering proof: the call must come back while the request is still hung. Without the
+        // per-URL timeout it returns only after the executor's sleep, which sets the flag first.
+        // Revert-check: dropping the `racedResolvedDataURL` branch from
+        // `HTMLRemoteImageAttachmentFallback.resolvedDataURL` waits out the 60s sleep and fails both
+        // assertions below.
+        XCTAssertFalse(hungRequestCompleted.isSet)
+        // Loose sanity bound that the 0.5s budget, not some longer timer, governs. It was 2.0s,
+        // which left less headroom than the 1.8s of scheduling jitter the parallel-fan-out test
+        // below once hit on CI.
+        XCTAssertLessThan(elapsed, 10.0)
     }
 
     func testInlineAttachmentStyleImages_resolvesCandidateURLsInParallel() async {
-        let perRequestDelayNanoseconds: UInt64 = 400_000_000
+        // Matches the production per-document candidate cap, so every URL can be in flight at once.
+        let expectedFanOut = 6
+        let barrier = ConcurrentRequestBarrier()
         let imageData = onePixelPNG
         let service = HTMLRemoteImageAttachmentFallback { request in
-            try? await Task.sleep(nanoseconds: perRequestDelayNanoseconds)
+            await barrier.enter()
+            await barrier.exit()
 
             let response = HTTPURLResponse(
                 url: request.url ?? URL(string: "https://d3t000000dywoeaq.file.force.com/file-asset-public/Asset")!,
@@ -376,25 +392,36 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
             return (imageData, response)
         }
 
-        let imageTags = (0..<6)
+        let imageTags = (0..<expectedFanOut)
             .map { index in
                 #"<img src="https://d3t000000dywoeaq.file.force.com/file-asset-public/Asset\#(index)?oid=00D3t000000dywO">"#
             }
             .joined()
         let html = "<html><body>\(imageTags)</body></html>"
 
-        let startedAt = Date()
-        let result = await service.inlineAttachmentStyleImages(
-            in: html,
-            senderEmail: "thomas@brambles.golf"
-        )
-        let elapsed = Date().timeIntervalSince(startedAt)
+        let resolution = Task {
+            await service.inlineAttachmentStyleImages(
+                in: html,
+                senderEmail: "thomas@brambles.golf"
+            )
+        }
 
-        XCTAssertEqual(result.components(separatedBy: "src=\"data:image/").count - 1, 6)
+        // Every request parks at the barrier until it is released, so all six HEADs can be in
+        // flight together only if the candidates fan out concurrently. This used to assert a
+        // wall-clock budget over 400ms sleeps (sequential ~4.8s vs parallel ~0.8s), which flaked
+        // at 2.57s against a 2.5s bound on a loaded CI runner.
+        // Revert-check: serialising `HTMLRemoteImageAttachmentFallback.resolveCandidateDataURLs`
+        // (awaiting each `resolvedDataURL` in a plain loop instead of the task group) parks one
+        // HEAD at a time, so this wait times out and the observed maximum is 1.
+        await waitUntil { await barrier.inFlightCount == expectedFanOut }
+        // Released unconditionally so a failed wait still drains instead of hanging the test.
+        await barrier.release()
 
-        // Sequential would take 6 * (HEAD + GET) = 12 * 0.4s = ~4.8s. Parallel pairs HEAD+GET per
-        // URL ≈ 0.8s wall-clock. Allow generous headroom for CI scheduling jitter.
-        XCTAssertLessThan(elapsed, 2.5)
+        let result = await resolution.value
+        let maxInFlightCount = await barrier.maxInFlightCount
+
+        XCTAssertEqual(maxInFlightCount, expectedFanOut)
+        XCTAssertEqual(result.components(separatedBy: "src=\"data:image/").count - 1, expectedFanOut)
     }
 
     func testInlineAttachmentStyleImages_callerTimeoutDoesNotPoisonCache() async {
@@ -499,6 +526,52 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
         XCTAssertEqual(freshLookup.html, html)
         XCTAssertTrue(freshLookup.hasPendingUpdates)
         XCTAssertTrue(freshLookup.needsWarmup)
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 10.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () async -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+}
+
+/// Parks every request until `release()` and records the peak number in flight at once, so a
+/// parallelism assertion rests on observed overlap rather than on wall-clock timing.
+private actor ConcurrentRequestBarrier {
+    private var isReleased = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var inFlightCount = 0
+    private(set) var maxInFlightCount = 0
+
+    func enter() async {
+        inFlightCount += 1
+        maxInFlightCount = max(maxInFlightCount, inFlightCount)
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func exit() {
+        inFlightCount -= 1
+    }
+
+    func release() {
+        isReleased = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
     }
 }
 
