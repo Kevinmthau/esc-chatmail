@@ -1621,6 +1621,170 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(result.contains("Quote"))
     }
 
+    // MARK: - Front core: bare hosts, owned media, wrapper name preservation, lead-in veto
+
+    // Revert-check: EmailDOMQuoteRemover.signatureWrapperSelectors "div.front-signature"
+    // and removeSignatureWrappers' name preservation after an outside sign-off.
+    func testRemoveQuotes_signatureMode_frontWrapperRemovedAndNameAfterOutsideSignOffKept() {
+        let cleaned = EmailDOMQuoteRemover.removeQuotes(from: FrontSignatureFixture.html, mode: .quotedAndSignatures)
+        let text = plainText(cleaned)
+        XCTAssertEqual(text, "Hi Jordan,\n\nJust so I'm clear, would you like me to go ahead and pay the balance?\n\nThanks so much,\n\nAvery Fenwick")
+        XCTAssertFalse(cleaned?.contains("<table") ?? true, "the wrapper route owns the logo and icon markup")
+        XCTAssertFalse(cleaned?.contains("front-blockquote") ?? true)
+    }
+
+    // Revert-check: URLPatterns.bareHostLine (the scan stops at "acmeadvisory.com" without it),
+    // SignaturePatterns.signOffPhrases "thanks so much" (nothing anchors the pair without it), and
+    // EmailDOMQuoteRemover.isSignatureOwnedMedia (the logo cell inside the widened range vetoes
+    // removal without it). Each alone leaves the card in the bubble.
+    func testRemoveQuotes_signatureMode_frontShapeWithoutClassTokenUsesHeuristicRoute() {
+        let cleaned = EmailDOMQuoteRemover.removeQuotes(from: FrontSignatureFixture.tokenFreeHTML, mode: .quotedAndSignatures)
+        let text = plainText(cleaned)
+        // The heuristic route re-emits the pair as one <div> with a <br>; the bubble pipeline's
+        // unwrap turns that into the same two-paragraph text the wrapper route produces.
+        XCTAssertEqual(text, "Hi Jordan,\n\nJust so I'm clear, would you like me to go ahead and pay the balance?\n\nThanks so much,\nAvery Fenwick")
+        for removed in ["Associate Relationship Manager", "acmeadvisory.com", "Direct:", "Los Angeles"] {
+            XCTAssertFalse(text.contains(removed), text)
+        }
+    }
+
+    // Revert-check: EmailDOMQuoteRemover.isSignatureOwnedMedia rules: aria-hidden, 1x1, width-only
+    // <= 48, sized image-only social profile link <= 64 (never a post/video path, never unsized),
+    // sized image-only https link with every declared side <= 100.
+    func testIsSignatureOwnedMedia_ownsIconsPixelsAndSmallLinkedLogosOnly() throws {
+        let html = """
+        <div>
+        <img id="pixel" src="https://t.example/p.gif" aria-hidden="true">
+        <img id="onebyone" src="https://t.example/p.gif" width="1" height="1">
+        <img id="widthonly" src="https://cdn.example/i.png" width="20">
+        <img id="styled" src="https://cdn.example/i.png" style="width: 16px; height: 16px">
+        <img id="tall" src="https://cdn.example/i.png" width="48" height="49">
+        <img id="heightonly" src="https://cdn.example/i.png" height="20">
+        <a href="https://www.linkedin.com/company/acme"><img id="social" src="https://cdn.example/in.png" width="24"></a>
+        <a href="https://www.linkedin.com/in/janedoe"><img id="socialunsized" src="cid:screenshot"></a>
+        <a href="https://www.linkedin.com/company/acme"><img id="socialwide" src="https://cdn.example/x.png" width="80"></a>
+        <a href="https://www.linkedin.com/posts/acme_123"><img id="socialpost" src="cid:damage" width="600"></a>
+        <a href="https://www.linkedin.com/posts/acme_123"><img id="socialpostsmall" src="https://cdn.example/p.png" width="80" height="80"></a>
+        <a href="https://twitter.com/acme/status/1"><img id="tweet" src="cid:shot"></a>
+        <a href="https://www.youtube.com/watch?v=1"><img id="video" src="cid:thumb" width="320" height="180"></a>
+        <a href="https://www.youtube.com/watch?v=1"><img id="badge" src="https://cdn.example/yt.png" width="60" height="60"></a>
+        <a href="https://signatures.example/acme"><img id="logo" src="https://cdn.example/logo.png" height="70"></a>
+        <a href="https://docs.example/plan"><img id="photo" src="https://cdn.example/photo.jpg" width="1200" height="800"></a>
+        <a href="https://docs.example/plan"><img id="undimensioned" src="https://cdn.example/photo.jpg"></a>
+        <a href="https://twitter.com/acme">Follow us <img id="labeled" src="https://cdn.example/tw.png"></a>
+        <picture id="picture"><img src="https://cdn.example/big.jpg" width="20" height="20"></picture>
+        <img id="alt" src="cid:floorplan" alt="Company logo">
+        </div>
+        """
+        let document = try SwiftSoup.parse(html)
+        func owned(_ id: String) throws -> Bool {
+            EmailDOMQuoteRemover.isSignatureOwnedMedia(try XCTUnwrap(document.getElementById(id)))
+        }
+        for id in ["pixel", "onebyone", "widthonly", "styled", "social", "logo", "badge"] {
+            XCTAssertTrue(try owned(id), id)
+        }
+        for id in ["tall", "heightonly", "socialunsized", "socialwide", "socialpost", "socialpostsmall", "tweet", "video", "photo",
+                   "undimensioned", "labeled", "picture", "alt"] {
+            XCTAssertFalse(try owned(id), id)
+        }
+    }
+
+    // Revert-check: EmailDOMQuoteRemover.isSignatureOwnedMedia inside containsSignatureTailMedia.
+    func testInferredSignatureRemovesBlockWithTrailingSocialIcons() throws {
+        let html = """
+        <div>Current reply.</div>
+        <div>Best,<br>Jane Doe<br>Partner<br><a href="mailto:jane@example.test">jane@example.test</a><br>415-555-1212<br>
+        <a href="https://www.linkedin.com/company/acme"><img src="https://cdn.example/in.png" width="20" height="20" alt="-"></a>&nbsp;
+        <a href="https://twitter.com/acme"><img src="https://cdn.example/tw.png" width="20" height="20" alt="-"></a></div>
+        """
+        let cleaned = try trailingContactHTML(html)
+        XCTAssertEqual(plainText(cleaned), "Current reply.\n\nBest,\nJane Doe", cleaned)
+        XCTAssertFalse(cleaned.contains("<img"), cleaned)
+    }
+
+    // HONEST SCOPE: passes at HEAD. A dimensioned screenshot linked to a tweet is authored media:
+    // it stays, and so does the media-before-signature prefix handling that keeps it in place. The
+    // guard this pins is that isSignatureOwnedMedia's social rule never owns a content-path link.
+    func testInferredSignaturePreservesSocialLinkedScreenshotBeforeSignOff() throws {
+        let html = """
+        <div>Look at this.<br><a href="https://twitter.com/acme/status/123"><img src="cid:shot" width="600" height="400"></a><br>
+        Best,<br>Jane Doe<br>Partner<br><a href="mailto:jane@example.test">jane@example.test</a><br>415-555-1212</div>
+        """
+        let cleaned = try trailingContactHTML(html)
+        XCTAssertTrue(cleaned.contains("cid:shot"), cleaned)
+        XCTAssertEqual(plainText(cleaned), "Look at this.\n\nBest,\nJane Doe", cleaned)
+    }
+
+    // Revert-check: URLPatterns.bareHostLine allowlist (every label two characters, explicit TLDs).
+    func testIsTrailingSignatureContactLine_bareHostAllowlist() {
+        for host in ["acmeadvisory.com", "www.nordvik.no", "nordvik.no", "Web: acme.co.uk", "acme.io/", "logo.ai", "NORDVIK.NO"] {
+            XCTAssertTrue(EmailDOMQuoteRemover.isTrailingSignatureContactLine(host), host)
+            XCTAssertTrue(EmailDOMQuoteRemover.isContactSignatureLine(host), host)
+        }
+        for notHost in ["main.cc", "README.md", "script.py", "photos.heic", "video.mov", "M.Sc", "e.g.", "Ph.D.",
+                        "acme.com is down", "See acme.com", "Nordvik AS", "a.co", "acme.com."] {
+            XCTAssertFalse(EmailDOMQuoteRemover.isTrailingSignatureContactLine(notHost), notHost)
+        }
+    }
+
+    // Revert-check: the lowercase multi-word tail guard in isLikelyCombinedSignOffAndNameLine. "Best of
+    // luck," is a closing sentence, not "Best" plus a person called "of luck"; without a recognised
+    // closing the whole wrapper goes, instead of keeping the closing and dropping the name. Caseless
+    // scripts and a lone lowercase name carry no such signal and stay preserved.
+    func testRemoveQuotes_signatureMode_combinedSignOffRequiresCapitalizedName() {
+        let html = """
+        <p>Body.</p>
+        <div class="gmail_signature">Best of luck,<br>Avery Fenwick<br>415-555-1212</div>
+        """
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Body.")
+
+        for kept in ["Regards, 田中", "cheers, kevin"] {
+            let wrapper = "<p>Body.</p><div class=\"gmail_signature\">\(kept)<br>Partner<br>415-555-1212</div>"
+            XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: wrapper, mode: .quotedAndSignatures)), "Body.\n\n\(kept)", kept)
+        }
+
+        let combined = """
+        <p>Body.</p>
+        <div class="gmail_signature">Thanks so much, Avery Fenwick<br>Partner<br>415-555-1212</div>
+        """
+        XCTAssertEqual(
+            plainText(EmailDOMQuoteRemover.removeQuotes(from: combined, mode: .quotedAndSignatures)),
+            "Body.\n\nThanks so much, Avery Fenwick"
+        )
+    }
+
+    // Revert-check: SignatureSignOffPolicy.isAuthoredLeadInLine replaces the keyword-only intro
+    // check; a colon lead-in with no contact keyword and a strong title below it was removed before.
+    func testTrailingContactSignature_colonLeadInPreservesReferralCard() throws {
+        let html = """
+        <div>You can reach the plumber here:</div><div>Jane Doe</div><div>Account Manager</div><div>Acme Plumbing</div>
+        <div><a href="mailto:jane@acmeplumbing.test">jane@acmeplumbing.test</a></div><div>404-555-0142</div>
+        """
+        XCTAssertEqual(plainText(try trailingContactHTML(html)), plainText(html))
+        let keyworded = html.replacingOccurrences(of: "You can reach the plumber here:", with: "Here are the reviewer contacts:")
+        XCTAssertEqual(plainText(try trailingContactHTML(keyworded)), plainText(keyworded))
+    }
+
+    // Revert-check: the bareHostContactLineCount guard in truncateTrailingContactSignature. Extensions
+    // that double as country codes ("Logo.ai", "main.tf") match bareHostLine, so a bare host may
+    // corroborate a block that has a real contact row but never anchor one by itself.
+    func testTrailingContactSignature_fileListAfterSignOffIsNotAContactBlock() throws {
+        let files = "<div>Attached are the two files.</div><div>Best,</div><div>Jane</div><div><br></div><div>Brand.ai</div><div>Logo.ai</div><div>Main.tf</div>"
+        XCTAssertEqual(plainText(try trailingContactHTML(files)), plainText(files))
+
+        let anchored = "<div>Attached are the two files.</div><div>Best,</div><div>Jane Doe</div>" +
+            "<div><a href=\"mailto:jane@brand.ai\">jane@brand.ai</a></div><div>Brand.ai</div>"
+        XCTAssertEqual(plainText(try trailingContactHTML(anchored)), "Attached are the two files.\n\nBest,\nJane Doe")
+    }
+
+    // Revert-check: "div.gmail_signature_prefix" ordered before "div.gmail_signature" in
+    // signatureWrapperSelectors, so the wrapper's previous visible line is the sign-off, not "--".
+    func testRemoveQuotes_signatureMode_gmailPrefixDoesNotHideOutsideSignOffFromNamePreservation() {
+        let html = "<div>Sounds good.</div><div>Thanks,</div><div class=\"gmail_signature_prefix\">-- </div>" +
+            "<div class=\"gmail_signature\"><div>Jane Doe</div><div>CEO</div><div><a href=\"mailto:jane@example.test\">jane@example.test</a></div></div>"
+        XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Sounds good.\n\nThanks,\n\nJane Doe")
+    }
+
     // MARK: - Idempotence
 
     func testRemoveQuotes_isIdempotent() {

@@ -4,6 +4,7 @@
 
 import { collapsedElementText, paragraphAwareText, parseHtmlDocument } from './htmlText'
 import {
+  BARE_HOST_LINE_PATTERN,
   EMAIL_ADDRESS_PATTERN,
   FROM_HEADER_PREFIXES,
   SENT_OR_DATE_HEADER_PREFIXES,
@@ -14,6 +15,7 @@ import {
   ADDRESS_KEYWORD_PATTERN,
   SIGN_OFF_PHRASES,
   DESCRIPTIVE_PHONE_LINE_PATTERN,
+  isAuthoredLeadInLine,
   isStrongSignatureSupportLine,
   shouldPreserveSignatureNameLine,
 } from './patterns'
@@ -1189,8 +1191,10 @@ function textRunForTruncation(offset: number, runs: TextRun[]): TextRun | null {
 // MARK: - Signatures
 
 const SIGNATURE_WRAPPER_SELECTORS: string[] = [
-  'div.gmail_signature',
+  // The "-- " prefix is removed first so the wrapper's previous visible line is
+  // the author's sign-off, not the delimiter (see preservedNameAfterOutsideSignOffHTML).
   'div.gmail_signature_prefix',
+  'div.gmail_signature',
   'div[data-smartmail="gmail_signature"]',
   'div[id*="ms-outlook-mobile-signature"]',
   'div[class*="ms-outlook-mobile-signature"]',
@@ -1198,6 +1202,10 @@ const SIGNATURE_WRAPPER_SELECTORS: string[] = [
   'div[id="Signature"]',
   'div.signature',
   'div[class*="moz-signature"]',
+  // Front (frontapp.com composer); class observed in a raw message fixture.
+  // Explicit because the footer pass's class-token rule sits behind the
+  // majority-text guard, which keeps a long vendor signature on a short reply.
+  'div.front-signature',
 ]
 
 const SIGN_OFF_PHRASES_FOR_PREFIX_MATCHING = [...SIGN_OFF_PHRASES].sort((a, b) => {
@@ -1208,7 +1216,10 @@ const SIGN_OFF_PHRASES_FOR_PREFIX_MATCHING = [...SIGN_OFF_PHRASES].sort((a, b) =
 function removeSignatureWrappers(document: Document): void {
   for (const selector of SIGNATURE_WRAPPER_SELECTORS) {
     for (const element of Array.from(document.querySelectorAll(selector))) {
-      const replacement = preservedSignOffHTML(element)
+      let replacement = preservedSignOffHTML(element)
+      if (replacement.length === 0) {
+        replacement = preservedNameAfterOutsideSignOffHTML(element, document)
+      }
       if (replacement.length === 0) {
         element.remove()
       } else {
@@ -1217,6 +1228,32 @@ function removeSignatureWrappers(document: Document): void {
       }
     }
   }
+}
+
+/**
+ * Vendor wrappers often start at the name while the author typed the sign-off
+ * just above them ("Thanks so much," then a wrapper opening with "Avery Fenwick").
+ * Keep that name so the wrapper route matches the heuristic route, which
+ * preserves the sign-off/name pair. Contact rows and linked contacts are not names.
+ * The name test is the shared `shouldPreserveSignatureNameLine`, so a company line
+ * without a legal-form keyword passes here exactly as it does on the heuristic
+ * route; tightening that belongs in the policy, for both routes at once.
+ */
+function preservedNameAfterOutsideSignOffHTML(element: Element, document: Document): string {
+  const body = document.body
+  if (!body) return ''
+  const firstLine = inlineHeaderLines(element, true).find((line) => line.text.length > 0)
+  if (
+    firstLine === undefined ||
+    !shouldPreserveSignatureNameLine(firstLine.text) ||
+    isContactSignatureLine(firstLine.text) ||
+    trailingSignatureLinkContact(firstLine) !== null
+  ) {
+    return ''
+  }
+  const previousLine = visibleLineElements(body, false, element).at(-1)
+  if (previousLine === undefined || !isLikelySignOffLine(previousLine.text)) return ''
+  return `<div>${escapedHTML(firstLine.text)}</div>`
 }
 
 function preservedSignOffHTML(element: Element): string {
@@ -1262,6 +1299,18 @@ function isLikelyCombinedSignOffAndNameLine(line: string): boolean {
       const prefix = signOff + separator
       if (!lowercased.startsWith(prefix)) continue
       const remainder = trimmed.slice(prefix.length).trim()
+      // "Best of luck," is not "Best" + a name called "of luck": a lowercase-initial
+      // multi-word tail is the rest of a closing sentence. Caseless scripts (CJK,
+      // Hangul, Arabic) have no case and stay eligible, as does a lone lowercase
+      // name ("cheers, kevin"); lowercase particles ("van der Berg") are the
+      // accepted residual.
+      const words = remainder.split(/\s+/).filter(Boolean)
+      const firstCharacter = [...remainder][0]
+      const startsLowercase =
+        firstCharacter !== undefined &&
+        firstCharacter === firstCharacter.toLowerCase() &&
+        firstCharacter !== firstCharacter.toUpperCase()
+      if (startsLowercase && words.length > 1) return false
       return shouldPreserveSignatureNameLine(remainder)
     }
   }
@@ -1333,8 +1382,6 @@ const SIGNATURE_BARE_HOURS_LABEL_PATTERN = /^after[ -]hours\s*:$/i
 const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
   /(?:\s*[|•│┃¦]\s*|\s+)(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)/gi
 
-const CONTACT_LIST_INTRO_KEYWORDS = ['contact', 'email', 'reviewer', 'recipient']
-
 interface SignatureLine extends VisibleLineElement {
   links: VisibleLineLink[]
   nonLinkText: string
@@ -1405,6 +1452,7 @@ function truncateTrailingContactSignature(document: Document): void {
   let strongSupportLineCount = 0
   let signatureSupportLineCount = 0
   let nonEmailContactLineCount = 0
+  let bareHostContactLineCount = 0
   let sawSignOffBeforeSignature = false
   let precedingBodyLine: string | null = null
   let scanIndex = lastContact
@@ -1444,11 +1492,12 @@ function truncateTrailingContactSignature(document: Document): void {
         break
       }
       contactLineCount += 1
-      if (
-        hasNonEmailContactSignal(text) ||
-        trailingSignatureLinkContact(lines[scanIndex]!) === 'phone'
-      ) {
+      const linkedContact = trailingSignatureLinkContact(lines[scanIndex]!)
+      if (hasNonEmailContactSignal(text) || linkedContact === 'phone') {
         nonEmailContactLineCount += 1
+      }
+      if (linkedContact === null && BARE_HOST_LINE_PATTERN.test(text)) {
+        bareHostContactLineCount += 1
       }
       signatureStart = scanIndex
       scanIndex -= 1
@@ -1479,7 +1528,16 @@ function truncateTrailingContactSignature(document: Document): void {
     scanIndex -= 1
   }
 
-  if (contactLineCount < 2 || isSignatureProductList(lines[signatureStart]!.text)) return
+  // A whole-line host corroborates a contact block but never anchors one: a list
+  // of filenames whose extensions double as country codes ("main.tf", "Logo.ai")
+  // must not read as two contact rows.
+  if (
+    contactLineCount < 2 ||
+    contactLineCount <= bareHostContactLineCount ||
+    isSignatureProductList(lines[signatureStart]!.text)
+  ) {
+    return
+  }
 
   const candidateLines = lines.slice(signatureStart, lastNonEmpty + 1)
   if (hasRepeatedPersonContactRecords(candidateLines)) return
@@ -1497,7 +1555,7 @@ function truncateTrailingContactSignature(document: Document): void {
     if (lines[i]!.text.length > 0) nonEmptyRemovalCount += 1
   }
   if (nonEmptyRemovalCount < 3) return
-  if (precedingBodyLine !== null && isContactListIntroLine(precedingBodyLine)) {
+  if (precedingBodyLine !== null && isAuthoredLeadInLine(precedingBodyLine)) {
     return
   }
   const hasStrongSignal = sawSignOffBeforeSignature || strongSupportLineCount > 0
@@ -1525,7 +1583,9 @@ function truncateTrailingContactSignature(document: Document): void {
     }
     signatureStart = scanIndex
   }
-  // Preserve unmarked media after the signature; only explicit wrappers own their images.
+  // Preserve unmarked media after the signature; only explicit wrappers and
+  // signature-owned icons, pixels and small linked logos (`isSignatureOwnedMedia`)
+  // own their images.
   removeSignatureLines(lines, signatureStart, lastNonEmpty, preservedHTML)
 }
 
@@ -1804,6 +1864,7 @@ function isTrailingSignatureContact(line: SignatureLine): boolean {
 // Contact tokens may have labels or a name, but must not swallow an authored instruction.
 // Keep the broader contact predicate unchanged for quote/header detection.
 export function isTrailingSignatureContactLine(text: string): boolean {
+  if (BARE_HOST_LINE_PATTERN.test(text)) return true
   if (!isContactSignatureLine(text)) return false
   const hasLink = EMAIL_ADDRESS_PATTERN.test(text) || WEB_URL_PATTERN.test(text)
   if (!hasLink) {
@@ -1828,7 +1889,8 @@ export function isTrailingSignatureContactLine(text: string): boolean {
       looksLikeSignatureNameSupportLine(label) ||
       isSignaturePhoneLine(label) ||
       SIGNATURE_CITY_STATE_ZIP_PATTERN.test(label) ||
-      isSignaturePostalLine(label)
+      isSignaturePostalLine(label) ||
+      BARE_HOST_LINE_PATTERN.test(label)
     )
   })
 }
@@ -1841,12 +1903,84 @@ function isSignaturePostalLine(text: string): boolean {
   )
 }
 
+const SIGNATURE_SOCIAL_HOST_PATTERN =
+  /^https?:\/\/(?:[a-z0-9-]+\.)*(?:twitter\.com|x\.com|linkedin\.com|facebook\.com|fb\.com|instagram\.com|tiktok\.com|threads\.net|bsky\.app|pinterest\.com)(?:[/?#]|$)/i
+
+/** A link into a post, video or photo is shared content, not a profile badge. */
+const SIGNATURE_SOCIAL_CONTENT_PATH_PATTERN =
+  /^https?:\/\/[^/?#]+(?:\/[^/?#]*)*?\/(?:status|posts|pulse|feed|p|reel|reels|video|videos|watch|shorts|photo|photos|events|groups)(?:[/?#]|$)/i
+
+const SIGNATURE_HTTP_TARGET_PATTERN = /^https?:\/\//i
+
+/**
+ * Social icons, tracking pixels, small badges and a small linked logo belong to the
+ * signature and must not anchor authored content the way an inline photo does.
+ * `<img>` only, never by `alt` text (authored images carry arbitrary alt), never
+ * `<picture>`/`<svg>`/video/object or CSS backgrounds. Width-only sizing counts
+ * (vendor icons often declare width alone); height-only never does.
+ */
+export function isSignatureOwnedMedia(element: Element): boolean {
+  if (tagName(element) !== 'img') return false
+  if ((element.getAttribute('aria-hidden') ?? '').toLowerCase() === 'true') return true
+  const width = declaredPixelDimension(element, 'width')
+  const height = declaredPixelDimension(element, 'height')
+  if (width !== null && height !== null && width <= 1 && height <= 1) return true
+  if (width !== null && width <= 48 && (height === null || height <= 48)) return true
+  // Linked media needs a declared size: an unsized screenshot linked to someone's
+  // profile is authored content, and vendor icons declare their size for Outlook.
+  const declared = [width, height].filter((value): value is number => value !== null)
+  if (declared.length === 0) return false
+  const href = imageOnlyLinkAncestor(element)?.getAttribute('href')
+  if (href === null || href === undefined) return false
+  if (SIGNATURE_SOCIAL_HOST_PATTERN.test(href)) {
+    // A link into a post, video or photo is shared content, not a profile badge.
+    if (SIGNATURE_SOCIAL_CONTENT_PATH_PATTERN.test(href)) return false
+    return declared.every((value) => value <= 64)
+  }
+  return SIGNATURE_HTTP_TARGET_PATTERN.test(href) && declared.every((value) => value <= 100)
+}
+
+/** The nearest `<a href>` ancestor whose only visible content is the image. */
+function imageOnlyLinkAncestor(element: Element): Element | null {
+  let ancestor = element.parentElement
+  while (ancestor && tagName(ancestor) !== 'body') {
+    if (tagName(ancestor) === 'a' && ancestor.hasAttribute('href')) {
+      const text = (ancestor.textContent ?? '').replace(/\u00A0/g, ' ').trim()
+      return text.length === 0 ? ancestor : null
+    }
+    ancestor = ancestor.parentElement
+  }
+  return null
+}
+
+/** Declared pixel size from the attribute ("20", "20px") or an inline style. */
+function declaredPixelDimension(element: Element, name: 'width' | 'height'): number | null {
+  const attribute = (element.getAttribute(name) ?? '').toLowerCase().trim()
+  const attributeMatch = /^(\d+)(?:px)?$/.exec(attribute)
+  if (attributeMatch) return Number.parseInt(attributeMatch[1]!, 10)
+  const style = (element.getAttribute('style') ?? '').toLowerCase()
+  const styleMatch = new RegExp(String.raw`(?:^|;)\s*${name}\s*:\s*(\d+)px`).exec(style)
+  if (!styleMatch) return null
+  return Number.parseInt(styleMatch[1]!, 10)
+}
+
 function containsSignatureTailMedia(element: Element): boolean {
   const mediaSelector =
     'img, picture, svg, video, audio, object, embed, iframe, [src], [srcset], [background], [poster]'
-  if (element.matches(mediaSelector) || element.querySelector(mediaSelector)) return true
-  // CID references also include linked attachments (href/xlink:href).
-  if (/cid:/i.test(element.outerHTML)) return true
+  const media = [
+    ...(element.matches(mediaSelector) ? [element] : []),
+    ...element.querySelectorAll(mediaSelector),
+  ]
+  if (media.some((candidate) => !isSignatureOwnedMedia(candidate))) return true
+  // CID references also include linked attachments (href/xlink:href). Walk the
+  // attributes rather than the serialized HTML so Outlook's VML conditional
+  // comments (<v:imagedata src="cid:…"> inside <!--[if gte vml 1]-->) do not veto.
+  // happy-dom cannot select `[xlink\:href]`, so read the attribute directly.
+  for (const candidate of [element, ...element.querySelectorAll('*')]) {
+    for (const attributeName of ['href', 'xlink:href']) {
+      if (/cid:/i.test(candidate.getAttribute(attributeName) ?? '')) return true
+    }
+  }
   return [element, ...element.querySelectorAll('[style]')].some((candidate) =>
     /url\s*\(/i.test(candidate.getAttribute('style') ?? ''),
   )
@@ -1910,6 +2044,7 @@ export function isContactSignatureLine(text: string): boolean {
   if (text.length === 0) return false
   if (EMAIL_ADDRESS_PATTERN.test(text)) return true
   if (WEB_URL_PATTERN.test(text)) return true
+  if (BARE_HOST_LINE_PATTERN.test(text)) return true
   if (isSignaturePhoneLine(text)) return true
   if (ADDRESS_KEYWORD_PATTERN.test(text)) return true
   if (SIGNATURE_CITY_STATE_ZIP_PATTERN.test(text)) return true
@@ -1922,7 +2057,7 @@ function containsEmailAddress(text: string): boolean {
 }
 
 function hasNonEmailContactSignal(text: string): boolean {
-  if (WEB_URL_PATTERN.test(text)) return true
+  if (WEB_URL_PATTERN.test(text) || BARE_HOST_LINE_PATTERN.test(text)) return true
   if (isSignaturePhoneLine(text)) return true
   if (ADDRESS_KEYWORD_PATTERN.test(text)) return true
   if (SIGNATURE_CITY_STATE_ZIP_PATTERN.test(text)) return true
@@ -2096,11 +2231,6 @@ export function isSignatureSupportLine(text: string): boolean {
     return true
   }
   return false
-}
-
-function isContactListIntroLine(text: string): boolean {
-  const lowercased = text.trim().toLowerCase()
-  return lowercased.endsWith(':') && CONTACT_LIST_INTRO_KEYWORDS.some((k) => lowercased.includes(k))
 }
 
 function looksLikeSignatureNameSupportLine(text: string): boolean {

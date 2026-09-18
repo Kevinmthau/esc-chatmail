@@ -3,8 +3,9 @@ import SwiftSoup
 
 // MARK: - Footer containers (newsletter unsubscribe, social icons)
 //
-// Removes whole footer/social/unsubscribe blocks by class/id selector. Only
-// runs in `.quotedAndSignatures` mode.
+// Removes whole footer/social/unsubscribe blocks by class/id selector. Runs in
+// `.quotedAndSignatures` and in the `.quotedContainersOnly` rescue (see
+// `EmailDOMQuoteRemover.removeQuotes`).
 extension EmailDOMQuoteRemover {
 
     // Substring matching is deliberate for these: token-anchoring would

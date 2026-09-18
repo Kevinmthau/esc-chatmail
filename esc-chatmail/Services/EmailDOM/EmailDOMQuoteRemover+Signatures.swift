@@ -16,22 +16,31 @@ extension EmailDOMQuoteRemover {
     // MARK: - Signature wrappers
 
     private static let signatureWrapperSelectors: [String] = [
-        "div.gmail_signature",
+        // The "-- " prefix is removed first so the wrapper's previous visible line is
+        // the author's sign-off, not the delimiter (see preservedNameAfterOutsideSignOffHTML).
         "div.gmail_signature_prefix",
+        "div.gmail_signature",
         "div[data-smartmail=gmail_signature]",
         "div[id*=ms-outlook-mobile-signature]",
         "div[class*=ms-outlook-mobile-signature]",
         "div.ms-outlook-signature",
         "div[id=Signature]",
         "div.signature",
-        "div[class*=moz-signature]"
+        "div[class*=moz-signature]",
+        // Front (frontapp.com composer); class observed in a raw message fixture.
+        // Explicit because the footer pass's class-token rule sits behind the
+        // majority-text guard, which keeps a long vendor signature on a short reply.
+        "div.front-signature"
     ]
 
     static func removeSignatureWrappers(in document: Document) throws {
         for selector in signatureWrapperSelectors {
             let elements = try document.select(selector)
             for element in elements.array() {
-                let replacement = preservedSignOffHTML(fromSignatureElement: element)
+                var replacement = preservedSignOffHTML(fromSignatureElement: element)
+                if replacement.isEmpty {
+                    replacement = preservedNameAfterOutsideSignOffHTML(forSignatureElement: element, in: document)
+                }
                 if replacement.isEmpty {
                     try element.remove()
                 } else {
@@ -40,6 +49,27 @@ extension EmailDOMQuoteRemover {
                 }
             }
         }
+    }
+
+    /// Vendor wrappers often start at the name while the author typed the sign-off
+    /// just above them ("Thanks so much," then a wrapper opening with "Avery Fenwick").
+    /// Keep that name so the wrapper route matches the heuristic route, which
+    /// preserves the sign-off/name pair. Contact rows and linked contacts are not names.
+    /// The name test is the shared `SignatureSignOffPolicy.shouldPreserveNameLine`, so a
+    /// company line without a legal-form keyword passes here exactly as it does on the
+    /// heuristic route; tightening that belongs in the policy, for both routes at once.
+    private static func preservedNameAfterOutsideSignOffHTML(
+        forSignatureElement element: Element,
+        in document: Document
+    ) -> String {
+        guard let body = document.body(),
+              let firstLine = inlineHeaderLines(in: element, splitBlockLines: true).first(where: { !$0.text.isEmpty }),
+              SignatureSignOffPolicy.shouldPreserveNameLine(firstLine.text),
+              !isContactSignatureLine(firstLine.text),
+              linkedContactEvidence(links: firstLine.links, nonLinkText: firstLine.nonLinkText) == nil,
+              let previousLine = visibleLineElements(in: body, includingEmpty: false, stoppingBefore: element).last,
+              isLikelySignOffLine(previousLine.text) else { return "" }
+        return "<div>\(escapedHTML(firstLine.text))</div>"
     }
 
     private static func preservedSignOffHTML(fromSignatureElement element: Element) -> String {
@@ -85,6 +115,13 @@ extension EmailDOMQuoteRemover {
                 let prefix = signOff + separator
                 guard lowercased.hasPrefix(prefix) else { continue }
                 let remainder = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                // "Best of luck," is not "Best" + a name called "of luck": a lowercase-initial
+                // multi-word tail is the rest of a closing sentence. Caseless scripts (CJK,
+                // Hangul, Arabic) have no case and stay eligible, as does a lone lowercase
+                // name ("cheers, kevin"); lowercase particles ("van der Berg") are the
+                // accepted residual.
+                let words = remainder.split(whereSeparator: \.isWhitespace)
+                guard !(remainder.first?.isLowercase == true && words.count > 1) else { return false }
                 return SignatureSignOffPolicy.shouldPreserveNameLine(remainder)
             }
         }
@@ -216,10 +253,6 @@ extension EmailDOMQuoteRemover {
 
     private static let signatureStandaloneContactLabelPattern = SignaturePatterns.standaloneContactLabel
 
-    private static let contactListIntroKeywords: [String] = [
-        "contact", "email", "reviewer", "recipient"
-    ]
-
     // The inclusive DOM window includes lastNonEmpty - 80; blank separators consume slots.
     private static let trailingSignatureLookback = 80
 
@@ -274,6 +307,7 @@ extension EmailDOMQuoteRemover {
         var strongSupportLineCount = 0
         var signatureSupportLineCount = 0
         var nonEmailContactLineCount = 0
+        var bareHostContactLineCount = 0
         var sawSignOffBeforeSignature = false
         var precedingBodyLine: String?
         var scanIndex = lastContact
@@ -316,6 +350,9 @@ extension EmailDOMQuoteRemover {
                 if hasNonEmailContactSignal(text) || linkedContact == true {
                     nonEmailContactLineCount += 1
                 }
+                if linkedContact == nil, matchesEntireLine(URLPatterns.bareHostLine, text: text) {
+                    bareHostContactLineCount += 1
+                }
                 signatureStart = scanIndex
                 scanIndex -= 1
                 continue
@@ -346,7 +383,11 @@ extension EmailDOMQuoteRemover {
             scanIndex -= 1
         }
 
-        guard contactLineCount >= 2, !isSignatureProductList(lines[signatureStart].text) else { return }
+        // A whole-line host corroborates a contact block but never anchors one: a list
+        // of filenames whose extensions double as country codes ("main.tf", "Logo.ai")
+        // must not read as two contact rows.
+        guard contactLineCount >= 2, contactLineCount > bareHostContactLineCount,
+              !isSignatureProductList(lines[signatureStart].text) else { return }
 
         if hasRepeatedContactRecords(lines[signatureStart...lastNonEmpty].map {
             (text: $0.text, isContact: isTrailingSignatureContactLine($0))
@@ -363,7 +404,7 @@ extension EmailDOMQuoteRemover {
 
         let nonEmptyRemovalCount = (signatureStart...lastNonEmpty).filter { !lines[$0].text.isEmpty }.count
         guard nonEmptyRemovalCount >= 3 else { return }
-        if let precedingBodyLine, isContactListIntroLine(precedingBodyLine) {
+        if let precedingBodyLine, SignatureSignOffPolicy.isAuthoredLeadInLine(precedingBodyLine) {
             return
         }
         let hasStrongSignatureSignal = sawSignOffBeforeSignature || strongSupportLineCount > 0
@@ -387,7 +428,9 @@ extension EmailDOMQuoteRemover {
             }
             signatureStart = scanIndex
         }
-        // Preserve unmarked media after the signature; only explicit wrappers own their images.
+        // Preserve unmarked media after the signature; only explicit wrappers and
+        // signature-owned icons, pixels and small linked logos (`isSignatureOwnedMedia`)
+        // own their images.
         try removeSignatureLines(lines, from: signatureStart, through: lastNonEmpty, preserving: preservedHTML)
     }
 
@@ -590,6 +633,7 @@ extension EmailDOMQuoteRemover {
     /// Contact tokens may have labels or a name, but must not swallow an authored instruction.
     /// Keep the broader contact predicate unchanged for quote/header detection.
     static func isTrailingSignatureContactLine(_ text: String) -> Bool {
+        if matchesEntireLine(URLPatterns.bareHostLine, text: text) { return true }
         guard isContactSignatureLine(text) else { return false }
         var remainder = text
         var hasLink = false
@@ -614,7 +658,7 @@ extension EmailDOMQuoteRemover {
             return label.isEmpty || ["e", "email", "e-mail", "w", "web", "website", "url"].contains(label.lowercased()) ||
                 looksLikeSignatureNameSupportLine(label) || isSignaturePhoneLine(label) ||
                 matchesEntireLine(signatureCityStateZipPattern, text: label) ||
-                isSignaturePostalLine(label)
+                isSignaturePostalLine(label) || matchesEntireLine(URLPatterns.bareHostLine, text: label)
         }
     }
 
@@ -701,11 +745,84 @@ extension EmailDOMQuoteRemover {
             signatureAddressPattern?.firstMatch(in: text, range: NSRange(location: 0, length: text.utf16.count)) != nil
     }
 
+    private static let signatureSocialHostPattern = try? NSRegularExpression(
+        pattern: #"^https?://(?:[a-z0-9-]+\.)*(?:twitter\.com|x\.com|linkedin\.com|facebook\.com|fb\.com|instagram\.com|tiktok\.com|threads\.net|bsky\.app|pinterest\.com)(?:[/?#]|$)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let signatureSocialContentPathPattern = try? NSRegularExpression(
+        pattern: #"^https?://[^/?#]+(?:/[^/?#]*)*?/(?:status|posts|pulse|feed|p|reel|reels|video|videos|watch|shorts|photo|photos|events|groups)(?:[/?#]|$)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let signatureHTTPTargetPattern = try? NSRegularExpression(
+        pattern: #"^https?://"#, options: [.caseInsensitive]
+    )
+
+    /// Social icons, tracking pixels, small badges and a small linked logo belong to the
+    /// signature and must not anchor authored content the way an inline photo does.
+    /// `<img>` only, never by `alt` text (authored images carry arbitrary alt), never
+    /// `<picture>`/`<svg>`/video/object or CSS backgrounds. Width-only sizing counts
+    /// (vendor icons often declare width alone); height-only never does.
+    static func isSignatureOwnedMedia(_ element: Element) -> Bool {
+        guard element.tagNameNormal() == "img" else { return false }
+        if ((try? element.attr("aria-hidden")) ?? "").lowercased() == "true" { return true }
+        let width = declaredPixelDimension(of: element, named: "width")
+        let height = declaredPixelDimension(of: element, named: "height")
+        if let width, let height, width <= 1, height <= 1 { return true }
+        if let width, width <= 48, height.map({ $0 <= 48 }) ?? true { return true }
+        // Linked media needs a declared size: an unsized screenshot linked to someone's
+        // profile is authored content, and vendor icons declare their size for Outlook.
+        let declared = [width, height].compactMap { $0 }
+        guard !declared.isEmpty, let link = imageOnlyLinkAncestor(of: element), let href = try? link.attr("href") else { return false }
+        if matchesPattern(signatureSocialHostPattern, in: href) {
+            // A link into a post, video or photo is shared content, not a profile badge.
+            guard !matchesPattern(signatureSocialContentPathPattern, in: href) else { return false }
+            return declared.allSatisfy { $0 <= 64 }
+        }
+        return matchesPattern(signatureHTTPTargetPattern, in: href) && declared.allSatisfy { $0 <= 100 }
+    }
+
+    private static func matchesPattern(_ pattern: NSRegularExpression?, in text: String) -> Bool {
+        pattern?.firstMatch(in: text, range: NSRange(location: 0, length: text.utf16.count)) != nil
+    }
+
+    /// The nearest `<a href>` ancestor whose only visible content is the image.
+    private static func imageOnlyLinkAncestor(of element: Element) -> Element? {
+        var ancestor = element.parent()
+        while let current = ancestor, current.tagNameNormal() != "body" {
+            if current.tagNameNormal() == "a", current.hasAttr("href") {
+                let text = ((try? current.text()) ?? "").replacingOccurrences(of: "\u{00a0}", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return text.isEmpty ? current : nil
+            }
+            ancestor = current.parent()
+        }
+        return nil
+    }
+
+    /// Declared pixel size from the attribute ("20", "20px") or an inline style.
+    private static func declaredPixelDimension(of element: Element, named name: String) -> Int? {
+        let attribute = ((try? element.attr(name)) ?? "").lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if let match = attribute.range(of: #"^(\d+)(?:px)?$"#, options: .regularExpression) {
+            return Int(attribute[match].filter(\.isNumber))
+        }
+        let style = ((try? element.attr("style")) ?? "").lowercased()
+        guard let match = style.range(of: "(?:^|;)\\s*\(name)\\s*:\\s*(\\d+)px", options: .regularExpression) else { return nil }
+        return Int(style[match].filter(\.isNumber))
+    }
+
     private static func containsSignatureTailMedia(_ element: Element) throws -> Bool {
         let mediaSelector = "img, picture, svg, video, audio, object, embed, iframe, [src], [srcset], [background], [poster]"
-        if try !element.select(mediaSelector).isEmpty() { return true }
-        // CID references also include linked attachments (href/xlink:href).
-        if try element.outerHtml().range(of: "cid:", options: .caseInsensitive) != nil { return true }
+        if try element.select(mediaSelector).array().contains(where: { !isSignatureOwnedMedia($0) }) { return true }
+        // CID references also include linked attachments (href/xlink:href). Walk the
+        // attributes rather than the serialized HTML so Outlook's VML conditional
+        // comments (<v:imagedata src="cid:…"> inside <!--[if gte vml 1]-->) do not veto.
+        for candidate in try element.getAllElements().array() {
+            for attributeName in ["href", "xlink:href"] where candidate.hasAttr(attributeName) {
+                if ((try? candidate.attr(attributeName)) ?? "").range(of: "cid:", options: .caseInsensitive) != nil { return true }
+            }
+        }
         let styledElements = [element] + (try element.select("[style]")).array()
         return styledElements.contains { candidate in
             let style = (try? candidate.attr("style")) ?? ""
@@ -769,6 +886,9 @@ extension EmailDOMQuoteRemover {
         if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
             return true
         }
+        if matchesEntireLine(URLPatterns.bareHostLine, text: text) {
+            return true
+        }
         if isSignaturePhoneLine(text) {
             return true
         }
@@ -793,7 +913,8 @@ extension EmailDOMQuoteRemover {
 
     private static func hasNonEmailContactSignal(_ text: String) -> Bool {
         let range = NSRange(location: 0, length: text.utf16.count)
-        if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
+        if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil ||
+            matchesEntireLine(URLPatterns.bareHostLine, text: text) {
             return true
         }
         if isSignaturePhoneLine(text) {
@@ -992,14 +1113,6 @@ extension EmailDOMQuoteRemover {
 
     private static func isStrongSignatureSupportLine(_ text: String) -> Bool {
         SignatureSignOffPolicy.isStrongSupportLine(text)
-    }
-
-    private static func isContactListIntroLine(_ text: String) -> Bool {
-        let lowercased = text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return lowercased.hasSuffix(":") &&
-            contactListIntroKeywords.contains(where: { lowercased.contains($0) })
     }
 
     private static func looksLikeSignatureNameSupportLine(_ text: String) -> Bool {

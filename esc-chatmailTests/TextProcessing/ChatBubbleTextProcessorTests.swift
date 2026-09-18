@@ -962,4 +962,18 @@ final class ChatBubbleTextProcessorTests: XCTestCase {
             "Upon approval, we will charge the card on file.\n\nBest,\nJanet\n\nP.S. one more thing."
         )
     }
+
+    // Revert-check: TextProcessing.signOffWords derives from SignaturePatterns.signOffPhrases
+    // (longest first, regex-escaped), so a multi-word gratitude closing breaks off inline while
+    // sentence-shaped well-wishes stay out of the vocabulary and unbroken.
+    func testFormatSignOffLineBreaks_breaksMultiWordGratitudeClosingInline() {
+        XCTAssertEqual(
+            TextProcessing.formatSignOffLineBreaks(in: "I will pay the balance today. Thanks so much, Jane"),
+            "I will pay the balance today.\n\nThanks so much,\n\nJane"
+        )
+        XCTAssertEqual(
+            TextProcessing.formatSignOffLineBreaks(in: "See you Monday. Have a great day!"),
+            "See you Monday. Have a great day!"
+        )
+    }
 }

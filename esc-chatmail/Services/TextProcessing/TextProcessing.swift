@@ -360,8 +360,35 @@ enum TextProcessing {
         PlainTextSignatureRemover.removeSignature(from: text)
     }
 
-    /// Common sign-off words that should have a line break before them
-    private static let signOffWords = ["regards", "thanks", "thank you", "best", "cheers", "sincerely", "yours truly", "best wishes", "kind regards", "warm regards", "take care", "all the best"]
+    /// Sign-offs that get a line break before them when they appear inline at the
+    /// end of text. Derived from the shared vocabulary so unwrap, formatting and the
+    /// signature passes agree on what a closing is. Longest first so a multi-word
+    /// closing wins over its shorter suffix; `Set` iteration order is not stable, so
+    /// the order is fixed here.
+    private static let signOffWords: [String] = SignaturePatterns.signOffPhrases.sorted {
+        $0.count == $1.count ? $0 < $1 : $0.count > $1.count
+    }
+
+    private struct SignOffLineBreakPattern {
+        let regex: NSRegularExpression
+        let patternIndex: Int
+    }
+
+    /// Three shapes per closing, compiled once. This runs on every bubble derivation
+    /// and on the launch-time preview repair, so compiling 130-odd expressions per call
+    /// was real cost. Grouped per closing to keep the one-match-per-closing loop below.
+    private static let signOffLineBreakPatterns: [[SignOffLineBreakPattern]] = signOffWords.map { signOff in
+        let escapedSignOff = NSRegularExpression.escapedPattern(for: signOff)
+        let shapes = [
+            "([.!?])\\s+(\(escapedSignOff))([!.])?,?\\s*$",  // "help. Regards" or "help. Thanks!" at end - group 3 captures trailing punct
+            "([.!?])\\s+(\(escapedSignOff)),\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin" at end
+            "([.!?])\\s+(\(escapedSignOff)),\\s+([A-Z][a-z]+)\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin Thau" at end
+        ]
+        return shapes.enumerated().compactMap { patternIndex, pattern in
+            (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]))
+                .map { SignOffLineBreakPattern(regex: $0, patternIndex: patternIndex) }
+        }
+    }
 
     /// Adds line breaks before sign-offs when they appear inline at the end of text
     /// Handles cases like "...for your help. Regards, Kevin" → "...for your help.\n\nRegards,\n\nKevin"
@@ -369,44 +396,37 @@ enum TextProcessing {
         var result = text
 
         // Pattern: sentence ending (. ! ?) followed by space and a sign-off word
-        for signOff in signOffWords {
-            // Case-insensitive search for ". SignOff" pattern
-            let patterns = [
-                "([.!?])\\s+(\(signOff))([!.])?,?\\s*$",  // "help. Regards" or "help. Thanks!" at end - group 3 captures trailing punct
-                "([.!?])\\s+(\(signOff)),\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin" at end
-                "([.!?])\\s+(\(signOff)),\\s+([A-Z][a-z]+)\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin Thau" at end
-            ]
+        for patterns in signOffLineBreakPatterns {
+            for entry in patterns {
+                let regex = entry.regex
+                let patternIndex = entry.patternIndex
+                let range = NSRange(location: 0, length: result.utf16.count)
+                if let match = regex.firstMatch(in: result, options: [], range: range) {
+                    // Found a sign-off pattern - add line breaks
+                    let punctuation = (result as NSString).substring(with: match.range(at: 1))
+                    let signOffText = (result as NSString).substring(with: match.range(at: 2))
 
-            for (patternIndex, pattern) in patterns.enumerated() {
-                if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
-                    let range = NSRange(location: 0, length: result.utf16.count)
-                    if let match = regex.firstMatch(in: result, options: [], range: range) {
-                        // Found a sign-off pattern - add line breaks
-                        let punctuation = (result as NSString).substring(with: match.range(at: 1))
-                        let signOffText = (result as NSString).substring(with: match.range(at: 2))
-
-                        // First pattern captures trailing punctuation in group 3; others have name in group 3
-                        let trailingPunct: String
-                        if patternIndex == 0 && match.numberOfRanges > 3 && match.range(at: 3).location != NSNotFound {
-                            trailingPunct = (result as NSString).substring(with: match.range(at: 3))
-                        } else {
-                            trailingPunct = ","
-                        }
-
-                        var replacement = "\(punctuation)\n\n\(signOffText)\(trailingPunct)"
-                        // For patterns 2 and 3 (with names), group 3 is first name, group 4 is last name
-                        if patternIndex > 0 && match.numberOfRanges > 3 {
-                            let name = (result as NSString).substring(with: match.range(at: 3))
-                            replacement += "\n\n\(name)"
-                            if match.numberOfRanges > 4 {
-                                let lastName = (result as NSString).substring(with: match.range(at: 4))
-                                replacement += " \(lastName)"
-                            }
-                        }
-
-                        result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: replacement)
-                        break  // Only process one sign-off pattern
+                    // First pattern captures trailing punctuation in group 3; others have name in group 3
+                    let trailingPunct: String
+                    if patternIndex == 0 && match.numberOfRanges > 3 && match.range(at: 3).location != NSNotFound {
+                        trailingPunct = (result as NSString).substring(with: match.range(at: 3))
+                    } else {
+                        trailingPunct = ","
                     }
+
+                    var replacement = "\(punctuation)\n\n\(signOffText)\(trailingPunct)"
+                    // For patterns 2 and 3 (with names), group 3 is first name, group 4 is last name
+                    if patternIndex > 0 && match.numberOfRanges > 3 {
+                        let name = (result as NSString).substring(with: match.range(at: 3))
+                        replacement += "\n\n\(name)"
+                        if match.numberOfRanges > 4 {
+                            let lastName = (result as NSString).substring(with: match.range(at: 4))
+                            replacement += " \(lastName)"
+                        }
+                    }
+
+                    result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: replacement)
+                    break  // Only process one sign-off pattern
                 }
             }
         }

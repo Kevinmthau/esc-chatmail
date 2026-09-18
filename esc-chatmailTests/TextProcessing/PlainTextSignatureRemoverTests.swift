@@ -427,4 +427,54 @@ final class PlainTextSignatureRemoverTests: XCTestCase {
             XCTAssertEqual(PlainTextSignatureRemover.removeTrailingContactSignature(from: input), expected, name)
         }
     }
+
+    // MARK: - Front core parity
+
+    // Revert-check: URLPatterns.bareHostLine in PlainTextSignatureRemover.evaluateLine.
+    func testBareHostRow_closesSignatureAndKeepsSignOffName() {
+        let text = "Sounds good.\n\nThanks,\nJane Doe\nAccount Manager\njane@acmeadvisory.com\nacmeadvisory.com"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), "Sounds good.\n\nThanks,\nJane Doe")
+    }
+
+    // Revert-check: the hasContactInfo guard in PlainTextSignatureRemover.preservingSignOff.
+    func testBareHostAfterSignOff_isNotPreservedAsName() {
+        let text = "See you then.\n\nThanks,\nacmeadvisory.com\njane@acmeadvisory.com\n415-555-1212"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), "See you then.")
+    }
+
+    // Revert-check: SignatureSignOffPolicy.isAuthoredLeadInLine veto in removeSignature (Pass 2).
+    func testColonLeadIn_preservesPayeeAddressBlock() {
+        let text = "Please send the check to:\n\nJane Doe\n123 Main Street\nSpringfield, IL 62701\njane@example.test"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text)
+        let signed = "Please find my details below:\n\nThanks,\nJane Doe\n123 Main Street\nSpringfield, IL 62701\njane@example.test"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: signed), "Please find my details below:\n\nThanks,\nJane Doe")
+    }
+
+    // HONEST SCOPE: passes at HEAD (filenames were never hosts); pins the TLD allowlist's rejections.
+    func testFilenameLines_areNotBareHosts() {
+        let text = "Attached are the files.\n\nBest,\nJane\n\nphotos.heic\nvideo.mov\nmain.cc"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text)
+    }
+
+    // Revert-check: the contactSignals > bareHostSignals gate in removeSignature (Pass 2). Extensions
+    // that double as country codes ("Logo.ai", "main.tf") and an authored list of domains match
+    // bareHostLine; they corroborate a real contact row but never anchor a signature by themselves.
+    func testBareHostRows_neverAnchorASignature() {
+        let files = "Attached are the two files.\n\nBest,\nJane\n\nBrand.ai\nLogo.ai\nmain.tf"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: files), files)
+        let domains = "Here are the domains to register.\n\nThanks,\nKevin\n\nKevinsbakery.com\nKevinsbakery.co\nKevinsbakery.shop"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: domains), domains)
+    }
+
+    // Revert-check: SignaturePatterns.signOffPhrases "thanks again"; isSignOffLine punctuation trim.
+    func testGratitudeClosings_anchorSignatureAndKeepPair() {
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeSignature(from: "That works for me.\n\nThanks again,\nJane Doe\nCEO\njane@example.test\n415-555-1212"),
+            "That works for me.\n\nThanks again,\nJane Doe"
+        )
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeSignature(from: "Sounds good.\n\nThanks!\nJane Doe\nCEO\njane@example.test\n415-555-1212"),
+            "Sounds good.\n\nThanks!\nJane Doe"
+        )
+    }
 }

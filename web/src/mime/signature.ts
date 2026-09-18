@@ -3,9 +3,11 @@
 
 import {
   ADDRESS_KEYWORD_PATTERN,
+  BARE_HOST_LINE_PATTERN,
   DESCRIPTIVE_PHONE_LINE_PATTERN,
   SIGN_OFF_PHRASES,
   shouldPreserveSignatureNameLine,
+  isAuthoredLeadInLine,
   isStrongSignatureSupportLine,
   EMAIL_ADDRESS_PATTERN,
   PHONE_PATTERN,
@@ -26,6 +28,8 @@ interface LineEvaluation {
   isHardIndicator: boolean
   isLikelySignatureLine: boolean
   hasContactInfo: boolean
+  /** The only contact evidence on the line is a whole-line host name. */
+  isBareHostOnly: boolean
 }
 
 const HARD_INDICATOR_FRAGMENTS: string[] = [
@@ -173,8 +177,6 @@ const ORGANIZATION_KEYWORDS = [
 const SINGLE_NAME_PATTERN = /^[A-Z][A-Za-z'-]{1,31}$/
 const MULTI_WORD_NAME_PATTERN = /^[A-Z][A-Za-z'.-]{1,31}(?:\s+[A-Z][A-Za-z'.-]{1,31}){1,3}$/
 
-const CONTACT_LIST_INTRO_KEYWORDS = ['contact', 'email', 'reviewer', 'recipient']
-
 /** Removes trailing signature blocks and boilerplate from plain text. */
 export function removeSignature(text: string): string {
   const normalized = normalizeLineEndings(text)
@@ -233,6 +235,7 @@ export function removeSignature(text: string): string {
   let signatureStartLine: number | null = null
   let signatureLineCount = 0
   let contactSignals = 0
+  let bareHostSignals = 0
   let signatureSupportSignals = 0
   let affiliationSupportSignals = 0
   let sawSignOffLine = false
@@ -281,6 +284,7 @@ export function removeSignature(text: string): string {
     const evaluation = evaluateLine(line)
     if (evaluation.hasContactInfo) {
       contactSignals += 1
+      if (evaluation.isBareHostOnly) bareHostSignals += 1
       hasDirectContactInfo =
         hasDirectContactInfo ||
         EMAIL_ADDRESS_PATTERN.test(line) ||
@@ -328,14 +332,22 @@ export function removeSignature(text: string): string {
     ) {
       return trimmed
     }
-    if (contactSignals >= 2 && hasContactListIntroBeforeSignature(signatureStartLine, lines)) {
-      return trimmed
+    // Without a closing above it, a block introduced by an authored lead-in
+    // ("Please send the check to:") is the author's content, not a signature.
+    if (!sawSignOffLine) {
+      const introIndex = previousNonEmptyLineIndex(signatureStartLine, lines)
+      if (introIndex !== null && isAuthoredLeadInLine(lines[introIndex]!)) {
+        return trimmed
+      }
     }
     if (
       signatureLineCount < 3 ||
       // Links or descriptive phone labels can be an authored resource list.
       // Require a closing, email address or conventional phone row too.
       !(sawSignOffLine || hasDirectContactInfo) ||
+      // A whole-line host corroborates but never anchors: a file list whose
+      // extensions double as country codes ("Logo.ai") is not a contact block.
+      contactSignals <= bareHostSignals ||
       !(
         contactSignals >= 2 ||
         (contactSignals === 1 && (affiliationSupportSignals > 0 || sawSignOffLine))
@@ -368,6 +380,7 @@ export function removeTrailingContactSignature(text: string): string {
 
   let start = last
   let contacts = 0
+  let bareHostContacts = 0
   let signOffIndex: number | null = null
   for (let index = last; index >= Math.max(0, last - 32); index--) {
     const line = lines[index]!.trim()
@@ -389,13 +402,15 @@ export function removeTrailingContactSignature(text: string): string {
         break
       }
       contacts++
+      if (BARE_HOST_LINE_PATTERN.test(line)) bareHostContacts++
     } else if (!isSignatureSupportLine(line)) {
       break
     }
     start = index
   }
   const removalCount = lines.slice(start, last + 1).filter((line) => line.trim().length > 0).length
-  if (signOffIndex === null || contacts < 2 || removalCount < 3) return trimmed
+  if (signOffIndex === null || contacts < 2 || contacts <= bareHostContacts || removalCount < 3)
+    return trimmed
   const result = joinLines(lines, preservingSignOff(signOffIndex, last, lines))
   // Never erase the entire extracted message.
   return result.length > 0 ? result : trimmed
@@ -456,7 +471,8 @@ function preservingSignOff(start: number, end: number, lines: string[]): number 
   const previous = previousNonEmptyLineIndex(start, lines)
   if (previous !== null && isSignOffLineForSignatureContext(lines[previous]!)) {
     const first = lines.slice(start, end + 1).find((line) => line.trim().length > 0)
-    if (first && shouldPreserveSignatureNameLine(first)) start = previous
+    if (first && shouldPreserveSignatureNameLine(first) && !evaluateLine(first).hasContactInfo)
+      start = previous
   }
   for (let index = start; index <= end; index++) {
     if (!isSignOffLineForSignatureContext(lines[index]!)) continue
@@ -464,7 +480,9 @@ function preservingSignOff(start: number, end: number, lines: string[]): number 
     while (nameIndex <= end && lines[nameIndex]!.trim().length === 0) nameIndex++
     if (nameIndex > end) return start
     const name = lines[nameIndex]!.trim()
-    if (shouldPreserveSignatureNameLine(name)) return nameIndex + 1
+    // A host name passes the name-shape check; it is a contact row, not a name.
+    if (shouldPreserveSignatureNameLine(name) && !evaluateLine(name).hasContactInfo)
+      return nameIndex + 1
     return start
   }
   return start
@@ -514,7 +532,11 @@ function isStrictSupportLine(line: string): boolean {
 // Email/URL matches must leave only a contact label, name or affiliation around them.
 function isStrictContactLine(line: string): boolean {
   if (isBodyProseLine(line)) return false
-  if (STANDALONE_CONTACT_LABEL_PATTERN.test(line) || DESCRIPTIVE_PHONE_LINE_PATTERN.test(line))
+  if (
+    STANDALONE_CONTACT_LABEL_PATTERN.test(line) ||
+    DESCRIPTIVE_PHONE_LINE_PATTERN.test(line) ||
+    BARE_HOST_LINE_PATTERN.test(line)
+  )
     return true
   const patterns = [EMAIL_ADDRESS_PATTERN, WEB_URL_PATTERN, PHONE_PATTERN]
   if (!patterns.some((pattern) => pattern.test(line))) return false
@@ -570,8 +592,15 @@ function evaluateLine(line: string): LineEvaluation {
   const hasPhoneCandidate = PHONE_PATTERN.test(trimmed)
   const hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased)
 
+  const hasBareHost = BARE_HOST_LINE_PATTERN.test(trimmed)
+
   const hasContactInfo =
-    hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || hasStandaloneContactLabel
+    hasContactPrefix ||
+    hasEmail ||
+    hasUrl ||
+    hasStandalonePhone ||
+    hasStandaloneContactLabel ||
+    hasBareHost
 
   const isHardIndicator = isDelimiter || isCidLine || hasHardFragment
 
@@ -590,6 +619,9 @@ function evaluateLine(line: string): LineEvaluation {
     isHardIndicator,
     isLikelySignatureLine: score >= 2,
     hasContactInfo,
+    isBareHostOnly:
+      hasBareHost &&
+      !(hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || hasStandaloneContactLabel),
   }
 }
 
@@ -618,13 +650,12 @@ function looksLikeStandalonePhoneLine(trimmed: string, lowercased: string): bool
 }
 
 function isSignOffLine(lowercased: string): boolean {
-  const normalized = lowercased.trim()
-  for (const signOff of SIGN_OFF_WORDS) {
-    if (normalized === signOff || normalized === `${signOff},`) {
-      return true
-    }
-  }
-  return false
+  // "Thanks!" and "Thanks." close a message exactly like "Thanks,".
+  const normalized = lowercased
+    .trim()
+    .replace(/^\p{P}+/u, '')
+    .replace(/\p{P}+$/u, '')
+  return SIGN_OFF_WORDS.has(normalized)
 }
 
 function isSignOffLineForSignatureContext(line: string): boolean {
@@ -767,7 +798,14 @@ function looksLikeSignatureLine(line: string): boolean {
   const hasPhoneCandidate = PHONE_PATTERN.test(trimmed)
   const hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased)
 
-  if (hasContactPrefix || hasStandaloneContactLabel || hasEmail || hasUrl || hasStandalonePhone) {
+  if (
+    hasContactPrefix ||
+    hasStandaloneContactLabel ||
+    hasEmail ||
+    hasUrl ||
+    hasStandalonePhone ||
+    BARE_HOST_LINE_PATTERN.test(trimmed)
+  ) {
     return true
   }
 
@@ -840,17 +878,6 @@ function nextNonEmptyLine(index: number, lines: string[]): string | null {
     probe += 1
   }
   return null
-}
-
-function hasContactListIntroBeforeSignature(startLine: number, lines: string[]): boolean {
-  const previousIndex = previousNonEmptyLineIndex(startLine, lines)
-  if (previousIndex === null) return false
-  return isContactListIntroLine(lines[previousIndex]!)
-}
-
-function isContactListIntroLine(line: string): boolean {
-  const lowercased = line.trim().toLowerCase()
-  return lowercased.endsWith(':') && CONTACT_LIST_INTRO_KEYWORDS.some((k) => lowercased.includes(k))
 }
 
 function preservesPostscriptAfterSignOff(lines: string[], lastNonEmpty: number): boolean {
@@ -999,7 +1026,13 @@ function isLikelySignatureContinuation(line: string): boolean {
   const hasUrl = WEB_URL_PATTERN.test(trimmed)
   const hasPhoneCandidate = PHONE_PATTERN.test(trimmed)
   const hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased)
-  if (hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone) {
+  if (
+    hasContactPrefix ||
+    hasEmail ||
+    hasUrl ||
+    hasStandalonePhone ||
+    BARE_HOST_LINE_PATTERN.test(trimmed)
+  ) {
     return true
   }
 
