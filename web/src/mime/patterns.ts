@@ -7,6 +7,46 @@ export const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
 /** Matches http(s) URLs and bare `www.` hosts anywhere in a line. */
 export const WEB_URL_PATTERN = /\bhttps?:\/\/\S+|\bwww\.[^\s]+/i
 
+/**
+ * A whole line that is only a host name, optionally labelled ("Web: acme.co.uk",
+ * "www.nordvik.no", "acmeadvisory.com"). Vendor signature generators print the
+ * bare company domain on its own row, which `WEB_URL_PATTERN` misses without a
+ * scheme or `www.`. Every label needs two characters and the TLD comes from an
+ * explicit allowlist, so "e.g.", "M.Sc" and most lone filenames ("main.cc",
+ * "README.md", "script.py", "photos.heic") never read as a host. Some extensions
+ * are also country codes ("main.tf", "Logo.ai", "script.pl"), which is why
+ * callers let a bare host corroborate a contact block but never anchor one on
+ * its own. Whole-line only: a domain mentioned inside prose is not a contact row.
+ */
+const BARE_HOST_GENERIC_TLDS =
+  'com|net|org|edu|gov|mil|int|info|biz|name|tel|travel|jobs|aero|coop|museum|asia|' +
+  'io|co|ai|app|dev|tech|online|site|store|shop|blog|cloud|digital|agency|studio|design|media|group|' +
+  'global|company|consulting|partners|law|legal|health|care|capital|finance|bank|fund|insurance|realty|' +
+  'homes|properties|church|foundation|ngo|tours|club|team|works|solutions|services|systems|software|' +
+  'network|email|live|tv|fm|me|xyz|top|world|today|news|expert|academy|school|university|institute|' +
+  'clinic|dental|doctor|pharmacy|energy|solar|construction|builders|plumbing|roofing|photography|video|' +
+  'film|music|art|gallery|events|wedding|boutique|fashion|beauty|fitness|restaurant|cafe|wine|' +
+  'bar|hotel|rentals|apartments|house|land|farm|garden|vet|llc|ltd|limited'
+// ISO 3166 country codes minus the ones that double as source or document
+// extensions (cc, so, ml, pm, am, sc, sh, md, ps, rs, py).
+const BARE_HOST_COUNTRY_TLDS =
+  'ac|ad|ae|af|ag|ai|al|ao|aq|ar|as|at|au|aw|ax|az|ba|bb|bd|be|bf|bg|bh|bi|bj|bm|bn|bo|br|bs|' +
+  'bt|bw|by|bz|ca|cd|cf|cg|ch|ci|ck|cl|cm|cn|co|cr|cu|cv|cw|cx|cy|cz|de|dj|dk|dm|do|dz|ec|ee|eg|er|es|' +
+  'et|eu|fi|fj|fk|fm|fo|fr|ga|gb|gd|ge|gf|gg|gh|gi|gl|gm|gn|gp|gq|gr|gs|gt|gu|gw|gy|hk|hm|hn|hr|ht|hu|' +
+  'id|ie|il|im|in|io|iq|ir|is|it|je|jm|jo|jp|ke|kg|kh|ki|km|kn|kp|kr|kw|ky|kz|la|lb|lc|li|lk|lr|ls|lt|' +
+  'lu|lv|ly|ma|mc|me|mg|mh|mk|mm|mn|mo|mp|mq|mr|ms|mt|mu|mv|mw|mx|my|mz|na|nc|ne|nf|ng|ni|nl|no|np|nr|' +
+  'nu|nz|om|pa|pe|pf|pg|ph|pk|pl|pn|pr|pt|pw|qa|re|ro|ru|rw|sa|sb|sd|se|sg|si|sj|sk|sl|sm|sn|sr|ss|st|' +
+  'su|sv|sx|sy|sz|tc|td|tf|tg|th|tj|tk|tl|tm|tn|to|tr|tt|tv|tw|tz|ua|ug|uk|us|uy|uz|va|vc|ve|vg|vi|vn|' +
+  'vu|wf|ws|ye|yt|za|zm|zw'
+export const BARE_HOST_LINE_PATTERN = new RegExp(
+  String.raw`^(?:(?:web(?:site)?|w|url|site|www)\s*[:.]?\s+)?(?:[a-z0-9][a-z0-9-]{0,61}[a-z0-9]\.)+(?:` +
+    BARE_HOST_GENERIC_TLDS +
+    '|' +
+    BARE_HOST_COUNTRY_TLDS +
+    ')/?$',
+  'i',
+)
+
 /** Phone-number candidate: 7+ digits with common separators. */
 export const PHONE_PATTERN = /\b\+?\d[\d\s().-]{6,}\b/
 
@@ -100,6 +140,41 @@ export const SIGN_OFF_PHRASES = new Set([
   'warm regards',
   'warmly',
   'yours truly',
+  // Gratitude and regards closings only. Sentence-shaped well-wishes ("have a
+  // nice weekend", "talk soon") stay out: `formatSignOffLineBreaks` in text.ts
+  // consumes this list and would break them off mid-paragraph.
+  'thanks so much',
+  'thank you so much',
+  'thanks again',
+  'thank you again',
+  'thanks a lot',
+  'thanks very much',
+  'thank you very much',
+  'thanks in advance',
+  'thank you in advance',
+  'much appreciated',
+  'with thanks',
+  'with gratitude',
+  'gratefully',
+  'kindest regards',
+  'warmest regards',
+  'with kind regards',
+  'with best regards',
+  'with warm regards',
+  'very best',
+  'very best regards',
+  'all my best',
+  'my best',
+  'yours sincerely',
+  'sincerely yours',
+  'yours faithfully',
+  'respectfully',
+  'respectfully yours',
+  'rgds',
+  'thx',
+  'thanks and regards',
+  'thanks & regards',
+  'warm wishes',
 ])
 
 export const LEGAL_FOOTER_OPENERS = [
@@ -180,4 +255,17 @@ export function shouldPreserveSignatureNameLine(line: string): boolean {
     trimmed.split(/\s+/).length <= 4 &&
     !isStrongSignatureSupportLine(trimmed)
   )
+}
+
+/**
+ * A body line that introduces the block after it ("Please send the check to:",
+ * "Reviewer contact:") owns that block. Every signature pass consults this one
+ * veto so a referral card, payee address or contact list is never trimmed as a
+ * signature. It is deliberately a false-negative-only rule: an intro line
+ * followed by a genuine signature keeps the signature visible.
+ */
+export function isAuthoredLeadInLine(line: string): boolean {
+  const trimmed = line.trim()
+  if (trimmed.length === 0) return false
+  return trimmed.endsWith(':') || trimmed.endsWith('：')
 }

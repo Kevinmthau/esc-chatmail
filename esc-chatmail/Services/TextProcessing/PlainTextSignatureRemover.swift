@@ -12,6 +12,8 @@ enum PlainTextSignatureRemover {
         let isHardIndicator: Bool
         let isLikelySignatureLine: Bool
         let hasContactInfo: Bool
+        /// The only contact evidence on the line is a whole-line host name.
+        let isBareHostOnly: Bool
     }
 
     // MARK: - Patterns
@@ -224,6 +226,7 @@ enum PlainTextSignatureRemover {
         var signatureStartLine: Int?
         var signatureLineCount = 0
         var contactSignals = 0
+        var bareHostSignals = 0
         var signatureSupportSignals = 0
         var affiliationSupportSignals = 0
         var sawSignOffLine = false
@@ -265,6 +268,7 @@ enum PlainTextSignatureRemover {
             let evaluation = evaluateLine(line)
             if evaluation.hasContactInfo {
                 contactSignals += 1
+                if evaluation.isBareHostOnly { bareHostSignals += 1 }
                 hasDirectContactInfo = hasDirectContactInfo || matchesRegex(emailPattern, in: line) ||
                     matchesRegex(contactPrefixPattern, in: line) ||
                     (matchesRegex(phonePattern, in: line) && looksLikeStandalonePhoneLine(line, lowercased: line.lowercased()))
@@ -302,20 +306,41 @@ enum PlainTextSignatureRemover {
             }
         }
 
-        if let startLine = signatureStartLine {
+        if var startLine = signatureStartLine {
             if contactSignals == 0 &&
                 signatureSupportSignals == 0 &&
                 hasBodyLikeContentAfterPotentialSignOff(startingAt: startLine, lines: lines, lastNonEmpty: lastNonEmpty) {
                 return trimmed
             }
-            if contactSignals >= 2 &&
-                hasContactListIntroBeforeSignature(startingAt: startLine, lines: lines) {
-                return trimmed
+            // A colon lead-in owns the block it introduces. If that block is the
+            // author's own signature (it starts at the closing), strip as usual.
+            // If a referral card sits between the lead-in and a later closing,
+            // clamp to the closing so the card stays and only the sender's
+            // signature is removed. Skipping the veto whenever any sign-off
+            // exists used to swallow the card.
+            if let introIndex = previousNonEmptyLineIndex(before: startLine, in: lines),
+               SignatureSignOffPolicy.isAuthoredLeadInLine(lines[introIndex]) {
+                let firstContentIndex = (startLine...lastNonEmpty).first {
+                    !lines[$0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                if let firstContentIndex,
+                   !isSignOffLineForSignatureContext(lines[firstContentIndex]) {
+                    if let signOffIndex = (startLine...lastNonEmpty).first(where: {
+                        isSignOffLineForSignatureContext(lines[$0])
+                    }) {
+                        startLine = signOffIndex
+                    } else {
+                        return trimmed
+                    }
+                }
             }
             guard signatureLineCount >= 3,
                   // Links or descriptive phone labels can be an authored resource list.
                   // Require a closing, email address or conventional phone row too.
                   sawSignOffLine || hasDirectContactInfo,
+                  // A whole-line host corroborates but never anchors: a file list whose
+                  // extensions double as country codes ("Logo.ai") is not a contact block.
+                  contactSignals > bareHostSignals,
                   contactSignals >= 2 || (contactSignals == 1 && (affiliationSupportSignals > 0 || sawSignOffLine)),
                   sawSignOffLine || affiliationSupportSignals > 0 ||
                     lines[startLine...lastNonEmpty].contains(where: { matchesRegex(multiWordNamePattern, in: $0) }) else {
@@ -340,6 +365,7 @@ enum PlainTextSignatureRemover {
 
         var start = last
         var contacts = 0
+        var bareHostContacts = 0
         var signOffIndex: Int?
         for index in stride(from: last, through: max(0, last - 32), by: -1) {
             let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
@@ -358,6 +384,7 @@ enum PlainTextSignatureRemover {
                     break
                 }
                 contacts += 1
+                if matchesRegex(URLPatterns.bareHostLine, in: line) { bareHostContacts += 1 }
             } else if !EmailDOMQuoteRemover.isSignatureSupportLine(line) {
                 break
             }
@@ -365,7 +392,7 @@ enum PlainTextSignatureRemover {
         }
 
         let removalCount = lines[start...last].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
-        guard let signOffIndex, contacts >= 2, removalCount >= 3 else { return trimmed }
+        guard let signOffIndex, contacts >= 2, contacts > bareHostContacts, removalCount >= 3 else { return trimmed }
         let result = joinLines(lines, upTo: preservingSignOff(startingAt: signOffIndex, through: last, lines: lines))
         // Never erase the entire extracted message.
         return result.isEmpty ? trimmed : result
@@ -410,19 +437,23 @@ enum PlainTextSignatureRemover {
         if let previous = previousNonEmptyLineIndex(before: start, in: lines),
            isSignOffLineForSignatureContext(lines[previous]),
            let first = lines[start...end].first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
-           SignatureSignOffPolicy.shouldPreserveNameLine(first) { start = previous }
+           SignatureSignOffPolicy.shouldPreserveNameLine(first), !evaluateLine(first).hasContactInfo { start = previous }
         guard start <= end else { return start }
         for index in start...end where isSignOffLineForSignatureContext(lines[index]) {
             var nameIndex = index + 1
             while nameIndex <= end && lines[nameIndex].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 nameIndex += 1
             }
-            guard nameIndex <= end else { return start }
+            // Keep an unpaired closing. Returning `start` would delete "Thanks!" when
+            // the next row is a title, company, host or legal line, wiping a
+            // gratitude-only reply.
+            guard nameIndex <= end else { return index + 1 }
             let name = lines[nameIndex].trimmingCharacters(in: .whitespacesAndNewlines)
-            if SignatureSignOffPolicy.shouldPreserveNameLine(name) {
+            // A host name passes the name-shape check; it is a contact row, not a name.
+            if SignatureSignOffPolicy.shouldPreserveNameLine(name), !evaluateLine(name).hasContactInfo {
                 return nameIndex + 1
             }
-            return start
+            return index + 1
         }
         return start
     }
@@ -464,7 +495,8 @@ enum PlainTextSignatureRemover {
     private static func isStrictContactLine(_ line: String) -> Bool {
         guard !isBodyProseLine(line) else { return false }
         if matchesRegex(standaloneContactLabelPattern, in: line) ||
-            matchesRegex(SignaturePatterns.descriptivePhoneLine, in: line) { return true }
+            matchesRegex(SignaturePatterns.descriptivePhoneLine, in: line) ||
+            matchesRegex(URLPatterns.bareHostLine, in: line) { return true }
         let patterns = [emailPattern, urlPattern, phonePattern]
         guard patterns.contains(where: { matchesRegex($0, in: line) }) else { return false }
         var remainder = line
@@ -516,7 +548,10 @@ enum PlainTextSignatureRemover {
         // primarily a phone line (or uses an explicit prefix like "T:", handled above).
         let hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased: lowercased)
 
-        let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || hasStandaloneContactLabel
+        let hasBareHost = matchesRegex(URLPatterns.bareHostLine, in: trimmed)
+
+        let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || hasStandaloneContactLabel ||
+            hasBareHost
 
         // Keep hard indicators conservative. URL/phone lines need surrounding context.
         let isHardIndicator = isDelimiter || isCidLine || hasHardFragment
@@ -537,7 +572,8 @@ enum PlainTextSignatureRemover {
         return LineEvaluation(
             isHardIndicator: isHardIndicator,
             isLikelySignatureLine: isLikelySignatureLine,
-            hasContactInfo: hasContactInfo
+            hasContactInfo: hasContactInfo,
+            isBareHostOnly: hasBareHost && !(hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || hasStandaloneContactLabel)
         )
     }
 
@@ -576,13 +612,11 @@ enum PlainTextSignatureRemover {
     }
 
     private static func isSignOffLine(_ lowercased: String) -> Bool {
-        let normalized = lowercased.trimmingCharacters(in: .whitespacesAndNewlines)
-        for signOff in signOffWords {
-            if normalized == signOff || normalized == "\(signOff)," {
-                return true
-            }
-        }
-        return false
+        // "Thanks!" and "Thanks." close a message exactly like "Thanks,".
+        let normalized = lowercased
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .punctuationCharacters)
+        return signOffWords.contains(normalized)
     }
 
     private static func isSignOffLineForSignatureContext(_ line: String) -> Bool {
@@ -728,7 +762,8 @@ enum PlainTextSignatureRemover {
         let hasPhoneCandidate = matchesRegex(phonePattern, in: trimmed)
         let hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased: lowercased)
 
-        if hasContactPrefix || hasStandaloneContactLabel || hasEmail || hasUrl || hasStandalonePhone {
+        if hasContactPrefix || hasStandaloneContactLabel || hasEmail || hasUrl || hasStandalonePhone ||
+            matchesRegex(URLPatterns.bareHostLine, in: trimmed) {
             return true
         }
 
@@ -808,25 +843,6 @@ enum PlainTextSignatureRemover {
             probe += 1
         }
         return nil
-    }
-
-    private static func hasContactListIntroBeforeSignature(startingAt startLine: Int, lines: [String]) -> Bool {
-        guard let previousIndex = previousNonEmptyLineIndex(before: startLine, in: lines) else {
-            return false
-        }
-        return isContactListIntroLine(lines[previousIndex])
-    }
-
-    private static let contactListIntroKeywords: [String] = [
-        "contact", "email", "reviewer", "recipient"
-    ]
-
-    private static func isContactListIntroLine(_ line: String) -> Bool {
-        let lowercased = line
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return lowercased.hasSuffix(":") &&
-            contactListIntroKeywords.contains(where: { lowercased.contains($0) })
     }
 
     private static func preservesPostscriptAfterSignOff(lines: [String], lastNonEmpty: Int) -> Bool {
@@ -975,7 +991,7 @@ enum PlainTextSignatureRemover {
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
         let hasPhoneCandidate = matchesRegex(phonePattern, in: trimmed)
         let hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased: lowercased)
-        if hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone {
+        if hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || matchesRegex(URLPatterns.bareHostLine, in: trimmed) {
             return true
         }
 

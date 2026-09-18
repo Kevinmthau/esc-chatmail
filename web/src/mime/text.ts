@@ -7,6 +7,7 @@
 import {
   SIGNATURE_DELIMITER_PATTERN,
   SIGNATURE_NAME_CONTACT_WORD_PATTERN,
+  SIGN_OFF_PHRASES,
   isUppercaseChar,
 } from './patterns'
 import { removeSignature } from './signature'
@@ -34,28 +35,28 @@ export function isListItem(line: string): boolean {
   return LIST_ITEM_PATTERN.test(line.slice(0, 10))
 }
 
-export const SIGN_OFF_WORDS = [
-  'regards',
-  'thanks',
-  'thank you',
-  'best',
-  'cheers',
-  'sincerely',
-  'yours truly',
-  'best wishes',
-  'kind regards',
-  'warm regards',
-  'take care',
-  'all the best',
-] as const
+/**
+ * Sign-offs that get a line break before them when they appear inline at the
+ * end of text. Derived from the shared vocabulary so unwrap, formatting and the
+ * signature passes agree on what a closing is. Longest first so a multi-word
+ * closing wins over its shorter suffix; `Set` iteration order is insertion
+ * order, not length, so the order is fixed here.
+ */
+export const SIGN_OFF_WORDS: readonly string[] = [...SIGN_OFF_PHRASES].sort((a, b) =>
+  a.length === b.length ? (a < b ? -1 : 1) : b.length - a.length,
+)
 
 function trimPunctuation(text: string): string {
   return text.replace(/^\p{P}+/u, '').replace(/\p{P}+$/u, '')
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function isStandaloneSignOffLine(line: string): boolean {
-  const normalized = trimPunctuation(line.toLowerCase().trim())
-  return (SIGN_OFF_WORDS as readonly string[]).includes(normalized)
+  const normalized = trimPunctuation(line.normalize('NFC').toLowerCase().trim())
+  return SIGN_OFF_PHRASES.has(normalized)
 }
 
 export function looksLikeNameLine(line: string): boolean {
@@ -197,10 +198,11 @@ export function formatSignOffLineBreaks(text: string): string {
   let result = text
 
   for (const signOff of SIGN_OFF_WORDS) {
+    const escapedSignOff = escapeRegExp(signOff)
     const patterns = [
-      `([.!?])\\s+(${signOff})([!.])?,?\\s*$`,
-      `([.!?])\\s+(${signOff}),\\s+([A-Z][a-z]+)\\s*$`,
-      `([.!?])\\s+(${signOff}),\\s+([A-Z][a-z]+)\\s+([A-Z][a-z]+)\\s*$`,
+      `([.!?])\\s+(${escapedSignOff})([!.])?,?\\s*$`,
+      `([.!?])\\s+(${escapedSignOff}),\\s+([A-Z][a-z]+)\\s*$`,
+      `([.!?])\\s+(${escapedSignOff}),\\s+([A-Z][a-z]+)\\s+([A-Z][a-z]+)\\s*$`,
     ]
 
     for (let patternIndex = 0; patternIndex < patterns.length; patternIndex++) {

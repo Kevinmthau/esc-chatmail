@@ -14,8 +14,8 @@ enum RepeatedSignatureRemover {
             guard position > 0, position + 4 < nonEmpty.count else { continue }
             let start = nonEmpty[position]
             let name = nonEmpty[position + 1]
-            // A colon introduces an authored example or template, even if it is repeated.
-            guard !lines[nonEmpty[position - 1]].trimmingCharacters(in: .whitespaces).hasSuffix(":") else { continue }
+            // A lead-in introduces an authored example or template, even if it is repeated.
+            guard !SignatureSignOffPolicy.isAuthoredLeadInLine(lines[nonEmpty[position - 1]]) else { continue }
             guard isSignOff(lines[start]), !isSignOff(lines[name]),
                   SignatureSignOffPolicy.shouldPreserveNameLine(lines[name]),
                   SignatureSignOffPolicy.isStrongSupportLine(lines[nonEmpty[position + 2]]) else { continue }

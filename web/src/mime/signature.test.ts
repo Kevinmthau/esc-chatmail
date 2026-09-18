@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { processChatBubbleText } from './bubble'
 import { removeSignature } from './signature'
-import { unwrapEmailLineBreaks } from './text'
+import { formatSignOffLineBreaks, unwrapEmailLineBreaks } from './text'
 
 // Revert-check: signature.ts contact-prefix, anchored-tail and sign-off policy / Swift PlainTextSignatureRemover.
 // HONEST SCOPE: mobile/legal/wire cases are existing removal controls.
@@ -269,6 +269,114 @@ describe('authored content at inferred signature boundaries', () => {
     expect(removeSignature(input)).toBe('The review is complete.\n\nBest,\nJane Doe')
     expect(processChatBubbleText(input, { inputKind: 'plainText' }).mainText).toBe(
       'The review is complete.\n\nBest,\n\nJane Doe',
+    )
+  })
+})
+
+describe('Front core parity', () => {
+  // Revert-check: BARE_HOST_LINE_PATTERN in signature.ts evaluateLine.
+  it('closes a signature at a bare host row and keeps the sign-off/name pair', () => {
+    const text =
+      'Sounds good.\n\nThanks,\nJane Doe\nAccount Manager\njane@acmeadvisory.com\nacmeadvisory.com'
+    expect(removeSignature(text)).toBe('Sounds good.\n\nThanks,\nJane Doe')
+  })
+
+  // Revert-check: the hasContactInfo guard in signature.ts preservingSignOff.
+  // The host is not a name, but an unpaired closing stays.
+  it('does not preserve a bare host after the sign-off as a name', () => {
+    const text = 'See you then.\n\nThanks,\nacmeadvisory.com\njane@acmeadvisory.com\n415-555-1212'
+    expect(removeSignature(text)).toBe('See you then.\n\nThanks,')
+  })
+
+  // Revert-check: isAuthoredLeadInLine veto in removeSignature (Pass 2).
+  it('preserves a payee address block introduced by a colon lead-in', () => {
+    const text =
+      'Please send the check to:\n\nJane Doe\n123 Main Street\nSpringfield, IL 62701\njane@example.test'
+    expect(removeSignature(text)).toBe(text)
+    const signed =
+      'Please find my details below:\n\nThanks,\nJane Doe\n123 Main Street\nSpringfield, IL 62701\njane@example.test'
+    expect(removeSignature(signed)).toBe('Please find my details below:\n\nThanks,\nJane Doe')
+  })
+
+  // HONEST SCOPE: passes at HEAD (filenames were never hosts); pins the TLD allowlist's rejections.
+  it('does not treat filename lines as bare hosts', () => {
+    const text = 'Attached are the files.\n\nBest,\nJane\n\nphotos.heic\nvideo.mov\nmain.cc'
+    expect(removeSignature(text)).toBe(text)
+  })
+
+  // Revert-check: the contactSignals > bareHostSignals gate in removeSignature (Pass 2).
+  // Extensions that double as country codes ("Logo.ai", "main.tf") and an authored list of
+  // domains match BARE_HOST_LINE_PATTERN; they corroborate a real contact row but never anchor a
+  // signature by themselves.
+  it('never anchors a signature on bare host rows', () => {
+    const files = 'Attached are the two files.\n\nBest,\nJane\n\nBrand.ai\nLogo.ai\nmain.tf'
+    expect(removeSignature(files)).toBe(files)
+    const domains =
+      'Here are the domains to register.\n\nThanks,\nKevin\n\nKevinsbakery.com\nKevinsbakery.co\nKevinsbakery.shop'
+    expect(removeSignature(domains)).toBe(domains)
+  })
+
+  // Revert-check: SIGN_OFF_PHRASES 'thanks again'; isSignOffLine punctuation trim.
+  it('anchors a signature on gratitude closings and keeps the pair', () => {
+    expect(
+      removeSignature(
+        'That works for me.\n\nThanks again,\nJane Doe\nCEO\njane@example.test\n415-555-1212',
+      ),
+    ).toBe('That works for me.\n\nThanks again,\nJane Doe')
+    expect(
+      removeSignature('Sounds good.\n\nThanks!\nJane Doe\nCEO\njane@example.test\n415-555-1212'),
+    ).toBe('Sounds good.\n\nThanks!\nJane Doe')
+  })
+
+  // Revert-check: preservingSignOff returns index + 1 when the line after the closing
+  // is not a name, so the closing stays and only the signature rows below it go.
+  it('keeps an unpaired gratitude closing and drops a pipe-title signature', () => {
+    expect(
+      removeSignature(
+        'Hi Bob,\n\nThank you so much!\nJane Doe | Director of Sales\nAcme Inc.\n555-123-4567\njane@acme.com',
+      ),
+    ).toBe('Hi Bob,\n\nThank you so much!')
+    expect(
+      removeSignature(
+        'Thank you so much!\nJane Doe | Director of Sales\nAcme Inc.\n555-123-4567\njane@acme.com',
+      ),
+    ).toBe('Thank you so much!')
+    expect(
+      removeSignature(
+        'Received, I will process the payment today.\n\nThank you very much.\nAcme Plumbing LLC\n555-123-4567\ninfo@acmeplumbing.com',
+      ),
+    ).toBe('Received, I will process the payment today.\n\nThank you very much.')
+  })
+
+  // Revert-check: the colon lead-in clamp in removeSignature (Pass 2). A referral
+  // card under a colon intro stays when the sender's own signature follows.
+  it('keeps a referral card when the sender signature follows a colon lead-in', () => {
+    const text = [
+      'Here is the contact info for the plumber:',
+      '',
+      'Mike Jones',
+      '555-123-4567',
+      'mike@jonesplumbing.com',
+      '',
+      'Thanks,',
+      'John Smith',
+      '555-987-6543',
+      'john@acme.com',
+    ].join('\n')
+    expect(removeSignature(text)).toBe(
+      'Here is the contact info for the plumber:\n\nMike Jones\n555-123-4567\nmike@jonesplumbing.com\n\nThanks,\nJohn Smith',
+    )
+  })
+
+  // Revert-check: text.ts SIGN_OFF_WORDS derives from SIGN_OFF_PHRASES (longest first,
+  // regex-escaped), so a multi-word gratitude closing breaks off inline while
+  // sentence-shaped well-wishes stay out of the vocabulary and unbroken.
+  it('breaks a multi-word gratitude closing off inline', () => {
+    expect(formatSignOffLineBreaks('I will pay the balance today. Thanks so much, Jane')).toBe(
+      'I will pay the balance today.\n\nThanks so much,\n\nJane',
+    )
+    expect(formatSignOffLineBreaks('See you Monday. Have a great day!')).toBe(
+      'See you Monday. Have a great day!',
     )
   })
 })

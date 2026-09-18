@@ -407,6 +407,72 @@
       "notes": "Even a recognized confidentiality sentence must preserve the forwarding instruction that follows on the same line.",
       "input": "Hi John,\n\nThis email may contain confidential information. Please forward it to counsel.",
       "expected": "Hi John,\n\nThis email may contain confidential information. Please forward it to counsel."
+    },
+    {
+      "id": "plain_bare_host_signature_row_removed",
+      "notes": "A labelled bare company domain closes a plain-text signature; without the bare-host row the scan never opens (the other rows sit above it). Rows start uppercase so unwrapEmailLineBreaks keeps them apart. Revert-check: URLPatterns.bareHostLine in PlainTextSignatureRemover.evaluateLine / web BARE_HOST_LINE_PATTERN in evaluateLine.",
+      "input": "Sounds good.\n\nThanks,\nJane Doe\nAccount Manager\nEmail: jane@acmeadvisory.com\nWeb: acmeadvisory.com",
+      "expected": "Sounds good.\n\nThanks,\n\nJane Doe"
+    },
+    {
+      "id": "plain_bare_host_after_signoff_not_preserved_as_name",
+      "notes": "A host name passes the name-shape check but is a contact row, so it is not kept as the name; the unpaired closing stays. Revert-check: PlainTextSignatureRemover.preservingSignOff hasContactInfo guard / web preservingSignOff.",
+      "input": "See you then.\n\nThanks,\nacmeadvisory.com\nDirect: 415-555-1212\nEmail: jane@acmeadvisory.com",
+      "expected": "See you then.\n\nThanks,"
+    },
+    {
+      "id": "plain_thanks_again_signature_removed",
+      "notes": "Gratitude closings beyond 'thanks' anchor a plain-text signature and keep the sign-off/name pair. Revert-check: SignaturePatterns.signOffPhrases 'thanks again' / web SIGN_OFF_PHRASES.",
+      "input": "That works for me.\n\nThanks again,\nJane Doe\nCEO\njane@example.test\n415-555-1212",
+      "expected": "That works for me.\n\nThanks again,\n\nJane Doe"
+    },
+    {
+      "id": "plain_thanks_so_much_sentence_body_preserved",
+      "notes": "HONEST SCOPE: passes at HEAD. A sentence that starts with a closing phrase is body text; only a whole-line closing is a sign-off (PlainTextSignatureRemover.isSignOffLine / web isSignOffLine), so the card below is removed without preserving a sign-off/name pair.",
+      "input": "Thanks so much for the help!\n\nJane Doe\nCEO\nDirect: 415-555-1212\nEmail: jane@example.test",
+      "expected": "Thanks so much for the help!"
+    },
+    {
+      "id": "plain_closing_sentence_after_body_preserved",
+      "notes": "HONEST SCOPE: passes at HEAD. Well-wish sentences stay out of the sign-off vocabulary so formatSignOffLineBreaks never splits them.",
+      "input": "See you Monday. Have a great day!",
+      "expected": "See you Monday. Have a great day!"
+    },
+    {
+      "id": "plain_files_after_signoff_preserved",
+      "notes": "HONEST SCOPE: passes at HEAD. Filename lines are not bare hosts: the TLD allowlist rejects media and source extensions.",
+      "input": "Attached are the files.\n\nBest,\nJane\n\nPhotos.heic\nVideo.mov\nMain.cc",
+      "expected": "Attached are the files.\n\nBest,\nJane\n\nPhotos.heic\n\nVideo.mov\n\nMain.cc"
+    },
+    {
+      "id": "plain_colon_intro_payee_address_preserved",
+      "notes": "An address block introduced by a colon lead-in is the author's content even though it ends in a labeled email address and carries address keywords. Revert-check: SignatureSignOffPolicy.isAuthoredLeadInLine veto in PlainTextSignatureRemover.removeSignature / web isAuthoredLeadInLine.",
+      "input": "Please send the check to:\n\nJane Doe\nAcme Holdings\nSuite 400, 123 Main Street\nSpringfield, IL 62701\nEmail: jane@example.test",
+      "expected": "Please send the check to:\n\nJane Doe\n\nAcme Holdings\n\nSuite 400, 123 Main Street\n\nSpringfield, IL 62701\n\nEmail: jane@example.test"
+    },
+    {
+      "id": "plain_signoff_name_then_bare_host_rows_preserved",
+      "notes": "An authored list of domains after the sign-off and name is not a signature: bare hosts never anchor. Revert-check: contactSignals > bareHostSignals gate in PlainTextSignatureRemover.removeSignature / web removeSignature.",
+      "input": "Here are the three domains I'd like to register.\n\nThanks,\nKevin\n\nKevinsbakery.com\nKevinsbakery.co\nKevinsbakery.shop",
+      "expected": "Here are the three domains I'd like to register.\n\nThanks,\nKevin\n\nKevinsbakery.com\n\nKevinsbakery.co\n\nKevinsbakery.shop"
+    },
+    {
+      "id": "plain_unpaired_gratitude_closing_pipe_title_kept",
+      "notes": "A gratitude closing with no preservable name below it stays; the pipe-title signature is removed. Rows start uppercase so unwrapEmailLineBreaks keeps them apart. Revert-check: PlainTextSignatureRemover.preservingSignOff unpaired index+1 / web preservingSignOff.",
+      "input": "Hi Bob,\n\nThank you so much!\nJane Doe | Director of Sales\nAcme Inc.\nPhone: 555-123-4567\nEmail: jane@acme.com",
+      "expected": "Hi Bob,\n\nThank you so much!"
+    },
+    {
+      "id": "plain_gratitude_only_pipe_title_kept",
+      "notes": "A gratitude-only reply must not be wiped: emptying the body used to leak the whole signature through the HTML fallback. Revert-check: PlainTextSignatureRemover.preservingSignOff unpaired index+1 / web preservingSignOff.",
+      "input": "Thank you so much!\nJane Doe | Director of Sales\nAcme Inc.\nPhone: 555-123-4567\nEmail: jane@acme.com",
+      "expected": "Thank you so much!"
+    },
+    {
+      "id": "plain_referral_card_then_own_signature_keeps_card",
+      "notes": "A colon lead-in owns the referral card even when the sender's own signature follows. Labeled Phone/Email rows start uppercase so unwrap keeps them apart. Revert-check: PlainTextSignatureRemover.removeSignature colon lead-in clamp / web removeSignature.",
+      "input": "Here is the contact info for the plumber:\n\nMike Jones\nPhone: 555-123-4567\nEmail: mike@jonesplumbing.com\n\nThanks,\nJohn Smith\nPhone: 555-987-6543\nEmail: john@acme.com",
+      "expected": "Here is the contact info for the plumber:\n\nMike Jones\n\nPhone: 555-123-4567\n\nEmail: mike@jonesplumbing.com\n\nThanks,\nJohn Smith"
     }
   ],
   "htmlToBubbleTextCases": [
@@ -823,6 +889,78 @@
       "notes": "Revert-check: repeated contact records must remain visible when each person's name and role share a paragraph, so the identity line also matches signature support text.",
       "inputHTML": "<p>The team is listed below.</p><p>Jane Doe, Partner</p><p><a href=\"mailto:jane@example.test\">Email me</a></p><p><a href=\"tel:+14155551212\">Call the office</a></p><p>John Smith, Partner</p><p><a href=\"mailto:john@example.test\">Email me</a></p><p><a href=\"tel:+14155551313\">Call the office</a></p>",
       "expected": "The team is listed below.\n\nJane Doe, Partner\n\nEmail me\n\nCall the office\n\nJohn Smith, Partner\n\nEmail me\n\nCall the office"
+    },
+    {
+      "id": "html_front_signature_wrapper_short_reply_removed",
+      "notes": "Front (frontapp.com) vendor wrapper on a short reply: the signature is ~64% of the visible text, above majorityTextGuardRatio, so the footer pass keeps it; the explicit wrapper selector removes it and the name after the outside sign-off survives. Revert-check: EmailDOMQuoteRemover.signatureWrapperSelectors \"div.front-signature\" + removeSignatureWrappers name preservation / web SIGNATURE_WRAPPER_SELECTORS + removeSignatureWrappers.",
+      "inputHTML": "<!--[if (gte mso 9)|(IE)]><style type=\"text/css\">.main-style-0123456789abcdef0123 { font-family: sans-serif; font-size: 11pt; /* inherit */ }</style><![endif]--><div style=\"/* inherit */\" class=\"main-style-0123456789abcdef0123\"><div>Hi Jordan,</div><div><br /></div><div>Just so I'm clear, would you like me to go ahead and pay the balance?</div><div><br /></div><div>Thanks so much,</div><br><div class=\"front-signature\"><div><br /></div><div><span class=\"fa-example1 fa-example2\"></span></div><table style=\"font-size: 13px; padding: 10px 0px; margin-bottom: 5px; border: none; border-collapse: collapse;\"><tbody><tr><td style=\"vertical-align: middle; padding: 0px 7px 0px 0px;\"><div><a href=\"https://signatures.example/customer/acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\"><img src=\"https://cdn.example/customer/acmeadvisory/logo.png\" height=\"70\" alt=\"Company logo\" /></a></div><div><br /></div></td><td style=\"border-left: 2px solid rgb(247, 148, 29); padding: 7px 0px 0px 10px;\"><div style=\"font-family: tahoma, sans-serif; line-height: 15px; font-weight: bold; color: rgb(51, 51, 51);\">Avery Fenwick</div><div style=\"font-family: tahoma, sans-serif; font-size: 11px; line-height: 14px; color: rgb(51, 51, 51); margin-bottom: 10px;\">Associate Relationship Manager</div><div style=\"font-family: tahoma, sans-serif; font-size: 11px; line-height: 14px; margin-bottom: 10px;\"><a style=\"text-decoration: none; color: rgb(19, 72, 101);\" href=\"mailto:avery.fenwick@acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\">avery.fenwick@acmeadvisory.com</a><span style=\"color: rgb(51, 51, 51); font-family: &quot;open sans&quot;, sans-serif; line-height: 13px;\"><br />Direct:&nbsp;206-555-0142</span><br /><span style=\"line-height: 14px;\"></span></div><div style=\"font-family: tahoma, sans-serif; font-size: 10px;\"><a style=\"text-decoration: none; color: rgb(19, 72, 101);\" href=\"https://signatures.example/customer/acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\">acmeadvisory.com</a></div><div style=\"font-family: tahoma, sans-serif; font-size: 10px; line-height: 13px; margin-bottom: 10px;\">4100 Avenue of the Pines, Suite 2400<br />Springfield, IL 62701</div><div style=\"line-height: 13px; margin-bottom: 10px;\"><div style=\"line-height: 13px; margin-bottom: 10px;\"><div style=\"line-height: 13px; margin-bottom: 10px;\"><strong><br />&nbsp;<a href=\"https://twitter.com/acmeadvisory\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/twitter-orange.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;<a href=\"https://www.linkedin.com/company/acmeadvisory\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/linkedin-orange.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;<a href=\"https://www.instagram.com/acmeadvisory_llc/\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/Gram.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;&nbsp;</strong></div></div></div></td></tr></tbody></table><div><br /></div><div><span style=\"background-color: rgb(255, 246, 39);\"><strong></strong></span></div></div></div><img src=\"https://app.example/seen/msg_0000example/00000000.gif\" alt=\"Sent from Front\" aria-hidden=\"true\" style=\"width: 1px; height: 1px\"><br><blockquote type=\"cite\" class=\"front-blockquote\" style=\"margin: 0px 0px 0px 0.8ex; padding-left: 1ex;\">On March 3, 2026 at 9:10 AM PST <a href=\"mailto:jordan@example.com\" target=\"_blank\" rel=\"noopener noreferrer\">jordan@example.com</a> wrote:<br /><br /><div id=\"fae_0000example0000\"><div dir=\"ltr\"><div dir=\"ltr\">Hi, can you please help with this?&nbsp;</div></div></div></blockquote>",
+      "expected": "Hi Jordan,\n\nJust so I'm clear, would you like me to go ahead and pay the balance?\n\nThanks so much,\n\nAvery Fenwick"
+    },
+    {
+      "id": "html_thanks_so_much_signoff_logo_between_name_preserved",
+      "notes": "Same Front shape without a signature class token: the heuristic scan needs the bare-domain contact row, the gratitude closing as a sign-off, and the logo/social icons counted as signature-owned media. Revert-check: URLPatterns.bareHostLine + SignaturePatterns.signOffPhrases 'thanks so much' + EmailDOMQuoteRemover.isSignatureOwnedMedia / web BARE_HOST_LINE_PATTERN, SIGN_OFF_PHRASES, isSignatureOwnedMedia.",
+      "inputHTML": "<!--[if (gte mso 9)|(IE)]><style type=\"text/css\">.main-style-0123456789abcdef0123 { font-family: sans-serif; font-size: 11pt; /* inherit */ }</style><![endif]--><div style=\"/* inherit */\" class=\"main-style-0123456789abcdef0123\"><div>Hi Jordan,</div><div><br /></div><div>Just so I'm clear, would you like me to go ahead and pay the balance?</div><div><br /></div><div>Thanks so much,</div><br><div class=\"card-wrap\"><div><br /></div><div><span class=\"fa-example1 fa-example2\"></span></div><table style=\"font-size: 13px; padding: 10px 0px; margin-bottom: 5px; border: none; border-collapse: collapse;\"><tbody><tr><td style=\"vertical-align: middle; padding: 0px 7px 0px 0px;\"><div><a href=\"https://signatures.example/customer/acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\"><img src=\"https://cdn.example/customer/acmeadvisory/logo.png\" height=\"70\" alt=\"Company logo\" /></a></div><div><br /></div></td><td style=\"border-left: 2px solid rgb(247, 148, 29); padding: 7px 0px 0px 10px;\"><div style=\"font-family: tahoma, sans-serif; line-height: 15px; font-weight: bold; color: rgb(51, 51, 51);\">Avery Fenwick</div><div style=\"font-family: tahoma, sans-serif; font-size: 11px; line-height: 14px; color: rgb(51, 51, 51); margin-bottom: 10px;\">Associate Relationship Manager</div><div style=\"font-family: tahoma, sans-serif; font-size: 11px; line-height: 14px; margin-bottom: 10px;\"><a style=\"text-decoration: none; color: rgb(19, 72, 101);\" href=\"mailto:avery.fenwick@acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\">avery.fenwick@acmeadvisory.com</a><span style=\"color: rgb(51, 51, 51); font-family: &quot;open sans&quot;, sans-serif; line-height: 13px;\"><br />Direct:&nbsp;206-555-0142</span><br /><span style=\"line-height: 14px;\"></span></div><div style=\"font-family: tahoma, sans-serif; font-size: 10px;\"><a style=\"text-decoration: none; color: rgb(19, 72, 101);\" href=\"https://signatures.example/customer/acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\">acmeadvisory.com</a></div><div style=\"font-family: tahoma, sans-serif; font-size: 10px; line-height: 13px; margin-bottom: 10px;\">4100 Avenue of the Pines, Suite 2400<br />Springfield, IL 62701</div><div style=\"line-height: 13px; margin-bottom: 10px;\"><div style=\"line-height: 13px; margin-bottom: 10px;\"><div style=\"line-height: 13px; margin-bottom: 10px;\"><strong><br />&nbsp;<a href=\"https://twitter.com/acmeadvisory\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/twitter-orange.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;<a href=\"https://www.linkedin.com/company/acmeadvisory\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/linkedin-orange.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;<a href=\"https://www.instagram.com/acmeadvisory_llc/\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/Gram.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;&nbsp;</strong></div></div></div></td></tr></tbody></table><div><br /></div><div><span style=\"background-color: rgb(255, 246, 39);\"><strong></strong></span></div></div></div><img src=\"https://app.example/seen/msg_0000example/00000000.gif\" alt=\"Sent from Front\" aria-hidden=\"true\" style=\"width: 1px; height: 1px\"><br><blockquote type=\"cite\" class=\"front-blockquote\" style=\"margin: 0px 0px 0px 0.8ex; padding-left: 1ex;\">On March 3, 2026 at 9:10 AM PST <a href=\"mailto:jordan@example.com\" target=\"_blank\" rel=\"noopener noreferrer\">jordan@example.com</a> wrote:<br /><br /><div id=\"fae_0000example0000\"><div dir=\"ltr\"><div dir=\"ltr\">Hi, can you please help with this?&nbsp;</div></div></div></blockquote>",
+      "expected": "Hi Jordan,\n\nJust so I'm clear, would you like me to go ahead and pay the balance?\n\nThanks so much,\n\nAvery Fenwick"
+    },
+    {
+      "id": "html_bare_domain_contact_signature_removed",
+      "notes": "A bare company domain on its own row is a contact row even when its link points at a signature vendor. Revert-check: URLPatterns.bareHostLine / web BARE_HOST_LINE_PATTERN.",
+      "inputHTML": "<div>Current reply.</div><div>Thanks,</div><div>Jane Doe</div><div>Account Manager</div><div><a href=\"mailto:jane@acmeadvisory.com\">jane@acmeadvisory.com</a></div><div>Direct: 206-555-0142</div><div><a href=\"https://signatures.example/customer/acmeadvisory.com\">acmeadvisory.com</a></div><div>4100 Avenue of the Pines, Suite 2400<br>Los Angeles, CA 90067</div>",
+      "expected": "Current reply.\n\nThanks,\n\nJane Doe"
+    },
+    {
+      "id": "html_single_cell_signature_with_trailing_social_icons_removed",
+      "notes": "Social icons after the contact rows are signature-owned media, not authored images. Revert-check: EmailDOMQuoteRemover.isSignatureOwnedMedia / web isSignatureOwnedMedia.",
+      "inputHTML": "<div>Current reply.</div><div>Best,<br>Jane Doe<br>Partner<br><a href=\"mailto:jane@example.test\">jane@example.test</a><br>415-555-1212<br><a href=\"https://www.linkedin.com/company/acme\"><img src=\"https://cdn.example/in.png\" width=\"20\" height=\"20\" alt=\"-\"></a>&nbsp;<a href=\"https://twitter.com/acme\"><img src=\"https://cdn.example/tw.png\" width=\"20\" height=\"20\" alt=\"-\"></a></div>",
+      "expected": "Current reply.\n\nBest,\n\nJane Doe"
+    },
+    {
+      "id": "html_video_linked_image_after_signature_same_block_preserved",
+      "notes": "HONEST SCOPE: passes at HEAD. Canary for isSignatureOwnedMedia's scope: a dimensioned image linked to a video is authored media and still protects the block.",
+      "inputHTML": "<div>Current reply.</div><div>Best,<br>Jane Doe<br><a href=\"mailto:jane@example.test\">jane@example.test</a><br>415-555-1212<br><a href=\"https://www.youtube.com/watch?v=abc\"><img src=\"cid:thumb\" width=\"320\" height=\"180\"></a></div>",
+      "expected": "Current reply.\n\nBest,\nJane Doe jane@example.test 415-555-1212"
+    },
+    {
+      "id": "html_colon_intro_div_referral_preserved",
+      "notes": "A colon lead-in owns the card below it even when the card carries a strong title. Revert-check: SignatureSignOffPolicy.isAuthoredLeadInLine / web isAuthoredLeadInLine.",
+      "inputHTML": "<div>You can reach the plumber here:</div><div>Jane Doe</div><div>Account Manager</div><div>Acme Plumbing</div><div><a href=\"mailto:jane@acmeplumbing.test\">jane@acmeplumbing.test</a></div><div>404-555-0142</div>",
+      "expected": "You can reach the plumber here:\n\nJane Doe\n\nAccount Manager\n\nAcme Plumbing jane@acmeplumbing.test 404-555-0142"
+    },
+    {
+      "id": "html_signature_token_wrapper_is_whole_message_preserved",
+      "notes": "HONEST SCOPE: passes at HEAD. Canary for the footer pass's majority-text guard: a sig-classed container holding the message body is not a footer. Revert-check: EmailDOMQuoteRemover.majorityTextGuardRatio / web MAJORITY_TEXT_GUARD_RATIO.",
+      "inputHTML": "<p>Hey.</p><div class=\"sig\"><p>The venue confirmed our booking for the twelfth and sent over the revised floor plan this morning.</p><p>I will forward the invoice once accounting approves the deposit, so please hold the date.</p></div>",
+      "expected": "Hey.\n\nThe venue confirmed our booking for the twelfth and sent over the revised floor plan this morning.\n\nI will forward the invoice once accounting approves the deposit, so please hold the date."
+    },
+    {
+      "id": "html_footer_classed_majority_container_preserved",
+      "notes": "HONEST SCOPE: passes at HEAD. Canary for the footer pass's majority-text guard on footer-classed containers. Revert-check: EmailDOMQuoteRemover.majorityTextGuardRatio / web MAJORITY_TEXT_GUARD_RATIO.",
+      "inputHTML": "<p>Hi!</p><div class=\"footerContainer\">Meaningful message text lives inside a footer-classed wrapper because the template author reused the class for the body.</div>",
+      "expected": "Hi!\n\nMeaningful message text lives inside a footer-classed wrapper because the template author reused the class for the body."
+    },
+    {
+      "id": "html_file_list_after_signoff_preserved",
+      "notes": "Extensions that double as country codes match the bare-host pattern, so a bare host corroborates a contact block but never anchors one. Revert-check: bareHostContactLineCount guard in EmailDOMQuoteRemover.truncateTrailingContactSignature / web truncateTrailingContactSignature.",
+      "inputHTML": "<div>Attached are the two files.</div><div>Best,</div><div>Jane</div><div><br></div><div>Brand.ai</div><div>Logo.ai</div><div>Main.tf</div>",
+      "expected": "Attached are the two files.\n\nBest,\nJane\n\nBrand.ai\n\nLogo.ai\n\nMain.tf"
+    },
+    {
+      "id": "html_unpaired_gratitude_closing_pipe_title_kept",
+      "notes": "A gratitude closing with no preservable name below it stays; hoisting signatureStart onto the unpaired closing would delete it and, when it is the whole reply, leak the signature through the cleanup fallback. Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature sign-off hoist / web truncateTrailingContactSignature.",
+      "inputHTML": "<div>Hi Bob,</div><div>Thank you so much!</div><div>Jane Doe | Director of Sales</div><div>Acme Inc.</div><div>415-555-1234</div><div><a href=\"mailto:jane@acme.com\">jane@acme.com</a></div>",
+      "expected": "Hi Bob,\n\nThank you so much!"
+    },
+    {
+      "id": "html_gratitude_only_pipe_title_kept",
+      "notes": "A gratitude-only HTML reply must keep the closing so HTMLCleanupFallback does not fall back to the uncleaned signature. Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature sign-off hoist / web truncateTrailingContactSignature.",
+      "inputHTML": "<div>Thank you so much!</div><div>Jane Doe | Director of Sales</div><div>Acme Inc.</div><div>415-555-1234</div><div><a href=\"mailto:jane@acme.com\">jane@acme.com</a></div>",
+      "expected": "Thank you so much!"
+    },
+    {
+      "id": "html_gratitude_sentence_company_first_signature_kept",
+      "notes": "An authored gratitude sentence stays when the first signature row is a company line rather than a bare name. Revert-check: EmailDOMQuoteRemover.truncateTrailingContactSignature sign-off hoist / web truncateTrailingContactSignature.",
+      "inputHTML": "<div>Received, I will process the payment today.</div><div>Thank you very much.</div><div>Acme Plumbing LLC</div><div>555-123-4567</div><div><a href=\"mailto:info@acmeplumbing.com\">info@acmeplumbing.com</a></div>",
+      "expected": "Received, I will process the payment today.\n\nThank you very much."
     }
   ],
   "rawSourceHTMLRecoveryCases": [
@@ -892,6 +1030,12 @@
       "id": "gmail_personal_invoice_with_nested_signature_not_rich",
       "notes": "A one-to-one Gmail message with an attached invoice and a large nested gmail_signature block should stay in bubble mode; the signature should not make it look like rich HTML.",
       "inputHTML": "<div dir=\"ltr\"><div class=\"gmail_default\" style=\"font-family:arial,sans-serif\">Hi Kevin,</div><div class=\"gmail_default\" style=\"font-family:arial,sans-serif\"><br></div><div class=\"gmail_default\" style=\"font-family:arial,sans-serif\">Please find attached an invoice for planning services and cancellation support.</div><div class=\"gmail_default\" style=\"font-family:arial,sans-serif\"><br></div><div class=\"gmail_default\" style=\"font-family:arial,sans-serif\">Upon approval, we will charge the card on file. Please let me know if you have any questions.</div><div class=\"gmail_default\" style=\"font-family:arial,sans-serif\"><br></div><div class=\"gmail_default\" style=\"font-family:arial,sans-serif\">Best,<br>Janet</div></div><div><div dir=\"ltr\" class=\"gmail_signature\" data-smartmail=\"gmail_signature\"><div dir=\"ltr\"><table cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tbody><tr><td style=\"text-align:center\"><a href=\"https://example.com/feature\">Feature story</a></td></tr><tr><td><img src=\"https://example.com/signature/top.jpg\" width=\"520\"></td></tr><tr><td><table cellpadding=\"0\" cellspacing=\"20\" border=\"0\"><tbody><tr><td><h2>Janet Example</h2><p>COO / Partner</p><p>Example Travel</p></td><td width=\"0\"><div></div></td><td><table cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tbody><tr><td width=\"30\"><img src=\"https://example.com/signature/phone.png\" width=\"13\"></td><td>617.221.4242 x100</td></tr><tr><td width=\"30\"><img src=\"https://example.com/signature/email.png\" width=\"13\"></td><td><a href=\"mailto:janet@exampletravel.com\">janet@exampletravel.com</a></td></tr><tr><td width=\"30\"><img src=\"https://example.com/signature/web.png\" width=\"13\"></td><td><a href=\"https://exampletravel.com\">exampletravel.com</a></td></tr></tbody></table></td></tr></tbody></table></td></tr><tr><td><table cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tbody><tr><td><a href=\"https://facebook.com/exampletravel\"><img src=\"https://example.com/signature/fb.png\" width=\"24\"></a></td><td><a href=\"https://instagram.com/exampletravel\"><img src=\"https://example.com/signature/ig.png\" width=\"24\"></a></td><td><a href=\"https://linkedin.com/company/exampletravel\"><img src=\"https://example.com/signature/li.png\" width=\"24\"></a></td></tr></tbody></table></td></tr></tbody></table></div></div></div>",
+      "expectedHasRichHTMLContent": false
+    },
+    {
+      "id": "front_signature_wrapper_short_reply_not_rich",
+      "notes": "Once the Front wrapper is removed the surviving reply has no table, logo, or social links, so it must not route to the HTML preview card. Revert-check: EmailDOMQuoteRemover.signatureWrapperSelectors \"div.front-signature\" / web SIGNATURE_WRAPPER_SELECTORS 'div.front-signature'.",
+      "inputHTML": "<!--[if (gte mso 9)|(IE)]><style type=\"text/css\">.main-style-0123456789abcdef0123 { font-family: sans-serif; font-size: 11pt; /* inherit */ }</style><![endif]--><div style=\"/* inherit */\" class=\"main-style-0123456789abcdef0123\"><div>Hi Jordan,</div><div><br /></div><div>Just so I'm clear, would you like me to go ahead and pay the balance?</div><div><br /></div><div>Thanks so much,</div><br><div class=\"front-signature\"><div><br /></div><div><span class=\"fa-example1 fa-example2\"></span></div><table style=\"font-size: 13px; padding: 10px 0px; margin-bottom: 5px; border: none; border-collapse: collapse;\"><tbody><tr><td style=\"vertical-align: middle; padding: 0px 7px 0px 0px;\"><div><a href=\"https://signatures.example/customer/acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\"><img src=\"https://cdn.example/customer/acmeadvisory/logo.png\" height=\"70\" alt=\"Company logo\" /></a></div><div><br /></div></td><td style=\"border-left: 2px solid rgb(247, 148, 29); padding: 7px 0px 0px 10px;\"><div style=\"font-family: tahoma, sans-serif; line-height: 15px; font-weight: bold; color: rgb(51, 51, 51);\">Avery Fenwick</div><div style=\"font-family: tahoma, sans-serif; font-size: 11px; line-height: 14px; color: rgb(51, 51, 51); margin-bottom: 10px;\">Associate Relationship Manager</div><div style=\"font-family: tahoma, sans-serif; font-size: 11px; line-height: 14px; margin-bottom: 10px;\"><a style=\"text-decoration: none; color: rgb(19, 72, 101);\" href=\"mailto:avery.fenwick@acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\">avery.fenwick@acmeadvisory.com</a><span style=\"color: rgb(51, 51, 51); font-family: &quot;open sans&quot;, sans-serif; line-height: 13px;\"><br />Direct:&nbsp;206-555-0142</span><br /><span style=\"line-height: 14px;\"></span></div><div style=\"font-family: tahoma, sans-serif; font-size: 10px;\"><a style=\"text-decoration: none; color: rgb(19, 72, 101);\" href=\"https://signatures.example/customer/acmeadvisory.com\" target=\"_blank\" rel=\"noopener noreferrer\">acmeadvisory.com</a></div><div style=\"font-family: tahoma, sans-serif; font-size: 10px; line-height: 13px; margin-bottom: 10px;\">4100 Avenue of the Pines, Suite 2400<br />Springfield, IL 62701</div><div style=\"line-height: 13px; margin-bottom: 10px;\"><div style=\"line-height: 13px; margin-bottom: 10px;\"><div style=\"line-height: 13px; margin-bottom: 10px;\"><strong><br />&nbsp;<a href=\"https://twitter.com/acmeadvisory\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/twitter-orange.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;<a href=\"https://www.linkedin.com/company/acmeadvisory\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/linkedin-orange.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;<a href=\"https://www.instagram.com/acmeadvisory_llc/\" target=\"_blank\" rel=\"noopener noreferrer\"><img width=\"20\" src=\"https://cdn.example/icons/Gram.jpg\" height=\"20\" alt=\"-\" /></a>&nbsp;&nbsp;</strong></div></div></div></td></tr></tbody></table><div><br /></div><div><span style=\"background-color: rgb(255, 246, 39);\"><strong></strong></span></div></div></div><img src=\"https://app.example/seen/msg_0000example/00000000.gif\" alt=\"Sent from Front\" aria-hidden=\"true\" style=\"width: 1px; height: 1px\"><br><blockquote type=\"cite\" class=\"front-blockquote\" style=\"margin: 0px 0px 0px 0.8ex; padding-left: 1ex;\">On March 3, 2026 at 9:10 AM PST <a href=\"mailto:jordan@example.com\" target=\"_blank\" rel=\"noopener noreferrer\">jordan@example.com</a> wrote:<br /><br /><div id=\"fae_0000example0000\"><div dir=\"ltr\"><div dir=\"ltr\">Hi, can you please help with this?&nbsp;</div></div></div></blockquote>",
       "expectedHasRichHTMLContent": false
     }
   ],

@@ -122,6 +122,30 @@ final class ChatPreviewRepairTests: XCTestCase {
         withExtendedLifetime(repair) {}
     }
 
+    // Revert-check: CacheVersioning.chatPreviewDerivationVersion "2026-09-17-signature-front-core-v1"
+    // re-derives a preview the previous version already completed; the Front wrapper fix changes
+    // only the saved preview, never the canonical HTML bytes.
+    func testFrontCoreVersionRepairsVendorWrapperPreviewWithoutChangingCanonicalHTML() async throws {
+        let received = try message("001")
+        let canonicalURL = try XCTUnwrap(handler.saveHTML(FrontSignatureFixture.html, for: "001"))
+        received.bodyStorageURI = canonicalURL.absoluteString
+        received.chatPreviewText = FrontSignatureFixture.leakedChatText
+        let canonicalData = try Data(contentsOf: canonicalURL)
+        try viewContext.save()
+        flags.set(true, forKey: "chatPreviewRepair.2026-09-10-repeated-signature-v1")
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
+        viewContext.refreshAllObjects()
+
+        XCTAssertEqual(received.chatPreviewText, FrontSignatureFixture.expectedChatText)
+        XCTAssertEqual(handler.loadHTML(for: "001"), FrontSignatureFixture.html)
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalData)
+        withExtendedLifetime(repair) {}
+    }
+
     func testRepeatedFooterVersionRepairsPreviouslyCompletedPreviewWithoutChangingSource() async throws {
         let received = try message("001")
         let source = RepeatedCorporateSignatureFixture.html()

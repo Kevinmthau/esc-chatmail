@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import corpusJson from '@fixtures/golden_message_corpus.json'
 import { isStrongSignatureSupportLine, shouldPreserveSignatureNameLine } from './patterns'
-import { removeQuotesFromHtml } from './html'
+import {
+  isContactSignatureLine,
+  isSignatureOwnedMedia,
+  isTrailingSignatureContactLine,
+  removeQuotesFromHtml,
+} from './html'
 import { paragraphAwareText, parseHtmlDocument } from './htmlText'
 
 function cleanedText(html: string): string {
@@ -415,12 +421,11 @@ describe('signature sub-lines and sign-off policy', () => {
   it.each(['Partner', 'Threash Insurance Agency'])(
     'does not preserve a title/company as a name: %s',
     (name) => {
-      for (const signature of [
-        `<div class="gmail_signature">Best,<br>${name}<br>john@example.test<br>415-555-1212</div>`,
-        `<p>Best,</p><p>${name}</p><p>john@example.test</p><p>415-555-1212</p>`,
-      ]) {
-        expect(cleanedText('<p>Current reply.</p>' + signature)).toBe('Current reply.')
-      }
+      const wrapper = `<div class="gmail_signature">Best,<br>${name}<br>john@example.test<br>415-555-1212</div>`
+      expect(cleanedText('<p>Current reply.</p>' + wrapper)).toBe('Current reply.')
+
+      const heuristic = `<p>Best,</p><p>${name}</p><p>john@example.test</p><p>415-555-1212</p>`
+      expect(cleanedText('<p>Current reply.</p>' + heuristic)).toBe('Current reply.\n\nBest,')
     },
   )
 })
@@ -435,4 +440,248 @@ it('preserves all unmarked trailing images when cutting inside a shared block', 
     expect(cleaned).toContain(`cid:photo${index}`)
   }
   expect(cleaned).not.toContain('john@example.test')
+})
+
+describe('Front core: bare hosts, owned media, wrapper name preservation, lead-in veto', () => {
+  const corpusCase = (id: string): string => {
+    const cases = (corpusJson as { htmlToBubbleTextCases: { id: string; inputHTML: string }[] })
+      .htmlToBubbleTextCases
+    const found = cases.find((scenario) => scenario.id === id)
+    if (!found) throw new Error(`missing corpus case ${id}`)
+    return found.inputHTML
+  }
+
+  // Revert-check: SIGNATURE_WRAPPER_SELECTORS 'div.front-signature' and
+  // removeSignatureWrappers' name preservation after an outside sign-off. The corpus
+  // replay pins the text; this pins that the wrapper route owns the logo and icon markup.
+  it('removes the Front wrapper and keeps the name after the outside sign-off', () => {
+    const html = corpusCase('html_front_signature_wrapper_short_reply_removed')
+    const cleaned = removeQuotesFromHtml(html, 'quotedAndSignatures') ?? ''
+    expect(cleanedText(html)).toBe(
+      "Hi Jordan,\n\nJust so I'm clear, would you like me to go ahead and pay the balance?\n\nThanks so much,\n\nAvery Fenwick",
+    )
+    expect(cleaned).not.toContain('<table')
+    expect(cleaned).not.toContain('front-blockquote')
+  })
+
+  // Revert-check: isSignatureOwnedMedia rules: aria-hidden, 1x1, width-only <= 48, sized
+  // image-only social profile link <= 64 (never a post/video path, never unsized), sized
+  // image-only https link with every declared side <= 100.
+  it('owns icons, pixels and small linked logos only', () => {
+    const html = `
+      <div>
+      <img id="pixel" src="https://t.example/p.gif" aria-hidden="true">
+      <img id="onebyone" src="https://t.example/p.gif" width="1" height="1">
+      <img id="widthonly" src="https://cdn.example/i.png" width="20">
+      <img id="styled" src="https://cdn.example/i.png" style="width: 16px; height: 16px">
+      <img id="tall" src="https://cdn.example/i.png" width="48" height="49">
+      <img id="heightonly" src="https://cdn.example/i.png" height="20">
+      <a href="https://www.linkedin.com/company/acme"><img id="social" src="https://cdn.example/in.png" width="24"></a>
+      <a href="https://www.linkedin.com/in/janedoe"><img id="socialunsized" src="cid:screenshot"></a>
+      <a href="https://www.linkedin.com/company/acme"><img id="socialwide" src="https://cdn.example/x.png" width="80"></a>
+      <a href="https://www.linkedin.com/posts/acme_123"><img id="socialpost" src="cid:damage" width="600"></a>
+      <a href="https://www.linkedin.com/posts/acme_123"><img id="socialpostsmall" src="https://cdn.example/p.png" width="80" height="80"></a>
+      <a href="https://twitter.com/acme/status/1"><img id="tweet" src="cid:shot"></a>
+      <a href="https://www.youtube.com/watch?v=1"><img id="video" src="cid:thumb" width="320" height="180"></a>
+      <a href="https://www.youtube.com/watch?v=1"><img id="badge" src="https://cdn.example/yt.png" width="60" height="60"></a>
+      <a href="https://signatures.example/acme"><img id="logo" src="https://cdn.example/logo.png" height="70"></a>
+      <a href="https://docs.example/plan"><img id="photo" src="https://cdn.example/photo.jpg" width="1200" height="800"></a>
+      <a href="https://docs.example/plan"><img id="undimensioned" src="https://cdn.example/photo.jpg"></a>
+      <a href="https://twitter.com/acme">Follow us <img id="labeled" src="https://cdn.example/tw.png"></a>
+      <picture id="picture"><img src="https://cdn.example/big.jpg" width="20" height="20"></picture>
+      <img id="alt" src="cid:floorplan" alt="Company logo">
+      </div>
+    `
+    const document = parseHtmlDocument(html)
+    const owned = (id: string): boolean => {
+      const element = document.getElementById(id)
+      if (!element) throw new Error(`missing element ${id}`)
+      return isSignatureOwnedMedia(element)
+    }
+    for (const id of ['pixel', 'onebyone', 'widthonly', 'styled', 'social', 'logo', 'badge']) {
+      expect(owned(id), id).toBe(true)
+    }
+    for (const id of [
+      'tall',
+      'heightonly',
+      'socialunsized',
+      'socialwide',
+      'socialpost',
+      'socialpostsmall',
+      'tweet',
+      'video',
+      'photo',
+      'undimensioned',
+      'labeled',
+      'picture',
+      'alt',
+    ]) {
+      expect(owned(id), id).toBe(false)
+    }
+  })
+
+  // Revert-check: isSignatureOwnedMedia inside containsSignatureTailMedia.
+  it('removes an inferred signature block with trailing social icons', () => {
+    const html =
+      '<div>Current reply.</div>' +
+      '<div>Best,<br>Jane Doe<br>Partner<br><a href="mailto:jane@example.test">jane@example.test</a><br>415-555-1212<br>' +
+      '<a href="https://www.linkedin.com/company/acme"><img src="https://cdn.example/in.png" width="20" height="20" alt="-"></a>&nbsp;' +
+      '<a href="https://twitter.com/acme"><img src="https://cdn.example/tw.png" width="20" height="20" alt="-"></a></div>'
+    const cleaned = removeQuotesFromHtml(html, 'quotedAndSignatures') ?? ''
+    expect(cleanedText(html)).toBe('Current reply.\n\nBest,\nJane Doe')
+    expect(cleaned).not.toContain('<img')
+  })
+
+  // HONEST SCOPE: passes at HEAD. A dimensioned screenshot linked to a tweet is authored media:
+  // it stays, and so does the media-before-signature prefix handling that keeps it in place. The
+  // guard this pins is that isSignatureOwnedMedia's social rule never owns a content-path link.
+  it('preserves a social-linked screenshot before the sign-off', () => {
+    const html =
+      '<div>Look at this.<br><a href="https://twitter.com/acme/status/123"><img src="cid:shot" width="600" height="400"></a><br>' +
+      'Best,<br>Jane Doe<br>Partner<br><a href="mailto:jane@example.test">jane@example.test</a><br>415-555-1212</div>'
+    const cleaned = removeQuotesFromHtml(html, 'quotedAndSignatures') ?? ''
+    expect(cleaned).toContain('cid:shot')
+    expect(cleanedText(html)).toBe('Look at this.\n\nBest,\nJane Doe')
+  })
+
+  // Revert-check: BARE_HOST_LINE_PATTERN allowlist (every label two characters, explicit TLDs).
+  it.each([
+    'acmeadvisory.com',
+    'www.nordvik.no',
+    'nordvik.no',
+    'Web: acme.co.uk',
+    'acme.io/',
+    'logo.ai',
+    'NORDVIK.NO',
+  ])('treats a bare host row as a contact line: %s', (host) => {
+    expect(isTrailingSignatureContactLine(host)).toBe(true)
+    expect(isContactSignatureLine(host)).toBe(true)
+  })
+
+  // HONEST SCOPE: passes at HEAD for every rejected input; pins the bare-host allowlist's rejections.
+  it.each([
+    'main.cc',
+    'README.md',
+    'script.py',
+    'photos.heic',
+    'video.mov',
+    'M.Sc',
+    'e.g.',
+    'Ph.D.',
+    'acme.com is down',
+    'See acme.com',
+    'Nordvik AS',
+    'a.co',
+    'acme.com.',
+  ])('does not treat a filename, abbreviation or prose mention as a host: %s', (notHost) => {
+    expect(isTrailingSignatureContactLine(notHost)).toBe(false)
+  })
+
+  // Revert-check: the lowercase multi-word tail guard in isLikelyCombinedSignOffAndNameLine. "Best
+  // of luck," is a closing sentence, not "Best" plus a person called "of luck"; without a
+  // recognised closing the whole wrapper goes, instead of keeping the closing and dropping the
+  // name. Caseless scripts and a lone lowercase name carry no such signal and stay preserved.
+  it('requires a capitalized name after a combined sign-off in a wrapper', () => {
+    const html =
+      '<p>Body.</p><div class="gmail_signature">Best of luck,<br>Avery Fenwick<br>415-555-1212</div>'
+    expect(cleanedText(html)).toBe('Body.')
+
+    for (const kept of ['Regards, 田中', 'cheers, kevin']) {
+      const wrapper = `<p>Body.</p><div class="gmail_signature">${kept}<br>Partner<br>415-555-1212</div>`
+      expect(cleanedText(wrapper), kept).toBe(`Body.\n\n${kept}`)
+    }
+
+    const combined =
+      '<p>Body.</p><div class="gmail_signature">Thanks so much, Avery Fenwick<br>Partner<br>415-555-1212</div>'
+    expect(cleanedText(combined)).toBe('Body.\n\nThanks so much, Avery Fenwick')
+  })
+
+  // Revert-check: isAuthoredLeadInLine replaces the keyword-only intro check; a colon lead-in
+  // with no contact keyword and a strong title below it was removed before.
+  it('preserves a referral card introduced by a colon lead-in', () => {
+    const html =
+      '<div>You can reach the plumber here:</div><div>Jane Doe</div><div>Account Manager</div><div>Acme Plumbing</div>' +
+      '<div><a href="mailto:jane@acmeplumbing.test">jane@acmeplumbing.test</a></div><div>404-555-0142</div>'
+    const originalText = (source: string): string =>
+      paragraphAwareText(parseHtmlDocument(source).body).trim()
+    expect(cleanedText(html)).toBe(originalText(html))
+    const keyworded = html.replace(
+      'You can reach the plumber here:',
+      'Here are the reviewer contacts:',
+    )
+    expect(cleanedText(keyworded)).toBe(originalText(keyworded))
+  })
+
+  // Revert-check: BARE_HOST_LINE_PATTERN (the scan stops at "acmeadvisory.com" without it),
+  // SIGN_OFF_PHRASES 'thanks so much' (nothing anchors the pair without it), and
+  // isSignatureOwnedMedia (the logo cell inside the widened range vetoes removal without it).
+  // Each alone leaves the card in the bubble.
+  it('removes the token-free Front shape through the heuristic route', () => {
+    const html = corpusCase('html_thanks_so_much_signoff_logo_between_name_preserved')
+    const text = cleanedText(html)
+    // The heuristic route re-emits the pair as one <div> with a <br>; the bubble pipeline's
+    // unwrap turns that into the same two-paragraph text the wrapper route produces.
+    expect(text).toBe(
+      "Hi Jordan,\n\nJust so I'm clear, would you like me to go ahead and pay the balance?\n\nThanks so much,\nAvery Fenwick",
+    )
+    for (const removed of [
+      'Associate Relationship Manager',
+      'acmeadvisory.com',
+      'Direct:',
+      'Los Angeles',
+    ]) {
+      expect(text, removed).not.toContain(removed)
+    }
+  })
+
+  // Revert-check: the bareHostContactLineCount guard in truncateTrailingContactSignature.
+  // Extensions that double as country codes ("Logo.ai", "main.tf") match BARE_HOST_LINE_PATTERN,
+  // so a bare host may corroborate a block that has a real contact row but never anchor one by
+  // itself.
+  it('does not read a file list after the sign-off as a contact block', () => {
+    const files =
+      '<div>Attached are the two files.</div><div>Best,</div><div>Jane</div><div><br></div><div>Brand.ai</div><div>Logo.ai</div><div>Main.tf</div>'
+    expect(cleanedText(files)).toBe(paragraphAwareText(parseHtmlDocument(files).body).trim())
+
+    const anchored =
+      '<div>Attached are the two files.</div><div>Best,</div><div>Jane Doe</div>' +
+      '<div><a href="mailto:jane@brand.ai">jane@brand.ai</a></div><div>Brand.ai</div>'
+    expect(cleanedText(anchored)).toBe('Attached are the two files.\n\nBest,\nJane Doe')
+  })
+
+  // Revert-check: truncateTrailingContactSignature only hoists signatureStart onto the
+  // sign-off when the following name is actually re-emitted.
+  it('keeps an unpaired gratitude closing above a pipe-title signature', () => {
+    const pipe =
+      '<div>Hi Bob,</div><div>Thank you so much!</div><div>Jane Doe | Director of Sales</div>' +
+      '<div>Acme Inc.</div><div>415-555-1234</div><div><a href="mailto:jane@acme.com">jane@acme.com</a></div>'
+    expect(cleanedText(pipe)).toBe('Hi Bob,\n\nThank you so much!')
+
+    const gratitudeOnly =
+      '<div>Thank you so much!</div><div>Jane Doe | Director of Sales</div>' +
+      '<div>Acme Inc.</div><div>415-555-1234</div><div><a href="mailto:jane@acme.com">jane@acme.com</a></div>'
+    expect(cleanedText(gratitudeOnly)).toBe('Thank you so much!')
+
+    const companyFirst =
+      '<div>Received, I will process the payment today.</div><div>Thank you very much.</div>' +
+      '<div>Acme Plumbing LLC</div><div>555-123-4567</div>' +
+      '<div><a href="mailto:info@acmeplumbing.com">info@acmeplumbing.com</a></div>'
+    expect(cleanedText(companyFirst)).toBe(
+      'Received, I will process the payment today.\n\nThank you very much.',
+    )
+
+    const sharedBlock =
+      '<div>Hi Bob,</div><div>Thank you so much!<br>Jane Doe | Director of Sales<br>Acme Inc.' +
+      '<br>415-555-1234<br><a href="mailto:jane@acme.com">jane@acme.com</a></div>'
+    expect(cleanedText(sharedBlock)).toBe('Hi Bob,\n\nThank you so much!')
+  })
+
+  // Revert-check: 'div.gmail_signature_prefix' ordered before 'div.gmail_signature' in
+  // SIGNATURE_WRAPPER_SELECTORS, so the wrapper's previous visible line is the sign-off, not "--".
+  it('does not let the Gmail "--" prefix hide the outside sign-off from name preservation', () => {
+    const html =
+      '<div>Sounds good.</div><div>Thanks,</div><div class="gmail_signature_prefix">-- </div>' +
+      '<div class="gmail_signature"><div>Jane Doe</div><div>CEO</div><div><a href="mailto:jane@example.test">jane@example.test</a></div></div>'
+    expect(cleanedText(html)).toBe('Sounds good.\n\nThanks,\n\nJane Doe')
+  })
 })

@@ -12,7 +12,7 @@ enum CacheVersioning {
     /// derivation output changes shape (classification, signature/quote
     /// removal) so `ChatPreviewRepair` re-derives stored previews. The
     /// in-memory caches need no constant: they start empty on every launch.
-    static let chatPreviewDerivationVersion = "2026-09-10-repeated-signature-v1"
+    static let chatPreviewDerivationVersion = "2026-09-17-signature-front-core-v1"
 
     /// Embedded in email preview snapshot cache keys. Bump when the preview
     /// renderer's visual output changes.

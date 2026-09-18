@@ -408,7 +408,7 @@ final class PlainTextSignatureRemoverTests: XCTestCase {
             ("url_instruction", "Please review the plan.\nJane Doe\nPartner\njane@example.com\n415-555-1212\nPlease review the revised plan at https://example.com/plan.", "Please review the plan.\nJane Doe\nPartner\njane@example.com\n415-555-1212\nPlease review the revised plan at https://example.com/plan."),
             ("title_instruction", "Please review the plan.\nJane Doe\nPartner\njane@example.com\n415-555-1212\nThe manager will call tomorrow.", "Please review the plan.\nJane Doe\nPartner\njane@example.com\n415-555-1212\nThe manager will call tomorrow."),
 
-            ("role_after_signoff", "The contract is ready.\n\nSincerely,\nPartner\njane@example.com\n404-555-0142", "The contract is ready."),
+            ("role_after_signoff", "The contract is ready.\n\nSincerely,\nPartner\njane@example.com\n404-555-0142", "The contract is ready.\n\nSincerely,"),
             ("titled_contact_only_document", "Jordan Smith\nPartner\njordan@example.com\n404-555-0142", "Jordan Smith\nPartner\njordan@example.com\n404-555-0142"),
 
             ("contact_only_document", "Jane Doe\njane@example.com\n404-555-0142", "Jane Doe\njane@example.com\n404-555-0142"),
@@ -426,5 +426,100 @@ final class PlainTextSignatureRemoverTests: XCTestCase {
         for (name, input, expected) in cases {
             XCTAssertEqual(PlainTextSignatureRemover.removeTrailingContactSignature(from: input), expected, name)
         }
+    }
+
+    // MARK: - Front core parity
+
+    // Revert-check: URLPatterns.bareHostLine in PlainTextSignatureRemover.evaluateLine.
+    func testBareHostRow_closesSignatureAndKeepsSignOffName() {
+        let text = "Sounds good.\n\nThanks,\nJane Doe\nAccount Manager\njane@acmeadvisory.com\nacmeadvisory.com"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), "Sounds good.\n\nThanks,\nJane Doe")
+    }
+
+    // Revert-check: the hasContactInfo guard in PlainTextSignatureRemover.preservingSignOff.
+    // The host is not a name, but an unpaired closing stays.
+    func testBareHostAfterSignOff_isNotPreservedAsName() {
+        let text = "See you then.\n\nThanks,\nacmeadvisory.com\njane@acmeadvisory.com\n415-555-1212"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), "See you then.\n\nThanks,")
+    }
+
+    // Revert-check: SignatureSignOffPolicy.isAuthoredLeadInLine veto in removeSignature (Pass 2).
+    func testColonLeadIn_preservesPayeeAddressBlock() {
+        let text = "Please send the check to:\n\nJane Doe\n123 Main Street\nSpringfield, IL 62701\njane@example.test"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text)
+        let signed = "Please find my details below:\n\nThanks,\nJane Doe\n123 Main Street\nSpringfield, IL 62701\njane@example.test"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: signed), "Please find my details below:\n\nThanks,\nJane Doe")
+    }
+
+    // HONEST SCOPE: passes at HEAD (filenames were never hosts); pins the TLD allowlist's rejections.
+    func testFilenameLines_areNotBareHosts() {
+        let text = "Attached are the files.\n\nBest,\nJane\n\nphotos.heic\nvideo.mov\nmain.cc"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: text), text)
+    }
+
+    // Revert-check: the contactSignals > bareHostSignals gate in removeSignature (Pass 2). Extensions
+    // that double as country codes ("Logo.ai", "main.tf") and an authored list of domains match
+    // bareHostLine; they corroborate a real contact row but never anchor a signature by themselves.
+    func testBareHostRows_neverAnchorASignature() {
+        let files = "Attached are the two files.\n\nBest,\nJane\n\nBrand.ai\nLogo.ai\nmain.tf"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: files), files)
+        let domains = "Here are the domains to register.\n\nThanks,\nKevin\n\nKevinsbakery.com\nKevinsbakery.co\nKevinsbakery.shop"
+        XCTAssertEqual(PlainTextSignatureRemover.removeSignature(from: domains), domains)
+    }
+
+    // Revert-check: SignaturePatterns.signOffPhrases "thanks again"; isSignOffLine punctuation trim.
+    func testGratitudeClosings_anchorSignatureAndKeepPair() {
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeSignature(from: "That works for me.\n\nThanks again,\nJane Doe\nCEO\njane@example.test\n415-555-1212"),
+            "That works for me.\n\nThanks again,\nJane Doe"
+        )
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeSignature(from: "Sounds good.\n\nThanks!\nJane Doe\nCEO\njane@example.test\n415-555-1212"),
+            "Sounds good.\n\nThanks!\nJane Doe"
+        )
+    }
+
+    // Revert-check: preservingSignOff returns index + 1 when the line after the closing
+    // is not a name, so the closing stays and only the signature rows below it go.
+    func testUnpairedGratitudeClosing_keepsClosingAndDropsPipeTitleBlock() {
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeSignature(
+                from: "Hi Bob,\n\nThank you so much!\nJane Doe | Director of Sales\nAcme Inc.\n555-123-4567\njane@acme.com"
+            ),
+            "Hi Bob,\n\nThank you so much!"
+        )
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeSignature(
+                from: "Thank you so much!\nJane Doe | Director of Sales\nAcme Inc.\n555-123-4567\njane@acme.com"
+            ),
+            "Thank you so much!"
+        )
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeSignature(
+                from: "Received, I will process the payment today.\n\nThank you very much.\nAcme Plumbing LLC\n555-123-4567\ninfo@acmeplumbing.com"
+            ),
+            "Received, I will process the payment today.\n\nThank you very much."
+        )
+    }
+
+    // Revert-check: the colon lead-in clamp in removeSignature (Pass 2). A referral
+    // card under a colon intro stays when the sender's own signature follows.
+    func testColonLeadIn_referralCardThenOwnSignature_keepsCardAndClosing() {
+        let text = """
+        Here is the contact info for the plumber:
+
+        Mike Jones
+        555-123-4567
+        mike@jonesplumbing.com
+
+        Thanks,
+        John Smith
+        555-987-6543
+        john@acme.com
+        """
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeSignature(from: text),
+            "Here is the contact info for the plumber:\n\nMike Jones\n555-123-4567\nmike@jonesplumbing.com\n\nThanks,\nJohn Smith"
+        )
     }
 }
