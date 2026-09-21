@@ -24,7 +24,7 @@ Run the real `esc-chatmail` project with the correct toolchain, scheme, and simu
    - If `xcodebuild` says the active developer directory is Command Line Tools, this was omitted.
 
 3. Prefer an explicit simulator destination.
-   - Default simulator: `platform=iOS Simulator,name=iPhone 17 Pro`
+   - Default simulator: the wrappers resolve an installed iPhone 17 Pro by device ID, using its newest available runtime. An explicit `DESTINATION` takes precedence.
    - Xcode simulator runtimes are registered by major/minor OS version; do not pin patch-level OS versions.
    - Reason: `Scripts/run-tests.sh` otherwise picks the first available iPhone simulator, which can land on an older runtime.
 
@@ -41,8 +41,8 @@ Run the real `esc-chatmail` project with the correct toolchain, scheme, and simu
 5. If the wrapper is unsuitable, use the same explicit environment and project settings manually.
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DESTINATION="$(python3 Scripts/default-simulator-destination.py)"
 xcodebuild build \
   -project esc-chatmail.xcodeproj \
   -scheme esc-chatmail \
@@ -51,8 +51,8 @@ xcodebuild build \
 ```
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DESTINATION="$(python3 Scripts/default-simulator-destination.py)"
 bash Scripts/run-tests.sh
 ```
 
