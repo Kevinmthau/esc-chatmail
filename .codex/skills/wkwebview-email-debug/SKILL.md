@@ -39,7 +39,7 @@ Find the failing layer quickly, keep preview and full-message behavior separated
    - Snapshot measurement and capture: `EmailPreviewSnapshotRenderSession.measureRenderedHeight` and `snapshot` in `EmailPreviewSnapshotRenderer.swift`, with clamped display height published by `EmailPreviewSnapshotViewModel`
    - Preview scaling heuristics: `esc-chatmail/Views/Components/EmailContent/HTMLPreviewScaleCalculator.swift`
    - Live fallback height clamping: `MiniEmailWebView.swift`
-   - Live fallback delayed measurements: `BaseEmailWebView.schedulePreviewHeightMeasurements` and `measurePreviewHeight`
+   - Live fallback delayed measurements: `BaseEmailWebView.Coordinator.schedulePreviewHeightMeasurement` and `measurePreviewHeight`
 
 5. Use the repo's failure patterns.
    - Double sanitization can corrupt complex newsletter HTML.
