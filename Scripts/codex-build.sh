@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-DESTINATION="${DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -16,6 +15,9 @@ Example:
 USAGE
   exit 0
 fi
+
+DESTINATION="${DESTINATION:-$(python3 "${SCRIPT_DIR}/default-simulator-destination.py")}"
+export DESTINATION
 
 cd "${REPO_ROOT}"
 exec xcodebuild build \

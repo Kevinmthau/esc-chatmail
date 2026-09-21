@@ -12,7 +12,7 @@ MushMail is a Gmail client for iOS that makes email feel like chat while preserv
 ## Requirements
 
 - Xcode app toolchain installed at `/Applications/Xcode.app/Contents/Developer`.
-- iOS simulator destination: `platform=iOS Simulator,name=iPhone 17 Pro`.
+- An installed iPhone 17 Pro simulator (the wrappers select its newest available runtime by device ID).
 - App deployment target: iOS 17.6.
 - Xcode project: `esc-chatmail.xcodeproj`.
 - Scheme: `esc-chatmail`.
@@ -26,7 +26,7 @@ For command-line builds, use the Xcode app toolchain rather than the standalone 
 ./Scripts/codex-build.sh
 ```
 
-The wrapper runs a Debug build of the `esc-chatmail` scheme in `esc-chatmail.xcodeproj` against the default iPhone 17 Pro simulator destination. You can pass additional `xcodebuild` arguments through the wrapper when needed.
+The wrapper runs a Debug build of the `esc-chatmail` scheme in `esc-chatmail.xcodeproj` against the default iPhone 17 Pro simulator destination. Set `DESTINATION` to override that selection. You can pass additional `xcodebuild` arguments through the wrapper when needed.
 
 ## Test
 

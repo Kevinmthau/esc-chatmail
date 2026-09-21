@@ -4,7 +4,7 @@ Native iOS SwiftUI Gmail client (chat-style mailbox) plus a separate `web/` PWA.
 
 ## Build, test, lint
 
-Always use the wrappers: they pin `DESTINATION` to `iPhone 17 Pro`, export `DEVELOPER_DIR` to the Xcode app toolchain (plain `xcodebuild` otherwise resolves to Command Line Tools), and `cd` to the repo root. `Scripts/run-tests.sh` run bare works but auto-picks the first available iPhone simulator, sets no `DEVELOPER_DIR`, and passes no `-project`.
+Always use the wrappers: they resolve an installed `iPhone 17 Pro` by device ID (newest available runtime), respect an explicit `DESTINATION`, export `DEVELOPER_DIR` to the Xcode app toolchain (plain `xcodebuild` otherwise resolves to Command Line Tools), and `cd` to the repo root. `Scripts/run-tests.sh` run bare works but auto-picks the first available iPhone simulator, sets no `DEVELOPER_DIR`, and passes no `-project`.
 
 ```bash
 export "$(bash Scripts/prepare-simulator.sh)"       # boots a sim + pre-grants Contacts, pins DESTINATION to it

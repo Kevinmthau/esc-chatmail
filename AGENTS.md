@@ -28,7 +28,7 @@ The repo uses:
 Use the Xcode app toolchain explicitly. Plain `xcodebuild` will otherwise point at Command Line Tools on this machine.
 
 Default simulator:
-- `platform=iOS Simulator,name=iPhone 17 Pro`
+- The wrappers resolve an installed iPhone 17 Pro by device ID, using its newest available runtime. Override with `DESTINATION` when needed.
 - Xcode simulator runtimes are registered by major/minor OS version; do not pin patch-level OS versions.
 
 Codex wrapper commands:
@@ -44,8 +44,8 @@ Use these wrappers for routine Codex runs so the approval system can reuse stabl
 Exact build command:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DESTINATION="$(python3 Scripts/default-simulator-destination.py)"
 xcodebuild build \
   -project esc-chatmail.xcodeproj \
   -scheme esc-chatmail \
@@ -56,24 +56,24 @@ xcodebuild build \
 Exact full test command:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DESTINATION="$(python3 Scripts/default-simulator-destination.py)"
 bash Scripts/run-tests.sh
 ```
 
 Narrow test pattern:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DESTINATION="$(python3 Scripts/default-simulator-destination.py)"
 bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
 ```
 
 Participant and conversation-rollup adjacent suites:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DESTINATION="$(python3 Scripts/default-simulator-destination.py)"
 bash Scripts/run-tests.sh \
   -only-testing 'esc-chatmailTests/ParticipantLoaderTests' \
   -only-testing 'esc-chatmailTests/ConversationRollupUpdaterTests'
