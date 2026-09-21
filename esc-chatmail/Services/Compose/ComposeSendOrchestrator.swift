@@ -96,14 +96,14 @@ private actor ComposeSendTransmissionAdmission {
 private final class ComposeSendCancellationRelay: @unchecked Sendable {
     private let lock = NSLock()
     private var cancellationRequested = false
+    private var backgroundTimeExpired = false
     private var transmissionAdmitted = false
     private var cancelWorker: (@Sendable () -> Void)?
 
     func install<Success>(_ task: Task<Success, Error>) {
         let shouldCancel = lock.withLock {
-            guard !transmissionAdmitted else { return false }
             cancelWorker = { task.cancel() }
-            return cancellationRequested
+            return backgroundTimeExpired || (cancellationRequested && !transmissionAdmitted)
         }
         if shouldCancel {
             task.cancel()
@@ -122,7 +122,22 @@ private final class ComposeSendCancellationRelay: @unchecked Sendable {
     func markTransmissionAdmitted() {
         lock.withLock {
             transmissionAdmitted = true
-            cancelWorker = nil
+        }
+    }
+
+    /// OS expiration must release execution time even for an admitted request.
+    /// Its durable marker makes cancellation ambiguous instead of retryable.
+    func expireBackgroundTime() {
+        let cancelWorker = lock.withLock {
+            backgroundTimeExpired = true
+            return self.cancelWorker
+        }
+        cancelWorker?()
+    }
+
+    func checkBackgroundTime() throws {
+        if lock.withLock({ backgroundTimeExpired }) {
+            throw CancellationError()
         }
     }
 
@@ -157,6 +172,18 @@ struct ComposeSendBackgroundOperation {
 struct ComposeSendOrchestrator {
     let sendService: ComposeSendServicing
     let syncPerformer: IncrementalSyncPerforming
+    private let backgroundTaskManager: any OutboundBackgroundTaskManaging
+
+    @MainActor
+    init(
+        sendService: ComposeSendServicing,
+        syncPerformer: IncrementalSyncPerforming,
+        backgroundTaskManager: (any OutboundBackgroundTaskManaging)? = nil
+    ) {
+        self.sendService = sendService
+        self.syncPerformer = syncPerformer
+        self.backgroundTaskManager = backgroundTaskManager ?? UIKitOutboundBackgroundTaskManager()
+    }
 
     private actor TransmissionBarrierState {
         private(set) var isPersisted = false
@@ -196,6 +223,9 @@ struct ComposeSendOrchestrator {
         let syncPerformer = self.syncPerformer
         let admission = ComposeSendTransmissionAdmission()
         let cancellationRelay = ComposeSendCancellationRelay()
+        let backgroundLease = OutboundSendBackgroundLease(manager: backgroundTaskManager) {
+            cancellationRelay.expireBackgroundTime()
+        }
 
         // Send in background - don't wait for completion
         let task = Task.detached(priority: .userInitiated) {
@@ -231,6 +261,8 @@ struct ComposeSendOrchestrator {
                             // non-idempotent API request. A failed marker save must
                             // therefore prevent request admission.
                             try await MainActor.run {
+                                try Task.checkCancellation()
+                                try cancellationRelay.checkBackgroundTime()
                                 if let transmissionAdmission {
                                     try transmissionAdmission()
                                 } else {
@@ -325,6 +357,10 @@ struct ComposeSendOrchestrator {
                         )
                     }
                     sendService.markAttachmentsAsUploaded(references: attachmentReferences)
+                    // Commit/reconciliation have finished; their durable recovery
+                    // marker remains if saving failed. Optional mailbox sync must
+                    // not extend the send's limited background allowance.
+                    backgroundLease.end()
                     reconciliationHooks.onSuccess?(
                         .init(
                             optimisticMessageID: optimisticMessageID,
@@ -414,6 +450,7 @@ struct ComposeSendOrchestrator {
                     await admission.fail(error)
                 }
             }
+            await backgroundLease.end()
         }
         return ComposeSendBackgroundOperation(
             task: task,
