@@ -82,8 +82,9 @@ The email rendering pipeline is intentionally split into stages:
 2. Sanitization and safety: `HTMLSanitizerService`, `HTMLRemoteImageAttachmentFallback`, URL and CSS sanitizers.
 3. Presentation wrapping: `HTMLDisplayWrapper`.
 4. Rendering surfaces:
-   - Full message: `HTMLMessageView` -> `HTMLWebView` -> `BaseEmailWebView(.fullInteractive)`.
-   - Preview routing: `EmailContentSection`, `NewsletterPreviewBuilder`, `TransactionalPreviewBuilder`, `MiniEmailWebView`.
+   - Full message: `EmailReaderView` -> `FullEmailReaderView` -> `HTMLMessageView` -> `HTMLWebView` -> `FullEmailReaderWebView`. `FullEmailWebViewManager` prepares and warms original-email artifacts and manages policy-gated adoption of offscreen WebViews.
+   - Chat previews: `EmailContentSection` -> `EmailPreviewPipeline` selects native preview cards or `EmailPreviewSnapshotView`, backed by `EmailPreviewSnapshotRenderer` and `EmailPreviewSnapshotCache`.
+   - Snapshot failure fallback: `MiniEmailWebView` -> `BaseEmailWebView(.scaledPreview)`. Compose HTML previews use `BaseEmailWebView(.simplePreview)`.
 
 Full-message rendering should prioritize fidelity to the original email. Chat previews may use derived representations optimized for speed, clarity, and stable layout. Preview-specific transformations should stay out of the full-message rendering path unless there is a clear product requirement.
 
@@ -103,7 +104,7 @@ See `esc-chatmail/Configuration/SECURITY_SETUP.md` for the current local configu
 - Keep full-message email rendering separate from chat-preview behavior.
 - Avoid repeated sanitization, wrapping, or recovery passes in the email rendering path.
 - Preserve Core Data batching and prefetching in inbox and chat list work.
-- Treat chat scroll timing and `MiniEmailWebView` height changes carefully.
+- Treat chat scroll timing, snapshot preview sizing, and `MiniEmailWebView` fallback height changes carefully.
 - Run the narrowest relevant tests first, then broaden test coverage when a change touches shared infrastructure.
 
 ## Additional Documentation

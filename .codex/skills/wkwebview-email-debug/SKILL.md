@@ -16,25 +16,30 @@ Find the failing layer quickly, keep preview and full-message behavior separated
 ## Workflow
 
 1. Classify the surface first.
-   - Full message: `esc-chatmail/Views/Chat/HTMLMessageView.swift`, `esc-chatmail/Views/Components/EmailContent/HTMLFullWebView.swift`, `BaseEmailWebView` in `.fullInteractive`
-   - Chat preview: `esc-chatmail/Views/Components/EmailContent/EmailContentSection.swift`, `MiniEmailWebView.swift`, `BaseEmailWebView` in preview modes
+   - Full message: `EmailReaderView` -> `FullEmailReaderView` -> `HTMLMessageView` in `esc-chatmail/Views/Chat/`, then `HTMLWebView` (`esc-chatmail/Views/Components/EmailContent/HTMLFullWebView.swift`) -> `FullEmailReaderWebView.swift`
+   - Chat preview: `esc-chatmail/Views/Components/EmailContent/EmailContentSection.swift` uses `esc-chatmail/Services/Preview/EmailPreviewPipeline.swift` to select native cards or `EmailPreviewSnapshotView.swift`
+   - Snapshot failure fallback: `MiniEmailWebView.swift` -> `BaseEmailWebView` in `.scaledPreview`; compose HTML previews use `.simplePreview`
 
 2. Trace content generation separately from WebKit.
-   - Source selection and recovery: `esc-chatmail/Services/HTMLContent/HTMLContentLoader.swift`, `HTMLContentHandler.swift`, `HTMLContentRecoveryService`
+   - Source selection and recovery: `OriginalEmailSourceLoader.swift`, `HTMLContentLoader.swift`, `HTMLContentHandler.swift`, and `HTMLContentRecoveryService.swift` in `esc-chatmail/Services/HTMLContent/`; `esc-chatmail/Services/Preview/EmailPreviewSourceLoader.swift` owns preview source loading
    - Sanitization and wrapping: `esc-chatmail/Services/HTMLSanitization/HTMLSanitizerService.swift`, `esc-chatmail/Services/HTMLSanitization/HTMLDisplayWrapper.swift`
    - Remote image fixes: `esc-chatmail/Services/HTMLSanitization/HTMLRemoteImageAttachmentFallback.swift`
-   - Preview routing/model generation: `EmailPreviewClassifier.swift`, `NewsletterPreviewBuilder.swift`, `TransactionalPreviewBuilder.swift`
+   - Preview routing/model generation: `EmailPreviewPipeline.swift`, `EmailPreviewClassifier.swift`, and the native preview builders in `esc-chatmail/Services/Preview/`
 
 3. Trace the WKWebView lifecycle.
-   - Main view wrapper: `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`
+   - Full reader: `esc-chatmail/Views/Components/EmailContent/FullEmailReaderWebView.swift`; `esc-chatmail/Services/Chat/FullEmailWebViewManager.swift` owns prepared-content warming, shared full-reader settings, and policy-gated offscreen WebView adoption
+   - Full-reader presentation: `FullEmailOpenSession` owns preparation state; `FullEmailReaderView` retains an available preview snapshot as a placeholder until the live WebView confirms paint
+   - Snapshot previews: `esc-chatmail/Services/Preview/EmailPreviewSnapshotRenderer.swift` and `EmailPreviewSnapshotCache.swift`; `EmailPreviewSnapshotView` displays the cached image and falls back to a live preview on failure
+   - Live fallback and compose previews: `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`
    - Inline attachment loading: `esc-chatmail/Services/Attachments/CIDSchemeHandler.swift`
    - Prewarm behavior: `AppPrewarmer` in `esc-chatmail/Services/HTMLContent/WebKitPrewarmer.swift`
-   - Check mode-specific settings: JavaScript, data detectors, base URL, user agent, and navigation policy
+   - Check surface-specific settings: JavaScript, data detectors, base URL, user agent, and navigation policy. Full original emails force light appearance; preview surfaces follow app appearance.
 
 4. Trace sizing and measurement independently.
+   - Snapshot measurement and capture: `EmailPreviewSnapshotRenderSession.measureRenderedHeight` and `snapshot` in `EmailPreviewSnapshotRenderer.swift`, with clamped display height published by `EmailPreviewSnapshotViewModel`
    - Preview scaling heuristics: `esc-chatmail/Views/Components/EmailContent/HTMLPreviewScaleCalculator.swift`
-   - Preview height clamping: `MiniEmailWebView.swift`
-   - Delayed measurements: `BaseEmailWebView.schedulePreviewHeightMeasurements` and `measurePreviewHeight`
+   - Live fallback height clamping: `MiniEmailWebView.swift`
+   - Live fallback delayed measurements: `BaseEmailWebView.Coordinator.schedulePreviewHeightMeasurement` and `measurePreviewHeight`
 
 5. Use the repo's failure patterns.
    - Double sanitization can corrupt complex newsletter HTML.
@@ -43,15 +48,17 @@ Find the failing layer quickly, keep preview and full-message behavior separated
    - Missing `message` context breaks `cid:` inline attachments.
    - Wrong or missing base URL can break CDN-hosted remote images that check `Referer`.
    - WKWebView may advertise support for image formats that still need `HTMLRemoteImageAttachmentFallback`.
-   - Preview height often needs multiple delayed measurements after `didFinish` because assets continue loading.
+   - Snapshot and live fallback measurements may need to settle after `didFinish` because assets continue loading.
 
 6. Reproduce with the smallest useful tool.
-   - Unit tests first: `HTMLContentLoaderTests`, `HTMLDisplayWrapperTests`, `HTMLSanitizerServiceTests`, `HTMLRemoteImageAttachmentFallbackTests`, `HTMLPreviewScaleCalculatorTests`
+   - Full-reader lifecycle: `FullEmailReaderWebViewTests`, `FullEmailWebViewManagerPreparedPayloadEvictionTests`, `FullEmailWebViewAdoptionPolicyTests`, `FullEmailReaderCoordinatorTests`
+   - Preview routing and sizing: `EmailPreviewPipelineTests`, `EmailContentSectionTests`, `EmailPreviewSnapshotCacheTests`, `HTMLPreviewScaleCalculatorTests`
+   - Source/sanitization: `HTMLContentLoaderTests`, `HTMLDisplayWrapperTests`, `HTMLSanitizerServiceTests`, `HTMLRemoteImageAttachmentFallbackTests`
    - Manual debug aid if needed: `esc-chatmail/Views/Components/EmailContent/HTMLRenderingDebugView.swift`
 
 7. Fix the lowest layer that explains the symptom.
    - Content generation bug: patch loader/sanitizer/wrapper
-   - Lifecycle bug: patch `BaseEmailWebView` mode/config/baseURL/navigation
+   - Lifecycle bug: patch the owning full-reader, snapshot renderer, or live-preview coordinator/configuration
    - Sizing bug: patch scale or measurement logic only
 
 ## Output Format

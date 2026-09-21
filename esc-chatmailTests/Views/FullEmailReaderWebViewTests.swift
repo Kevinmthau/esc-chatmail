@@ -19,8 +19,7 @@ final class FullEmailReaderWebViewTests: XCTestCase {
 
     func testHTMLWebViewBodyUsesFullEmailReaderWebView() {
         let body = HTMLWebView(
-            htmlContent: "<html><body>Hello</body></html>",
-            isDarkMode: true
+            htmlContent: "<html><body>Hello</body></html>"
         ).body
 
         XCTAssertEqual(String(describing: type(of: body)), "FullEmailReaderWebView")

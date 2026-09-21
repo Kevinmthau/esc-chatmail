@@ -79,36 +79,6 @@ struct EmailContentSection: View {
         return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextFingerprint)|\(cleanedSnippetFingerprint)|\(subjectFingerprint)|\(senderEmailFingerprint)|\(senderNameFingerprint)|\(isDarkMode)|\(message.htmlDisplayCleanupMode.rawValue)|source:\(htmlSourceSignature ?? "unknown")"
     }
 
-    static func makePreviewHTMLCacheKey(
-        messageId: String,
-        sourceSignature: String,
-        isDarkMode: Bool,
-        cleanupMode: HTMLContentCleanupMode
-    ) -> String {
-        EmailPreviewPipeline.makePreviewHTMLCacheKey(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            isDarkMode: isDarkMode,
-            cleanupMode: cleanupMode
-        )
-    }
-
-    static func shouldUseTransactionalPreviewCard(isForwardedEmail: Bool) -> Bool {
-        EmailPreviewPipeline.shouldUseTransactionalPreviewCard(isForwardedEmail: isForwardedEmail)
-    }
-
-    static func nativePreviewCardRoutes(
-        isNewsletter: Bool,
-        isForwardedEmail: Bool,
-        classificationKind: EmailPreviewKind
-    ) -> [NativePreviewCardRoute] {
-        EmailPreviewPipeline.nativePreviewCardRoutes(
-            isNewsletter: isNewsletter,
-            isForwardedEmail: isForwardedEmail,
-            classificationKind: classificationKind
-        )
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let renderedPreview {
