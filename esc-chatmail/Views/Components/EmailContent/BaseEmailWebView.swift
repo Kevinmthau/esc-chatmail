@@ -145,6 +145,11 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         func loadContentIfReady(in webView: WKWebView) {
+            if isLoading {
+                // Replay the latest input after this navigation, unless it returns to the content already loading.
+                shouldReloadAfterCurrentLoad = needsReload
+            }
+
             let windowPresent = webView.window != nil
             let width = webView.bounds.width
             let height = webView.bounds.height
