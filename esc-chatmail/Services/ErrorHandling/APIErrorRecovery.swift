@@ -1,8 +1,7 @@
 import Foundation
 
 /// Recovery actions for sync/API errors. Produced canonically by
-/// `APIError.recoveryAction`; `BackgroundSyncErrorHandler` maps non-APIError
-/// inputs onto the same vocabulary.
+/// `APIError.recoveryAction`.
 enum BackgroundSyncRecoveryAction {
     case retry
     case partialSync
@@ -25,9 +24,9 @@ extension APIError {
     }
 
     /// Canonical recovery classification for API errors. This is the single
-    /// mapping; `RetryStrategy`, `MessageFetcher`, and
-    /// `BackgroundSyncErrorHandler` all derive their APIError decisions from
-    /// it, so a new case only needs classifying here (exhaustive switch).
+    /// mapping; `RetryStrategy` and `MessageFetcher` derive their APIError
+    /// decisions from it, so a new case only needs classifying here
+    /// (exhaustive switch).
     var recoveryAction: BackgroundSyncRecoveryAction {
         switch self {
         case .historyIdExpired:

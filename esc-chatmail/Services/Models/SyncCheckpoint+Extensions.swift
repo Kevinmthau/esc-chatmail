@@ -6,8 +6,7 @@ import CoreData
 /// carries a uniqueness constraint (new v3 entity, so it may carry constraints
 /// from birth), making writes natural upserts under the object-trump merge policy.
 ///
-/// `accountEmail` is the single-account validation tag (the
-/// `BackgroundSyncContinuationState.isCompatible` pattern): consumers must
+/// `accountEmail` is the single-account validation tag: consumers must
 /// discard a checkpoint whose accountEmail doesn't match the signed-in
 /// account rather than resume another account's state.
 ///

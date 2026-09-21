@@ -1943,14 +1943,8 @@ final class AuthSessionTests: XCTestCase {
         let defaults = makeDefaults()
         defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
         defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastReconciliationTimeKey)
-        let backgroundState = BackgroundSyncStateManager(defaults: defaults)
-        try backgroundState.storeContinuationState(
-            .history(
-                startHistoryId: "old-history",
-                pageToken: "old-page",
-                accountEmail: "old@example.com"
-            )
-        )
+        let legacyContinuation = #"{"mode":"history","startHistoryId":"old-history","pageToken":"old-page","accountEmail":"old@example.com"}"#
+        defaults.set(Data(legacyContinuation.utf8), forKey: "backgroundSync.continuationState")
         let keychain = MockKeychainService()
         var defaultsMarkerWasClearedBeforeKeychainDelete = false
         keychain.onDelete = { key in
@@ -1980,7 +1974,7 @@ final class AuthSessionTests: XCTestCase {
 
         XCTAssertNil(defaults.object(forKey: SyncConfig.lastSuccessfulSyncTimeKey))
         XCTAssertNil(defaults.object(forKey: SyncConfig.lastReconciliationTimeKey))
-        XCTAssertNil(backgroundState.getContinuationState())
+        XCTAssertNil(defaults.object(forKey: "backgroundSync.continuationState"))
         XCTAssertTrue(
             defaultsMarkerWasClearedBeforeKeychainDelete,
             "The defaults mirror must be flushed away while Keychain still protects crash recovery"
