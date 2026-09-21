@@ -95,9 +95,14 @@ extension MimeBuilder {
         dateString: String,
         senderDisplay: String
     ) -> String {
+        // Email bodies often reset inherited typography (including font-size: 0).
+        // Give the authored response its own readable baseline while leaving the
+        // quoted document's styling intact.
         let userMessageHTML = body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? ""
-            : "\(convertPlainTextToReplyHTML(body))<div style=\"height: 10px;\"></div>"
+            : """
+            <div class="esc-reply-content" style="font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #222; background-color: #fff; text-align: left;">\(convertPlainTextToReplyHTML(body))</div><div style="height: 10px;"></div>
+            """
         let gmailQuotePrefix = """
         \(userMessageHTML)<div class="gmail_quote gmail_quote_container"><div dir="ltr" class="gmail_attr">On \(escapeHTML(dateString)), \(escapeHTML(senderDisplay)) wrote:<br></div><blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex;">
         """
@@ -152,8 +157,7 @@ extension MimeBuilder {
     }
 
     private static func convertPlainTextToReplyHTML(_ text: String) -> String {
-        let escaped = escapeHTML(text)
-        let linked = autoLinkURLs(escaped)
+        let linked = autoLinkURLs(text)
         let normalized = linked
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
@@ -221,22 +225,58 @@ extension MimeBuilder {
         return result
     }
 
-    private static func autoLinkURLs(_ text: String) -> String {
-        let urlPattern = #"(https?://[^\s<>&\"']+|www\.[^\s<>&\"']+)"#
-        guard let regex = try? NSRegularExpression(pattern: urlPattern, options: .caseInsensitive) else {
-            return text
-        }
+    private static let replyLinkDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    )
 
-        var result = text
-        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-        for match in matches.reversed() {
-            guard let range = Range(match.range, in: result) else { continue }
-            let url = String(result[range])
-            let href = url.lowercased().hasPrefix("http") ? url : "https://\(url)"
-            let link = "<a href=\"\(href)\" style=\"color: #0b57d0; text-decoration: none;\">\(url)</a>"
-            result.replaceSubrange(range, with: link)
+    private static func autoLinkURLs(_ text: String) -> String {
+        guard let replyLinkDetector else { return escapeHTML(text) }
+
+        // Detect in the original text so query separators are part of the URL,
+        // and let the system detector distinguish trailing prose punctuation.
+        // Escape each resulting segment exactly once, including the href.
+        var result = ""
+        var cursor = text.startIndex
+        let matches = replyLinkDetector.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches {
+            guard let detectedRange = Range(match.range, in: text) else { continue }
+            let range = trimmingUnmatchedClosingDelimiters(detectedRange, in: text)
+            let label = String(text[range])
+            let lowercased = label.lowercased()
+            guard lowercased.hasPrefix("https://") || lowercased.hasPrefix("http://") ||
+                    lowercased.hasPrefix("www.") else { continue }
+
+            result += escapeHTML(String(text[cursor..<range.lowerBound]))
+            let href = lowercased.hasPrefix("www.") ? "https://\(label)" : label
+            result += "<a href=\"\(escapeHTML(href))\" style=\"color: #0b57d0; text-decoration: none;\">\(escapeHTML(label))</a>"
+            cursor = range.upperBound
         }
+        result += escapeHTML(String(text[cursor...]))
         return result
+    }
+
+    private static func trimmingUnmatchedClosingDelimiters(
+        _ range: Range<String.Index>,
+        in text: String
+    ) -> Range<String.Index> {
+        var end = range.upperBound
+        while end > range.lowerBound {
+            let lastIndex = text.index(before: end)
+            let closing = text[lastIndex]
+            let opening: Character
+            switch closing {
+            case ")": opening = "("
+            case "]": opening = "["
+            case "}": opening = "{"
+            default: return range.lowerBound..<end
+            }
+            let candidate = text[range.lowerBound..<end]
+            guard candidate.filter({ $0 == closing }).count > candidate.filter({ $0 == opening }).count else {
+                break
+            }
+            end = lastIndex
+        }
+        return range.lowerBound..<end
     }
 
     static func base64UrlEncode(_ data: Data) -> String {
