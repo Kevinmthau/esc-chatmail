@@ -16,7 +16,6 @@ struct ComposeView: View {
     @State private var iMessageHeaderHeight: CGFloat = 0
 
     private let presentationStyle: PresentationStyle
-    private let onOpenConversation: ((Conversation) -> Void)?
     private let onSendConversation: ((ConversationReference) -> Void)?
 
     private var iMessageCanvasColor: Color {
@@ -42,22 +41,16 @@ struct ComposeView: View {
         presentationStyle == .iMessage && viewModel.mode == .newMessage
     }
 
-    private var shouldOpenExistingConversationOnSelection: Bool {
-        usesIMessagePresentation && onOpenConversation != nil
-    }
-
     @MainActor
     init(
         mode: ComposeViewModel.Mode = .newMessage,
         presentationStyle: PresentationStyle = .standard,
         deps: Dependencies? = nil,
-        onOpenConversation: ((Conversation) -> Void)? = nil,
         onSendConversation: ((ConversationReference) -> Void)? = nil
     ) {
         let resolvedDeps = deps ?? Dependencies.shared
         let composeDependencies = resolvedDeps.makeComposeDependencies()
         self.presentationStyle = presentationStyle
-        self.onOpenConversation = onOpenConversation
         self.onSendConversation = onSendConversation
         _viewModel = StateObject(
             wrappedValue: ComposeViewModel(mode: mode, dependencies: composeDependencies)
@@ -248,17 +241,6 @@ struct ComposeView: View {
     }
 
     private func handleSelectedRecipient(email: String, displayName: String?) {
-        let prospectiveRecipients = viewModel.recipients.map(\.email) + [email]
-
-        if shouldOpenExistingConversationOnSelection,
-           let existingConversation = viewModel.findActiveConversation(forRecipients: prospectiveRecipients) {
-            viewModel.clearAutocomplete()
-            viewModel.recipientInput = ""
-            onOpenConversation?(existingConversation)
-            dismiss()
-            return
-        }
-
         viewModel.addRecipient(email: email, displayName: displayName)
         viewModel.recipientInput = ""
         viewModel.clearAutocomplete()
