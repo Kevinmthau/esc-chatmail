@@ -37,11 +37,6 @@ final class ComposeViewModel: ObservableObject {
     private var hasSetupMode = false
     private var forwardedPreviewIsDarkMode: Bool?
 
-    /// Self-alias snapshot for participant-hash computation. Compose-side hashes
-    /// must exclude the same alias set the sync router excludes, or a sent
-    /// message and its synced-back copy land in different chats.
-    private var cachedMyAliases: Set<String> = []
-
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Forward HTML Content
@@ -138,15 +133,6 @@ final class ComposeViewModel: ObservableObject {
         forwardChanges(from: autocompleteService, storing: &cancellables)
         forwardChanges(from: recipientManager, storing: &cancellables)
         forwardChanges(from: attachmentManager, storing: &cancellables)
-
-        Task { [weak self] in
-            // getAliases(from:) falls back to Core Data on a cold cache; a
-            // cached-only read would leave lookups without self-exclusion
-            // until the first sync primes AliasManager.
-            guard let context = self?.storage.viewContext else { return }
-            let aliases = await AliasManager.shared.getAliases(from: context)
-            self?.cachedMyAliases = aliases
-        }
     }
 
     func setupForMode() {
@@ -245,11 +231,6 @@ final class ComposeViewModel: ObservableObject {
         autocompleteService.clearAutocomplete()
     }
 
-    func findActiveConversation(forRecipients recipients: [String]) -> Conversation? {
-        ConversationLookupService(context: storage.viewContext)
-            .findActiveConversation(forRecipients: recipients, myAliases: cachedMyAliases)
-    }
-
     func addAttachment(_ attachment: Attachment) {
         guard !isSending else { return }
         attachmentManager.addAttachment(attachment)
@@ -278,7 +259,6 @@ final class ComposeViewModel: ObservableObject {
             let recipientEmails = recipients.map { $0.email }
             result = try await outboundMessageCoordinator.send(preparing: { [self] in
                 let myAliases = await AliasManager.shared.getAliases(from: storage.viewContext)
-                cachedMyAliases = myAliases
                 return try makeOutboundSendRequest(
                     recipientEmails: recipientEmails,
                     myAliases: myAliases
