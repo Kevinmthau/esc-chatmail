@@ -308,7 +308,10 @@ final class ComposeViewModel: ObservableObject {
                     recipientEmails: recipientEmails,
                     subject: subject,
                     body: body,
-                    attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments),
+                    attachments: try outboundAttachmentContextBuilder.buildSendAttachments(
+                        from: attachments,
+                        including: forwardedInlineAttachmentInfos
+                    ),
                     optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails, myAliases: myAliases)
                 )
             )

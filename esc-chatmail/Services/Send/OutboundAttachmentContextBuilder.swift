@@ -17,9 +17,18 @@ struct OutboundAttachmentContextBuilder {
     let viewContext: NSManagedObjectContext
 
     func buildSendAttachments(
-        from attachments: [Attachment]
+        from attachments: [Attachment],
+        including inlineAttachmentInfos: [GmailSendService.AttachmentInfo] = []
     ) throws -> [OutboundMessageRequest.AttachmentContext] {
-        try ensureAttachmentsAreReady(attachments)
+        var inlineBytes: Int64 = 0
+        for info in inlineAttachmentInfos {
+            let byteCount = fileByteCount(for: info.localURL) ?? 0
+            try DraftAttachmentImport.validateSize(
+                byteCount: byteCount, existingByteCount: inlineBytes, filename: info.filename
+            )
+            inlineBytes += byteCount
+        }
+        try ensureAttachmentsAreReady(attachments, existingByteCount: inlineBytes)
         try ensurePermanentObjectIDs(for: attachments)
 
         return attachments.map { attachment in
@@ -54,13 +63,31 @@ struct OutboundAttachmentContextBuilder {
         )
     }
 
-    private func ensureAttachmentsAreReady(_ attachments: [Attachment]) throws {
+    private func ensureAttachmentsAreReady(_ attachments: [Attachment], existingByteCount: Int64 = 0) throws {
+        var totalBytes = existingByteCount
         for attachment in attachments {
             guard let localURL = attachment.readableLocalURLValue,
                   !localURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw BuildError.attachmentNotReady(filename: attachment.filenameValue)
             }
+            // Stat the selected file before MIME construction, since persisted
+            // metadata can be stale for forwarded/recovered attachments.
+            let byteCount = fileByteCount(for: localURL) ?? attachment.byteSize
+            try DraftAttachmentImport.validateSize(
+                byteCount: byteCount,
+                existingByteCount: totalBytes,
+                filename: attachment.filenameValue
+            )
+            totalBytes += byteCount
         }
+    }
+
+    private func fileByteCount(for localURL: String?) -> Int64? {
+        guard let url = AttachmentPaths.fullURL(for: localURL),
+              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else {
+            return nil
+        }
+        return Int64(size)
     }
 
     private func ensurePermanentObjectIDs(for attachments: [Attachment]) throws {
