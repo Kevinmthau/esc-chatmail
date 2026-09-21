@@ -42,7 +42,11 @@ struct ImageProcessor {
 
         // Use newer rendering API if available
         if #available(iOS 10.0, *) {
-            let renderer = UIGraphicsImageRenderer(size: newSize)
+            // These limits are pixels, not display points. The default renderer
+            // scale would multiply both dimensions on Retina devices.
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
             let jpegData = renderer.jpegData(withCompressionQuality: jpegCompressionQuality) { context in
                 image.draw(in: CGRect(origin: .zero, size: newSize))
             }

@@ -25,10 +25,10 @@ struct ComposeInputBar: View {
     @State private var showAttachmentOptions = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var photoProcessingTask: Task<Void, Never>?
+    @State private var documentProcessingTask: Task<Void, Never>?
     @State private var photoProcessingID: UUID?
     @State private var documentProcessingID = UUID()
 
-    private let maxAttachmentSize: Int64 = 25 * 1024 * 1024 // 25 MB
     private var iMessageButtonBackground: Color {
         Color(.systemGray6)
     }
@@ -124,12 +124,12 @@ struct ComposeInputBar: View {
             let processingID = UUID()
             photoProcessingID = processingID
             viewModel.setAttachmentImportInProgress(true, id: processingID)
-            photoProcessingTask = AttachmentAccountWorkRegistry.shared.startOperation { generation in
+            photoProcessingTask = AttachmentAccountWorkRegistry.shared.startDetachedOperation { generation in
                 await processPhotoSelections(
                     newValue,
-                    generation: generation,
-                    processingID: processingID
+                    generation: generation
                 )
+                await finishPhotoProcessing(processingID: processingID)
             }
             if photoProcessingTask == nil {
                 finishPhotoProcessing(processingID: processingID)
@@ -137,6 +137,7 @@ struct ComposeInputBar: View {
         }
         .onDisappear {
             photoProcessingTask?.cancel()
+            documentProcessingTask?.cancel()
         }
         .sheet(isPresented: $showDocumentPicker) {
             DocumentPicker(attachments: Binding(
@@ -147,6 +148,10 @@ struct ComposeInputBar: View {
                     isProcessing,
                     id: documentProcessingID
                 )
+            }, onOperationChanged: { documentProcessingTask = $0 }, onImportFailures: { failures in
+                if let message = DraftAttachmentImport.failureMessage(failures) {
+                    viewModel.errorAlert = ComposeErrorAlert(message: message)
+                }
             })
         }
         .confirmationDialog("Add Attachment", isPresented: $showAttachmentOptions) {
@@ -201,12 +206,10 @@ struct ComposeInputBar: View {
         .accessibilityLabel("Add attachment")
     }
 
-    private func processPhotoSelections(
+    private nonisolated func processPhotoSelections(
         _ items: [PhotosPickerItem],
-        generation: AttachmentAccountWorkGeneration,
-        processingID: UUID
+        generation: AttachmentAccountWorkGeneration
     ) async {
-        defer { finishPhotoProcessing(processingID: processingID) }
         guard !items.isEmpty, generation.isActive else { return }
 
         let placeholderIds = await MainActor.run { () -> [String] in
@@ -228,33 +231,31 @@ struct ComposeInputBar: View {
             }
         )
 
-        photoLoop: for (item, localId) in zip(items, placeholderIds) {
+        var failures: [String] = []
+        photoLoop: for (index, pair) in zip(items, placeholderIds).enumerated() {
+            let (item, localId) = pair
             guard generation.isActive else { break }
-            guard let data = try? await item.loadTransferable(type: Data.self) else {
-                removeAttachmentPlaceholder(localId: localId)
+            let filename = "Photo \(index + 1)"
+            let prepared: DraftAttachmentImport.PreparedImage
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self) else {
+                    throw DraftAttachmentImport.ImportError.unreadable(filename: filename)
+                }
+                guard generation.isActive else { break }
+                let existingBytes = await MainActor.run {
+                    DraftAttachmentImport.totalByteCount(viewModel.attachments.map(\.byteSize))
+                }
+                prepared = try DraftAttachmentImport.prepareImage(
+                    data: data, filename: filename, existingByteCount: existingBytes
+                )
+            } catch {
+                if generation.isActive { failures.append("\(filename): \(error.localizedDescription)") }
+                await removeAttachmentPlaceholder(localId: localId)
                 pendingWrites.removeValue(forKey: localId)
                 continue
             }
-            guard generation.isActive else { break }
-
-            // Process image
-            let (processedData, size) = ImageProcessor.processImage(data: data)
-            guard let finalData = processedData else {
-                removeAttachmentPlaceholder(localId: localId)
-                pendingWrites.removeValue(forKey: localId)
-                continue
-            }
-
-            // Check size limit
-            if finalData.count > maxAttachmentSize {
-                removeAttachmentPlaceholder(localId: localId)
-                pendingWrites.removeValue(forKey: localId)
-                continue
-            }
-
-            // Generate IDs and paths
-            let ext = AttachmentPaths.fileExtension(for: "image/jpeg")
-            let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: ext)
+            let finalData = prepared.data
+            let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: prepared.fileExtension)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: localId)
             pendingWrites[localId]?.originalPath = originalPath
 
@@ -262,14 +263,15 @@ struct ComposeInputBar: View {
             guard generation.isActive else { break }
             guard AttachmentPaths.saveData(finalData, to: originalPath) else {
                 AttachmentPaths.deleteFile(at: originalPath)
-                removeAttachmentPlaceholder(localId: localId)
+                await removeAttachmentPlaceholder(localId: localId)
                 pendingWrites.removeValue(forKey: localId)
+                failures.append(DraftAttachmentImport.ImportError.cannotSave(filename: filename).localizedDescription)
                 continue
             }
 
             // Generate preview
             var savedPreviewPath: String?
-            if let thumbnailData = ImageProcessor.generateThumbnail(from: finalData, mimeType: "image/jpeg") {
+            if let thumbnailData = ImageProcessor.generateThumbnail(from: finalData, mimeType: prepared.mimeType) {
                 pendingWrites[localId]?.previewPath = previewPath
                 if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
                     savedPreviewPath = previewPath
@@ -280,20 +282,21 @@ struct ComposeInputBar: View {
             }
 
             // Update placeholder attachment with finalized metadata.
+            let finalizedPreviewPath = savedPreviewPath
             let didFinalize = await MainActor.run { () -> Bool in
                 guard generation.isActive else { return false }
                 guard let attachment = viewModel.attachments.first(where: { $0.id == localId }) else {
                     return false
                 }
 
+                attachment.filename = prepared.filename(replacingExtensionOf: attachment.filename)
+                attachment.mimeType = prepared.mimeType
                 attachment.byteSize = Int64(finalData.count)
                 attachment.localURL = originalPath
-                attachment.previewURL = savedPreviewPath
+                attachment.previewURL = finalizedPreviewPath
 
-                if let size {
-                    attachment.width = Int16(clamping: Int(size.width.rounded()))
-                    attachment.height = Int16(clamping: Int(size.height.rounded()))
-                }
+                attachment.width = Int16(clamping: Int(prepared.size.width.rounded()))
+                attachment.height = Int16(clamping: Int(prepared.size.height.rounded()))
                 return true
             }
             switch AttachmentImportFinalizationResult.resolve(
@@ -318,14 +321,21 @@ struct ComposeInputBar: View {
         for (localId, write) in pendingWrites {
             AttachmentPaths.deleteFile(at: write.originalPath)
             AttachmentPaths.deleteFile(at: write.previewPath)
-            removeAttachmentPlaceholder(localId: localId)
+            await removeAttachmentPlaceholder(localId: localId)
         }
 
         if generation.isActive {
-            selectedPhotoItems = []
+            let errorMessage = DraftAttachmentImport.failureMessage(failures)
+            await MainActor.run {
+                selectedPhotoItems = []
+                if let message = errorMessage {
+                    viewModel.errorAlert = ComposeErrorAlert(message: message)
+                }
+            }
         }
     }
 
+    @MainActor
     private func finishPhotoProcessing(processingID: UUID) {
         viewModel.setAttachmentImportInProgress(false, id: processingID)
         guard photoProcessingID == processingID else { return }
