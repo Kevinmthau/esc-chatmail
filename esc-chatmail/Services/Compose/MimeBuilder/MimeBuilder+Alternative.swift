@@ -35,7 +35,8 @@ extension MimeBuilder {
         references: [String],
         attachments: [AttachmentData],
         inlineAttachments: [InlineAttachmentData],
-        messageId: String? = nil
+        messageId: String? = nil,
+        preserveEmptySubject: Bool = false
     ) -> Data {
         // Rich HTML and its inline parts are one unit. If a Content-ID would
         // need a lossy rewrite, fall back to the plain body so its `cid:` URL
@@ -50,7 +51,8 @@ extension MimeBuilder {
                     subject: subject,
                     inReplyTo: inReplyTo,
                     references: references,
-                    messageId: messageId
+                    messageId: messageId,
+                    preserveEmptySubject: preserveEmptySubject
                 )
             }
             return buildMultipartMessage(
@@ -62,7 +64,8 @@ extension MimeBuilder {
                 inReplyTo: inReplyTo,
                 references: references,
                 attachments: attachments,
-                messageId: messageId
+                messageId: messageId,
+                preserveEmptySubject: preserveEmptySubject
             )
         }
 
@@ -79,6 +82,9 @@ extension MimeBuilder {
         if let subject = subject, !subject.isEmpty {
             let encodedSubject = encodeHeaderIfNeeded(subject)
             mime += "Subject: \(encodedSubject)\r\n"
+        } else if preserveEmptySubject {
+            // A display placeholder would change the subject of a subjectless reply.
+            mime += "Subject: \r\n"
         } else {
             mime += "Subject: (No Subject)\r\n"
         }
