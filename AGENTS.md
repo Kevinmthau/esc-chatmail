@@ -104,8 +104,9 @@ Email rendering pipeline:
 2. sanitization and safety: `HTMLSanitizerService`, `HTMLRemoteImageAttachmentFallback`, URL/CSS sanitizers
 3. presentation wrapping: `HTMLDisplayWrapper`
 4. rendering surfaces:
-   - full message: `HTMLMessageView` -> `HTMLWebView` -> `BaseEmailWebView(.fullInteractive)`
-   - preview routing: `EmailContentSection`, `NewsletterPreviewBuilder`, `TransactionalPreviewBuilder`, `MiniEmailWebView`
+   - full message: `EmailReaderView` -> `FullEmailReaderView` -> `HTMLMessageView` -> `HTMLWebView` -> `FullEmailReaderWebView`; `FullEmailWebViewManager` prepares and warms original-email artifacts and manages policy-gated adoption of offscreen WebViews
+   - chat previews: `EmailContentSection` -> `EmailPreviewPipeline` selects native cards or `EmailPreviewSnapshotView`, backed by `EmailPreviewSnapshotRenderer` and `EmailPreviewSnapshotCache`
+   - snapshot failure fallback: `MiniEmailWebView` -> `BaseEmailWebView(.scaledPreview)`; compose HTML previews use `BaseEmailWebView(.simplePreview)`
 
 Important rule:
 - Do not mix preview-specific transformations into the full-message rendering path unless required.
@@ -116,6 +117,8 @@ Be especially careful in:
 - `esc-chatmail/Services/HTMLContent/HTMLContentLoader.swift`
 - `esc-chatmail/Services/HTMLSanitization/HTMLSanitizerService.swift`
 - `esc-chatmail/Services/HTMLSanitization/HTMLDisplayWrapper.swift`
+- `esc-chatmail/Services/Chat/FullEmailWebViewManager.swift`
+- `esc-chatmail/Views/Components/EmailContent/FullEmailReaderWebView.swift`
 - `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`
 - preview rendering in chat/thread UI
 
@@ -132,7 +135,7 @@ Product principles:
 - Treat `ChatMessagesView` scroll timing as delicate. It has staged initial, follow-up, and stabilization scroll tasks for a reason.
 - Avoid introducing view-driven N+1 work when loaders/caches already exist.
 - Repeated HTML sanitization, wrapping, or recovery passes are a regression risk.
-- `MiniEmailWebView` height changes can destabilize scrolling. Keep preview heights predictable.
+- Snapshot preview sizing and `MiniEmailWebView` fallback height changes can destabilize scrolling. Keep preview heights predictable.
 - `AppPrewarmer` exists because first-use `WKWebView` startup is expensive.
 
 ## UI And UX Guardrails

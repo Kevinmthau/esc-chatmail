@@ -16,7 +16,6 @@ struct HTMLMessageView: View {
     var body: some View {
         HTMLWebView(
             htmlContent: html,
-            isDarkMode: false,
             sourceSignature: sourceSignature,
             readerWidth: readerWidth,
             message: message,

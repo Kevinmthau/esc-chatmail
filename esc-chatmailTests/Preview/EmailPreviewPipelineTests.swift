@@ -39,6 +39,95 @@ final class EmailPreviewPipelineTests: XCTestCase {
         super.tearDown()
     }
 
+    func testPreviewHTMLCacheKeyIncludesSourceSignatureAndPreviewMode() {
+        let firstSourceKey = EmailPreviewPipeline.makePreviewHTMLCacheKey(
+            messageId: "message-id",
+            sourceSignature: "sha256:first",
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+        let secondSourceKey = EmailPreviewPipeline.makePreviewHTMLCacheKey(
+            messageId: "message-id",
+            sourceSignature: "sha256:second",
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+        let darkModeKey = EmailPreviewPipeline.makePreviewHTMLCacheKey(
+            messageId: "message-id",
+            sourceSignature: "sha256:first",
+            isDarkMode: true,
+            cleanupMode: .none
+        )
+        let cleanupModeKey = EmailPreviewPipeline.makePreviewHTMLCacheKey(
+            messageId: "message-id",
+            sourceSignature: "sha256:first",
+            isDarkMode: false,
+            cleanupMode: .quotedOnly
+        )
+
+        XCTAssertNotEqual(firstSourceKey, secondSourceKey)
+        XCTAssertNotEqual(firstSourceKey, darkModeKey)
+        XCTAssertNotEqual(firstSourceKey, cleanupModeKey)
+    }
+
+    func testShouldUseTransactionalPreviewCard_forwardedMessage_returnsFalse() {
+        XCTAssertFalse(EmailPreviewPipeline.shouldUseTransactionalPreviewCard(isForwardedEmail: true))
+    }
+
+    func testShouldUseTransactionalPreviewCard_regularMessage_returnsTrue() {
+        XCTAssertTrue(EmailPreviewPipeline.shouldUseTransactionalPreviewCard(isForwardedEmail: false))
+    }
+
+    func testNativePreviewCardRoutes_newsletterFlagAttemptsNewsletterWhenClassifierIsConservative() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: true,
+            isForwardedEmail: false,
+            classificationKind: .personToPerson
+        )
+
+        XCTAssertEqual(routes, [.newsletter])
+    }
+
+    func testNativePreviewCardRoutes_transactionalClassificationPrecedesNewsletterFlag() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: true,
+            isForwardedEmail: false,
+            classificationKind: .transactional
+        )
+
+        XCTAssertEqual(routes, [.transactional, .newsletter])
+    }
+
+    func testNativePreviewCardRoutes_forwardedNewsletterFlagWithoutClassificationFallsThroughToHTML() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: true,
+            isForwardedEmail: true,
+            classificationKind: .personToPerson
+        )
+
+        XCTAssertEqual(routes, [])
+    }
+
+    func testNativePreviewCardRoutes_forwardedNewsletterClassificationFallsThroughToHTML() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: false,
+            isForwardedEmail: true,
+            classificationKind: .newsletter
+        )
+
+        XCTAssertEqual(routes, [])
+    }
+
+    func testNativePreviewCardRoutes_forwardedTransactionalSkipsTransactionalCard() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: false,
+            isForwardedEmail: true,
+            classificationKind: .transactional
+        )
+
+        XCTAssertEqual(routes, [])
+    }
+
     func testLoadPreview_buildsNewsletterCardFromCanonicalHTML() async throws {
         let messageId = "preview-pipeline-newsletter-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

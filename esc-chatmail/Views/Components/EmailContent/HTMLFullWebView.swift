@@ -3,8 +3,6 @@ import SwiftUI
 /// Full interactive WebView for displaying original email HTML.
 struct HTMLWebView: View {
     let htmlContent: String
-    let isDarkMode: Bool
-    var senderEmail: String? = nil
     var sourceSignature: String? = nil
     var readerWidth: CGFloat = 0
     /// Optional message for resolving cid: URLs to inline attachments
