@@ -35,11 +35,13 @@ final class MessagePersisterAttachmentHandoffTests: XCTestCase {
         super.tearDown()
     }
 
-    func testConsumingSupersededSendPreservesSavedDraftConversationAndAttachments() throws {
+    func testConsumingSupersededSendAndFollowOnRollupPreserveSavedDraftConversationAndAttachments() async throws {
         let context = testStack.makeMainQueueViewContext()
         for newlyInserted in [true, false] {
             let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
             let conversationID = conversation.id
+            let unprotectedConversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+            let unprotectedConversationID = unprotectedConversation.id
             let message = MessageBuilder()
                 .withId("superseded-\(newlyInserted)")
                 .inConversation(conversation)
@@ -64,7 +66,14 @@ final class MessagePersisterAttachmentHandoffTests: XCTestCase {
                 shouldConsumeAfterPersistence: true
             )
 
-            persister.consumeRemoteCommittedSendMutation(resolution, in: context)
+            var affectedIDs = persister.consumeRemoteCommittedSendMutation(resolution, in: context)
+            affectedIDs.insert(unprotectedConversation.objectID)
+            let updated = await ConversationRollupUpdater().updateRollupsForModified(
+                conversationIDs: affectedIDs,
+                in: context,
+                myEmail: "me@example.com"
+            )
+            XCTAssertTrue(updated)
             try context.save()
             context.reset()
 
@@ -79,7 +88,63 @@ final class MessagePersisterAttachmentHandoffTests: XCTestCase {
             XCTAssertEqual(draft.text, "Next reply")
             XCTAssertEqual(attachments.map(\.id), ["draft-\(newlyInserted)"])
             XCTAssertNil(attachments.first?.message)
+
+            request.predicate = NSPredicate(format: "id == %@", unprotectedConversationID as CVarArg)
+            let savedUnprotectedConversation = try XCTUnwrap(context.fetch(request).first)
+            XCTAssertTrue(savedUnprotectedConversation.hidden)
+            XCTAssertNotNil(savedUnprotectedConversation.archivedAt)
+            XCTAssertNil(savedUnprotectedConversation.lastMessageDate)
         }
+    }
+
+    func testRerouteBufferPreservesSavedDraftSourceAndHidesUnprotectedEmptySource() throws {
+        let context = testStack.makeMainQueueViewContext()
+        let draftSource = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let draftSourceID = draftSource.id
+        let unprotectedSource = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let unprotectedSourceID = unprotectedSource.id
+        let destination = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let draftSourceMessage = MessageBuilder()
+            .withId("draft-source-rerouted")
+            .inConversation(draftSource)
+            .build(in: context)
+        let unprotectedSourceMessage = MessageBuilder()
+            .withId("unprotected-source-rerouted")
+            .inConversation(unprotectedSource)
+            .build(in: context)
+        let store = ChatReplyDraftStore(context: context)
+        try store.save(
+            StoredChatReplyDraft(text: "Reply after reroute", targetURI: nil, recoveredEnvelope: nil),
+            attachments: [],
+            conversationID: draftSourceID
+        )
+        let buffer = MessagePersisterReroutedSourceRollupBuffer(observing: context)
+        defer { buffer.stopObserving() }
+        draftSourceMessage.conversation = destination
+        unprotectedSourceMessage.conversation = destination
+        context.processPendingChanges()
+        buffer.register(draftSource.objectID)
+        buffer.register(unprotectedSource.objectID)
+
+        buffer.drainAndApply(in: context)
+        try context.save()
+        context.reset()
+
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", draftSourceID as CVarArg)
+        let savedDraftSource = try XCTUnwrap(context.fetch(request).first)
+        XCTAssertTrue(savedDraftSource.messages?.isEmpty ?? true)
+        XCTAssertFalse(savedDraftSource.hidden)
+        XCTAssertNil(savedDraftSource.archivedAt)
+        XCTAssertNotNil(savedDraftSource.lastMessageDate)
+        XCTAssertEqual(try store.load(conversationID: draftSourceID)?.0.text, "Reply after reroute")
+
+        request.predicate = NSPredicate(format: "id == %@", unprotectedSourceID as CVarArg)
+        let savedUnprotectedSource = try XCTUnwrap(context.fetch(request).first)
+        XCTAssertTrue(savedUnprotectedSource.messages?.isEmpty ?? true)
+        XCTAssertTrue(savedUnprotectedSource.hidden)
+        XCTAssertNotNil(savedUnprotectedSource.archivedAt)
+        XCTAssertNil(savedUnprotectedSource.lastMessageDate)
     }
 
     // Revert-check: fails if `handoffOptimisticAttachmentStorage` reverts to
