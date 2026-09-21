@@ -10,7 +10,15 @@ import Combine
 @MainActor
 final class ChatComposerState: ObservableObject {
     @Published var replyText: String
-    @Published var replyingTo: Message?
+    @Published var replyingTo: Message? {
+        didSet {
+            if let replyingTo {
+                replyAnchor = replyingTo
+            }
+        }
+    }
+    // Dismissing the quote changes presentation, not the draft's destination.
+    private(set) var replyAnchor: Message?
     @Published var attachments: [Attachment]
     @Published private(set) var isSending = false
     private var discardsAttachmentsWhenSendFinishes = false
@@ -22,7 +30,13 @@ final class ChatComposerState: ObservableObject {
     ) {
         self.replyText = replyText
         self.replyingTo = replyingTo
+        self.replyAnchor = replyingTo
         self.attachments = attachments
+    }
+
+    func replaceReplyTarget(_ message: Message?) {
+        replyAnchor = message
+        replyingTo = message
     }
 
     var hasDraftContent: Bool {
@@ -292,9 +306,12 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Reply Actions
 
+    private var manuallySelectedReplyTargetID: NSManagedObjectID?
+
     func setReplyingTo(_ message: Message) {
         guard !composerState.isSending,
               isValidReplyTarget(message) else { return }
+        manuallySelectedReplyTargetID = message.objectID
         replyingTo = message
     }
 
@@ -306,7 +323,8 @@ final class ChatViewModel: ObservableObject {
     /// Sets the initial replyingTo message when the conversation loads
     func initializeReplyingTo(lastMessage: Message?) {
         guard !composerState.isSending,
-              replyingTo == nil,
+              !composerState.hasDraftContent,
+              composerState.replyAnchor == nil,
               let lastMessage,
               isValidReplyTarget(lastMessage) else { return }
         replyingTo = lastMessage
@@ -319,8 +337,8 @@ final class ChatViewModel: ObservableObject {
     /// Keeps the reply target anchored to this conversation as rows change.
     ///
     /// A legacy message can move to a List-Id conversation while this chat is
-    /// open. Replace that invalid target even when the replacement has the same
-    /// subject; otherwise outbound validation rejects the reply. List chats also
+    /// open. For an idle automatic target, use the replacement even when it has
+    /// the same subject. Active drafts retain their target for validation. List chats also
     /// advance across Gmail threads whose subjects happen to match.
     func updateReplyingToIfNewSubject(lastMessage: Message?) {
         guard !composerState.isSending else { return }
@@ -328,8 +346,13 @@ final class ChatViewModel: ObservableObject {
         // If user cleared replyingTo (tapped X), don't auto-update
         guard let currentReplyingTo = replyingTo else { return }
 
+        // A selected message or an active draft owns its destination. If sync
+        // invalidates that target, send validation keeps the draft for recovery.
+        guard !composerState.hasDraftContent,
+              manuallySelectedReplyTargetID != currentReplyingTo.objectID else { return }
+
         guard isValidReplyTarget(currentReplyingTo) else {
-            replyingTo = lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil }
+            composerState.replaceReplyTarget(lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil })
             return
         }
 
@@ -426,8 +449,9 @@ final class ChatViewModel: ObservableObject {
                     .init(
                         context: outboundReplyContextBuilder.build(
                             conversationObjectID: conversation.objectID,
-                            replyingToMessageObjectID: replyingTo?.objectID,
-                            optimisticConversation: replyOptimisticConversation
+                            replyingToMessageObjectID: composerState.replyAnchor?.objectID,
+                            optimisticConversation: replyOptimisticConversation,
+                            includesQuotedMessage: replyingTo != nil
                         ),
                         body: trimmedReplyText,
                         attachments: attachmentContexts

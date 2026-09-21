@@ -28,12 +28,14 @@ struct OutboundReplyContextBuilder {
     func build(
         conversationObjectID: NSManagedObjectID,
         replyingToMessageObjectID: NSManagedObjectID?,
-        optimisticConversation: OptimisticConversationReference?
+        optimisticConversation: OptimisticConversationReference?,
+        includesQuotedMessage: Bool = true
     ) -> OutboundMessageRequest.ReplyContext {
         return OutboundMessageRequest.ReplyContext(
             conversationObjectID: conversationObjectID,
             replyingToMessageObjectID: replyingToMessageObjectID,
-            optimisticConversation: optimisticConversation
+            optimisticConversation: optimisticConversation,
+            includesQuotedMessage: includesQuotedMessage
         )
     }
 
@@ -76,7 +78,8 @@ struct OutboundReplyContextBuilder {
             ),
             replyingTo: replyingTo,
             sendAsAliases: sendAsAliases,
-            userAliases: userAliases
+            userAliases: userAliases,
+            includesQuotedMessage: context.includesQuotedMessage
         )
     }
 
