@@ -1,13 +1,11 @@
 import XCTest
 @testable import esc_chatmail
 
-/// CX3 characterization: pins the error-classification behavior of the retry
-/// and background-sync seams across the full APIError matrix, so the
-/// consolidation onto `APIError.recoveryAction` is observable row by row.
+/// Pins retry classification and the canonical recovery mapping across the
+/// APIError matrix.
 final class APIErrorClassificationTests: XCTestCase {
 
     private let retryStrategy = NetworkRetryStrategy(maxRetries: 5)
-    private let backgroundHandler = BackgroundSyncErrorHandler()
 
     private func shouldRetry(_ error: Error) -> Bool {
         retryStrategy.shouldRetry(error: error, attempt: 0)
@@ -40,48 +38,6 @@ final class APIErrorClassificationTests: XCTestCase {
         XCTAssertTrue(strategy.shouldRetry(error: APIError.timeout, attempt: 1))
         XCTAssertFalse(strategy.shouldRetry(error: APIError.timeout, attempt: 2))
         XCTAssertFalse(strategy.shouldRetry(error: APIError.timeout, attempt: 3))
-    }
-
-    // MARK: - BackgroundSyncErrorHandler APIError matrix
-
-    func testBackgroundHandler_historyIdExpired_fallsBackToPartialSync() {
-        XCTAssertEqual(backgroundHandler.handleError(APIError.historyIdExpired), .partialSync)
-    }
-
-    func testBackgroundHandler_authenticationError_refreshesToken() {
-        XCTAssertEqual(backgroundHandler.handleError(APIError.authenticationError), .tokenRefreshAndRetry)
-    }
-
-    func testBackgroundHandler_credentialsRevoked_abortsWithoutRetry() {
-        XCTAssertEqual(backgroundHandler.handleError(APIError.credentialsRevoked), .abortNoRetry)
-    }
-
-    func testBackgroundHandler_transientErrors_retry() {
-        XCTAssertEqual(backgroundHandler.handleError(APIError.rateLimited(retryAfter: nil)), .retry)
-        XCTAssertEqual(backgroundHandler.handleError(APIError.timeout), .retry)
-        XCTAssertEqual(backgroundHandler.handleError(APIError.networkError(URLError(.networkConnectionLost))), .retry)
-        XCTAssertEqual(backgroundHandler.handleError(APIError.serverError(500)), .retry)
-        XCTAssertEqual(backgroundHandler.handleError(APIError.serverError(503)), .retry)
-    }
-
-    func testBackgroundHandler_clientServerErrorCodes_abort() {
-        XCTAssertEqual(backgroundHandler.handleError(APIError.serverError(400)), .abort)
-        XCTAssertEqual(backgroundHandler.handleError(APIError.serverError(451)), .abort)
-    }
-
-    func testBackgroundHandler_invalidData_aborts() {
-        XCTAssertEqual(backgroundHandler.handleError(APIError.invalidData("Gmail API 403: quota")), .abort)
-    }
-
-    func testBackgroundHandler_malformedRequestOrResponseErrors_abort() {
-        // CX3 decision: these previously fell through `default:` to .retry
-        // even though retrying cannot succeed (the M1 inverted-intent bug
-        // class). The canonical mapping classifies them as .abort, matching
-        // every same-request retry classifier.
-        XCTAssertEqual(backgroundHandler.handleError(APIError.invalidURL("bad url")), .abort)
-        XCTAssertEqual(backgroundHandler.handleError(APIError.decodingError(URLError(.cannotParseResponse))), .abort)
-        XCTAssertEqual(backgroundHandler.handleError(APIError.notFound("message")), .abort)
-        XCTAssertEqual(backgroundHandler.handleError(APIError.invalidHistoryPageToken), .abort)
     }
 
     // MARK: - Canonical mapping matrix (APIError.recoveryAction)
@@ -141,29 +97,5 @@ final class APIErrorClassificationTests: XCTestCase {
                 "RetryStrategy diverged from canonical mapping for \(error)"
             )
         }
-    }
-
-    // MARK: - BackgroundSyncErrorHandler non-APIError legs
-
-    func testBackgroundHandler_urlErrors() {
-        XCTAssertEqual(backgroundHandler.handleError(URLError(.notConnectedToInternet)), .abortNoRetry)
-        XCTAssertEqual(backgroundHandler.handleError(URLError(.networkConnectionLost)), .abortNoRetry)
-        XCTAssertEqual(backgroundHandler.handleError(URLError(.timedOut)), .retry)
-        XCTAssertEqual(backgroundHandler.handleError(URLError(.cannotConnectToHost)), .retry)
-    }
-
-    func testBackgroundHandler_nsErrorStatusCodes() {
-        XCTAssertEqual(
-            backgroundHandler.handleError(NSError(domain: "test", code: 404)), .partialSync
-        )
-        XCTAssertEqual(
-            backgroundHandler.handleError(NSError(domain: "test", code: 401)), .tokenRefreshAndRetry
-        )
-        XCTAssertEqual(
-            backgroundHandler.handleError(NSError(domain: "test", code: 429)), .retry
-        )
-        XCTAssertEqual(
-            backgroundHandler.handleError(NSError(domain: "test", code: 1)), .retry
-        )
     }
 }

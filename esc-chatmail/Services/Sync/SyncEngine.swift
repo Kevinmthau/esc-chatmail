@@ -39,11 +39,11 @@ private actor IncrementalSyncResultRecorder {
 /// - SyncFailureTracker: Handle failures gracefully
 ///
 /// `Sendable` is declared explicitly rather than left implied by `@MainActor`:
-/// `BackgroundSyncMessageCoordinating` and `BackgroundMailboxSyncExecuting`
-/// inherit `Sendable` and are conformed to beside their protocols, and a
-/// class's `Sendable` conformance must be declared in the class's own source
-/// file. Xcode 27's compiler no longer exempts `@MainActor` classes from that
-/// rule, and warnings-as-errors turns the violation into a build failure.
+/// `BackgroundMailboxSyncExecuting` inherits `Sendable` and is conformed to
+/// beside its protocol. A class's `Sendable` conformance must be declared in
+/// the class's own source file. Xcode 27's compiler no longer exempts
+/// `@MainActor` classes from that rule, and warnings-as-errors turns the
+/// violation into a build failure.
 @MainActor
 final class SyncEngine: ObservableObject, Sendable {
     static let shared = SyncEngine()
@@ -61,9 +61,6 @@ final class SyncEngine: ObservableObject, Sendable {
     private let initialSyncOrchestrator: InitialSyncOrchestrator
     private let incrementalSyncOrchestrator: IncrementalSyncOrchestrator
     private let messageFetcher: MessageFetcher
-    private let messagePersister: MessagePersister
-    private let historyProcessor: HistoryProcessor
-    private let conversationManager: ConversationManager
     private let coreDataStack: CoreDataStack
     private let attachmentDownloader: AttachmentDownloader
     private let networkMonitor: NetworkMonitorService
@@ -107,9 +104,6 @@ final class SyncEngine: ObservableObject, Sendable {
         )
 
         self.messageFetcher = messageFetcher
-        self.messagePersister = messagePersister
-        self.historyProcessor = historyProcessor
-        self.conversationManager = conversationManager
         self.coreDataStack = coreDataStack
         self.attachmentDownloader = attachmentDownloader
         self.networkMonitor = networkMonitor
@@ -254,66 +248,6 @@ final class SyncEngine: ObservableObject, Sendable {
             uiState.update(isSyncing: false, status: "Sync failed: \(formatSyncError(error))")
             return false
         }
-    }
-
-    // MARK: - Delegated Methods (for BackgroundSyncManager compatibility)
-
-    /// Clears local modifications for synced messages
-    func clearLocalModifications(for messageIds: [String]) async {
-        await historyProcessor.clearLocalModifications(for: messageIds)
-    }
-
-    /// Updates conversation rollups for the explicitly provided modified conversations.
-    nonisolated func updateConversationRollups(
-        conversationIDs: Set<NSManagedObjectID>,
-        in context: NSManagedObjectContext
-    ) async {
-        guard !conversationIDs.isEmpty else { return }
-
-        await conversationManager.updateRollupsForModifiedConversations(
-            conversationIDs: conversationIDs,
-            in: context
-        )
-    }
-
-    /// Updates conversation display names without recomputing rollup fields.
-    nonisolated func updateConversationDisplayNames(
-        conversationIDs: Set<NSManagedObjectID>,
-        in context: NSManagedObjectContext
-    ) async {
-        guard !conversationIDs.isEmpty else { return }
-
-        await conversationManager.updateConversationDisplayNames(
-            conversationIDs: conversationIDs,
-            in: context
-        )
-    }
-
-    /// Prefetches label IDs for background sync
-    nonisolated func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String> {
-        return await messagePersister.prefetchLabelIds(in: context)
-    }
-
-    /// Saves a message (used by BackgroundSyncManager)
-    @discardableResult
-    func saveMessage(
-        _ gmailMessage: GmailMessage,
-        labelIds: Set<String>? = nil,
-        modificationTransaction: ModificationTracker.Transaction,
-        in context: NSManagedObjectContext
-    ) async throws -> MessagePersistDisposition {
-        // Use centralized AliasManager for alias resolution
-        let myAliases = await AliasManager.shared.getAliases(from: context)
-        let sendAsAliases = await SendAsAliasManager.shared.getAliases(from: context)
-
-        return try await messagePersister.saveMessage(
-            gmailMessage,
-            labelIds: labelIds,
-            myAliases: myAliases,
-            sendAsAliases: sendAsAliases,
-            modificationTransaction: modificationTransaction,
-            in: context
-        )
     }
 
     // MARK: - Private Implementation

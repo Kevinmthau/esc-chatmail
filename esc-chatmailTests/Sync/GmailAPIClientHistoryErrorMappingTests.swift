@@ -268,11 +268,8 @@ final class GmailAPIClientHistoryErrorMappingTests: XCTestCase {
                 return XCTFail(
                     """
                     Expected historyIdExpired, got \(error). An expired history \
-                    cursor misrouted to .invalidHistoryPageToken deadlocks \
-                    incremental sync: BackgroundSyncErrorHandler maps that case \
-                    to .abort with no recovery branch, so the stale cursor is \
-                    never replaced and every subsequent run aborts the same way. \
-                    The reverse mistake only costs one recovery pass.
+                    cursor must trigger mailbox recovery rather than replaying \
+                    a page token against the same expired cursor.
                     """
                 )
             }
@@ -383,28 +380,5 @@ final class GmailAPIClientHistoryErrorMappingTests: XCTestCase {
 
         XCTAssertEqual(response.historyId, "99")
         XCTAssertEqual(StubURLProtocol.requestCount, 2)
-    }
-
-    // MARK: - BackgroundSyncErrorHandler routing
-
-    func testErrorHandler_invalidDataAborts() {
-        let handler = BackgroundSyncErrorHandler()
-        let action = handler.handleError(APIError.invalidData("Gmail API 403: quota"))
-        XCTAssertEqual(action, .abort)
-    }
-
-    func testErrorHandler_invalidHistoryPageTokenAborts() {
-        let handler = BackgroundSyncErrorHandler()
-        XCTAssertEqual(handler.handleError(APIError.invalidHistoryPageToken), .abort)
-    }
-
-    func testErrorHandler_credentialsRevokedAbortsWithoutRetry() {
-        let handler = BackgroundSyncErrorHandler()
-        XCTAssertEqual(handler.handleError(APIError.credentialsRevoked), .abortNoRetry)
-    }
-
-    func testErrorHandler_serverErrorStillRetries() {
-        let handler = BackgroundSyncErrorHandler()
-        XCTAssertEqual(handler.handleError(APIError.serverError(502)), .retry)
     }
 }

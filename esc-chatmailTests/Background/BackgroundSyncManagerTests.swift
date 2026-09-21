@@ -1,29 +1,18 @@
 import XCTest
 import BackgroundTasks
-import CoreData
 import Security
 @testable import esc_chatmail
 
 final class BackgroundSyncManagerTests: XCTestCase {
-    private static let partialQuery = "after:123 -label:spam -label:drafts -label:trash"
-
-    private var testStack: TestCoreDataStack!
-    private var coreDataStack: CoreDataStack!
     private var defaults: UserDefaults!
     private var defaultsSuiteName: String!
-    private var apiClient: MockGmailAPIClient!
     private var taskScheduler: BackgroundTaskSchedulerSpy!
     private var sceneAssertions: SceneBackgroundAssertionSpy!
 
     override func setUp() {
         super.setUp()
-        testStack = TestCoreDataStack()
-        coreDataStack = CoreDataStack(
-            persistentContainerForTesting: testStack.persistentContainer
-        )
         defaultsSuiteName = "BackgroundSyncManagerTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: defaultsSuiteName)!
-        apiClient = MockGmailAPIClient()
         taskScheduler = BackgroundTaskSchedulerSpy()
         sceneAssertions = SceneBackgroundAssertionSpy()
     }
@@ -32,68 +21,9 @@ final class BackgroundSyncManagerTests: XCTestCase {
         defaults.removePersistentDomain(forName: defaultsSuiteName)
         sceneAssertions = nil
         taskScheduler = nil
-        apiClient = nil
         defaults = nil
         defaultsSuiteName = nil
-        coreDataStack = nil
-        testStack = nil
         super.tearDown()
-    }
-
-    func testCompletionDisposition_truncationStoresContinuationAndSchedulesCatchUpRetry() {
-        let continuationState = BackgroundSyncContinuationState.history(
-            startHistoryId: "history-100",
-            pageToken: "page-2"
-        )
-        let disposition = BackgroundSyncManager.completionDisposition(
-            catchUpState: continuationState,
-            hadFetchFailures: false,
-            latestHistoryId: "history-123"
-        )
-
-        XCTAssertEqual(
-            disposition,
-            BackgroundSyncCompletionDisposition(
-                historyIdToStore: nil,
-                continuationState: continuationState,
-                retryAction: .catchUp,
-                shouldResetRetryState: false
-            )
-        )
-    }
-
-    func testCompletionDisposition_failuresUseFailureBackoff() {
-        let disposition = BackgroundSyncManager.completionDisposition(
-            hadFetchFailures: true,
-            latestHistoryId: "history-123"
-        )
-
-        XCTAssertEqual(
-            disposition,
-            BackgroundSyncCompletionDisposition(
-                historyIdToStore: nil,
-                continuationState: nil,
-                retryAction: .failureBackoff,
-                shouldResetRetryState: false
-            )
-        )
-    }
-
-    func testCompletionDisposition_successAdvancesHistoryIdAndResetsRetryState() {
-        let disposition = BackgroundSyncManager.completionDisposition(
-            hadFetchFailures: false,
-            latestHistoryId: "history-123"
-        )
-
-        XCTAssertEqual(
-            disposition,
-            BackgroundSyncCompletionDisposition(
-                historyIdToStore: "history-123",
-                continuationState: nil,
-                retryAction: .none,
-                shouldResetRetryState: true
-            )
-        )
     }
 
     func testBlockedBackgroundSync_schedulesRetryOnlyForPendingActions() {
@@ -112,7 +42,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     }
 
     func testModelV3Executor_registersHandlersAndSchedulesBackgroundWork() async {
-        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        let manager = makeManager()
 
         manager.registerBackgroundTasks()
         await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
@@ -130,9 +60,28 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertTrue(success)
+        let callCount = await MainActor.run { executor.callCount }
+        XCTAssertEqual(callCount, 1)
+    }
+
+    // Revert-check: fails if authoritative handoff stops clearing the retired
+    // checkpoint or moves cleanup until after the executor has started.
+    func testModelV3Executor_clearsLegacyContinuationBeforeSyncing() async {
+        let defaults = defaults!
+        let legacyContinuation = #"{"mode":"history","startHistoryId":"old-history","pageToken":"old-page","accountEmail":"old@example.com"}"#
+        defaults.set(Data(legacyContinuation.utf8), forKey: "backgroundSync.continuationState")
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .completed, onPerform: {
+                XCTAssertNil(defaults.object(forKey: "backgroundSync.continuationState"))
+            })
+        }
+        let manager = makeManager(authoritativeSyncExecutor: executor)
 
         let success = await manager.performAuthoritativeSync()
 
@@ -151,7 +100,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -171,7 +119,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -191,7 +138,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -213,7 +159,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
         taskScheduler.processingTaskPending = true
@@ -239,7 +184,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     // (The unguarded manager-level pass-through no longer exists, so reverting
     // the call site itself fails to compile rather than silently regressing.)
     func testScheduleProcessingTaskIfNotPending_doesNotReplacePendingRequest() async {
-        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        let manager = makeManager()
         taskScheduler.processingTaskPending = true
 
         await manager.scheduleProcessingTaskIfNotPending()
@@ -256,7 +201,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     // Companion to the pending-request test above: proves the guard is a guard,
     // not a no-op, so the pair together pins both sides of the branch.
     func testScheduleProcessingTaskIfNotPending_submitsWhenNoRequestIsPending() async {
-        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        let manager = makeManager()
 
         await manager.scheduleProcessingTaskIfNotPending()
 
@@ -272,7 +217,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             await MainActor.run { authenticated.value = false }
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncIsAuthenticated: { authenticated.value }
         )
 
@@ -290,7 +234,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     // most 15 minutes, so a pending request always begins no later than a
     // fresh re-submit would.
     func testArmBackgroundTasksForSceneBackground_doesNotReplacePendingRefreshRequest() async {
-        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        let manager = makeManager()
         taskScheduler.appRefreshTaskPending = true
 
         await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
@@ -316,7 +260,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     // `scheduleProcessingTaskIfNotPending()`: it must share one MainActor
     // slice with the sign-out gate re-check below.)
     func testArmBackgroundTasksForSceneBackground_doesNotReplacePendingProcessingRequest() async {
-        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        let manager = makeManager()
         taskScheduler.processingTaskPending = true
 
         await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
@@ -338,7 +282,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
     // in `beginCount` immediately, with no async wait.)
     func testArmBackgroundTasksForSceneBackground_whenUnauthenticated_armsNothing() async {
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncIsAuthenticated: { false }
         )
 
@@ -363,7 +306,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             await MainActor.run { authenticated.value = false }
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncIsAuthenticated: { authenticated.value }
         )
 
@@ -398,7 +340,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     // moved inside the Task reads 0 here deterministically instead of racing
     // the Task's completion.
     func testArmBackgroundTasksForSceneBackground_holdsAssertionUntilArmCompletes() async {
-        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        let manager = makeManager()
 
         let beginCountAtReturn = await MainActor.run { () -> Int in
             manager.armBackgroundTasksForSceneBackground()
@@ -425,8 +367,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
             pendingTaskRequestsProvider: { callbackProbe.install($0) }
         )
         let manager = makeManager(
-            taskSchedulerOverride: scheduler,
-            legacyDeltaSyncEnabled: false
+            taskSchedulerOverride: scheduler
         )
 
         await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
@@ -451,7 +392,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
         let pendingChecks = BackgroundPendingCheckCounter()
         sceneAssertions.shouldGrant = false
         taskScheduler.onPendingCheck = { pendingChecks.increment() }
-        let manager = makeManager(legacyDeltaSyncEnabled: false)
+        let manager = makeManager()
 
         await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
         await waitUntil { self.sceneAssertions.endInvocationCount == 1 }
@@ -473,7 +414,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .failed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -494,7 +434,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .failed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -517,7 +456,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             )
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -537,7 +475,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncReadiness: { false }
         )
@@ -558,7 +495,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
         taskScheduler.appRefreshTaskPending = true
         taskScheduler.processingTaskPending = true
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncReadiness: {
                 await readinessGate.waitUntilReleased()
             },
@@ -594,7 +530,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
         }
         let readinessGate = BackgroundSyncReadinessGate()
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncReadiness: {
                 await readinessGate.waitUntilReleased()
@@ -623,7 +558,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
         taskScheduler.processingTaskPending = true
         let readinessGate = BackgroundSyncReadinessGate()
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncReadiness: {
                 await readinessGate.waitUntilReleased()
             },
@@ -650,7 +584,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncReadiness: { false }
         )
@@ -667,7 +600,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncIsAuthenticated: { false }
         )
@@ -702,7 +634,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
                 }
             }
             let manager = makeManager(
-                legacyDeltaSyncEnabled: false,
                 authoritativeSyncExecutor: executor,
                 authoritativeSyncIsAuthenticated: { authenticated.value }
             )
@@ -730,7 +661,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             }
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncIsAuthenticated: { authenticated.value },
             authoritativeSyncIsDurablySignedOut: { durablySignedOut.value }
@@ -755,7 +685,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .failed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncReadiness: {
                 await readinessGate.waitUntilReleased()
@@ -794,7 +723,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .needsFollowUp)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncReadiness: {
                 await readinessGate.waitUntilReleased()
@@ -828,7 +756,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
         taskScheduler.appRefreshTaskPending = true
         taskScheduler.processingTaskPending = true
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncIsAuthenticated: { false },
             authoritativeSyncIsDurablySignedOut: { true }
         )
@@ -860,7 +787,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncIsAuthenticated: { false },
             authoritativeSyncIsDurablySignedOut: { true }
@@ -907,7 +833,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             let expiration = BackgroundTaskExpirationHandlerProbe()
             let completion = BackgroundTaskCompletionProbe()
             let manager = makeManager(
-                legacyDeltaSyncEnabled: false,
                 authoritativeSyncReadiness: {
                     await readinessGate.waitUntilReleased()
                 },
@@ -952,7 +877,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
         let completion = BackgroundTaskCompletionProbe()
         let manager = makeManager(
             taskSchedulerOverride: scheduler,
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -984,7 +908,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncIsAuthenticated: { false },
             authoritativeSyncIsDurablySignedOut: { true }
@@ -1018,7 +941,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncIsAuthenticated: { false },
             authoritativeSyncIsDurablySignedOut: { false }
@@ -1043,7 +965,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .completed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncIsAuthenticated: { true },
             authoritativeSyncIsDurablySignedOut: { true }
@@ -1471,7 +1392,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .failed)
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -1485,7 +1405,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .blocked(by: .pendingActions))
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -1500,7 +1419,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .blocked(by: .maintenance))
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -1515,7 +1433,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             BackgroundMailboxSyncExecutorSpy(result: .blocked(by: nil))
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
 
@@ -1532,7 +1449,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
                 BackgroundMailboxSyncExecutorSpy(result: .blocked(by: activeKind))
             }
             let manager = makeManager(
-                legacyDeltaSyncEnabled: false,
                 authoritativeSyncExecutor: executor
             )
 
@@ -1548,7 +1464,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             CancellableBackgroundMailboxSyncExecutorSpy()
         }
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor
         )
         let task = Task {
@@ -1583,7 +1498,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
         }
         let readinessGate = BackgroundSyncReadinessGate()
         let manager = makeManager(
-            legacyDeltaSyncEnabled: false,
             authoritativeSyncExecutor: executor,
             authoritativeSyncReadiness: {
                 await readinessGate.waitUntilReleased()
@@ -1607,461 +1521,24 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(callCount, 0)
     }
 
-    func testLegacyGateOn_preservesSchedulingForCharacterizationTests() async {
-        let manager = makeManager(legacyDeltaSyncEnabled: true)
-
-        await MainActor.run { manager.armBackgroundTasksForSceneBackground() }
-        await waitUntil { self.sceneAssertions.endCount == 1 }
-
-        XCTAssertEqual(taskScheduler.appRefreshScheduleCount, 1)
-        XCTAssertEqual(taskScheduler.processingScheduleCount, 1)
-    }
-
-    // Revert-check: fails if `BackgroundSyncManager.handleHistorySyncError`'s
-    // `APIError.invalidHistoryPageToken` branch stops clearing the persisted continuation
-    // and replaying once from the frozen cursor (success flips to a retry-scheduling abort).
-    func testLegacyHistorySync_rejectedPersistedPageTokenReplaysOnceFromSavedCursor() async throws {
-        let stateManager = makeStateManager()
-        try await stateManager.storeHistoryId(
-            "history-100",
-            accountEmail: "user@example.com"
-        )
-        try stateManager.storeContinuationState(
-            .history(
-                startHistoryId: "history-100",
-                pageToken: "stale-token",
-                accountEmail: "user@example.com"
-            )
-        )
-        apiClient.listHistoryErrorsByPageToken["stale-token"] = APIError.invalidHistoryPageToken
-        apiClient.historyResponse = HistoryResponse(
-            history: nil,
-            nextPageToken: nil,
-            historyId: "history-200"
-        )
-
-        let success = await makeManager().performHistorySync(
-            startHistoryId: "history-100",
-            initialPageToken: "stale-token",
-            isProcessingTask: false,
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertTrue(success)
-        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stale-token", nil])
-        XCTAssertNil(stateManager.getContinuationState())
-        let storedHistoryId = await stateManager.getStoredHistoryId()
-        XCTAssertEqual(storedHistoryId, "history-200")
-    }
-
-    // Revert-check: fails if the replay stops passing `initialPageToken: nil` into
-    // `performHistorySync` — the guard could then fire again for the same run and issue
-    // more than the two pinned `listHistory` calls instead of scheduling a retry.
-    func testLegacyHistorySync_repeatedInvalidPageTokenStopsAfterSingleReplay() async throws {
-        let stateManager = makeStateManager()
-        let continuation = BackgroundSyncContinuationState.history(
-            startHistoryId: "history-100",
-            pageToken: "stale-token",
-            accountEmail: "user@example.com"
-        )
-        try stateManager.storeContinuationState(continuation)
-        apiClient.listHistoryErrorsByPageToken["stale-token"] = APIError.invalidHistoryPageToken
-        apiClient.listHistoryError = APIError.invalidHistoryPageToken
-
-        let success = await makeManager().performHistorySync(
-            startHistoryId: "history-100",
-            initialPageToken: "stale-token",
-            isProcessingTask: false,
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertFalse(success)
-        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stale-token", nil])
-        XCTAssertNil(stateManager.getContinuationState())
-        XCTAssertEqual(taskScheduler.retryBackoffs, [60])
-    }
-
-    // HONEST SCOPE: this test survives a full revert of the recovery branch — it pins the
-    // guard's *scope*, failing only if the `invalidHistoryPageToken` match broadens so an
-    // unrelated abort also discards the persisted continuation token.
-    func testLegacyHistorySync_unrelatedAbortDoesNotDiscardPersistedPageToken() async throws {
-        let stateManager = makeStateManager()
-        let continuation = BackgroundSyncContinuationState.history(
-            startHistoryId: "history-100",
-            pageToken: "stale-token",
-            accountEmail: "user@example.com"
-        )
-        try stateManager.storeContinuationState(continuation)
-        apiClient.listHistoryErrorsByPageToken["stale-token"] = APIError.invalidData("bad response")
-
-        let success = await makeManager().performHistorySync(
-            startHistoryId: "history-100",
-            initialPageToken: "stale-token",
-            isProcessingTask: false,
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertFalse(success)
-        XCTAssertEqual(apiClient.listHistoryCalls.map(\.pageToken), ["stale-token"])
-        XCTAssertEqual(stateManager.getContinuationState(), continuation)
-        XCTAssertEqual(taskScheduler.retryBackoffs, [60])
-    }
-
-    func testHistoryContinuationCompatibility_requiresMatchingAccountAndCursor() {
-        let continuationState = BackgroundSyncContinuationState.history(
-            startHistoryId: "history-100",
-            pageToken: "page-2",
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertTrue(
-            continuationState.isCompatible(
-                storedHistoryId: "history-100",
-                currentAccountEmail: "user@example.com"
-            )
-        )
-        XCTAssertFalse(
-            continuationState.isCompatible(
-                storedHistoryId: "history-101",
-                currentAccountEmail: "user@example.com"
-            )
-        )
-        XCTAssertFalse(
-            continuationState.isCompatible(
-                storedHistoryId: "history-100",
-                currentAccountEmail: "other@example.com"
-            )
-        )
-    }
-
-    func testPartialContinuationCompatibility_requiresSameAccountAndSourceCursor() {
-        let continuationState = BackgroundSyncContinuationState.partial(
-            query: "after:123 -label:spam",
-            pageToken: "page-2",
-            maxResults: 50,
-            startHistoryId: "history-expired",
-            watermarkHistoryId: "history-watermark",
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertTrue(
-            continuationState.isCompatible(
-                storedHistoryId: "history-expired",
-                currentAccountEmail: "user@example.com"
-            )
-        )
-        XCTAssertFalse(
-            continuationState.isCompatible(
-                storedHistoryId: "history-advanced",
-                currentAccountEmail: "user@example.com"
-            )
-        )
-        XCTAssertFalse(
-            continuationState.isCompatible(
-                storedHistoryId: "history-expired",
-                currentAccountEmail: "other@example.com"
-            )
-        )
-
-        let initialSyncContinuation = BackgroundSyncContinuationState.partial(
-            query: "after:123 -label:spam",
-            pageToken: nil,
-            maxResults: 50,
-            startHistoryId: nil,
-            watermarkHistoryId: "history-watermark",
-            accountEmail: "user@example.com"
-        )
-        XCTAssertTrue(
-            initialSyncContinuation.isCompatible(
-                storedHistoryId: nil,
-                currentAccountEmail: "user@example.com"
-            )
-        )
-    }
-
-    func testContinuationCompatibility_rejectsUnscopedState() {
-        let continuationState = BackgroundSyncContinuationState.partial(
-            query: "after:123 -label:spam",
-            pageToken: "page-2",
-            maxResults: 50,
-            startHistoryId: nil,
-            watermarkHistoryId: "history-watermark"
-        )
-
-        XCTAssertFalse(
-            continuationState.isCompatible(
-                storedHistoryId: nil,
-                currentAccountEmail: "user@example.com"
-            )
-        )
-    }
-
-    // MARK: - Partial-sync watermark integration
-
-    func testPartialSync_capturesWatermarkBeforeListingAndStoresCanonicalProfileEmail() async throws {
-        apiClient.profileResponse = makeProfile(
-            email: "Canonical.User@example.com",
-            historyId: "history-watermark"
-        )
-        apiClient.listMessagesResponse = emptyMessagePage(nextPageToken: nil)
-
-        let success = await makeManager().performPartialSync(
-            query: Self.partialQuery,
-            startHistoryId: nil,
-            isProcessingTask: false,
-            accountEmail: "canonical.user@EXAMPLE.COM"
-        )
-
-        XCTAssertTrue(success)
-        XCTAssertEqual(apiClient.endpointCallOrder, ["getProfile", "listMessages"])
-        XCTAssertEqual(apiClient.getProfileCallCount, 1)
-        XCTAssertEqual(apiClient.listMessagesCallCount, 1)
-        XCTAssertNil(makeStateManager().getContinuationState())
-
-        let accounts = try await fetchAccountSnapshots()
-        XCTAssertEqual(accounts.count, 1)
-        XCTAssertEqual(accounts.first?.email, "Canonical.User@example.com")
-        XCTAssertEqual(accounts.first?.historyId, "history-watermark")
-    }
-
-    func testPartialSync_rejectsMismatchedProfileAccountBeforeListingOrCheckpointing() async throws {
-        apiClient.profileResponse = makeProfile(
-            email: "canonical@example.com",
-            historyId: "history-watermark"
-        )
-        apiClient.listMessagesResponse = emptyMessagePage(nextPageToken: nil)
-
-        let success = await makeManager().performPartialSync(
-            query: Self.partialQuery,
-            startHistoryId: nil,
-            isProcessingTask: false,
-            accountEmail: "different@example.com"
-        )
-
-        XCTAssertFalse(success)
-        XCTAssertEqual(apiClient.endpointCallOrder, ["getProfile"])
-        XCTAssertEqual(apiClient.listMessagesCallCount, 0)
-        XCTAssertNil(makeStateManager().getContinuationState())
-        let accounts = try await fetchAccountSnapshots()
-        XCTAssertTrue(accounts.isEmpty)
-    }
-
-    func testPartialSync_listFailureRetainsInitialCheckpointCapturedBeforeEnumeration() async throws {
-        try await makeStateManager().storeHistoryId(
-            "history-expired",
-            accountEmail: "user@example.com"
-        )
-        apiClient.profileResponse = makeProfile(
-            email: "user@example.com",
-            historyId: "history-watermark"
-        )
-        apiClient.listMessagesError = APIError.timeout
-
-        let manager = makeManager()
-        let success = await manager.performPartialSync(
-            query: Self.partialQuery,
-            startHistoryId: "history-expired",
-            isProcessingTask: false,
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertFalse(success)
-        XCTAssertEqual(apiClient.endpointCallOrder, ["getProfile", "listMessages"])
-        XCTAssertEqual(
-            makeStateManager().getContinuationState(),
-            BackgroundSyncContinuationState.partial(
-                query: Self.partialQuery,
-                pageToken: nil,
-                maxResults: 50,
-                startHistoryId: "history-expired",
-                watermarkHistoryId: "history-watermark",
-                accountEmail: "user@example.com"
-            )
-        )
-        let storedHistoryId = await makeStateManager().getStoredHistoryId()
-        XCTAssertEqual(storedHistoryId, "history-expired")
-
-        let checkpoint = try XCTUnwrap(makeStateManager().getContinuationState())
-        let checkpointQuery = try XCTUnwrap(checkpoint.query)
-        let checkpointMaxResults = try XCTUnwrap(checkpoint.maxResults)
-        let checkpointWatermark = try XCTUnwrap(checkpoint.watermarkHistoryId)
-        apiClient.profileResponse = makeProfile(
-            email: "user@example.com",
-            historyId: "history-must-not-be-used"
-        )
-        apiClient.listMessagesResponse = emptyMessagePage(nextPageToken: nil)
-
-        let retrySucceeded = await manager.performPartialSync(
-            query: checkpointQuery,
-            initialPageToken: checkpoint.pageToken,
-            maxResults: checkpointMaxResults,
-            startHistoryId: checkpoint.startHistoryId,
-            watermarkHistoryId: checkpointWatermark,
-            isProcessingTask: false,
-            accountEmail: checkpoint.accountEmail
-        )
-
-        XCTAssertTrue(retrySucceeded)
-        XCTAssertEqual(apiClient.getProfileCallCount, 1)
-        XCTAssertEqual(apiClient.endpointCallOrder, ["getProfile", "listMessages", "listMessages"])
-        let retriedHistoryId = await makeStateManager().getStoredHistoryId()
-        XCTAssertEqual(retriedHistoryId, "history-watermark")
-        XCTAssertNil(makeStateManager().getContinuationState())
-    }
-
-    func testPartialSync_messageFetchFailureRetainsOriginalCheckpointAndWatermark() async throws {
-        try await makeStateManager().storeHistoryId(
-            "history-expired",
-            accountEmail: "user@example.com"
-        )
-        apiClient.profileResponse = makeProfile(
-            email: "user@example.com",
-            historyId: "history-watermark"
-        )
-        apiClient.listMessagesResponse = MessagesListResponse(
-            messages: [MessageListItem(id: "message-1", threadId: "thread-1")],
-            nextPageToken: nil,
-            resultSizeEstimate: 1
-        )
-        apiClient.getMessageError = APIError.timeout
-
-        let success = await makeManager().performPartialSync(
-            query: Self.partialQuery,
-            startHistoryId: "history-expired",
-            isProcessingTask: false,
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertFalse(success)
-        XCTAssertEqual(apiClient.getProfileCallCount, 1)
-        XCTAssertEqual(apiClient.getMessageCallCount, 1)
-        XCTAssertEqual(
-            makeStateManager().getContinuationState(),
-            BackgroundSyncContinuationState.partial(
-                query: Self.partialQuery,
-                pageToken: nil,
-                maxResults: 50,
-                startHistoryId: "history-expired",
-                watermarkHistoryId: "history-watermark",
-                accountEmail: "user@example.com"
-            )
-        )
-        let storedHistoryId = await makeStateManager().getStoredHistoryId()
-        XCTAssertEqual(storedHistoryId, "history-expired")
-    }
-
-    func testPartialSync_resumesTruncatedCheckpointWithoutRecapturingWatermark() async throws {
-        try await makeStateManager().storeHistoryId(
-            "history-expired",
-            accountEmail: "user@example.com"
-        )
-        apiClient.profileResponse = makeProfile(
-            email: "user@example.com",
-            historyId: "history-watermark"
-        )
-        apiClient.listMessagesResponse = emptyMessagePage(nextPageToken: "page-2")
-        apiClient.paginatedListMessagesResponses = [
-            "page-2": emptyMessagePage(nextPageToken: "page-3"),
-            "page-3": emptyMessagePage(nextPageToken: "page-4"),
-            "page-4": emptyMessagePage(nextPageToken: nil)
-        ]
-
-        let manager = makeManager()
-        let firstRunSucceeded = await manager.performPartialSync(
-            query: Self.partialQuery,
-            startHistoryId: "history-expired",
-            isProcessingTask: false,
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertFalse(firstRunSucceeded)
-        XCTAssertEqual(apiClient.getProfileCallCount, 1)
-        XCTAssertEqual(apiClient.listMessagesCallCount, 3)
-        XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
-
-        guard let checkpoint = makeStateManager().getContinuationState(),
-              let checkpointQuery = checkpoint.query,
-              let checkpointMaxResults = checkpoint.maxResults,
-              let checkpointWatermark = checkpoint.watermarkHistoryId else {
-            XCTFail("Expected a complete partial-sync checkpoint")
-            return
-        }
-        XCTAssertEqual(checkpoint.pageToken, "page-4")
-        XCTAssertEqual(checkpoint.startHistoryId, "history-expired")
-        XCTAssertEqual(checkpointWatermark, "history-watermark")
-
-        apiClient.profileResponse = makeProfile(
-            email: "user@example.com",
-            historyId: "history-must-not-be-used"
-        )
-        let resumedRunSucceeded = await manager.performPartialSync(
-            query: checkpointQuery,
-            initialPageToken: checkpoint.pageToken,
-            maxResults: checkpointMaxResults,
-            startHistoryId: checkpoint.startHistoryId,
-            watermarkHistoryId: checkpointWatermark,
-            isProcessingTask: false,
-            accountEmail: checkpoint.accountEmail
-        )
-
-        XCTAssertTrue(resumedRunSucceeded)
-        XCTAssertEqual(apiClient.getProfileCallCount, 1)
-        XCTAssertEqual(apiClient.listMessagesCallCount, 4)
-        XCTAssertEqual(apiClient.listMessagesLastPageToken, "page-4")
-        XCTAssertEqual(
-            apiClient.endpointCallOrder,
-            ["getProfile", "listMessages", "listMessages", "listMessages", "listMessages"]
-        )
-        let storedHistoryId = await makeStateManager().getStoredHistoryId()
-        XCTAssertEqual(storedHistoryId, "history-watermark")
-        XCTAssertNil(makeStateManager().getContinuationState())
-    }
-
-    func testPartialSync_profileFailureAbortsBeforeListingOrCheckpointing() async throws {
-        apiClient.getProfileError = APIError.timeout
-        apiClient.listMessagesResponse = emptyMessagePage(nextPageToken: nil)
-
-        let success = await makeManager().performPartialSync(
-            query: Self.partialQuery,
-            startHistoryId: nil,
-            isProcessingTask: false,
-            accountEmail: "user@example.com"
-        )
-
-        XCTAssertFalse(success)
-        XCTAssertEqual(apiClient.endpointCallOrder, ["getProfile"])
-        XCTAssertEqual(apiClient.listMessagesCallCount, 0)
-        XCTAssertNil(makeStateManager().getContinuationState())
-        let accounts = try await fetchAccountSnapshots()
-        XCTAssertTrue(accounts.isEmpty)
-    }
-
     private func makeManager(
         taskSchedulerOverride: (any BackgroundTaskScheduling)? = nil,
-        legacyDeltaSyncEnabled: Bool = true,
         authoritativeSyncExecutor: (any BackgroundMailboxSyncExecuting)? = nil,
         authoritativeSyncReadiness: @escaping @Sendable () async -> Bool = { true },
         authoritativeSyncIsAuthenticated: @escaping @MainActor @Sendable () -> Bool = { true },
         authoritativeSyncIsDurablySignedOut: @escaping @MainActor @Sendable () -> Bool = { false }
     ) -> BackgroundSyncManager {
-        let apiClient = apiClient!
-        let syncCoordinator = BackgroundSyncNoopCoordinator()
         let executor = authoritativeSyncExecutor
         let assertions = sceneAssertions!
         return BackgroundSyncManager(
             taskScheduler: taskSchedulerOverride ?? taskScheduler,
-            coreDataStack: coreDataStack,
             defaults: defaults,
-            syncRunCoordinator: SyncRunCoordinator(),
-            legacyDeltaSyncEnabled: legacyDeltaSyncEnabled,
-            apiClientProvider: { apiClient },
             authoritativeSyncExecutorProvider: {
                 executor ?? SyncEngine.shared
             },
             authoritativeSyncReadiness: authoritativeSyncReadiness,
             authoritativeSyncIsAuthenticated: authoritativeSyncIsAuthenticated,
             authoritativeSyncIsDurablySignedOut: authoritativeSyncIsDurablySignedOut,
-            syncCoordinatorProvider: { syncCoordinator },
             beginSceneBackgroundAssertion: { onExpiration in
                 assertions.begin(onExpiration: onExpiration)
                 return { assertions.end() }
@@ -2086,13 +1563,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
-    private func makeStateManager() -> BackgroundSyncStateManager {
-        BackgroundSyncStateManager(
-            coreDataStack: coreDataStack,
-            defaults: defaults
-        )
-    }
-
     /// A fully isolated `AuthSession` for probing `isDurablySignedOut()`:
     /// every singleton-typed collaborator is a fresh instance, so the verdict
     /// comes only from the injected keychain and SDK-session signal.
@@ -2112,33 +1582,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
             )!,
             syncRunCoordinator: SyncRunCoordinator(),
             outboundTaskRegistry: OutboundTaskRegistry()
-        )
-    }
-
-    private func fetchAccountSnapshots() async throws -> [BackgroundAccountSnapshot] {
-        let context = testStack.newBackgroundContext()
-        return try await context.perform {
-            let request: NSFetchRequest<Account> = Account.fetchRequest()
-            return try context.fetch(request).map {
-                BackgroundAccountSnapshot(email: $0.email, historyId: $0.historyId)
-            }
-        }
-    }
-
-    private func makeProfile(email: String, historyId: String) -> GmailProfile {
-        GmailProfile(
-            emailAddress: email,
-            messagesTotal: 0,
-            threadsTotal: 0,
-            historyId: historyId
-        )
-    }
-
-    private func emptyMessagePage(nextPageToken: String?) -> MessagesListResponse {
-        MessagesListResponse(
-            messages: [],
-            nextPageToken: nextPageToken,
-            resultSizeEstimate: 0
         )
     }
 }
@@ -2307,11 +1750,6 @@ private actor BackgroundPersistencePreparationScript {
     func invocationCount() -> Int {
         calls
     }
-}
-
-private struct BackgroundAccountSnapshot {
-    let email: String
-    let historyId: String?
 }
 
 private final class BackgroundTaskSchedulerSpy: BackgroundTaskScheduling {
@@ -2519,29 +1957,4 @@ private final class BackgroundPendingCheckCounter: @unchecked Sendable {
         count += 1
         lock.unlock()
     }
-}
-
-private final class BackgroundSyncNoopCoordinator: @unchecked Sendable, BackgroundSyncMessageCoordinating {
-    func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String> {
-        []
-    }
-
-    func saveMessage(
-        _ gmailMessage: GmailMessage,
-        labelIds: Set<String>?,
-        modificationTransaction: ModificationTracker.Transaction,
-        in context: NSManagedObjectContext
-    ) async throws -> MessagePersistDisposition {
-        .persisted
-    }
-
-    func updateConversationRollups(
-        conversationIDs: Set<NSManagedObjectID>,
-        in context: NSManagedObjectContext
-    ) async {}
-
-    func updateConversationDisplayNames(
-        conversationIDs: Set<NSManagedObjectID>,
-        in context: NSManagedObjectContext
-    ) async {}
 }
