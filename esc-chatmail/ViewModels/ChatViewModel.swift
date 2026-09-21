@@ -10,7 +10,15 @@ import Combine
 @MainActor
 final class ChatComposerState: ObservableObject {
     @Published var replyText: String
-    @Published var replyingTo: Message?
+    @Published var replyingTo: Message? {
+        didSet {
+            if let replyingTo {
+                replyAnchor = replyingTo
+            }
+        }
+    }
+    // Dismissing the quote changes presentation, not the draft's destination.
+    private(set) var replyAnchor: Message?
     @Published var attachments: [Attachment]
     @Published private(set) var isSending = false
     private var discardsAttachmentsWhenSendFinishes = false
@@ -22,7 +30,13 @@ final class ChatComposerState: ObservableObject {
     ) {
         self.replyText = replyText
         self.replyingTo = replyingTo
+        self.replyAnchor = replyingTo
         self.attachments = attachments
+    }
+
+    func replaceReplyTarget(_ message: Message?) {
+        replyAnchor = message
+        replyingTo = message
     }
 
     var hasDraftContent: Bool {
@@ -310,7 +324,7 @@ final class ChatViewModel: ObservableObject {
     func initializeReplyingTo(lastMessage: Message?) {
         guard !composerState.isSending,
               !composerState.hasDraftContent,
-              replyingTo == nil,
+              composerState.replyAnchor == nil,
               let lastMessage,
               isValidReplyTarget(lastMessage) else { return }
         replyingTo = lastMessage
@@ -338,7 +352,7 @@ final class ChatViewModel: ObservableObject {
               manuallySelectedReplyTargetID != currentReplyingTo.objectID else { return }
 
         guard isValidReplyTarget(currentReplyingTo) else {
-            replyingTo = lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil }
+            composerState.replaceReplyTarget(lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil })
             return
         }
 
@@ -435,8 +449,9 @@ final class ChatViewModel: ObservableObject {
                     .init(
                         context: outboundReplyContextBuilder.build(
                             conversationObjectID: conversation.objectID,
-                            replyingToMessageObjectID: replyingTo?.objectID,
-                            optimisticConversation: replyOptimisticConversation
+                            replyingToMessageObjectID: composerState.replyAnchor?.objectID,
+                            optimisticConversation: replyOptimisticConversation,
+                            includesQuotedMessage: replyingTo != nil
                         ),
                         body: trimmedReplyText,
                         attachments: attachmentContexts
