@@ -782,6 +782,100 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         XCTAssertEqual(durableState.1, [pendingEmptyID])
     }
 
+    func testSavedDraftProtectsEmptyConversationDuringBatchCleanup() async throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let sqliteCoreDataStack = CoreDataStack(persistentContainerForTesting: sqliteStack.persistentContainer)
+        let fixtureContext = sqliteStack.viewContext
+        let conversation = ConversationBuilder().visible().build(in: fixtureContext)
+        let conversationID = conversation.id
+        let disposable = ConversationBuilder().visible().build(in: fixtureContext)
+        let disposableID = disposable.id
+        let draft = ChatReplyDraft(context: fixtureContext)
+        draft.conversationId = conversationID
+        draft.data = Data("saved reply".utf8)
+        try sqliteStack.saveViewContext()
+        let service = DataCleanupService(
+            coreDataStack: sqliteCoreDataStack,
+            conversationManager: ConversationManager(currentUserEmail: { Self.me }),
+            migrationFlags: InMemoryMigrationFlagStore(),
+            identityAliasProvider: { _ in [Self.me] }
+        )
+
+        await service.removeEmptyConversations(in: sqliteCoreDataStack.newBackgroundContext())
+
+        let assertionContext = sqliteStack.newBackgroundContext()
+        let state = try await assertionContext.perform {
+            let conversations = try assertionContext.fetch(Conversation.fetchRequest())
+            let drafts = try assertionContext.fetch(NSFetchRequest<ChatReplyDraft>(entityName: "ChatReplyDraft"))
+            return (
+                protected: conversations.contains { $0.id == conversationID && !$0.hidden },
+                disposable: conversations.contains { $0.id == disposableID },
+                data: drafts.first { $0.conversationId == conversationID }?.data
+            )
+        }
+        XCTAssertTrue(state.protected)
+        XCTAssertFalse(state.disposable)
+        XCTAssertEqual(state.data, Data("saved reply".utf8))
+    }
+
+    func testSavedDraftProtectsConversationFromDuplicateMerges() async throws {
+        let protected = ConversationBuilder().withKeyHash("draft-duplicate-key")
+            .withParticipantHash(Self.hashAlice).visible().build(in: context)
+        let protectedID = protected.id
+        let ordinary = ConversationBuilder().withKeyHash("draft-duplicate-key")
+            .withParticipantHash(Self.hashAlice).visible().build(in: context)
+        let ordinaryID = ordinary.id
+        try addMessage(id: "draft-protected-target", date: Date(timeIntervalSince1970: 100),
+                       from: Self.alice, to: [Self.me], in: protected)
+        try addMessage(id: "ordinary-duplicate", date: Date(timeIntervalSince1970: 200),
+                       from: Self.alice, to: [Self.me], in: ordinary)
+        let draft = ChatReplyDraft(context: context)
+        draft.conversationId = protectedID
+        draft.data = Data("saved reply".utf8)
+        try context.save()
+        let merger = ConversationMerger(coreDataStack: coreDataStack)
+
+        await merger.removeDuplicateConversations(in: coreDataStack.newBackgroundContext())
+        _ = await merger.mergeActiveConversationDuplicates(in: coreDataStack.newBackgroundContext())
+
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 2)
+        XCTAssertEqual(states.first { $0.id == protectedID }?.messageIDs, ["draft-protected-target"])
+        XCTAssertEqual(states.first { $0.id == ordinaryID }?.messageIDs, ["ordinary-duplicate"])
+    }
+
+    func testSavedDraftKeepsTargetInItsConversationUntilDraftIsRemoved() async throws {
+        let conversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [Self.alice, Self.me]))
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible().build(in: context)
+        let conversationID = conversation.id
+        addConversationParticipant(email: Self.alice, to: conversation)
+        addConversationParticipant(email: Self.me, to: conversation)
+        try addMessage(
+            id: "draft-target", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me], in: conversation
+        )
+        let draft = ChatReplyDraft(context: context)
+        draft.conversationId = conversationID
+        draft.data = Data("saved reply".utf8)
+        try context.save()
+
+        await runMigration()
+
+        let state = try XCTUnwrap(fetchConversationStates().first { $0.id == conversationID })
+        XCTAssertEqual(state.messageIDs, ["draft-target"])
+        XCTAssertFalse(migrationFlags.bool(forKey: DataCleanupService.participantSetSplitMigrationKey))
+
+        context.delete(draft)
+        try context.save()
+        await runMigration()
+
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.participantSetSplitMigrationKey))
+        let migrated = try XCTUnwrap(fetchConversationStates().first { $0.participantHash == Self.hashAlice })
+        XCTAssertEqual(migrated.messageIDs, ["draft-target"])
+    }
+
     func testEmptyAliasProviderDoesNotBurnFlag() async throws {
         let inbox = LabelBuilder().inbox().build(in: context)
         let source = ConversationBuilder()

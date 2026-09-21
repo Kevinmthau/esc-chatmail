@@ -34,6 +34,7 @@ protocol ComposeSendServicing: AnyObject {
         messageId: String?,
         beforeTransmission: @Sendable () async throws -> Void
     ) async throws -> GmailSendService.SendResult
+    @MainActor func recordSendFailureReason(optimisticMessageID: String, reason: String)
     @MainActor func remoteCommittedSendResult(optimisticMessageID: String) -> GmailSendService.SendResult?
     @MainActor func persistOptimisticMessageBeforeTransmission(optimisticMessageID: String) throws
     @MainActor func recordRemoteSendAdmission(optimisticMessageID: String) throws
@@ -54,6 +55,10 @@ protocol ComposeSendServicing: AnyObject {
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
     )
+}
+
+extension ComposeSendServicing {
+    @MainActor func recordSendFailureReason(optimisticMessageID: String, reason: String) {}
 }
 
 extension GmailSendService: ComposeSendServicing {}
@@ -485,6 +490,7 @@ struct ComposeSendOrchestrator {
                 byID: optimisticMessageID,
                 fallbackAttachmentReferences: attachmentReferences
             )
+            sendService.recordSendFailureReason(optimisticMessageID: optimisticMessageID, reason: error.localizedDescription)
             reconciliationHooks.onFailure?(
                 .init(
                     optimisticMessageID: optimisticMessageID,

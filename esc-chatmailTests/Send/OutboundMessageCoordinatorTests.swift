@@ -38,6 +38,25 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         super.tearDown()
     }
 
+    private func chatDependencies(_ dependencies: Dependencies, context: NSManagedObjectContext) -> ChatDependencies {
+        let base = dependencies.makeChatDependencies()
+        // Draft relationships, conversation fixtures, and imports must share
+        // one context, just as they do in the production chat screen.
+        return ChatDependencies(
+            session: base.session, content: base.content,
+            messaging: ChatMessagingDependencies(
+                messageActions: base.messaging.messageActions,
+                outboundMessageCoordinator: base.messaging.outboundMessageCoordinator,
+                outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder(viewContext: context),
+                outboundReplyContextBuilder: base.messaging.outboundReplyContextBuilder,
+                composeForwardModeContextBuilder: base.messaging.composeForwardModeContextBuilder
+            ),
+            contacts: base.contacts,
+            storage: ChatStorageDependencies(viewContext: context, makeBackgroundContext: base.storage.makeBackgroundContext),
+            fullEmailOpener: base.fullEmailOpener
+        )
+    }
+
     func testSend_composeNormalizesInputAndRunsSendNew() async throws {
         let sendService = MockOutboundMessageSendService(context: viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
@@ -209,7 +228,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         try context.obtainPermanentIDs(for: [conversation, target])
         let viewModel = ChatViewModel(
             conversation: conversation,
-            chatDependencies: dependencies.makeChatDependencies()
+            chatDependencies: chatDependencies(dependencies, context: context)
         )
         viewModel.initializeReplyingTo(lastMessage: target)
 
@@ -285,7 +304,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         try context.save()
         let viewModel = ChatViewModel(
             conversation: conversation,
-            chatDependencies: dependencies.makeChatDependencies()
+            chatDependencies: chatDependencies(dependencies, context: context)
         )
         viewModel.replyText = "Follow-up to the new topic"
 
@@ -1403,7 +1422,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         try context.obtainPermanentIDs(for: [conversation])
         let viewModel = ChatViewModel(
             conversation: conversation,
-            chatDependencies: dependencies.makeChatDependencies()
+            chatDependencies: chatDependencies(dependencies, context: context)
         )
         AttachmentPaths.setupDirectories()
         let attachmentID = "local_\(UUID().uuidString)"
@@ -1624,7 +1643,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(target.participants?.count ?? 0, 0)
         let viewModel = ChatViewModel(
             conversation: conversation,
-            chatDependencies: dependencies.makeChatDependencies()
+            chatDependencies: chatDependencies(dependencies, context: context)
         )
         viewModel.initializeReplyingTo(lastMessage: target)
         XCTAssertEqual(viewModel.replyingTo?.objectID, target.objectID)
@@ -1853,7 +1872,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         chatPreviewText: String?,
         senderEmail: String?,
         senderName: String?,
-        optimisticConversation: OptimisticConversationReference?
+        optimisticConversation: OptimisticConversationReference?,
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?
     ) async throws -> OptimisticSendHandle {
         if let optimisticCreationGate {
             await optimisticCreationGate.waitUntilReleased()

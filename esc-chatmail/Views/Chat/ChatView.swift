@@ -63,7 +63,7 @@ struct ChatView: View {
         )
         .navigationTitle(navigationDisplayName)
         .navigationBarTitleDisplayMode(.inline)
-        // This screen owns the only draft copy until transmission admission.
+        // Keep the composer on screen while its draft is handed off to the send.
         .navigationBarBackButtonHidden(!allowsConversationExit)
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -84,6 +84,9 @@ struct ChatView: View {
 
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Menu {
+                    if composerHasDraft || viewModel.draftRestoreFailed {
+                        Button("Discard draft", role: .destructive) { viewModel.discardReplyDraft() }
+                    }
                     Button(action: archiveConversationAndDismiss) {
                         SwiftUI.Label("Archive", systemImage: "archivebox")
                     }
@@ -165,7 +168,10 @@ struct ChatView: View {
             dismiss()
         }
         .onDisappear {
-            viewModel.discardUnsentReplyAttachments()
+            viewModel.saveReplyDraft()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { viewModel.saveReplyDraft() }
         }
     }
 

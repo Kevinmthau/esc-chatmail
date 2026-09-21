@@ -166,7 +166,7 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         withExtendedLifetime(coordinator) {}
     }
 
-    func testRepairMissingConversationPreviews_preservesPendingSendShell() async throws {
+    func testRepairMissingConversationPreviews_preservesPendingSendAndSavedDraftShells() async throws {
         let oldDate = Date(timeIntervalSinceNow: -7_200)
         let pendingShell = ConversationBuilder()
             .withCreatedAt(oldDate)
@@ -178,6 +178,11 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         pendingRecord.id = "launch-repair-pending-send"
         pendingRecord.createdAt = Date()
         pendingRecord.conversationId = pendingShellID
+        let draftShell = ConversationBuilder().withCreatedAt(oldDate).withLastMessageDate(oldDate)
+            .visible().build(in: viewContext)
+        let draft = ChatReplyDraft(context: viewContext)
+        draft.conversationId = draftShell.id
+        draft.data = Data("saved reply".utf8)
         try viewContext.save()
 
         let coordinator = makeCoordinator()
@@ -192,6 +197,9 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         let preserved = try fetchConversation(pendingShell.objectID)
         XCTAssertNil(preserved.archivedAt)
         XCTAssertFalse(preserved.hidden)
+        let preservedDraftShell = try fetchConversation(draftShell.objectID)
+        XCTAssertNil(preservedDraftShell.archivedAt)
+        XCTAssertFalse(preservedDraftShell.hidden)
         XCTAssertEqual(
             try viewContext.fetch(OutboundSendMutationRecord.fetchRequest())
                 .compactMap(\.conversationId),

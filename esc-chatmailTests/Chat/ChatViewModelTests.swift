@@ -1306,6 +1306,94 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNotNil(viewModel.sendErrorAlert)
     }
 
+    func testReplyDraftReopensWithItsTextAndSelectedTarget() throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let target = MessageBuilder().withId(UUID().uuidString).inConversation(conversation).build(in: context)
+        let first = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        first.replyText = "Saved reply"
+        first.replyingTo = target
+        first.saveReplyDraft()
+        let reopened = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        XCTAssertEqual(reopened.replyText, "Saved reply")
+        XCTAssertEqual(reopened.replyingTo?.objectID, target.objectID)
+        reopened.discardReplyDraft()
+    }
+
+    func testRestoredMissingTargetBlocksSendInsteadOfChangingThreads() throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let target = MessageBuilder().withId(UUID().uuidString).inConversation(conversation).build(in: context)
+        let first = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        first.replyText = "Draft for deleted message"
+        first.replyingTo = target
+        first.saveReplyDraft()
+        let targetURI = target.objectID.uriRepresentation()
+        context.delete(target)
+        try context.save()
+        let reopened = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        XCTAssertEqual(reopened.composerState.unavailableReplyTargetURI, targetURI)
+        XCTAssertNil(reopened.replyingTo)
+        reopened.saveReplyDraft()
+        let stored = try ChatReplyDraftStore(context: context).load(conversationID: conversation.id)
+        XCTAssertEqual(stored?.0.targetURI, targetURI)
+        reopened.discardReplyDraft()
+    }
+
+    func testUnreadableDraftCannotBeOverwrittenByAutosaveOrSend() async throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let record = ChatReplyDraft(context: context)
+        record.conversationId = conversation.id
+        record.data = Data("unreadable draft".utf8)
+        try context.save()
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        XCTAssertTrue(viewModel.draftRestoreFailed)
+        viewModel.replyText = "New text"
+        viewModel.saveReplyDraft()
+        XCTAssertEqual(record.data, Data("unreadable draft".utf8))
+        let result = await viewModel.sendReply()
+        XCTAssertNil(result)
+        XCTAssertEqual(record.data, Data("unreadable draft".utf8))
+        viewModel.discardReplyDraft()
+        XCTAssertNil(try ChatReplyDraftStore(context: context).fetch(conversationID: conversation.id))
+    }
+
+    func testReplyDraftExcludesUnfinishedImportsAndPreservesFinalizedAttachments() throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let unfinished = AttachmentBuilder().withId("local_\(UUID().uuidString)")
+            .withFilename("still-importing.pdf").build(in: context)
+        let emptyPath = AttachmentBuilder().withId("local_\(UUID().uuidString)")
+            .withFilename("empty-path.pdf").withLocalURL("  ").build(in: context)
+        let finalized = AttachmentBuilder().withId("local_\(UUID().uuidString)")
+            .withFilename("ready.pdf").withLocalURL("Attachments/\(UUID().uuidString).pdf")
+            .build(in: context)
+        let first = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        first.replyText = "Keep this text while the import finishes"
+        first.composerState.attachments = [unfinished, emptyPath, finalized]
+        first.composerState.isProcessingAttachments = true
+
+        first.saveReplyDraft()
+
+        XCTAssertNil(unfinished.replyDraft, "The importer must retain ownership of its placeholder")
+        XCTAssertNil(emptyPath.replyDraft)
+        XCTAssertNotNil(finalized.replyDraft)
+        XCTAssertEqual(first.composerState.attachments.count, 3, "Saving must not cancel active imports")
+        let reopened = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        XCTAssertEqual(reopened.replyText, "Keep this text while the import finishes")
+        XCTAssertEqual(reopened.composerState.attachments.map(\.objectID), [finalized.objectID])
+
+        unfinished.localURL = "Attachments/\(UUID().uuidString).pdf"
+        first.saveReplyDraft()
+        let saved = try XCTUnwrap(ChatReplyDraftStore(context: context).load(conversationID: conversation.id))
+        XCTAssertEqual(Set(saved.1.map(\.objectID)), Set([unfinished.objectID, finalized.objectID]))
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         pollIntervalNanoseconds: UInt64 = 20_000_000,

@@ -151,6 +151,7 @@ private enum ProductionLocalMailboxStoreInspector {
     /// intentional account-boundary decision.
     private static let accountScopedEntityNames = [
         "Attachment",
+        "ChatReplyDraft",
         "Conversation",
         "ConversationParticipant",
         "Label",

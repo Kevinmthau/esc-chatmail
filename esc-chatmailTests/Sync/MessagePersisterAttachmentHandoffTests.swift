@@ -35,6 +35,53 @@ final class MessagePersisterAttachmentHandoffTests: XCTestCase {
         super.tearDown()
     }
 
+    func testConsumingSupersededSendPreservesSavedDraftConversationAndAttachments() throws {
+        let context = testStack.makeMainQueueViewContext()
+        for newlyInserted in [true, false] {
+            let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+            let conversationID = conversation.id
+            let message = MessageBuilder()
+                .withId("superseded-\(newlyInserted)")
+                .inConversation(conversation)
+                .build(in: context)
+            let attachment = AttachmentBuilder().withId("draft-\(newlyInserted)").build(in: context)
+            let store = ChatReplyDraftStore(context: context)
+            try store.save(
+                StoredChatReplyDraft(text: "Next reply", targetURI: nil, recoveredEnvelope: nil),
+                attachments: [attachment],
+                conversationID: conversationID
+            )
+            let resolution = MessagePersister.RemoteCommittedSendMutationResolution(
+                recordObjectIDs: [],
+                supersededOptimisticMessages: [
+                    message.objectID: MessagePersister.SupersededOptimisticMessage(
+                        optimisticMessageID: message.id,
+                        newlyInsertedConversation: newlyInserted
+                    )
+                ],
+                anchoredListConversationObjectID: nil,
+                anchoredListId: nil,
+                shouldConsumeAfterPersistence: true
+            )
+
+            persister.consumeRemoteCommittedSendMutation(resolution, in: context)
+            try context.save()
+            context.reset()
+
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", conversationID as CVarArg)
+            let savedConversation = try XCTUnwrap(context.fetch(request).first)
+            XCTAssertTrue(savedConversation.messages?.isEmpty ?? true)
+            XCTAssertFalse(savedConversation.hidden)
+            XCTAssertNil(savedConversation.archivedAt)
+            XCTAssertNotNil(savedConversation.lastMessageDate)
+            let (draft, attachments) = try XCTUnwrap(store.load(conversationID: conversationID))
+            XCTAssertEqual(draft.text, "Next reply")
+            XCTAssertEqual(attachments.map(\.id), ["draft-\(newlyInserted)"])
+            XCTAssertNil(attachments.first?.message)
+        }
+    }
+
     // Revert-check: fails if `handoffOptimisticAttachmentStorage` reverts to
     // greedy first-match pairing — the ambiguous duplicate-metadata pair would
     // then hand off (bytes copied, state .downloaded) instead of staying queued

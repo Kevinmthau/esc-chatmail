@@ -340,5 +340,5 @@ enum AttachmentPredicates {
         NSPredicate(format: "messageId == %@", messageId)
     }
 
-    static let orphaned = NSPredicate(format: "message == nil")
+    static let orphaned = NSPredicate(format: "message == nil AND replyDraft == nil")
 }

@@ -5,7 +5,7 @@ import CoreData
 struct OutboundReplyContextBuilder {
     let viewContext: NSManagedObjectContext
     let replyMetadataBuilder: ReplyMetadataBuilder
-    private let replyQuotedHTMLResolver: ReplyQuotedHTMLResolver
+    let replyQuotedHTMLResolver: ReplyQuotedHTMLResolver
     private let loadUserAliases: @MainActor () async -> Set<String>
 
     init(
@@ -78,6 +78,21 @@ struct OutboundReplyContextBuilder {
             sendAsAliases: sendAsAliases,
             userAliases: userAliases
         )
+    }
+
+    func validateRecoveredReply(_ metadata: OutboundMessageRequest.ReplyMetadata,
+                                context: OutboundMessageRequest.ReplyContext) throws {
+        guard let conversation = fetchConversation(objectID: context.conversationObjectID),
+              !conversation.isDeleted, !conversation.isRetainedDrainedShell else {
+            throw GmailSendService.SendError.replyTargetUnavailable
+        }
+        let auth = replyMetadataBuilder.authSession
+        let selected = try ReplyFromAddressSelector(
+            sendAsAliases: loadSendAsAliases(), fallbackEmail: auth.userEmail, fallbackDisplayName: auth.userName
+        ).select(replyFromAddress: metadata.fromEmail, deliveredToAddress: nil)
+        guard EmailNormalizer.normalize(selected.emailAddress) == EmailNormalizer.normalize(metadata.fromEmail) else {
+            throw GmailSendService.SendError.sendAsAliasUnavailable(metadata.fromEmail)
+        }
     }
 
     private func fetchConversation(objectID: NSManagedObjectID) -> Conversation? {

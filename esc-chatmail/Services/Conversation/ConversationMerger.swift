@@ -291,6 +291,8 @@ struct ConversationMerger: Sendable {
     private func pendingSendConversationIDs(
         in context: NSManagedObjectContext
     ) throws -> Set<UUID> {
-        Set(try context.fetch(OutboundSendMutationRecord.fetchRequest()).compactMap(\.conversationId))
+        let sends = try context.fetch(OutboundSendMutationRecord.fetchRequest())
+        let drafts = try context.fetch(NSFetchRequest<ChatReplyDraft>(entityName: "ChatReplyDraft"))
+        return Set(sends.compactMap(\.conversationId)).union(drafts.map(\.conversationId))
     }
 }

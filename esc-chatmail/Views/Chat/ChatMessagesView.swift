@@ -643,6 +643,20 @@ struct ChatMessagesView: View {
 
     @ViewBuilder
     private func messageContextMenu(for message: ChatMessageRowModel) -> some View {
+        if message.outboundSendDeliveryState == .notSent {
+            Button("Edit and resend", systemImage: "square.and.pencil") {
+                if viewModel.editFailedReply(messageObjectID: message.messageObjectID) {
+                    isTextFieldFocused.wrappedValue = true
+                }
+            }
+            Button("View send error", systemImage: "exclamationmark.circle") {
+                viewModel.showReplyFailure(messageObjectID: message.messageObjectID)
+            }
+        } else if message.outboundSendDeliveryState == .deliveryUnknown {
+            Button("Check delivery", systemImage: "arrow.clockwise") {
+                viewModel.checkReplyDelivery(messageObjectID: message.messageObjectID)
+            }
+        }
         if message.outboundSendDeliveryState == .none {
             Button(action: { viewModel.setReplyingTo(messageObjectID: message.messageObjectID) }) {
                 SwiftUI.Label("Reply", systemImage: "arrow.turn.up.left")
@@ -733,7 +747,10 @@ private struct ChatReplyComposerOverlay: View {
                 conversation: conversation,
                 isSending: composerState.isSending,
                 onSend: onSend,
-                focusBinding: focusBinding
+                focusBinding: focusBinding,
+                isProcessingAttachments: $composerState.isProcessingAttachments,
+                unavailableReplyTargetURI: $composerState.unavailableReplyTargetURI,
+                recoveredReplyEnvelope: composerState.recoveredReplyEnvelope
             )
         }
         .background(Color(UIColor.systemBackground))
