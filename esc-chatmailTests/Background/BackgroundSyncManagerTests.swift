@@ -73,11 +73,14 @@ final class BackgroundSyncManagerTests: XCTestCase {
     // Revert-check: fails if authoritative handoff stops clearing the retired
     // checkpoint or moves cleanup until after the executor has started.
     func testModelV3Executor_clearsLegacyContinuationBeforeSyncing() async {
-        let defaults = defaults!
+        let suiteName = defaultsSuiteName!
         let legacyContinuation = #"{"mode":"history","startHistoryId":"old-history","pageToken":"old-page","accountEmail":"old@example.com"}"#
         defaults.set(Data(legacyContinuation.utf8), forKey: "backgroundSync.continuationState")
         let executor = await MainActor.run {
             BackgroundMailboxSyncExecutorSpy(result: .completed, onPerform: {
+                guard let defaults = UserDefaults(suiteName: suiteName) else {
+                    return XCTFail("Expected the isolated defaults suite to exist")
+                }
                 XCTAssertNil(defaults.object(forKey: "backgroundSync.continuationState"))
             })
         }
