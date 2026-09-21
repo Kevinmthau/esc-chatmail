@@ -3,7 +3,7 @@ import CoreData
 
 /// A store-less context whose `save()` throws a scripted error, driving
 /// save-retry paths deterministically without touching a persistent store.
-/// Shared across suites (originally private to `CoreDataBatchOperationsRetryTests`).
+/// Shared across suites that exercise Core Data save failures.
 final class ScriptedSaveContext: NSManagedObjectContext, @unchecked Sendable {
     private let lock = NSLock()
     private var _saveAttempts = 0
