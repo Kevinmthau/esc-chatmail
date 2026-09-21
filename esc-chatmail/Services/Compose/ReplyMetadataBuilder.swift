@@ -15,14 +15,15 @@ struct ReplyMetadataBuilder {
         sendAsAliases: [SendAsAlias],
         userAliases: Set<String> = []
     ) throws -> OutboundMessageRequest.ReplyMetadata {
+        let target = replyingTo ?? conversation.latestReplyTarget
         let currentUserEmail = authSession.userEmail ?? ""
         let selectedFrom = try ReplyFromAddressSelector(
             sendAsAliases: sendAsAliases,
             fallbackEmail: authSession.userEmail,
             fallbackDisplayName: authSession.userName
         ).select(
-            replyFromAddress: replyingTo?.replyFromAddress ?? conversation.replyFromAddress,
-            deliveredToAddress: replyingTo?.deliveredToAddress ?? conversation.deliveredToAddress
+            replyFromAddress: target?.replyFromAddress ?? conversation.replyFromAddress,
+            deliveredToAddress: target?.deliveredToAddress ?? conversation.deliveredToAddress
         )
 
         let userAddresses = Set(
@@ -38,24 +39,30 @@ struct ReplyMetadataBuilder {
             }
         }
         let conversationRecipients = usableRecipients(conversation.participantEmails)
-        let replyTargetRecipients = replyingTo.map {
+        let replyTargetRecipients = target.map {
             usableRecipients($0.participantEmails)
         } ?? []
         let normalizedParticipants = Set(
             conversation.participantEmails.map(EmailNormalizer.normalize).filter { !$0.isEmpty }
         )
         let selfFallbackEvidence: ReplyParticipantEvidence?
-        if let replyingTo {
+        if let target {
             // A targeted reply must be authorized by that exact message. Never
             // borrow evidence from another conversation row when its snapshot
             // is incomplete or synthetic.
-            selfFallbackEvidence = replyingTo.participantEvidence
+            selfFallbackEvidence = target.participantEvidence
         } else {
             selfFallbackEvidence = conversation.latestThreadParticipantEvidence
         }
         let recipients: [String]
-        if conversation.isListConversation, replyingTo != nil {
-            recipients = replyTargetRecipients.isEmpty ? conversationRecipients : replyTargetRecipients
+        if conversation.isListConversation, target != nil {
+            // A List-Id can contain unrelated threads and recipient sets. Missing
+            // target recipients must never borrow another post's addresses.
+            recipients = replyTargetRecipients
+        } else if target?.usesReplyTo == true, !conversationRecipients.isEmpty {
+            // Honor an explicit inbound Reply-To while retaining the non-list
+            // conversation identity safety checks for incomplete/stale rows.
+            recipients = replyTargetRecipients
         } else if !conversation.isListConversation,
                   conversationRecipients.isEmpty,
                   !normalizedParticipants.isEmpty,
@@ -75,20 +82,20 @@ struct ReplyMetadataBuilder {
         var references: [String] = []
         var originalMessage: QuotedMessage?
 
-        if let replyingTo = replyingTo {
-            guard let targetThreadId = replyingTo.threadId?
+        if let target {
+            guard let targetThreadId = target.threadId?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
                   !targetThreadId.isEmpty else {
                 throw GmailSendService.SendError.replyTargetUnavailable
             }
-            subject = replyingTo.subject.map { MimeBuilder.prefixSubjectForReply($0) }
+            subject = target.subject.map { MimeBuilder.prefixSubjectForReply($0) }
             threadId = targetThreadId
-            inReplyTo = replyingTo.messageId
-            references = replyingTo.references
-            if let messageId = replyingTo.messageId {
+            inReplyTo = target.messageId
+            references = target.references
+            if let messageId = target.messageId {
                 references.append(messageId)
             }
-            originalMessage = replyingTo.originalMessage
+            originalMessage = replyingTo?.originalMessage
         } else {
             threadId = conversation.latestThreadId
         }

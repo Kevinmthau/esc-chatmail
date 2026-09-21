@@ -382,6 +382,59 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.replyingTo)
     }
 
+    func testRestoredDraftWithClearedTargetDoesNotRestoreAQuote() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let latest = MessageBuilder().withSubject("Latest subject")
+            .inConversation(conversation).build(in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.replyText = "Restored draft without a quote"
+
+        viewModel.initializeReplyingTo(lastMessage: latest)
+
+        XCTAssertNil(viewModel.replyingTo)
+    }
+
+    func testManualReplyTargetDoesNotFollowANewerListThread() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().asList().withListId("list.example.com")
+            .visible().recentlyActive().build(in: context)
+        let selected = MessageBuilder().withId("manual-selected").withThreadId("selected-thread")
+            .withSubject("Selected subject").withListId("list.example.com")
+            .inConversation(conversation).build(in: context)
+        let newest = MessageBuilder().withId("manual-newest").withThreadId("newest-thread")
+            .withSubject("New subject").withListId("list.example.com")
+            .inConversation(conversation).build(in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+
+        viewModel.setReplyingTo(selected)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: newest)
+
+        XCTAssertEqual(viewModel.replyingTo, selected)
+    }
+
+    func testDraftReplyTargetDoesNotFollowNewSubjectOrInvalidation() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let selected = MessageBuilder().withId("draft-selected").withThreadId("selected-thread")
+            .withSubject("Selected subject").inConversation(conversation).build(in: context)
+        let newest = MessageBuilder().withId("draft-newest").withThreadId("newest-thread")
+            .withSubject("New subject").inConversation(conversation).build(in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: selected)
+        viewModel.replyText = "Reply intended for the selected message"
+
+        viewModel.updateReplyingToIfNewSubject(lastMessage: newest)
+        XCTAssertEqual(viewModel.replyingTo, selected)
+
+        selected.conversation = ConversationBuilder().build(in: context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: newest)
+        XCTAssertEqual(viewModel.replyingTo, selected, "Keep invalid draft targets for send-time rejection")
+    }
+
     func testListReplyTargetRetargetsWhenSameSubjectMovesToNewGmailThread() {
         let deps = makeDependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com")

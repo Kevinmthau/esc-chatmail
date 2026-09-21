@@ -982,7 +982,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertFalse(metadata.recipientEmails.contains("later-bcc@example.com"))
     }
 
-    func testBuildReplyMetadata_listReplyToReconciledOptimisticMessageFallsBackToLatestInboundRecipients() async throws {
+    func testBuildReplyMetadata_listTargetWithoutParticipantsDoesNotBorrowAnotherThreadsRecipients() async throws {
         let fixture = try makeRotatingListConversation()
         let reconciledOptimisticMessage = MessageBuilder()
             .withId("reconciled-optimistic")
@@ -1007,14 +1007,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(
-            metadata.recipientEmails,
-            [
-                "later-sender@example.com",
-                "later-list@example.com",
-                "later-cc@example.com"
-            ]
-        )
+        XCTAssertEqual(metadata.recipientEmails, [])
         XCTAssertEqual(metadata.subject, "Re: Optimistic Subject")
         XCTAssertEqual(metadata.threadId, "thread-optimistic")
         XCTAssertEqual(metadata.inReplyTo, "<optimistic@example.com>")
@@ -1292,6 +1285,120 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     private func saveViewContext() throws {
         guard viewContext.hasChanges else { return }
         try viewContext.save()
+    }
+
+    func testBuildReplyMetadata_nonListReplyUsesReplyToAndPreservesOtherRecipients() async throws {
+        let conversation = makeReplyConversation(in: viewContext, friendEmail: "noreply@example.com")
+        let message = MessageBuilder()
+            .withId("ordinary-reply-to")
+            .withThreadId("ordinary-thread")
+            .withSender(email: "noreply@example.com", name: "Service")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        message.replyTo = "Support <agent@example.com>, COPY@example.com"
+        addMessageParticipant(email: "noreply@example.com", kind: .from, to: message)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: message)
+        addMessageParticipant(email: "copy@example.com", kind: .cc, to: message)
+        addMessageParticipant(email: "hidden@example.com", kind: .bcc, to: message)
+        try viewContext.obtainPermanentIDs(for: [conversation, message])
+
+        for target in [message.objectID, nil] {
+            let metadata = try await makeBuilder().buildReplyMetadata(.init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: target,
+                optimisticConversation: nil
+            ))
+            XCTAssertEqual(metadata.recipientEmails, ["agent@example.com", "copy@example.com"])
+        }
+    }
+
+    func testBuildReplyMetadata_outgoingFollowUpUsesRecipientsInsteadOfOwnReplyTo() async throws {
+        let conversation = makeReplyConversation(in: viewContext, friendEmail: "friend@example.com")
+        let message = MessageBuilder()
+            .withId("outgoing-follow-up")
+            .withThreadId("outgoing-thread")
+            .withSender(email: "me@example.com", name: "Me")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        message.replyTo = "My reply mailbox <other-self@example.com>"
+        addMessageParticipant(email: "me@example.com", kind: .from, to: message)
+        addMessageParticipant(email: "friend@example.com", kind: .to, to: message)
+        try viewContext.obtainPermanentIDs(for: [conversation, message])
+
+        let metadata = try await makeBuilder().buildReplyMetadata(.init(
+            conversationObjectID: conversation.objectID,
+            replyingToMessageObjectID: message.objectID,
+            optimisticConversation: nil
+        ))
+        XCTAssertEqual(metadata.recipientEmails, ["friend@example.com"])
+    }
+
+    func testBuildReplyMetadata_clearedTargetPreservesHeadersWithoutQuoteOrFullHistoryLoad() async throws {
+        let conversation = makeReplyConversation(in: viewContext, friendEmail: "friend@example.com")
+        for index in 0..<100 {
+            _ = MessageBuilder()
+                .withId("cleared-history-\(index)")
+                .withThreadId("older-thread")
+                .withDate(Date(timeIntervalSince1970: TimeInterval(index)))
+                .inConversation(conversation)
+                .build(in: viewContext)
+        }
+        let anchor = MessageBuilder()
+            .withId("cleared-anchor")
+            .withThreadId("current-thread")
+            .withSubject("Current topic")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        anchor.messageId = "<current@example.com>"
+        anchor.references = "<previous@example.com>"
+        let pending = try makeLocalSend(
+            in: conversation,
+            threadId: "current-thread",
+            date: Date(timeIntervalSince1970: 300)
+        )
+        pending.record.remoteCommittedMessageId = OutboundSendRemoteState.notSentMessageID
+        try saveViewContext()
+        let conversationID = conversation.objectID
+        viewContext.reset()
+        let coldConversation = try XCTUnwrap(
+            try viewContext.existingObject(with: conversationID) as? Conversation
+        )
+        XCTAssertTrue(coldConversation.hasFault(forRelationshipNamed: "messages"))
+
+        let metadata = try await makeBuilder().buildReplyMetadata(.init(
+            conversationObjectID: conversationID,
+            replyingToMessageObjectID: nil,
+            optimisticConversation: nil
+        ))
+
+        XCTAssertEqual(metadata.threadId, "current-thread")
+        XCTAssertEqual(metadata.subject, "Re: Current topic")
+        XCTAssertEqual(metadata.inReplyTo, "<current@example.com>")
+        XCTAssertEqual(metadata.references, ["<previous@example.com>", "<current@example.com>"])
+        XCTAssertNil(metadata.originalMessage)
+        XCTAssertTrue(coldConversation.hasFault(forRelationshipNamed: "messages"))
+    }
+
+    func testBuildReplyMetadata_clearedListTargetPreservesLatestPostHeadersWithoutQuote() async throws {
+        let fixture = try makeRotatingListConversation()
+        fixture.laterMessage.subject = "List topic"
+        fixture.laterMessage.messageId = "<list-post@example.com>"
+        fixture.laterMessage.references = "<list-parent@example.com>"
+
+        let metadata = try await makeBuilder().buildReplyMetadata(.init(
+            conversationObjectID: fixture.conversation.objectID,
+            replyingToMessageObjectID: nil,
+            optimisticConversation: nil
+        ))
+
+        XCTAssertEqual(metadata.threadId, "thread-later")
+        XCTAssertEqual(metadata.subject, "Re: List topic")
+        XCTAssertEqual(metadata.inReplyTo, "<list-post@example.com>")
+        XCTAssertEqual(metadata.references, ["<list-parent@example.com>", "<list-post@example.com>"])
+        XCTAssertNil(metadata.originalMessage)
     }
 
     private func makeBuilder(
