@@ -1,9 +1,133 @@
 import XCTest
 import CoreData
+import UIKit
 @testable import esc_chatmail
 
 @MainActor
 final class ComposeSendOrchestratorTests: XCTestCase {
+    func testBackgroundLeaseCoversLocalCommitAndEndsBeforeOptionalSync() async {
+        let sendService = MockComposeSendService()
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        backgroundTasks.onEnd = {
+            XCTAssertEqual(sendService.snapshot.recordRemoteCommittedSendCalls, ["lease-success"])
+            XCTAssertEqual(sendService.snapshot.reconcileRemoteCommittedSendCalls, ["lease-success"])
+            XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+        }
+
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer,
+            backgroundTaskManager: backgroundTasks
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "lease-success")
+        XCTAssertEqual(backgroundTasks.beginCalls, 1, "Acquire time before detached preflight starts")
+        await operation.task.value
+
+        XCTAssertEqual(backgroundTasks.endedIdentifiers, [backgroundTasks.identifier])
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+        backgroundTasks.expire()
+        XCTAssertEqual(backgroundTasks.endedIdentifiers.count, 1, "A late expiration cannot end a completed lease twice")
+    }
+
+    func testBackgroundLeaseEndsAfterPreflightFailureCleanup() async {
+        let sendService = MockComposeSendService()
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("Attachment missing")
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        backgroundTasks.onEnd = {
+            XCTAssertEqual(sendService.snapshot.rollbackBeforeTransmissionCalls, 1)
+        }
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "lease-failure")
+        await operation.task.value
+
+        XCTAssertEqual(backgroundTasks.endedIdentifiers, [backgroundTasks.identifier])
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
+    }
+
+    func testBackgroundExpirationBeforeWorkerInstallationPreventsTransmission() async {
+        let sendService = MockComposeSendService()
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "lease-preflight")
+
+        // MainActor has not yielded to the worker's first persistence hop yet.
+        backgroundTasks.expire()
+        XCTAssertEqual(backgroundTasks.endedIdentifiers.count, 1, "Return UIKit's time immediately")
+        await operation.task.value
+        do {
+            try await operation.waitForTransmissionAdmission()
+            XCTFail("Expired preflight must not be admitted")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
+        XCTAssertEqual(sendService.snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertTrue(sendService.snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertTrue(sendService.snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
+        XCTAssertEqual(backgroundTasks.endedIdentifiers.count, 1)
+    }
+
+    func testBackgroundExpirationAfterAdmissionRetainsUnknownDeliveryWithoutRetry() async throws {
+        let sendService = MockComposeSendService()
+        sendService.sendDelayNanoseconds = 5_000_000_000
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: syncPerformer,
+            backgroundTaskManager: backgroundTasks
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "lease-admitted")
+        try await operation.waitForTransmissionAdmission()
+
+        backgroundTasks.expire()
+        XCTAssertEqual(backgroundTasks.endedIdentifiers.count, 1)
+        await operation.task.value
+
+        XCTAssertEqual(sendService.snapshot.sendNewCalls, 1)
+        XCTAssertEqual(sendService.snapshot.recordAmbiguousRemoteSendCalls, ["lease-admitted"])
+        XCTAssertEqual(sendService.snapshot.rollbackBeforeTransmissionCalls, 0)
+        XCTAssertEqual(sendService.snapshot.retainDefinitelyUnsentCalls, 0)
+        XCTAssertTrue(sendService.snapshot.recordRemoteCommittedSendCalls.isEmpty)
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+        XCTAssertEqual(backgroundTasks.endedIdentifiers.count, 1)
+    }
+
+    func testDeniedBackgroundTimeStillAllowsForegroundSend() async {
+        let sendService = MockComposeSendService()
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        backgroundTasks.identifier = .invalid
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "lease-denied")
+        await operation.task.value
+
+        XCTAssertEqual(sendService.snapshot.recordRemoteCommittedSendCalls, ["lease-denied"])
+        XCTAssertTrue(backgroundTasks.endedIdentifiers.isEmpty)
+    }
+
+    func testSynchronousBackgroundExpirationReturnsTheAcquiredIdentifierOnce() {
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        backgroundTasks.expiresDuringBegin = true
+        var expirationCalls = 0
+        let lease = OutboundSendBackgroundLease(manager: backgroundTasks) {
+            expirationCalls += 1
+        }
+        lease.end()
+        backgroundTasks.expire()
+
+        XCTAssertEqual(expirationCalls, 1)
+        XCTAssertEqual(backgroundTasks.endedIdentifiers, [backgroundTasks.identifier])
+    }
+
     func testExecuteInBackground_newMessage_runsSendNewAndSync() async {
         let sendService = MockComposeSendService()
         let syncPerformer = MockIncrementalSyncPerformer()
@@ -538,6 +662,32 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             inlineAttachmentInfos: [],
             replyMetadata: replyMetadata
         )
+    }
+}
+
+@MainActor
+private final class MockOutboundBackgroundTaskManager: OutboundBackgroundTaskManaging {
+    var identifier = UIBackgroundTaskIdentifier(rawValue: 42)
+    var expiresDuringBegin = false
+    var onEnd: (() -> Void)?
+    private(set) var beginCalls = 0
+    private(set) var endedIdentifiers: [UIBackgroundTaskIdentifier] = []
+    private var expirationHandler: (@MainActor @Sendable () -> Void)?
+
+    func begin(expirationHandler: @escaping @MainActor @Sendable () -> Void) -> UIBackgroundTaskIdentifier {
+        beginCalls += 1
+        self.expirationHandler = expirationHandler
+        if expiresDuringBegin { expirationHandler() }
+        return identifier
+    }
+
+    func end(_ identifier: UIBackgroundTaskIdentifier) {
+        endedIdentifiers.append(identifier)
+        onEnd?()
+    }
+
+    func expire() {
+        expirationHandler?()
     }
 }
 

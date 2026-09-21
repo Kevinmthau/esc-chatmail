@@ -26,6 +26,19 @@ enum OutboundMessageRequest {
         let conversationObjectID: NSManagedObjectID
         let replyingToMessageObjectID: NSManagedObjectID?
         let optimisticConversation: OptimisticConversationReference?
+        let includesQuotedMessage: Bool
+
+        init(
+            conversationObjectID: NSManagedObjectID,
+            replyingToMessageObjectID: NSManagedObjectID?,
+            optimisticConversation: OptimisticConversationReference?,
+            includesQuotedMessage: Bool = true
+        ) {
+            self.conversationObjectID = conversationObjectID
+            self.replyingToMessageObjectID = replyingToMessageObjectID
+            self.optimisticConversation = optimisticConversation
+            self.includesQuotedMessage = includesQuotedMessage
+        }
     }
 
     struct Compose {

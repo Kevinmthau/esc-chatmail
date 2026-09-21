@@ -168,10 +168,10 @@ struct ChatView: View {
             dismiss()
         }
         .onDisappear {
-            viewModel.saveReplyDraft()
+            viewModel.scheduleReplyDraftSave()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { viewModel.saveReplyDraft() }
+            if phase != .active { viewModel.scheduleReplyDraftSave() }
         }
     }
 

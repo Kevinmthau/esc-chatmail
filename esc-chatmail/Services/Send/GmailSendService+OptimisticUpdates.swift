@@ -1124,19 +1124,41 @@ extension GmailSendService {
         _ snapshot: OptimisticSendMutationSnapshot,
         replyMetadata: OutboundMessageRequest.ReplyMetadata?
     ) throws {
+        let draftStore = ChatReplyDraftStore(context: viewContext)
+        let originalDraft: ChatReplyDraft?
+        if replyMetadata != nil, let conversationID = snapshot.conversationID {
+            originalDraft = try draftStore.fetch(conversationID: conversationID)
+        } else {
+            originalDraft = nil
+        }
+        let originalDraftData = originalDraft?.data
+        let originalDraftAttachments = originalDraft?.attachments ?? []
         let record = fetchOptimisticSendMutationRecords(
             messageID: snapshot.optimisticMessageID
         ).first ?? OutboundSendMutationRecord(context: viewContext)
         snapshot.apply(to: record)
-        if let replyMetadata {
-            record.replyEnvelopeData = try JSONEncoder().encode(StoredReplyEnvelope(replyMetadata))
-            if let conversationID = snapshot.conversationID {
-                try ChatReplyDraftStore(context: viewContext).remove(conversationID: conversationID)
+        do {
+            if let replyMetadata {
+                record.replyEnvelopeData = try JSONEncoder().encode(StoredReplyEnvelope(replyMetadata))
+                if let conversationID = snapshot.conversationID {
+                    try draftStore.remove(conversationID: conversationID)
+                }
             }
-        }
 
-        if viewContext.hasChanges {
-            try viewContext.save()
+            if viewContext.hasChanges {
+                try viewContext.save()
+            }
+        } catch {
+            // The caller rolls back the new message, but a failed save leaves
+            // the consumed draft pending deletion. Restore its ownership too,
+            // so a later unrelated save cannot erase the user's durable draft.
+            if let originalDraft, originalDraft.isDeleted {
+                let restoredDraft = ChatReplyDraft(context: viewContext)
+                restoredDraft.conversationId = originalDraft.conversationId
+                restoredDraft.data = originalDraftData
+                restoredDraft.attachments = originalDraftAttachments
+            }
+            throw error
         }
     }
 

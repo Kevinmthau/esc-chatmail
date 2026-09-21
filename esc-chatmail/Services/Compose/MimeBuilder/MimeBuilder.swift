@@ -117,7 +117,8 @@ struct MimeBuilder {
             references: references,
             attachments: attachments,
             inlineAttachments: [],
-            messageId: messageId
+            messageId: messageId,
+            preserveEmptySubject: true
         )
     }
 

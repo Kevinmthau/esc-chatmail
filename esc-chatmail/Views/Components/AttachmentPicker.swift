@@ -32,7 +32,7 @@ struct AttachmentPicker: View {
     @State private var documentProcessingTask: Task<Void, Never>?
     @State private var photoProcessingID: UUID?
 
-    private let maxAttachmentSize: Int64 = 25 * 1024 * 1024 // 25 MB
+    @State private var importErrorMessage: String?
     
     var body: some View {
         HStack(spacing: 16) {
@@ -62,7 +62,6 @@ struct AttachmentPicker: View {
             guard !newValue.isEmpty else { return }
             photoProcessingTask?.cancel()
             let processingID = UUID()
-            let attachmentSizeLimit = maxAttachmentSize
             photoProcessingID = processingID
             isProcessing = true
             // Image decoding, resizing, thumbnailing, and file writes must not
@@ -70,8 +69,7 @@ struct AttachmentPicker: View {
             photoProcessingTask = AttachmentAccountWorkRegistry.shared.startDetachedOperation { generation in
                 await processPhotoSelections(
                     newValue,
-                    generation: generation,
-                    maxAttachmentSize: attachmentSizeLimit
+                    generation: generation
                 )
                 await finishPhotoProcessing(processingID: processingID)
             }
@@ -87,37 +85,50 @@ struct AttachmentPicker: View {
             DocumentPicker(
                 attachments: $attachments,
                 onProcessingChanged: { isProcessing = $0 },
-                onOperationChanged: { documentProcessingTask = $0 }
+                onOperationChanged: { documentProcessingTask = $0 },
+                onImportFailures: { importErrorMessage = DraftAttachmentImport.failureMessage($0) }
             )
+        }
+        .alert("Some Attachments Weren’t Added", isPresented: Binding(
+            get: { importErrorMessage != nil },
+            set: { if !$0 { importErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { importErrorMessage = nil }
+        } message: {
+            Text(importErrorMessage ?? "")
         }
     }
     
     private nonisolated func processPhotoSelections(
         _ items: [PhotosPickerItem],
-        generation: AttachmentAccountWorkGeneration,
-        maxAttachmentSize: Int64
+        generation: AttachmentAccountWorkGeneration
     ) async {
         guard generation.isActive else { return }
         var pendingWrites: [String: PickerPendingAttachmentWrite] = [:]
+        var failures: [String] = []
         
-        for item in items {
+        for (index, item) in items.enumerated() {
             guard generation.isActive else { break }
-            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-            guard generation.isActive else { break }
-            
-            // Process image
-            let (processedData, size) = ImageProcessor.processImage(data: data)
-            guard let finalData = processedData else { continue }
-            
-            // Check size limit
-            if finalData.count > maxAttachmentSize {
-                continue // Skip oversized attachments
+            let filename = "Photo \(index + 1)"
+            let prepared: DraftAttachmentImport.PreparedImage
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self) else {
+                    throw DraftAttachmentImport.ImportError.unreadable(filename: filename)
+                }
+                guard generation.isActive else { break }
+                let existingBytes = await MainActor.run {
+                    DraftAttachmentImport.totalByteCount(attachments.map(\.byteSize))
+                }
+                prepared = try DraftAttachmentImport.prepareImage(
+                    data: data, filename: filename, existingByteCount: existingBytes
+                )
+            } catch {
+                if generation.isActive { failures.append("\(filename): \(error.localizedDescription)") }
+                continue
             }
-            
-            // Generate IDs and paths
+            let finalData = prepared.data
             let localId = "local_\(UUID().uuidString)"
-            let ext = AttachmentPaths.fileExtension(for: "image/jpeg")
-            let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: ext)
+            let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: prepared.fileExtension)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: localId)
             pendingWrites[localId] = PickerPendingAttachmentWrite(
                 originalPath: originalPath,
@@ -129,12 +140,13 @@ struct AttachmentPicker: View {
             guard AttachmentPaths.saveData(finalData, to: originalPath) else {
                 AttachmentPaths.deleteFile(at: originalPath)
                 pendingWrites.removeValue(forKey: localId)
+                failures.append(DraftAttachmentImport.ImportError.cannotSave(filename: filename).localizedDescription)
                 continue
             }
             
             // Generate preview
             var savedPreviewPath: String?
-            if let thumbnailData = ImageProcessor.generateThumbnail(from: finalData, mimeType: "image/jpeg") {
+            if let thumbnailData = ImageProcessor.generateThumbnail(from: finalData, mimeType: prepared.mimeType) {
                 pendingWrites[localId]?.previewPath = previewPath
                 if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
                     savedPreviewPath = previewPath
@@ -150,17 +162,15 @@ struct AttachmentPicker: View {
                 guard generation.isActive else { return false }
                 let attachment = Attachment(context: viewContext)
                 attachment.setValue(localId, forKey: "id")
-                attachment.setValue("photo_\(Date().timeIntervalSince1970).jpg", forKey: "filename")
-                attachment.setValue("image/jpeg", forKey: "mimeType")
+                attachment.setValue(prepared.filename(replacingExtensionOf: "photo_\(Int(Date().timeIntervalSince1970))_\(index)"), forKey: "filename")
+                attachment.setValue(prepared.mimeType, forKey: "mimeType")
                 attachment.setValue(Int64(finalData.count), forKey: "byteSize")
                 attachment.setValue(originalPath, forKey: "localURL")
                 attachment.setValue(finalizedPreviewPath, forKey: "previewURL")
                 attachment.setValue("queued", forKey: "stateRaw")
                 
-                if let size = size {
-                    attachment.setValue(Int16(size.width), forKey: "width")
-                    attachment.setValue(Int16(size.height), forKey: "height")
-                }
+                attachment.width = Int16(clamping: Int(prepared.size.width.rounded()))
+                attachment.height = Int16(clamping: Int(prepared.size.height.rounded()))
                 
                 attachments.append(attachment)
                 return true
@@ -178,8 +188,10 @@ struct AttachmentPicker: View {
         }
         
         if generation.isActive {
+            let errorMessage = DraftAttachmentImport.failureMessage(failures)
             await MainActor.run {
                 selectedPhotoItems = []
+                importErrorMessage = errorMessage
             }
         }
     }
@@ -199,15 +211,18 @@ struct DocumentPicker: UIViewControllerRepresentable {
     @Environment(\.managedObjectContext) private var viewContext
     let onProcessingChanged: @MainActor (Bool) -> Void
     let onOperationChanged: @MainActor (Task<Void, Never>?) -> Void
+    let onImportFailures: @MainActor ([String]) -> Void
 
     init(
         attachments: Binding<[Attachment]>,
         onProcessingChanged: @escaping @MainActor (Bool) -> Void = { _ in },
-        onOperationChanged: @escaping @MainActor (Task<Void, Never>?) -> Void = { _ in }
+        onOperationChanged: @escaping @MainActor (Task<Void, Never>?) -> Void = { _ in },
+        onImportFailures: @escaping @MainActor ([String]) -> Void = { _ in }
     ) {
         self._attachments = attachments
         self.onProcessingChanged = onProcessingChanged
         self.onOperationChanged = onOperationChanged
+        self.onImportFailures = onImportFailures
     }
     
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
@@ -268,26 +283,41 @@ struct DocumentPicker: UIViewControllerRepresentable {
             generation: AttachmentAccountWorkGeneration
         ) async {
             var pendingWrites: [String: PickerPendingAttachmentWrite] = [:]
+            var failures: [String] = []
 
             documentLoop: for url in urls {
                 guard generation.isActive else { break }
-                guard url.startAccessingSecurityScopedResource() else { continue }
+                guard url.startAccessingSecurityScopedResource() else {
+                    failures.append(DraftAttachmentImport.ImportError.unreadable(filename: url.lastPathComponent).localizedDescription)
+                    continue
+                }
                 defer { url.stopAccessingSecurityScopedResource() }
 
                 let filename = url.lastPathComponent
-                let mimeType = mimeType(for: url.pathExtension)
+                var mimeType = mimeType(for: url.pathExtension)
                 let localId = "local_\(UUID().uuidString)"
-                let ext = url.pathExtension.isEmpty ? "dat" : url.pathExtension
-                let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: ext)
+                var ext = url.pathExtension.isEmpty ? "dat" : url.pathExtension
+                var finalizedFilename = filename
                 let previewPath = AttachmentPaths.previewPath(idOrUUID: localId)
 
+                let existingBytes = await MainActor.run {
+                    DraftAttachmentImport.totalByteCount(parent.attachments.map(\.byteSize))
+                }
+                do {
+                    try DraftAttachmentImport.preflightDocument(at: url, existingByteCount: existingBytes)
+                } catch {
+                    failures.append("\(filename): \(error.localizedDescription)")
+                    continue
+                }
+
                 // Add placeholder immediately so all selected files appear right away.
+                let sourceMimeType = mimeType
                 let didAddPlaceholder = await MainActor.run { () -> Bool in
                     guard generation.isActive else { return false }
                     let attachment = Attachment(context: parent.viewContext)
                     attachment.id = localId
                     attachment.filename = filename
-                    attachment.mimeType = mimeType
+                    attachment.mimeType = sourceMimeType
                     attachment.stateRaw = Attachment.State.queued.rawValue
                     parent.attachments.append(attachment)
                     return true
@@ -296,6 +326,7 @@ struct DocumentPicker: UIViewControllerRepresentable {
                 pendingWrites[localId] = PickerPendingAttachmentWrite()
 
                 guard let data = try? Data(contentsOf: url) else {
+                    failures.append(DraftAttachmentImport.ImportError.unreadable(filename: filename).localizedDescription)
                     await cleanupPendingWrite(
                         pendingWrites.removeValue(forKey: localId),
                         localId: localId
@@ -310,27 +341,37 @@ struct DocumentPicker: UIViewControllerRepresentable {
                 var height: Int16? = nil
                 var pageCount: Int16? = nil
                 
-                if mimeType.starts(with: "image/") {
-                    // Process image
-                    let (processed, size) = ImageProcessor.processImage(data: data)
-                    if let processed = processed {
-                        processedData = processed
-                        if let size = size {
-                            width = Int16(size.width)
-                            height = Int16(size.height)
-                        }
+                do {
+                    // Recheck after reading in case a provider changed the file.
+                    try DraftAttachmentImport.validateSize(
+                        byteCount: Int64(data.count), existingByteCount: existingBytes, filename: filename
+                    )
+                    if mimeType.starts(with: "image/") {
+                        let prepared = try DraftAttachmentImport.prepareImage(
+                            data: data, filename: filename, existingByteCount: existingBytes
+                        )
+                        processedData = prepared.data
+                        mimeType = prepared.mimeType
+                        ext = prepared.fileExtension
+                        finalizedFilename = prepared.filename(replacingExtensionOf: filename)
+                        width = Int16(clamping: Int(prepared.size.width.rounded()))
+                        height = Int16(clamping: Int(prepared.size.height.rounded()))
+                    } else if mimeType == "application/pdf",
+                              let count = ImageProcessor.getPDFPageCount(from: data) {
+                        pageCount = Int16(clamping: count)
                     }
-                } else if mimeType == "application/pdf" {
-                    // Get PDF info
-                    if let count = ImageProcessor.getPDFPageCount(from: data) {
-                        pageCount = Int16(count)
-                    }
+                } catch {
+                    failures.append("\(filename): \(error.localizedDescription)")
+                    await cleanupPendingWrite(pendingWrites.removeValue(forKey: localId), localId: localId)
+                    continue
                 }
+                let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: ext)
 
                 // Save files
                 pendingWrites[localId]?.originalPath = originalPath
                 guard generation.isActive else { break }
                 guard AttachmentPaths.saveData(processedData, to: originalPath) else {
+                    failures.append(DraftAttachmentImport.ImportError.cannotSave(filename: filename).localizedDescription)
                     await cleanupPendingWrite(
                         pendingWrites.removeValue(forKey: localId),
                         localId: localId
@@ -351,6 +392,8 @@ struct DocumentPicker: UIViewControllerRepresentable {
                 }
 
                 // Fill in finalized metadata for the placeholder attachment.
+                let finalFilename = finalizedFilename
+                let finalMimeType = mimeType
                 let finalizedByteSize = Int64(processedData.count)
                 let finalizedPreviewPath = savedPreviewPath
                 let finalizedWidth = width ?? 0
@@ -362,6 +405,8 @@ struct DocumentPicker: UIViewControllerRepresentable {
                         return false
                     }
 
+                    attachment.filename = finalFilename
+                    attachment.mimeType = finalMimeType
                     attachment.byteSize = finalizedByteSize
                     attachment.localURL = originalPath
                     attachment.previewURL = finalizedPreviewPath
@@ -389,6 +434,9 @@ struct DocumentPicker: UIViewControllerRepresentable {
 
             for (localId, write) in pendingWrites {
                 await cleanupPendingWrite(write, localId: localId)
+            }
+            if generation.isActive, !failures.isEmpty {
+                await parent.onImportFailures(failures)
             }
         }
 

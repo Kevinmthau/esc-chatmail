@@ -107,4 +107,62 @@ final class OutboundAttachmentContextBuilderTests: XCTestCase {
             )
         }
     }
+
+    func testSendBudgetUsesActualCombinedFileSizesBeforePromotingIDs() throws {
+        let builder = OutboundAttachmentContextBuilder(viewContext: viewContext)
+        let first = try makeLocalAttachment(byteCount: 13 * 1024 * 1024)
+        let second = try makeLocalAttachment(byteCount: 13 * 1024 * 1024)
+        defer {
+            AttachmentPaths.deleteFile(at: first.localURL)
+            AttachmentPaths.deleteFile(at: second.localURL)
+        }
+        // Stale metadata must not bypass the send budget.
+        first.byteSize = 0
+        second.byteSize = 0
+
+        XCTAssertThrowsError(try builder.buildSendAttachments(from: [first, second])) { error in
+            XCTAssertTrue(error.localizedDescription.contains("combined attachment budget"))
+        }
+        XCTAssertTrue(first.objectID.isTemporaryID)
+        XCTAssertTrue(second.objectID.isTemporaryID)
+    }
+
+    func testForwardBudgetIncludesInlineAndRegularFilesTogether() throws {
+        let builder = OutboundAttachmentContextBuilder(viewContext: viewContext)
+        let regular = try makeLocalAttachment(byteCount: 13 * 1024 * 1024)
+        let inline = try makeLocalAttachment(byteCount: 13 * 1024 * 1024)
+        defer {
+            AttachmentPaths.deleteFile(at: regular.localURL)
+            AttachmentPaths.deleteFile(at: inline.localURL)
+        }
+
+        XCTAssertThrowsError(try builder.buildSendAttachments(from: [regular], including: [
+            GmailSendService.AttachmentInfo(
+                localURL: inline.localURL,
+                filename: "inline.png",
+                mimeType: "image/png",
+                contentId: "inline@example.com"
+            )
+        ])) { error in
+            XCTAssertTrue(error.localizedDescription.contains("combined attachment budget"))
+        }
+        XCTAssertTrue(regular.objectID.isTemporaryID)
+    }
+
+    private func makeLocalAttachment(byteCount: UInt64) throws -> Attachment {
+        AttachmentPaths.setupDirectories()
+        let attachment = viewContext.insertTestObject(Attachment.self)
+        let localID = "local_\(UUID().uuidString)"
+        attachment.id = localID
+        attachment.filename = "attachment.pdf"
+        attachment.mimeType = "application/pdf"
+        let path = AttachmentPaths.originalPath(idOrUUID: localID, ext: "pdf")
+        attachment.localURL = path
+        attachment.stateRaw = Attachment.State.queued.rawValue
+        XCTAssertTrue(AttachmentPaths.saveData(Data(), to: path))
+        let file = try FileHandle(forWritingTo: XCTUnwrap(AttachmentPaths.fullURL(for: path)))
+        try file.truncate(atOffset: byteCount)
+        try file.close()
+        return attachment
+    }
 }

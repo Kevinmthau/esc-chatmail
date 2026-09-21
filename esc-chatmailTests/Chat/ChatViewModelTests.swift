@@ -1141,6 +1141,129 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(request.context.replyingToMessageObjectID, replyTarget.objectID)
     }
 
+    func testSendReply_clearingQuoteKeepsOriginalListDestinationWhenNewThreadArrives() async throws {
+        let fixture = try makeListReplyFixture()
+        let viewModel = fixture.viewModel
+        viewModel.initializeReplyingTo(lastMessage: fixture.selected)
+
+        // The quote's X button writes directly to the composer's binding.
+        viewModel.composerState.replyingTo = nil
+        viewModel.initializeReplyingTo(lastMessage: fixture.newest)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: fixture.newest)
+        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.selected)
+        viewModel.replyText = "Reply without a quote"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.selected.objectID)
+        XCTAssertFalse(request.context.includesQuotedMessage)
+        let metadata = try await fixture.dependencies.makeChatDependencies().messaging
+            .outboundReplyContextBuilder.buildReplyMetadata(request.context)
+        XCTAssertEqual(metadata.recipientEmails, ["selected-replies@example.com"])
+        XCTAssertEqual(metadata.subject, "Re: Selected subject")
+        XCTAssertEqual(metadata.threadId, "selected-thread")
+        XCTAssertEqual(metadata.inReplyTo, "<selected@example.com>")
+        XCTAssertEqual(metadata.references, ["<older@example.com>", "<selected@example.com>"])
+        XCTAssertNil(metadata.originalMessage)
+    }
+
+    func testSendReply_reselectingAfterClearingQuoteChangesAnchorAndRestoresQuote() async throws {
+        let fixture = try makeListReplyFixture()
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.selected)
+        viewModel.composerState.replyingTo = nil
+        viewModel.replyText = "Reply to the newer message"
+
+        viewModel.setReplyingTo(fixture.newest)
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(viewModel.replyingTo, fixture.newest)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.newest)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.newest.objectID)
+        XCTAssertTrue(request.context.includesQuotedMessage)
+        let metadata = try await fixture.dependencies.makeChatDependencies().messaging
+            .outboundReplyContextBuilder.buildReplyMetadata(request.context)
+        XCTAssertEqual(metadata.recipientEmails, ["newest-replies@example.com"])
+        XCTAssertEqual(metadata.subject, "Re: New subject")
+        XCTAssertEqual(metadata.threadId, "newest-thread")
+        XCTAssertEqual(metadata.originalMessage?.body, "New message body")
+    }
+
+    func testSendReply_hiddenTargetStillRejectsMoveOrInvalidListIdentity() async throws {
+        for movesConversation in [true, false] {
+            let fixture = try makeListReplyFixture()
+            let viewModel = fixture.viewModel
+            viewModel.initializeReplyingTo(lastMessage: fixture.selected)
+            viewModel.composerState.replyingTo = nil
+            viewModel.replyText = "Keep my original destination"
+            if movesConversation {
+                fixture.selected.conversation = ConversationBuilder()
+                    .build(in: fixture.dependencies.viewContext)
+            } else {
+                fixture.selected.listId = "different-list.example.com"
+            }
+            viewModel.initializeReplyingTo(lastMessage: fixture.newest)
+            viewModel.updateReplyingToIfNewSubject(lastMessage: fixture.newest)
+            _ = await viewModel.sendReply()
+
+            guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+                return XCTFail("Expected reply request for send-time validation")
+            }
+            XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.selected.objectID)
+            do {
+                _ = try await fixture.dependencies.makeChatDependencies().messaging
+                    .outboundReplyContextBuilder.buildReplyMetadata(request.context)
+                XCTFail("An invalid hidden target must not fall back to the newest list message")
+            } catch GmailSendService.SendError.replyTargetUnavailable {
+                // Removing the quote does not waive target validation.
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testSendReply_failureAndRetryKeepHiddenReplyAnchor() async throws {
+        let fixture = try makeListReplyFixture()
+        let viewModel = fixture.viewModel
+        viewModel.initializeReplyingTo(lastMessage: fixture.selected)
+        viewModel.composerState.replyingTo = nil
+        viewModel.replyText = "Retry without a quote"
+        fixture.coordinator.sendError = MockChatSendError.preflightFailed
+
+        let failedResult = await viewModel.sendReply()
+
+        XCTAssertNil(failedResult)
+        XCTAssertEqual(viewModel.replyText, "Retry without a quote")
+        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.selected)
+        viewModel.initializeReplyingTo(lastMessage: fixture.newest)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: fixture.newest)
+        fixture.coordinator.sendError = nil
+
+        let retryResult = await viewModel.sendReply()
+
+        XCTAssertNotNil(retryResult)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.selected.objectID)
+        XCTAssertFalse(request.context.includesQuotedMessage)
+        let metadata = try await fixture.dependencies.makeChatDependencies().messaging
+            .outboundReplyContextBuilder.buildReplyMetadata(request.context)
+        XCTAssertEqual(metadata.recipientEmails, ["selected-replies@example.com"])
+        XCTAssertEqual(metadata.threadId, "selected-thread")
+        XCTAssertNil(metadata.originalMessage)
+    }
+
     func testSendReply_preflightFailureAfterOptimisticPublicationRetainsDraftState() async {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let coordinator = MockChatOutboundMessageCoordinator()
@@ -1306,7 +1429,7 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNotNil(viewModel.sendErrorAlert)
     }
 
-    func testReplyDraftReopensWithItsTextAndSelectedTarget() throws {
+    func testReplyDraftReopensWithItsTextAndSelectedTarget() async throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
@@ -1314,14 +1437,142 @@ final class ChatViewModelTests: XCTestCase {
         let first = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
         first.replyText = "Saved reply"
         first.replyingTo = target
-        first.saveReplyDraft()
+        await first.saveReplyDraft()
         let reopened = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
         XCTAssertEqual(reopened.replyText, "Saved reply")
         XCTAssertEqual(reopened.replyingTo?.objectID, target.objectID)
         reopened.discardReplyDraft()
     }
 
-    func testRestoredMissingTargetBlocksSendInsteadOfChangingThreads() throws {
+    func testReplyDraftReopensWithHiddenAnchorAndKeepsOriginalListDestination() async throws {
+        let fixture = try makeListReplyFixture()
+        let first = fixture.viewModel
+        first.setReplyingTo(fixture.selected)
+        first.replyText = "Keep this destination without a quote"
+        first.composerState.replyingTo = nil
+        await first.saveReplyDraft()
+
+        let reopened = ChatViewModel(
+            conversation: first.conversation,
+            chatDependencies: fixture.dependencies.makeChatDependencies()
+        )
+        reopened.initializeReplyingTo(lastMessage: fixture.newest)
+        reopened.updateReplyingToIfNewSubject(lastMessage: fixture.newest)
+        XCTAssertNil(reopened.replyingTo)
+        XCTAssertEqual(reopened.composerState.replyAnchor, fixture.selected)
+
+        let result = await reopened.sendReply()
+
+        XCTAssertNotNil(result)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        let metadata = try await fixture.dependencies.makeChatDependencies().messaging
+            .outboundReplyContextBuilder.buildReplyMetadata(request.context)
+        XCTAssertEqual(metadata.recipientEmails, ["selected-replies@example.com"])
+        XCTAssertEqual(metadata.threadId, "selected-thread")
+        XCTAssertFalse(request.context.includesQuotedMessage)
+        XCTAssertNil(metadata.originalMessage)
+    }
+
+    func testReplyDraftStabilizesHiddenTemporaryTargetBeforeSaving() async throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let first = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        let target = MessageBuilder().inConversation(conversation).build(in: context)
+        first.replyingTo = target
+        first.replyingTo = nil
+        first.replyText = "Keep the hidden target"
+        XCTAssertTrue(target.objectID.isTemporaryID)
+
+        await first.saveReplyDraft()
+
+        XCTAssertFalse(target.objectID.isTemporaryID)
+        let saved = try XCTUnwrap(ChatReplyDraftStore(context: context).load(conversationID: conversation.id))
+        XCTAssertEqual(saved.0.targetURI, target.objectID.uriRepresentation())
+        XCTAssertEqual(saved.0.includesQuotedMessage, false)
+        first.discardReplyDraft()
+    }
+
+    func testLegacyReplyDraftRestoresVisibleQuote() throws {
+        let fixture = try makeListReplyFixture()
+        let conversation = fixture.viewModel.conversation
+        let legacy = StoredChatReplyDraft(
+            text: "Legacy draft", targetURI: fixture.selected.objectID.uriRepresentation(), recoveredEnvelope: nil
+        )
+        let data = try JSONEncoder().encode(legacy)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("includesQuotedMessage"))
+        try ChatReplyDraftStore(context: fixture.dependencies.viewContext).save(
+            legacy, attachments: [], conversationID: conversation.id
+        )
+
+        let reopened = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: fixture.dependencies.makeChatDependencies()
+        )
+
+        XCTAssertEqual(reopened.replyingTo, fixture.selected)
+        XCTAssertEqual(reopened.composerState.replyAnchor, fixture.selected)
+        reopened.discardReplyDraft()
+    }
+
+    func testRecoverFailedReplyClearsAnUnrelatedHiddenAnchor() async throws {
+        let fixture = try makeListReplyFixture()
+        let viewModel = fixture.viewModel
+        let context = fixture.dependencies.viewContext
+        viewModel.setReplyingTo(fixture.newest)
+        viewModel.replyingTo = nil
+        let metadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["selected-replies@example.com"], fromEmail: "me@example.com", fromName: nil,
+            subject: "Re: Selected subject", threadId: "selected-thread", inReplyTo: "<selected@example.com>",
+            references: [], originalMessage: nil
+        )
+        let service = GmailSendService(viewContext: context)
+        let handle = try await service.createOptimisticMessage(
+            to: metadata.recipientEmails, body: "Retry this reply", subject: metadata.subject, threadId: metadata.threadId,
+            optimisticConversation: .existingConversation(.init(objectID: viewModel.conversation.objectID)),
+            replyMetadata: metadata
+        )
+        service.retainDefinitelyUnsentOptimisticMessage(byID: handle.optimisticMessageID, fallbackAttachmentReferences: [])
+
+        XCTAssertTrue(viewModel.editFailedReply(messageObjectID: handle.optimisticMessageObjectID))
+
+        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertNil(viewModel.composerState.replyAnchor)
+        await viewModel.saveReplyDraft()
+        let draft = try XCTUnwrap(ChatReplyDraftStore(context: context).load(conversationID: viewModel.conversation.id))
+        XCTAssertNil(draft.0.targetURI)
+        XCTAssertEqual(draft.0.recoveredEnvelope?.threadId, "selected-thread")
+        let result = await viewModel.sendReply()
+        XCTAssertNotNil(result)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected recovered reply request")
+        }
+        XCTAssertNil(request.context.replyingToMessageObjectID)
+        XCTAssertEqual(request.retryMetadata?.recipientEmails, metadata.recipientEmails)
+        XCTAssertEqual(request.retryMetadata?.threadId, metadata.threadId)
+
+        viewModel.initializeReplyingTo(lastMessage: fixture.newest)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: fixture.newest)
+        viewModel.replyText = "One more thing in the same thread"
+        let followUpResult = await viewModel.sendReply()
+        XCTAssertNotNil(followUpResult)
+        guard case .reply(let followUpRequest)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected follow-up reply request")
+        }
+        XCTAssertNil(followUpRequest.context.replyingToMessageObjectID)
+        XCTAssertEqual(followUpRequest.retryMetadata?.recipientEmails, metadata.recipientEmails)
+        XCTAssertEqual(followUpRequest.retryMetadata?.threadId, metadata.threadId)
+
+        viewModel.replyText = "Discard this destination"
+        viewModel.discardReplyDraft()
+        viewModel.initializeReplyingTo(lastMessage: fixture.newest)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.newest)
+        XCTAssertNil(viewModel.composerState.recoveredReplyEnvelope)
+    }
+
+    func testRestoredMissingTargetBlocksSendInsteadOfChangingThreads() async throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
@@ -1329,14 +1580,15 @@ final class ChatViewModelTests: XCTestCase {
         let first = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
         first.replyText = "Draft for deleted message"
         first.replyingTo = target
-        first.saveReplyDraft()
+        first.replyingTo = nil
+        await first.saveReplyDraft()
         let targetURI = target.objectID.uriRepresentation()
         context.delete(target)
         try context.save()
         let reopened = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
         XCTAssertEqual(reopened.composerState.unavailableReplyTargetURI, targetURI)
         XCTAssertNil(reopened.replyingTo)
-        reopened.saveReplyDraft()
+        await reopened.saveReplyDraft()
         let stored = try ChatReplyDraftStore(context: context).load(conversationID: conversation.id)
         XCTAssertEqual(stored?.0.targetURI, targetURI)
         reopened.discardReplyDraft()
@@ -1353,7 +1605,7 @@ final class ChatViewModelTests: XCTestCase {
         let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
         XCTAssertTrue(viewModel.draftRestoreFailed)
         viewModel.replyText = "New text"
-        viewModel.saveReplyDraft()
+        await viewModel.saveReplyDraft()
         XCTAssertEqual(record.data, Data("unreadable draft".utf8))
         let result = await viewModel.sendReply()
         XCTAssertNil(result)
@@ -1362,7 +1614,7 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(try ChatReplyDraftStore(context: context).fetch(conversationID: conversation.id))
     }
 
-    func testReplyDraftExcludesUnfinishedImportsAndPreservesFinalizedAttachments() throws {
+    func testReplyDraftExcludesUnfinishedImportsAndPreservesFinalizedAttachments() async throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
@@ -1378,7 +1630,7 @@ final class ChatViewModelTests: XCTestCase {
         first.composerState.attachments = [unfinished, emptyPath, finalized]
         first.composerState.isProcessingAttachments = true
 
-        first.saveReplyDraft()
+        await first.saveReplyDraft()
 
         XCTAssertNil(unfinished.replyDraft, "The importer must retain ownership of its placeholder")
         XCTAssertNil(emptyPath.replyDraft)
@@ -1389,9 +1641,49 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(reopened.composerState.attachments.map(\.objectID), [finalized.objectID])
 
         unfinished.localURL = "Attachments/\(UUID().uuidString).pdf"
-        first.saveReplyDraft()
+        await first.saveReplyDraft()
         let saved = try XCTUnwrap(ChatReplyDraftStore(context: context).load(conversationID: conversation.id))
         XCTAssertEqual(Set(saved.1.map(\.objectID)), Set([unfinished.objectID, finalized.objectID]))
+    }
+
+    private func makeListReplyFixture() throws -> (
+        dependencies: Dependencies,
+        coordinator: MockChatOutboundMessageCoordinator,
+        viewModel: ChatViewModel,
+        selected: Message,
+        newest: Message
+    ) {
+        let coordinator = MockChatOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let dependencies = Dependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com"),
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = dependencies.viewContext
+        let conversation = ConversationBuilder().asList().withListId("list.example.com")
+            .visible().recentlyActive().build(in: context)
+        let selected = MessageBuilder().withThreadId("selected-thread")
+            .withSubject("Selected subject").withListId("list.example.com")
+            .withSender(email: "selected-author@example.com").hoursAgo(1)
+            .inConversation(conversation).build(in: context)
+        selected.replyTo = "selected-replies@example.com"
+        selected.messageId = "<selected@example.com>"
+        selected.references = "<older@example.com>"
+        let newest = MessageBuilder().withThreadId("newest-thread")
+            .withSubject("New subject").withListId("list.example.com")
+            .withSender(email: "newest-author@example.com").withBody("New message body")
+            .inConversation(conversation).build(in: context)
+        newest.replyTo = "newest-replies@example.com"
+        try context.obtainPermanentIDs(for: [conversation, selected, newest])
+        return (
+            dependencies,
+            coordinator,
+            ChatViewModel(conversation: conversation, chatDependencies: dependencies.makeChatDependencies()),
+            selected,
+            newest
+        )
     }
 
     private func waitUntil(

@@ -338,10 +338,7 @@ extension MessagePersister {
         for (_, (conversation, wasNewlyInserted)) in affectedConversations
             where !conversation.isDeleted {
             let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
-            if remainingMessages.isEmpty && draftConversationIDs.contains(conversation.id) {
-                continue
-            }
-            if wasNewlyInserted && remainingMessages.isEmpty {
+            if wasNewlyInserted && remainingMessages.isEmpty && !draftConversationIDs.contains(conversation.id) {
                 context.delete(conversation)
             } else {
                 ConversationRollupSnapshot.make(from: Set(remainingMessages)).apply(to: conversation)

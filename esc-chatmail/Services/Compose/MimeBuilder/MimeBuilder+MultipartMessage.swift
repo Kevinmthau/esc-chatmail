@@ -11,7 +11,8 @@ extension MimeBuilder {
         inReplyTo: String?,
         references: [String],
         attachments: [AttachmentData],
-        messageId: String? = nil
+        messageId: String? = nil,
+        preserveEmptySubject: Bool = false
     ) -> Data {
         var mime = ""
         let boundary = generateBoundary()
@@ -24,6 +25,8 @@ extension MimeBuilder {
         if let subject = subject, !subject.isEmpty {
             let encodedSubject = encodeHeaderIfNeeded(subject)
             mime += "Subject: \(encodedSubject)\r\n"
+        } else if preserveEmptySubject {
+            mime += "Subject: \r\n"
         } else {
             // Add default subject if none provided
             mime += "Subject: (No Subject)\r\n"

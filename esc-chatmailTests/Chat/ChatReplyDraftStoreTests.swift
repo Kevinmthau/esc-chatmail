@@ -60,6 +60,54 @@ final class ChatReplyDraftStoreTests: XCTestCase {
         XCTAssertEqual(attachment.replyDraft, draft)
     }
 
+    func testDiscardUnreadableDraftDeletesOwnedAttachmentRowsAndFiles() throws {
+        let id = conversation.id
+        let attachmentID = "local_unreadable_\(UUID().uuidString)"
+        let localPath = AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "txt")
+        let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentID)
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(Data("draft file".utf8), to: localPath))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("preview".utf8), to: previewPath))
+        defer {
+            AttachmentPaths.deleteFile(at: localPath)
+            AttachmentPaths.deleteFile(at: previewPath)
+        }
+        let draft = ChatReplyDraft(context: context)
+        draft.conversationId = id
+        draft.data = Data("unreadable snapshot".utf8)
+        let attachment = AttachmentBuilder().withId(attachmentID)
+            .withLocalURL(localPath).withPreviewURL(previewPath).build(in: context)
+        attachment.replyDraft = draft
+        try context.save()
+        XCTAssertThrowsError(try store.load(conversationID: id))
+
+        try store.discard(conversationID: id)
+        context.reset()
+
+        XCTAssertNil(try store.load(conversationID: id))
+        XCTAssertEqual(try context.count(for: Attachment.fetchRequest()), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(AttachmentPaths.fullURL(for: localPath)).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(AttachmentPaths.fullURL(for: previewPath)).path))
+    }
+
+    func testDiscardDraftPreservesAttachmentAlreadyOwnedByMessage() throws {
+        let id = conversation.id
+        let message = MessageBuilder().withId("sent-owner").inConversation(conversation).build(in: context)
+        let draft = ChatReplyDraft(context: context)
+        draft.conversationId = id
+        let attachment = AttachmentBuilder().withId("local_sent_owner").forMessage(message).build(in: context)
+        attachment.replyDraft = draft
+        try context.save()
+
+        try store.discard(conversationID: id)
+        context.reset()
+
+        let savedAttachment = try XCTUnwrap(context.fetch(Attachment.fetchRequest()).first)
+        XCTAssertEqual(savedAttachment.message?.id, "sent-owner")
+        XCTAssertNil(savedAttachment.replyDraft)
+        XCTAssertNil(try store.load(conversationID: id))
+    }
+
     func testOptimisticReplyAtomicallyTakesDraftOwnershipAndSavesEnvelope() async throws {
         let attachment = AttachmentBuilder().withId("local_outgoing").withFilename("notes.txt").build(in: context)
         try store.save(.init(text: "Reply", targetURI: nil, recoveredEnvelope: nil), attachments: [attachment], conversationID: conversation.id)

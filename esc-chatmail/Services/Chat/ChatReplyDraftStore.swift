@@ -54,6 +54,15 @@ struct StoredChatReplyDraft: Codable {
     let text: String
     let targetURI: URL?
     let recoveredEnvelope: StoredReplyEnvelope?
+    // Older drafts always displayed the quote for their saved target.
+    let includesQuotedMessage: Bool?
+
+    init(text: String, targetURI: URL?, recoveredEnvelope: StoredReplyEnvelope?, includesQuotedMessage: Bool? = nil) {
+        self.text = text
+        self.targetURI = targetURI
+        self.recoveredEnvelope = recoveredEnvelope
+        self.includesQuotedMessage = includesQuotedMessage
+    }
 }
 
 /// Drafts live in the mailbox store, so account removal also removes their
@@ -101,6 +110,31 @@ struct ChatReplyDraftStore {
         guard let record = try fetch(conversationID: conversationID) else { return }
         record.attachments = []
         context.delete(record)
+    }
+
+    /// Explicit discard must also work when the snapshot cannot be decoded and
+    /// its attachments were never loaded into the composer.
+    func discard(conversationID: UUID) throws {
+        guard let record = try fetch(conversationID: conversationID) else { return }
+        if context.hasChanges { try context.save() }
+        let attachments = Array(record.attachments ?? []).filter { !$0.isDeleted }
+        let filePaths = attachments.filter { $0.message == nil && $0.isLocalAttachment }
+            .flatMap { [$0.localURL, $0.previewURL].compactMap { $0 } }
+        do {
+            // A send may already own an attachment. Preserve that ownership
+            // instead of letting the draft's cascade deletion remove it.
+            for attachment in attachments where attachment.message != nil {
+                attachment.replyDraft = nil
+            }
+            context.delete(record)
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+        for path in filePaths {
+            AttachmentPaths.deleteFile(at: path)
+        }
     }
 
     func recover(_ message: Message, conversation: Conversation, currentUserEmail: String) throws -> (StoredChatReplyDraft, [Attachment]) {

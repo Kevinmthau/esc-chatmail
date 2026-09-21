@@ -45,7 +45,7 @@ struct ChatReplyBar: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
             } else if let recoveredReplyEnvelope {
-                Text("Resending to: \(recoveredReplyEnvelope.recipients.joined(separator: ", "))")
+                Text("Replying to: \(recoveredReplyEnvelope.recipients.joined(separator: ", "))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16)

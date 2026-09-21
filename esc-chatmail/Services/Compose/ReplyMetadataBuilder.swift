@@ -13,7 +13,8 @@ struct ReplyMetadataBuilder {
         conversation: ReplyConversationSnapshot,
         replyingTo: ReplyTargetSnapshot?,
         sendAsAliases: [SendAsAlias],
-        userAliases: Set<String> = []
+        userAliases: Set<String> = [],
+        includesQuotedMessage: Bool = true
     ) throws -> OutboundMessageRequest.ReplyMetadata {
         let target = replyingTo ?? conversation.latestReplyTarget
         let currentUserEmail = authSession.userEmail ?? ""
@@ -95,7 +96,7 @@ struct ReplyMetadataBuilder {
             if let messageId = target.messageId {
                 references.append(messageId)
             }
-            originalMessage = replyingTo?.originalMessage
+            originalMessage = includesQuotedMessage ? replyingTo?.originalMessage : nil
         } else {
             threadId = conversation.latestThreadId
         }

@@ -85,6 +85,27 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertNil(conversation.snippet)
     }
 
+    func testEmptyDraftConversationClearsUnreadStateWhileKeepingDraftReachable() throws {
+        let staleDate = Date(timeIntervalSince1970: 100)
+        let conversation = ConversationBuilder().withSnippet("Previous message")
+            .withLastMessageDate(staleDate).hasInboxMessages(true).visible().build(in: context)
+        conversation.inboxUnreadCount = 3
+        conversation.latestInboxDate = staleDate
+        let draft = ChatReplyDraft(context: context)
+        draft.conversationId = conversation.id
+        draft.data = Data("saved draft".utf8)
+        try context.save()
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertFalse(conversation.hasInbox)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        XCTAssertNil(conversation.latestInboxDate)
+        XCTAssertFalse(conversation.hidden)
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertEqual(conversation.lastMessageDate, staleDate)
+    }
+
     func testUpdateRollups_keepsActiveConversationVisibleWhenLatestMessageIsOutgoing() throws {
         let oldDate = Date(timeIntervalSince1970: 100)
         let sentDate = Date(timeIntervalSince1970: 200)

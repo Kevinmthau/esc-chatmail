@@ -10,7 +10,15 @@ import Combine
 @MainActor
 final class ChatComposerState: ObservableObject {
     @Published var replyText: String
-    @Published var replyingTo: Message?
+    @Published var replyingTo: Message? {
+        didSet {
+            if let replyingTo {
+                replyAnchor = replyingTo
+            }
+        }
+    }
+    // Dismissing the quote changes presentation, not the draft's destination.
+    private(set) var replyAnchor: Message?
     @Published var attachments: [Attachment]
     @Published var isProcessingAttachments = false
     @Published var recoveredReplyEnvelope: StoredReplyEnvelope?
@@ -25,7 +33,13 @@ final class ChatComposerState: ObservableObject {
     ) {
         self.replyText = replyText
         self.replyingTo = replyingTo
+        self.replyAnchor = replyingTo
         self.attachments = attachments
+    }
+
+    func replaceReplyTarget(_ message: Message?) {
+        replyAnchor = message
+        replyingTo = message
     }
 
     var hasDraftContent: Bool {
@@ -79,7 +93,7 @@ final class ChatComposerState: ObservableObject {
 
     func discardUnsentAttachments() {
         let discardedAttachments = attachments.filter { attachment in
-            !attachment.isDeleted && attachment.message == nil
+            attachment.managedObjectContext != nil && !attachment.isDeleted && attachment.message == nil
         }
         attachments.removeAll()
 
@@ -147,6 +161,7 @@ final class ChatViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let draftStore: ChatReplyDraftStore
     private let draftAccountEmail: String?
+    private let conversationMutationSerializer: ConversationRollupMutationSerializer
     @Published private(set) var draftRestoreFailed = false
 
     // MARK: - Task Management
@@ -186,7 +201,11 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init(conversation: Conversation, chatDependencies: ChatDependencies) {
+    init(
+        conversation: Conversation,
+        chatDependencies: ChatDependencies,
+        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared
+    ) {
         if conversation.objectID.isTemporaryID {
             try? chatDependencies.storage.viewContext.obtainPermanentIDs(for: [conversation])
         }
@@ -197,6 +216,7 @@ final class ChatViewModel: ObservableObject {
         self.viewContext = chatDependencies.storage.viewContext
         self.draftStore = ChatReplyDraftStore(context: chatDependencies.storage.viewContext)
         self.draftAccountEmail = chatDependencies.session.authSession.userEmail
+        self.conversationMutationSerializer = conversationMutationSerializer
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
         self.conversationDisplayNameHint = conversation.displayName
@@ -216,7 +236,7 @@ final class ChatViewModel: ObservableObject {
         restoreReplyDraft()
         composerState.objectWillChange
             .debounce(for: .milliseconds(350), scheduler: RunLoop.main)
-            .sink { [weak self] _ in self?.saveReplyDraft() }
+            .sink { [weak self] _ in self?.scheduleReplyDraftSave() }
             .store(in: &cancellables)
     }
 
@@ -328,7 +348,7 @@ final class ChatViewModel: ObservableObject {
     func initializeReplyingTo(lastMessage: Message?) {
         guard !composerState.isSending,
               !composerState.hasDraftContent,
-              replyingTo == nil,
+              composerState.replyAnchor == nil,
               composerState.recoveredReplyEnvelope == nil,
               composerState.unavailableReplyTargetURI == nil,
               let lastMessage,
@@ -358,7 +378,7 @@ final class ChatViewModel: ObservableObject {
               manuallySelectedReplyTargetID != currentReplyingTo.objectID else { return }
 
         guard isValidReplyTarget(currentReplyingTo) else {
-            replyingTo = lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil }
+            composerState.replaceReplyTarget(lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil })
             return
         }
 
@@ -443,7 +463,7 @@ final class ChatViewModel: ObservableObject {
         guard composerState.beginSending() else { return nil }
         defer {
             composerState.finishSending()
-            saveReplyDraft()
+            scheduleReplyDraftSave()
         }
 
         guard !isConversationDrained else {
@@ -459,8 +479,8 @@ final class ChatViewModel: ObservableObject {
 
         let result: OutboundMessageResult?
         do {
-            if let replyingTo, replyingTo.objectID.isTemporaryID {
-                try viewContext.obtainPermanentIDs(for: [replyingTo])
+            if let target = composerState.replyAnchor, target.objectID.isTemporaryID {
+                try viewContext.obtainPermanentIDs(for: [target])
             }
             let attachmentContexts = try outboundAttachmentContextBuilder.buildSendAttachments(
                 from: attachments
@@ -470,8 +490,9 @@ final class ChatViewModel: ObservableObject {
                     .init(
                         context: outboundReplyContextBuilder.build(
                             conversationObjectID: conversation.objectID,
-                            replyingToMessageObjectID: replyingTo?.objectID,
-                            optimisticConversation: replyOptimisticConversation
+                            replyingToMessageObjectID: composerState.replyAnchor?.objectID,
+                            optimisticConversation: replyOptimisticConversation,
+                            includesQuotedMessage: replyingTo != nil
                         ),
                         body: trimmedReplyText,
                         attachments: attachmentContexts,
@@ -492,38 +513,82 @@ final class ChatViewModel: ObservableObject {
         // Clear only after local preflight reaches durable transmission admission.
         // Keep the reply target so another message in this chat retains its
         // subject and threading headers while the sent-message echo arrives.
+        // A recovered envelope serves the same purpose when its original
+        // target is no longer available locally.
         replyText = ""
         composerState.attachments = []
-        composerState.recoveredReplyEnvelope = nil
         return result
     }
 
     // MARK: - Durable reply drafts and failed-send recovery
 
-    func saveReplyDraft() {
-        guard !composerState.isSending, !draftRestoreFailed,
-              authSession.userEmail == draftAccountEmail,
-              conversation.managedObjectContext != nil, !conversation.isDeleted else { return }
+    /// Retain the screen state until its lifecycle-triggered save finishes, even
+    /// after navigation releases the view. Repeated requests replace older work.
+    func scheduleReplyDraftSave() {
+        taskManager.run("saveReplyDraft") { [self] in
+            await saveReplyDraft()
+        }
+    }
+
+    func saveReplyDraft(onEnqueued: (@Sendable () async -> Void)? = nil) async {
         do {
-            if let target = replyingTo, target.objectID.isTemporaryID {
-                try viewContext.obtainPermanentIDs(for: [target])
+            try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation(
+                onEnqueued: onEnqueued
+            ) { [self] in
+                try await saveReplyDraftWithoutCleanupInterleaving()
             }
-            // Importers own unfinished placeholders and may remove them after
-            // this screen disappears. Persist only finalized files so that a
-            // later cancellation cannot leave a durable, unsendable attachment.
-            let finalizedAttachments = composerState.attachments.filter { attachment in
-                guard let localURL = attachment.localURL else { return false }
-                return !localURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            }
-            try draftStore.save(
-                StoredChatReplyDraft(text: replyText, targetURI: composerState.unavailableReplyTargetURI ?? replyingTo?.objectID.uriRepresentation(),
-                                     recoveredEnvelope: composerState.recoveredReplyEnvelope),
-                attachments: finalizedAttachments,
-                conversationID: conversation.id
-            )
+        } catch is CancellationError {
+            // A newer request will persist the latest composer state.
         } catch {
             Log.error("Failed to save reply draft", category: .message, error: error)
             sendErrorAlert = ChatSendErrorAlert(title: "Couldn’t Save Draft", message: error.localizedDescription)
+        }
+    }
+
+    private func saveReplyDraftWithoutCleanupInterleaving() throws {
+        // Read live state only after acquiring cleanup's gate: a queued save
+        // must not resurrect content that was sent or explicitly discarded.
+        guard !composerState.isSending, !draftRestoreFailed,
+              authSession.userEmail == draftAccountEmail else { return }
+        guard conversation.managedObjectContext === viewContext, !conversation.isDeleted else {
+            if composerState.hasDraftContent { throw ReplyDraftPersistenceError.conversationUnavailable }
+            return
+        }
+        if !conversation.isInserted {
+            // Cleanup may have deleted the row in another context before its
+            // merge notification reaches this still-registered UI object.
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(format: "SELF == %@", conversation.objectID)
+            request.includesPendingChanges = false
+            guard try viewContext.count(for: request) > 0 else {
+                if composerState.hasDraftContent { throw ReplyDraftPersistenceError.conversationUnavailable }
+                return
+            }
+        }
+        if let target = composerState.replyAnchor, target.objectID.isTemporaryID {
+            try viewContext.obtainPermanentIDs(for: [target])
+        }
+        // Importers own unfinished placeholders and may remove them after
+        // this screen disappears. Persist only finalized files so that a
+        // later cancellation cannot leave a durable, unsendable attachment.
+        let finalizedAttachments = composerState.attachments.filter { attachment in
+            guard let localURL = attachment.localURL else { return false }
+            return !localURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        try draftStore.save(
+            StoredChatReplyDraft(text: replyText, targetURI: composerState.unavailableReplyTargetURI ?? composerState.replyAnchor?.objectID.uriRepresentation(),
+                                 recoveredEnvelope: composerState.recoveredReplyEnvelope,
+                                 includesQuotedMessage: replyingTo != nil),
+            attachments: finalizedAttachments,
+            conversationID: conversation.id
+        )
+    }
+
+    private enum ReplyDraftPersistenceError: LocalizedError {
+        case conversationUnavailable
+
+        var errorDescription: String? {
+            "This conversation is no longer available. Your draft and attachments are still here."
         }
     }
 
@@ -535,8 +600,9 @@ final class ChatViewModel: ObservableObject {
             composerState.recoveredReplyEnvelope = snapshot.recoveredEnvelope
             if let uri = snapshot.targetURI,
                let objectID = viewContext.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: uri) {
-                replyingTo = resolveMessage(with: objectID)
-                if replyingTo == nil { composerState.unavailableReplyTargetURI = uri }
+                composerState.replaceReplyTarget(resolveMessage(with: objectID))
+                if composerState.replyAnchor == nil { composerState.unavailableReplyTargetURI = uri }
+                if snapshot.includesQuotedMessage == false { replyingTo = nil }
             } else if let uri = snapshot.targetURI {
                 composerState.unavailableReplyTargetURI = uri
             }
@@ -549,12 +615,20 @@ final class ChatViewModel: ObservableObject {
 
     func discardReplyDraft() {
         guard !composerState.isSending, !composerState.isProcessingAttachments else { return }
+        do {
+            try draftStore.discard(conversationID: conversation.id)
+        } catch {
+            sendErrorAlert = ChatSendErrorAlert(title: "Couldn’t Discard Draft", message: error.localizedDescription)
+            return
+        }
         draftRestoreFailed = false
         replyText = ""
+        composerState.replaceReplyTarget(nil)
+        manuallySelectedReplyTargetID = nil
         composerState.recoveredReplyEnvelope = nil
         composerState.unavailableReplyTargetURI = nil
         composerState.discardUnsentAttachments()
-        saveReplyDraft()
+        scheduleReplyDraftSave()
     }
 
     @discardableResult
@@ -570,7 +644,10 @@ final class ChatViewModel: ObservableObject {
             let (snapshot, attachments) = try draftStore.recover(message, conversation: conversation,
                                                                currentUserEmail: authSession.userEmail ?? "")
             replyText = snapshot.text
-            replyingTo = nil
+            // The saved envelope now owns the destination. Do not retain a
+            // previously selected message as a hidden follow-up reply target.
+            composerState.replaceReplyTarget(nil)
+            manuallySelectedReplyTargetID = nil
             composerState.unavailableReplyTargetURI = nil
             composerState.attachments = attachments
             composerState.recoveredReplyEnvelope = snapshot.recoveredEnvelope

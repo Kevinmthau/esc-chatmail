@@ -39,6 +39,9 @@ final class MessagePersisterAttachmentHandoffTests: XCTestCase {
         let context = testStack.makeMainQueueViewContext()
         for newlyInserted in [true, false] {
             let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+            conversation.hasInbox = true
+            conversation.inboxUnreadCount = 2
+            conversation.latestInboxDate = Date()
             let conversationID = conversation.id
             let unprotectedConversation = ConversationBuilder().visible().recentlyActive().build(in: context)
             let unprotectedConversationID = unprotectedConversation.id
@@ -67,6 +70,9 @@ final class MessagePersisterAttachmentHandoffTests: XCTestCase {
             )
 
             var affectedIDs = persister.consumeRemoteCommittedSendMutation(resolution, in: context)
+            XCTAssertFalse(conversation.hasInbox)
+            XCTAssertEqual(conversation.inboxUnreadCount, 0)
+            XCTAssertNil(conversation.latestInboxDate)
             affectedIDs.insert(unprotectedConversation.objectID)
             let updated = await ConversationRollupUpdater().updateRollupsForModified(
                 conversationIDs: affectedIDs,

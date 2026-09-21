@@ -75,6 +75,10 @@ struct ConversationRollupSnapshot: Sendable {
         to conversation: Conversation,
         routingPolicy: ConversationRoutingPolicy = ConversationRoutingPolicy()
     ) {
+        // Draft ownership preserves visibility, not stale mailbox state.
+        conversation.hasInbox = hasInbox
+        conversation.inboxUnreadCount = inboxUnreadCount
+        conversation.latestInboxDate = latestInboxDate
         if lastMessageDate == nil {
             // Sync can drain a conversation after the user starts another reply.
             // Preserve its list entry until that saved draft is sent or discarded.
@@ -95,9 +99,6 @@ struct ConversationRollupSnapshot: Sendable {
         } else {
             conversation.snippet = MessagePreviewText.nonEmpty(snippet)
         }
-        conversation.hasInbox = hasInbox
-        conversation.inboxUnreadCount = inboxUnreadCount
-        conversation.latestInboxDate = latestInboxDate
         routingPolicy.applyArchiveState(to: conversation, snapshot: self)
     }
 

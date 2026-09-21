@@ -180,6 +180,85 @@ final class ComposeViewModelTests: XCTestCase {
         )
     }
 
+    func testSend_forwardIncludesInlineFilesInCombinedAttachmentBudget() async throws {
+        let coordinator = MockOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com"),
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        AttachmentPaths.setupDirectories()
+        let inlinePath = AttachmentPaths.originalPath(idOrUUID: UUID().uuidString, ext: "png")
+        let regularPath = AttachmentPaths.originalPath(idOrUUID: UUID().uuidString, ext: "pdf")
+        defer {
+            AttachmentPaths.deleteFile(at: inlinePath)
+            AttachmentPaths.deleteFile(at: regularPath)
+        }
+        for path in [inlinePath, regularPath] {
+            XCTAssertTrue(AttachmentPaths.saveData(Data(), to: path))
+            let file = try FileHandle(forWritingTo: XCTUnwrap(AttachmentPaths.fullURL(for: path)))
+            try file.truncate(atOffset: 13 * 1024 * 1024)
+            try file.close()
+        }
+        let viewModel = ComposeViewModel(
+            mode: .forward(.init(
+                id: "forward-source-message",
+                initialSubject: "Fwd: Original Subject",
+                forwardedPlainTextBody: "Forwarded body",
+                forwardedHTMLBody: "<img src=\"cid:inline@example.com\">",
+                forwardedInlineAttachmentInfos: [
+                    .init(localURL: inlinePath, filename: "inline.png", mimeType: "image/png", contentId: "inline@example.com")
+                ],
+                forwardedRegularAttachments: [
+                    .init(
+                        filename: "report.pdf",
+                        mimeType: "application/pdf",
+                        byteSize: 0,
+                        localURL: regularPath,
+                        previewURL: nil,
+                        width: 0,
+                        height: 0,
+                        pageCount: 0
+                    )
+                ]
+            )),
+            dependencies: deps.makeComposeDependencies()
+        )
+        defer { viewModel.attachmentManager.clear() }
+        viewModel.setupForMode()
+        viewModel.addRecipient(email: "friend@example.com")
+
+        XCTAssertTrue(viewModel.canSend)
+        let didSendOverBudget = await viewModel.send()
+
+        XCTAssertFalse(didSendOverBudget)
+        XCTAssertNil(coordinator.lastRequest, "Combined attachment size must be checked before submitting the forward")
+        XCTAssertFalse(viewModel.isSending)
+        XCTAssertEqual(
+            viewModel.errorAlert?.message,
+            DraftAttachmentImport.ImportError.sizeLimit(filename: "report.pdf").localizedDescription
+        )
+
+        // Reducing the regular file to 12 MiB puts the combined total at the 25 MiB limit.
+        let copiedAttachment = try XCTUnwrap(viewModel.attachments.first)
+        let copiedURL = try XCTUnwrap(AttachmentPaths.fullURL(for: copiedAttachment.localURL))
+        let file = try FileHandle(forWritingTo: copiedURL)
+        try file.truncate(atOffset: 12 * 1024 * 1024)
+        try file.close()
+
+        let didSendWithinBudget = await viewModel.send()
+
+        XCTAssertTrue(didSendWithinBudget)
+        XCTAssertNil(viewModel.errorAlert)
+        guard case .forward(let request)? = coordinator.lastRequest else {
+            return XCTFail("Expected forward request")
+        }
+        XCTAssertEqual(request.attachments.map(\.info.filename), ["report.pdf"])
+        XCTAssertEqual(request.forwardedInlineAttachmentInfos.map(\.contentId), ["inline@example.com"])
+    }
+
     func testSend_waitsForAttachmentImportFinalizationBeforeInvokingCoordinator() async {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let coordinator = MockOutboundMessageCoordinator()
