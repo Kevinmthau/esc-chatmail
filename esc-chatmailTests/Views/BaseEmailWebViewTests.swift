@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import WebKit
 @testable import esc_chatmail
 
 @MainActor
@@ -58,6 +59,88 @@ final class BaseEmailWebViewTests: XCTestCase {
         coordinator.updateParent(darkView)
 
         XCTAssertTrue(coordinator.needsReload)
+    }
+
+    func testPendingReload_multipleUpdatesDuringLoad_loadsOnlyLatestContentAfterFinish() {
+        // Revert-check: remove pending-reload tracking from BaseEmailWebView.Coordinator.loadContentIfReady.
+        let originalView = makeWebView(message: nil, html: "<p>Original</p>")
+        let coordinator = BaseEmailWebView.Coordinator(originalView)
+        let webView = RecordingPreviewWebView()
+        coordinator.loadContentIfReady(in: webView)
+
+        coordinator.updateParent(makeWebView(message: nil, html: "<p>Intermediate</p>"))
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.updateParent(makeWebView(message: nil, html: "<p>Latest</p>"))
+        coordinator.loadContentIfReady(in: webView)
+        XCTAssertEqual(webView.loadedHTML, ["<p>Original</p>"])
+
+        coordinator.webView(webView, didFinish: nil)
+
+        XCTAssertEqual(webView.loadedHTML, ["<p>Original</p>", "<p>Latest</p>"])
+        coordinator.webView(webView, didFinish: nil)
+        XCTAssertEqual(webView.loadedHTML.count, 2)
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
+    func testPendingReload_appearanceChangesDuringLoad_reloadsAfterFinish() {
+        // Revert-check: remove pending-reload tracking from BaseEmailWebView.Coordinator.loadContentIfReady.
+        let originalView = makeWebView(message: nil, isDarkMode: false)
+        let coordinator = BaseEmailWebView.Coordinator(originalView)
+        let webView = RecordingPreviewWebView()
+        coordinator.loadContentIfReady(in: webView)
+
+        coordinator.updateParent(makeWebView(message: nil, isDarkMode: true))
+        coordinator.loadContentIfReady(in: webView)
+        XCTAssertEqual(webView.loadedHTML.count, 1)
+
+        coordinator.webView(webView, didFinish: nil)
+
+        XCTAssertEqual(webView.loadedHTML, [originalView.htmlContent, originalView.htmlContent])
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
+    func testPendingReload_navigationFails_loadsLatestContentWithoutRetryingItsFailure() {
+        // Revert-check: remove pending-reload tracking from BaseEmailWebView.Coordinator.loadContentIfReady.
+        assertPendingReloadAfterFailure(isProvisional: false)
+    }
+
+    func testPendingReload_provisionalNavigationFails_loadsLatestContentWithoutRetryingItsFailure() {
+        // Revert-check: remove pending-reload tracking from BaseEmailWebView.Coordinator.loadContentIfReady.
+        assertPendingReloadAfterFailure(isProvisional: true)
+    }
+
+    func testPendingReload_latestInputReturnsToOriginal_doesNotReloadAfterFinish() {
+        // HONEST SCOPE: the old implementation also passes; this guards against a sticky pending flag.
+        let originalView = makeWebView(message: nil)
+        let coordinator = BaseEmailWebView.Coordinator(originalView)
+        let webView = RecordingPreviewWebView()
+        coordinator.loadContentIfReady(in: webView)
+
+        coordinator.updateParent(makeWebView(message: nil, html: "<p>Superseded</p>"))
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.updateParent(originalView)
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.webView(webView, didFinish: nil)
+
+        XCTAssertEqual(webView.loadedHTML, [originalView.htmlContent])
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
+    func testPendingReload_unchangedFailedInput_doesNotAutomaticallyRetry() {
+        // HONEST SCOPE: the old implementation also passes; failure alone must not trigger a new load.
+        for isProvisional in [false, true] {
+            let originalView = makeWebView(message: nil)
+            let coordinator = BaseEmailWebView.Coordinator(originalView)
+            let webView = RecordingPreviewWebView()
+            coordinator.loadContentIfReady(in: webView)
+            coordinator.updateParent(originalView)
+            coordinator.loadContentIfReady(in: webView)
+
+            failNavigation(coordinator, in: webView, isProvisional: isProvisional)
+
+            XCTAssertEqual(webView.loadedHTML, [originalView.htmlContent])
+            XCTAssertTrue(coordinator.needsReload)
+        }
     }
 
     func testResetLoadedSignatureAfterFailureMakesCurrentContentEligibleForRetry() {
@@ -140,19 +223,72 @@ final class BaseEmailWebViewTests: XCTestCase {
     private func makeWebView(
         message: Message?,
         mode: EmailWebViewMode = .simplePreview,
-        isDarkMode: Bool? = nil
+        isDarkMode: Bool? = nil,
+        html: String = "<html><body><img src=\"cid:image001@example.com\"></body></html>"
     ) -> BaseEmailWebView {
         BaseEmailWebView(
-            htmlContent: "<html><body><img src=\"cid:image001@example.com\"></body></html>",
+            htmlContent: html,
             mode: mode,
             isDarkMode: isDarkMode,
             message: message
         )
     }
 
+    private func assertPendingReloadAfterFailure(isProvisional: Bool) {
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, html: "<p>Original</p>"))
+        let webView = RecordingPreviewWebView()
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.updateParent(makeWebView(message: nil, html: "<p>Latest</p>"))
+        coordinator.loadContentIfReady(in: webView)
+        XCTAssertEqual(webView.loadedHTML, ["<p>Original</p>"])
+
+        failNavigation(coordinator, in: webView, isProvisional: isProvisional)
+
+        XCTAssertEqual(webView.loadedHTML, ["<p>Original</p>", "<p>Latest</p>"])
+        // The pending update is consumed once. A failure of that new document must not start a retry loop.
+        failNavigation(coordinator, in: webView, isProvisional: isProvisional)
+        XCTAssertEqual(webView.loadedHTML, ["<p>Original</p>", "<p>Latest</p>"])
+        XCTAssertTrue(coordinator.needsReload)
+    }
+
+    private func failNavigation(
+        _ coordinator: BaseEmailWebView.Coordinator,
+        in webView: WKWebView,
+        isProvisional: Bool
+    ) {
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
+        if isProvisional {
+            coordinator.webView(webView, didFailProvisionalNavigation: nil, withError: error)
+        } else {
+            coordinator.webView(webView, didFail: nil, withError: error)
+        }
+    }
+
     private func makeMessage(id: String) -> Message {
         MessageBuilder()
             .withId(id)
             .build(in: coreDataStack.viewContext)
+    }
+}
+
+@MainActor
+private final class RecordingPreviewWebView: WKWebView {
+    private let testWindow = UIWindow()
+    private(set) var loadedHTML: [String] = []
+
+    // Supply a ready viewport without incidental UIKit layout callbacks replaying a missed update.
+    override var window: UIWindow? { testWindow }
+
+    init() {
+        super.init(frame: CGRect(x: 0, y: 0, width: 320, height: 240), configuration: WKWebViewConfiguration())
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    override func loadHTMLString(_ string: String, baseURL: URL?) -> WKNavigation? {
+        loadedHTML.append(string)
+        return nil
     }
 }
