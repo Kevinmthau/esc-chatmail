@@ -637,6 +637,54 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         await outboundTaskRegistry.cancelAndAwaitAll()
     }
 
+    func testRemoteReconciliationPreservesNewerSavedDraftInSupersededConversation() async throws {
+        let recipient = "draft-after-send@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "First send",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        let conversationID = try XCTUnwrap(message.conversation?.id)
+        let attachment = AttachmentBuilder().withId("newer-saved-draft").build(in: viewContext)
+        let store = ChatReplyDraftStore(context: viewContext)
+        try store.save(
+            StoredChatReplyDraft(text: "Next reply", targetURI: nil, recoveredEnvelope: nil),
+            attachments: [attachment],
+            conversationID: conversationID
+        )
+        let remoteConversation = ConversationBuilder().visible().recentlyActive().build(in: viewContext)
+        let remoteMessage = MessageBuilder()
+            .withId("draft-after-send-remote")
+            .inConversation(remoteConversation)
+            .build(in: viewContext)
+        try saveViewContext()
+        let result = GmailSendService.SendResult(messageId: remoteMessage.id, threadId: "remote-thread")
+
+        XCTAssertTrue(try sendService.reconcileRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: result
+        ))
+        viewContext.reset()
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: result.messageId))
+        XCTAssertEqual(try optimisticMutationRecordCount(in: viewContext), 0)
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", conversationID as CVarArg)
+        let savedConversation = try XCTUnwrap(viewContext.fetch(request).first)
+        XCTAssertTrue(savedConversation.messages?.isEmpty ?? true)
+        XCTAssertFalse(savedConversation.hidden)
+        XCTAssertNil(savedConversation.archivedAt)
+        XCTAssertNotNil(savedConversation.lastMessageDate)
+        let (draft, attachments) = try XCTUnwrap(store.load(conversationID: conversationID))
+        XCTAssertEqual(draft.text, "Next reply")
+        XCTAssertEqual(attachments.map(\.id), ["newer-saved-draft"])
+        XCTAssertNil(attachments.first?.message)
+    }
+
     func testSyncEchoConsumesMutationBeforeAPIResponse_successIsIdempotent() async throws {
         let recipient = "sync-first-race@example.com"
         let remoteMessageID = "gmail-sync-first-id"

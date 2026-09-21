@@ -9,11 +9,13 @@ struct ChatReplyBar: View {
     let isSending: Bool
     let onSend: () async -> Bool
     var focusBinding: FocusState<Bool>.Binding
-    @State private var isProcessingAttachments = false
+    @Binding var isProcessingAttachments: Bool
+    @Binding var unavailableReplyTargetURI: URL?
+    var recoveredReplyEnvelope: StoredReplyEnvelope? = nil
     @Environment(\.managedObjectContext) private var viewContext
     
     var canSend: Bool {
-        Self.isSendEnabled(
+        unavailableReplyTargetURI == nil && Self.isSendEnabled(
             replyText: replyText,
             hasAttachments: !attachments.isEmpty,
             isSending: isSending,
@@ -33,7 +35,22 @@ struct ChatReplyBar: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            if let replyingTo = replyingTo,
+            if unavailableReplyTargetURI != nil {
+                HStack {
+                    Text("Original reply target unavailable")
+                    Spacer()
+                    Button("Clear target") { unavailableReplyTargetURI = nil }
+                }
+                .font(.caption)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+            } else if let recoveredReplyEnvelope {
+                Text("Replying to: \(recoveredReplyEnvelope.recipients.joined(separator: ", "))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+            } else if let replyingTo = replyingTo,
                let subject = replyingTo.subject,
                !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 replyingToIndicator(message: replyingTo)

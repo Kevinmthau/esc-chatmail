@@ -16,7 +16,8 @@ extension GmailSendService {
         attachments: [OutboundMessageRequest.AttachmentContext] = [],
         senderEmail: String? = nil,
         senderName: String? = nil,
-        optimisticConversation: OptimisticConversationReference? = nil
+        optimisticConversation: OptimisticConversationReference? = nil,
+        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
     ) async throws -> OptimisticSendHandle {
         try await createOptimisticMessage(
             to: recipients,
@@ -27,7 +28,8 @@ extension GmailSendService {
             chatPreviewText: optimisticChatPreviewText(from: body),
             senderEmail: senderEmail,
             senderName: senderName,
-            optimisticConversation: optimisticConversation
+            optimisticConversation: optimisticConversation,
+            replyMetadata: replyMetadata
         )
     }
 
@@ -43,7 +45,8 @@ extension GmailSendService {
         chatPreviewText: String?,
         senderEmail: String? = nil,
         senderName: String? = nil,
-        optimisticConversation: OptimisticConversationReference? = nil
+        optimisticConversation: OptimisticConversationReference? = nil,
+        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
     ) async throws -> OptimisticSendHandle {
         try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
             try await createOptimisticMessageWithoutCleanupInterleaving(
@@ -55,7 +58,8 @@ extension GmailSendService {
                 chatPreviewText: chatPreviewText,
                 senderEmail: senderEmail,
                 senderName: senderName,
-                optimisticConversation: optimisticConversation
+                optimisticConversation: optimisticConversation,
+                replyMetadata: replyMetadata
             )
         }
     }
@@ -73,7 +77,8 @@ extension GmailSendService {
         chatPreviewText: String?,
         senderEmail: String?,
         senderName: String?,
-        optimisticConversation: OptimisticConversationReference?
+        optimisticConversation: OptimisticConversationReference?,
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?
     ) async throws -> OptimisticSendHandle {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
@@ -203,7 +208,7 @@ extension GmailSendService {
             conversation: conversation
         )
         do {
-            try persistOptimisticSendMutationAndGraph(rollbackSnapshot)
+            try persistOptimisticSendMutationAndGraph(rollbackSnapshot, replyMetadata: replyMetadata)
         } catch {
             Log.error("Failed to persist optimistic send state", category: .message, error: error)
             rollbackOptimisticCreation(message, snapshot: rollbackSnapshot)
@@ -321,6 +326,26 @@ extension GmailSendService {
             fallbackAttachments,
             detachedFromMessageID: messageID
         )
+        // Restore the draft in the same save that removes the pre-admission
+        // send. A crash must not leave a gap with neither durable owner.
+        if let conversation = message.conversation,
+           let data = fetchOptimisticSendMutationRecords(messageID: messageID).first?.replyEnvelopeData {
+            do {
+                let envelope = try JSONDecoder().decode(StoredReplyEnvelope.self, from: data)
+                try ChatReplyDraftStore(context: viewContext).save(
+                    .init(text: message.bodyTextValue ?? "", targetURI: nil, recoveredEnvelope: envelope),
+                    attachments: messageAttachments, conversationID: conversation.id, persist: false
+                )
+            } catch {
+                Log.error("Failed to restore preflight draft", category: .message, error: error)
+                for attachment in messageAttachments {
+                    attachment.replyDraft = nil
+                    attachment.message = message
+                }
+                retainDefinitelyUnsentOptimisticMessage(byID: messageID, fallbackAttachmentReferences: fallbackAttachmentReferences)
+                return
+            }
+        }
         viewContext.delete(message)
         finalizeOptimisticFailureCleanup(cleanup, restoreRollupFields: true)
         deleteOptimisticSendMutationRecord(messageID: messageID)
@@ -457,6 +482,13 @@ extension GmailSendService {
             didRecord = true
         }
         return didRecord
+    }
+
+    @MainActor
+    func recordSendFailureReason(optimisticMessageID: String, reason: String) {
+        guard let record = fetchOptimisticSendMutationRecords(messageID: optimisticMessageID).first else { return }
+        record.failureReason = reason
+        saveOptimisticFailureCleanup()
     }
 
     /// Reflects a durable delivery state in the registered UI context without
@@ -616,6 +648,16 @@ extension GmailSendService {
         }
 
         let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
+        if remainingMessages.isEmpty {
+            do {
+                if try ChatReplyDraftStore(context: viewContext).fetch(conversationID: conversation.id) != nil {
+                    return
+                }
+            } catch {
+                Log.error("Failed to check saved draft before send cleanup", category: .coreData, error: error)
+                return
+            }
+        }
         if wasInsertedConversation && remainingMessages.isEmpty {
             viewContext.delete(conversation)
             return
@@ -1079,15 +1121,44 @@ extension GmailSendService {
 
     @MainActor
     private func persistOptimisticSendMutationAndGraph(
-        _ snapshot: OptimisticSendMutationSnapshot
+        _ snapshot: OptimisticSendMutationSnapshot,
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?
     ) throws {
+        let draftStore = ChatReplyDraftStore(context: viewContext)
+        let originalDraft: ChatReplyDraft?
+        if replyMetadata != nil, let conversationID = snapshot.conversationID {
+            originalDraft = try draftStore.fetch(conversationID: conversationID)
+        } else {
+            originalDraft = nil
+        }
+        let originalDraftData = originalDraft?.data
+        let originalDraftAttachments = originalDraft?.attachments ?? []
         let record = fetchOptimisticSendMutationRecords(
             messageID: snapshot.optimisticMessageID
         ).first ?? OutboundSendMutationRecord(context: viewContext)
         snapshot.apply(to: record)
+        do {
+            if let replyMetadata {
+                record.replyEnvelopeData = try JSONEncoder().encode(StoredReplyEnvelope(replyMetadata))
+                if let conversationID = snapshot.conversationID {
+                    try draftStore.remove(conversationID: conversationID)
+                }
+            }
 
-        if viewContext.hasChanges {
-            try viewContext.save()
+            if viewContext.hasChanges {
+                try viewContext.save()
+            }
+        } catch {
+            // The caller rolls back the new message, but a failed save leaves
+            // the consumed draft pending deletion. Restore its ownership too,
+            // so a later unrelated save cannot erase the user's durable draft.
+            if let originalDraft, originalDraft.isDeleted {
+                let restoredDraft = ChatReplyDraft(context: viewContext)
+                restoredDraft.conversationId = originalDraft.conversationId
+                restoredDraft.data = originalDraftData
+                restoredDraft.attachments = originalDraftAttachments
+            }
+            throw error
         }
     }
 

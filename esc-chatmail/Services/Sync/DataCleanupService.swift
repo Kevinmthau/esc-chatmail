@@ -135,9 +135,15 @@ struct DataCleanupService: Sendable {
         await mergeDuplicateLabels(in: context)
     }
 
-    /// Pending optimistic-send anchors are a destructive-cleanup exclusion.
-    /// Callers deliberately fail closed if this fetch throws.
-    func pendingSendConversationIDs(in context: NSManagedObjectContext) throws -> Set<UUID> {
-        Set(try context.fetch(OutboundSendMutationRecord.fetchRequest()).compactMap(\.conversationId))
+    /// Pending sends and saved reply drafts own their conversation anchors.
+    /// Callers deliberately fail closed if either reference fetch throws.
+    func pendingSendConversationIDs(
+        in context: NSManagedObjectContext,
+        sendRecords: [OutboundSendMutationRecord]? = nil
+    ) throws -> Set<UUID> {
+        let sends = try sendRecords ?? context.fetch(OutboundSendMutationRecord.fetchRequest())
+        let draftRequest = NSFetchRequest<ChatReplyDraft>(entityName: "ChatReplyDraft")
+        return Set(sends.compactMap(\.conversationId))
+            .union(try context.fetch(draftRequest).map(\.conversationId))
     }
 }

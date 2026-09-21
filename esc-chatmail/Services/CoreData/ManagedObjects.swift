@@ -13,6 +13,13 @@ public class Attachment: NSManagedObject, Identifiable {
 public class Person: NSManagedObject, Identifiable {
 }
 
+@objc(ChatReplyDraft)
+public class ChatReplyDraft: NSManagedObject {
+    @NSManaged public var conversationId: UUID
+    @NSManaged public var data: Data?
+    @NSManaged public var attachments: Set<Attachment>?
+}
+
 @objc(Conversation)
 public class Conversation: NSManagedObject, Identifiable {
 }
@@ -50,6 +57,8 @@ public class SyncCheckpoint: NSManagedObject, Identifiable {
 }
 
 extension Attachment {
+    @NSManaged public var replyDraft: ChatReplyDraft?
+
     enum State: String {
         case queued = "queued"
         case uploading = "uploading"
@@ -130,6 +139,8 @@ extension OutboundSendMutationRecord {
     @NSManaged public var newlyInsertedConversation: Bool
     @NSManaged public var remoteCommittedMessageId: String?
     @NSManaged public var remoteCommittedThreadId: String?
+    @NSManaged public var replyEnvelopeData: Data?
+    @NSManaged public var failureReason: String?
     @NSManaged public var snippet: String?
 }
 

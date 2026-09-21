@@ -2,7 +2,7 @@ import Foundation
 
 /// Value-only inputs needed to recover the original HTML when MIME construction begins.
 /// Capturing these on the managed-object context keeps Core Data out of background preflight.
-struct ReplyQuotedHTMLSource: Sendable {
+struct ReplyQuotedHTMLSource: Codable, Sendable {
     let messageId: String
     let bodyStorageURI: String?
     let bodyText: String?

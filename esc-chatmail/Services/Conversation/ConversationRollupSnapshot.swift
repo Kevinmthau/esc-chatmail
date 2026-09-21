@@ -1,4 +1,5 @@
 import Foundation
+import CoreData
 
 /// Derived conversation-list fields computed from the current message set.
 struct ConversationRollupSnapshot: Sendable {
@@ -74,15 +75,30 @@ struct ConversationRollupSnapshot: Sendable {
         to conversation: Conversation,
         routingPolicy: ConversationRoutingPolicy = ConversationRoutingPolicy()
     ) {
+        // Draft ownership preserves visibility, not stale mailbox state.
+        conversation.hasInbox = hasInbox
+        conversation.inboxUnreadCount = inboxUnreadCount
+        conversation.latestInboxDate = latestInboxDate
+        if lastMessageDate == nil {
+            // Sync can drain a conversation after the user starts another reply.
+            // Preserve its list entry until that saved draft is sent or discarded.
+            guard let context = conversation.managedObjectContext else { return }
+            let request = NSFetchRequest<ChatReplyDraft>(entityName: "ChatReplyDraft")
+            request.predicate = NSPredicate(format: "conversationId == %@", conversation.id as CVarArg)
+            request.fetchLimit = 1
+            do {
+                if try context.count(for: request) > 0 { return }
+            } catch {
+                Log.error("Failed to check saved draft before empty rollup", category: .coreData, error: error)
+                return
+            }
+        }
         conversation.lastMessageDate = lastMessageDate
         if lastMessageDate == nil {
             conversation.snippet = nil
         } else {
             conversation.snippet = MessagePreviewText.nonEmpty(snippet)
         }
-        conversation.hasInbox = hasInbox
-        conversation.inboxUnreadCount = inboxUnreadCount
-        conversation.latestInboxDate = latestInboxDate
         routingPolicy.applyArchiveState(to: conversation, snapshot: self)
     }
 

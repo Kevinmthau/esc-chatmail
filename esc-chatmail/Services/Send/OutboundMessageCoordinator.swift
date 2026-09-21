@@ -98,6 +98,14 @@ enum OutboundMessageRequest {
         let context: ReplyContext
         let body: String
         let attachments: [AttachmentContext]
+        let retryMetadata: ReplyMetadata?
+
+        init(context: ReplyContext, body: String, attachments: [AttachmentContext], retryMetadata: ReplyMetadata? = nil) {
+            self.context = context
+            self.body = body
+            self.attachments = attachments
+            self.retryMetadata = retryMetadata
+        }
     }
 }
 
@@ -142,6 +150,7 @@ struct OutboundMessageReconciliationHooks: Sendable {
 
 @MainActor
 protocol OutboundMessageCoordinating: AnyObject {
+    func checkDelivery() async throws
     /// Reports the persisted optimistic identity before awaiting local preflight,
     /// then returns only after durable transmission admission.
     func send(
@@ -152,6 +161,8 @@ protocol OutboundMessageCoordinating: AnyObject {
 }
 
 extension OutboundMessageCoordinating {
+    func checkDelivery() async throws {}
+
     func send(
         _ request: OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks
@@ -200,7 +211,8 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         chatPreviewText: String?,
         senderEmail: String?,
         senderName: String?,
-        optimisticConversation: OptimisticConversationReference?
+        optimisticConversation: OptimisticConversationReference?,
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?
     ) async throws -> OptimisticSendHandle
 
     @MainActor
@@ -289,7 +301,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 chatPreviewText: preparedSend.chatPreviewText,
                 senderEmail: preparedSend.replyMetadata?.fromEmail,
                 senderName: preparedSend.replyMetadata?.fromName,
-                optimisticConversation: preparedSend.optimisticConversation
+                optimisticConversation: preparedSend.optimisticConversation,
+                replyMetadata: preparedSend.replyMetadata
             )
             do {
                 try checkActive(reservation)
@@ -413,6 +426,10 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         return optimisticResult
     }
 
+    func checkDelivery() async throws {
+        try await syncPerformer.performIncrementalSync()
+    }
+
     private func checkActive(_ reservation: OutboundSendReservation) throws {
         try Task.checkCancellation()
         guard outboundTaskRegistry.isActive(reservation) else {
@@ -473,9 +490,13 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
 
         case .reply(let reply):
             let body = normalizedBody(reply.body)
-            let metadata = try await outboundReplyContextBuilder.buildReplyMetadata(
-                reply.context
-            )
+            let metadata: OutboundMessageRequest.ReplyMetadata
+            if let retryMetadata = reply.retryMetadata {
+                try outboundReplyContextBuilder.validateRecoveredReply(retryMetadata, context: reply.context)
+                metadata = retryMetadata
+            } else {
+                metadata = try await outboundReplyContextBuilder.buildReplyMetadata(reply.context)
+            }
 
             return PreparedSend(
                 recipientEmails: metadata.recipientEmails,

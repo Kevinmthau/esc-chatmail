@@ -397,6 +397,65 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(retryMessage.participants?.filter { $0.participantKind == .to }.count, 1)
     }
 
+    func testCreateOptimisticReply_failedTakeoverKeepsDraftAfterLaterSaveAndReload() async throws {
+        let context = MutationRecordPersistenceFailingContext(concurrencyType: .mainQueueConcurrencyType)
+        context.persistentStoreCoordinator = coreDataStack.persistentContainer.persistentStoreCoordinator
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        context.failAfterObtainingPermanentIDs = false
+        defer { context.reset() }
+        let service = GmailSendService(viewContext: context)
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let conversationID = conversation.id
+        let originalMessage = MessageBuilder().withId("draft-original").inConversation(conversation).build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("local_draft_takeover_failure")
+            .withLocalURL("Attachments/draft-takeover.txt")
+            .queued()
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, originalMessage, attachment])
+        let targetURI = originalMessage.objectID.uriRepresentation()
+        let store = ChatReplyDraftStore(context: context)
+        try store.save(
+            .init(text: "Keep my reply", targetURI: targetURI, recoveredEnvelope: nil),
+            attachments: [attachment], conversationID: conversationID
+        )
+        let attachmentContexts = try OutboundAttachmentContextBuilder(viewContext: context)
+            .buildSendAttachments(from: [attachment])
+        context.failMutationRecordPersistence = true
+
+        do {
+            _ = try await service.createOptimisticMessage(
+                to: ["friend@example.com"], body: "Keep my reply", attachments: attachmentContexts,
+                optimisticConversation: .existingConversation(.init(objectID: conversation.objectID)),
+                replyMetadata: .init(
+                    recipientEmails: ["friend@example.com"], fromEmail: "me@example.com", fromName: nil,
+                    subject: "Re: Original", threadId: "original-thread", inReplyTo: "<original@example.com>",
+                    references: [], originalMessage: nil
+                )
+            )
+            XCTFail("Expected optimistic creation to fail")
+        } catch {
+            guard case GmailSendService.SendError.optimisticCreationFailed = error else {
+                return XCTFail("Expected optimisticCreationFailed, got \(error)")
+            }
+        }
+
+        context.failMutationRecordPersistence = false
+        conversation.displayName = "An unrelated edit"
+        try context.save()
+        context.reset()
+
+        let (draft, attachments) = try XCTUnwrap(store.load(conversationID: conversationID))
+        XCTAssertEqual(draft.text, "Keep my reply")
+        XCTAssertEqual(draft.targetURI, targetURI)
+        XCTAssertEqual(attachments.map(\.id), ["local_draft_takeover_failure"])
+        XCTAssertNil(attachments.first?.message)
+        XCTAssertNotNil(attachments.first?.replyDraft)
+        XCTAssertEqual(try messageCount(in: context), 1)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+        XCTAssertEqual(try context.count(for: NSFetchRequest<ChatReplyDraft>(entityName: "ChatReplyDraft")), 1)
+    }
+
     func testCreateOptimisticMessage_reactivatesArchivedConversationDurably() async throws {
         let context: NSManagedObjectContext = viewContext
         let recipient = "friend@example.com"

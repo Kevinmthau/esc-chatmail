@@ -320,10 +320,25 @@ extension MessagePersister {
         }
         context.processPendingChanges()
 
+        // A second reply can be saved while the first send waits for its echo.
+        // Keep that draft's empty conversation reachable after consuming the send.
+        let conversationIDs = Set(affectedConversations.values.map { $0.0.id })
+        var draftConversationIDs = Set<UUID>()
+        if !conversationIDs.isEmpty {
+            let request = NSFetchRequest<ChatReplyDraft>(entityName: "ChatReplyDraft")
+            request.predicate = NSPredicate(format: "conversationId IN %@", Array(conversationIDs))
+            do {
+                draftConversationIDs = Set(try context.fetch(request).map(\.conversationId))
+            } catch {
+                draftConversationIDs = conversationIDs
+                Log.error("Failed to check saved drafts before send cleanup", category: .coreData, error: error)
+            }
+        }
+
         for (_, (conversation, wasNewlyInserted)) in affectedConversations
             where !conversation.isDeleted {
             let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
-            if wasNewlyInserted && remainingMessages.isEmpty {
+            if wasNewlyInserted && remainingMessages.isEmpty && !draftConversationIDs.contains(conversation.id) {
                 context.delete(conversation)
             } else {
                 ConversationRollupSnapshot.make(from: Set(remainingMessages)).apply(to: conversation)

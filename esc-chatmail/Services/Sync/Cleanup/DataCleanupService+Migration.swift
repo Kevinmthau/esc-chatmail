@@ -469,7 +469,9 @@ extension DataCleanupService {
             let pendingSendConversationIds: Set<UUID>
             do {
                 outboundSendRecords = try context.fetch(OutboundSendMutationRecord.fetchRequest())
-                pendingSendConversationIds = Set(outboundSendRecords.compactMap(\.conversationId))
+                pendingSendConversationIds = try pendingSendConversationIDs(
+                    in: context, sendRecords: outboundSendRecords
+                )
             } catch {
                 Log.error(
                     "Failed to fetch pending sends before participant-set re-home",

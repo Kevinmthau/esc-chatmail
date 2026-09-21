@@ -425,10 +425,9 @@ final class ConversationLaunchRepairCoordinator {
     ) async -> Int? {
         let pendingConversationIDs: Set<UUID>? = await context.perform {
             do {
-                return Set(
-                    try context.fetch(OutboundSendMutationRecord.fetchRequest())
-                        .compactMap(\.conversationId)
-                )
+                let sends = try context.fetch(OutboundSendMutationRecord.fetchRequest())
+                let drafts = try context.fetch(NSFetchRequest<ChatReplyDraft>(entityName: "ChatReplyDraft"))
+                return Set(sends.compactMap(\.conversationId)).union(drafts.map(\.conversationId))
             } catch {
                 Log.error(
                     "Failed to fetch pending sends before stranded-shell cleanup",
