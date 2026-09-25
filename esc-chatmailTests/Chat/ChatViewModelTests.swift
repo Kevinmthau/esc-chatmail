@@ -382,6 +382,122 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.replyingTo)
     }
 
+    /// Once Gmail accepts a send, its optimistic row resolves `.none` and is
+    /// the latest visible message until the sync echo replaces (deletes) it.
+    /// Retargeting the automatic reply to it anchored the next draft to a row
+    /// about to disappear, and that reply was refused.
+    ///
+    /// Revert-check: dropping the `localOptimisticMessageID` guard from
+    /// `ChatViewModel.isValidReplyTarget` retargets to the optimistic row
+    /// (and accepts it as a manual pick).
+    func testCommittedOptimisticRowCannotBecomeAutomaticReplyTarget() throws {
+        let stack = TestCoreDataStack()
+        let context: NSManagedObjectContext = stack.makeMainQueueViewContext()
+        let baseDependencies = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        ).makeChatDependencies()
+        let chatDependencies = ChatDependencies(
+            session: baseDependencies.session,
+            content: baseDependencies.content,
+            messaging: baseDependencies.messaging,
+            contacts: baseDependencies.contacts,
+            storage: ChatStorageDependencies(
+                viewContext: context,
+                makeBackgroundContext: { stack.newBackgroundContext() }
+            ),
+            fullEmailOpener: baseDependencies.fullEmailOpener
+        )
+        let conversation = ConversationBuilder()
+            .withDisplayName("Bed linens")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let incoming = MessageBuilder()
+            .withSubject("Bed linens + Towels")
+            .inConversation(conversation)
+            .build(in: context)
+        let optimisticID = UUID().uuidString
+        let sentReply = MessageBuilder()
+            .withId(optimisticID)
+            .withSubject("Re: Bed linens + Towels")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        sentReply.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = optimisticID
+        record.createdAt = Date()
+        record.remoteCommittedMessageId = "gmail-accepted-id"
+        record.remoteCommittedThreadId = "gmail-thread-id"
+        try context.save()
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: sentReply), .none)
+
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: chatDependencies)
+        viewModel.initializeReplyingTo(lastMessage: incoming)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: sentReply)
+
+        XCTAssertEqual(viewModel.replyingTo?.objectID, incoming.objectID)
+
+        viewModel.setReplyingTo(sentReply)
+        XCTAssertEqual(viewModel.replyingTo?.objectID, incoming.objectID)
+    }
+
+    /// Opening a chat whose newest row is the user's own send awaiting its
+    /// echo (right after composing into an existing chat) left no target at
+    /// all, which read as "the user cleared it" for the rest of the session,
+    /// so the next reply lost its quote.
+    ///
+    /// Revert-check: removing the `newestValidReplyTarget()` fallback from
+    /// `ChatViewModel.initializeReplyingTo` leaves the target nil.
+    func testInitializeReplyingTo_newestRowAwaitingEcho_fallsBackToNewestDurableMessage() throws {
+        let stack = TestCoreDataStack()
+        let context: NSManagedObjectContext = stack.makeMainQueueViewContext()
+        let baseDependencies = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        ).makeChatDependencies()
+        let chatDependencies = ChatDependencies(
+            session: baseDependencies.session,
+            content: baseDependencies.content,
+            messaging: baseDependencies.messaging,
+            contacts: baseDependencies.contacts,
+            storage: ChatStorageDependencies(
+                viewContext: context,
+                makeBackgroundContext: { stack.newBackgroundContext() }
+            ),
+            fullEmailOpener: baseDependencies.fullEmailOpener
+        )
+        let conversation = ConversationBuilder()
+            .withDisplayName("Bed linens")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let incoming = MessageBuilder()
+            .withSubject("Bed linens + Towels")
+            .withDate(Date(timeIntervalSinceNow: -60))
+            .inConversation(conversation)
+            .build(in: context)
+        let optimisticID = UUID().uuidString
+        let sentReply = MessageBuilder()
+            .withId(optimisticID)
+            .withSubject("Re: Bed linens + Towels")
+            .withDate(Date())
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        sentReply.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = optimisticID
+        record.createdAt = Date()
+        record.remoteCommittedMessageId = "gmail-accepted-id"
+        record.remoteCommittedThreadId = "gmail-thread-id"
+        try context.save()
+
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: chatDependencies)
+        viewModel.initializeReplyingTo(lastMessage: sentReply)
+
+        XCTAssertEqual(viewModel.replyingTo?.objectID, incoming.objectID)
+    }
+
     func testRestoredDraftWithClearedTargetDoesNotRestoreAQuote() {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext

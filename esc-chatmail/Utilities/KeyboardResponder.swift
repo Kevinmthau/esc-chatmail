@@ -5,7 +5,16 @@ import Combine
 final class KeyboardResponder: ObservableObject {
     @Published var currentHeight: CGFloat = 0
     @Published var isKeyboardVisible: Bool = false
+    /// Duration of the animation the latest `currentHeight` change was
+    /// published with. Deliberately not `@Published`: it is set before
+    /// `currentHeight` and `isKeyboardVisible` are published, so a change
+    /// handler in the same update (the chat transcript's bottom-inset handler)
+    /// reads the duration that change arrived with. For inset changes the
+    /// keyboard did not cause, it is the last keyboard animation's duration.
+    private(set) var animationDuration: TimeInterval = KeyboardResponder.minimumAnimationDuration
     private var cancellables = Set<AnyCancellable>()
+
+    private static let minimumAnimationDuration: TimeInterval = 0.25
 
     // Shared instance to prevent multiple subscriptions
     static let shared = KeyboardResponder()
@@ -29,7 +38,8 @@ final class KeyboardResponder: ObservableObject {
         guard let userInfo = notification.userInfo else {
             // Handle hide notification even without userInfo
             if notification.name == UIResponder.keyboardWillHideNotification {
-                withAnimation(.easeOut(duration: 0.25)) {
+                self.animationDuration = Self.minimumAnimationDuration
+                withAnimation(.easeOut(duration: Self.minimumAnimationDuration)) {
                     self.currentHeight = 0
                     self.isKeyboardVisible = false
                 }
@@ -42,19 +52,28 @@ final class KeyboardResponder: ObservableObject {
         }
 
         // Use default duration if not provided
-        let animationDuration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+        let notificationDuration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? Self.minimumAnimationDuration
 
         let visibleKeyboardHeight = Self.visibleHeight(for: keyboardFrame)
         let keyboardHeight: CGFloat
+        let keyboardIsVisible: Bool
         if notification.name == UIResponder.keyboardWillHideNotification || visibleKeyboardHeight <= 0 {
             keyboardHeight = 0
-            isKeyboardVisible = false
+            keyboardIsVisible = false
         } else {
             keyboardHeight = visibleKeyboardHeight
-            isKeyboardVisible = true
+            keyboardIsVisible = true
         }
 
-        withAnimation(.easeOut(duration: max(animationDuration, 0.25))) {
+        let effectiveAnimationDuration = max(notificationDuration, Self.minimumAnimationDuration)
+        self.animationDuration = effectiveAnimationDuration
+        // Visibility is published inside the same animation as the height:
+        // the chat composer's keyboard offset is gated on it, and publishing
+        // it outside made the composer snap to the bottom on every hide while
+        // the keyboard (and now the transcript) eased down after it, opening
+        // a blank band between the newest message and the composer.
+        withAnimation(.easeOut(duration: effectiveAnimationDuration)) {
+            self.isKeyboardVisible = keyboardIsVisible
             self.currentHeight = keyboardHeight
         }
     }

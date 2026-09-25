@@ -52,6 +52,14 @@ struct ChatMessagesView: View {
 
     @StateObject private var session: ChatMessagesSession
     @State private var replyBarHeight: CGFloat = 0
+    /// Height of the transcript's trailing spacer. Follows
+    /// `ChatBottomInsetPolicy.Components.inset` through
+    /// `handleBottomInsetChange` rather than being computed in `body`, so
+    /// growth can be applied without the keyboard's animation (see
+    /// `ChatBottomInsetPolicy.SpacerTransition`).
+    @State private var transcriptBottomInset: CGFloat = 1
+    @State private var transcriptOffsetShiftRequest: ChatTranscriptOffsetShifter.Request?
+    @State private var transcriptShiftTracking = ChatTranscriptOffsetShifter.Tracking()
     @State private var isBottomAnchorVisible = false
     @GestureState private var isScrollGestureActive = false
     @ObservedObject private var keyboard = KeyboardResponder.shared
@@ -99,7 +107,11 @@ struct ChatMessagesView: View {
             let groupingMessages = senderGroupingMessages(for: displayedMessages)
             let groupingMessageIDs = groupingMessages.map(\.objectID)
             let keyboardOffset = keyboardAvoidanceOffset()
-            let bottomContentInset = max(1, replyBarHeight + keyboardOffset)
+            let bottomInsetComponents = ChatBottomInsetPolicy.Components(
+                replyBarHeight: replyBarHeight,
+                keyboardOffset: keyboardOffset
+            )
+            let bottomContentInset = bottomInsetComponents.inset
             let initialLoadPhase = scrollState.initialLoadPhase
             let isWaitingForInitialWindow = initialLoadPhase == .loading
             let isInitialLoadUnavailable =
@@ -112,7 +124,7 @@ struct ChatMessagesView: View {
                 ZStack {
                     messagesScrollView(
                         displayedMessages: displayedMessages,
-                        bottomContentInset: bottomContentInset,
+                        bottomContentInset: transcriptBottomInset,
                         scrollProxy: proxy
                     )
                     .opacity(shouldHideMessages ? 0 : 1)
@@ -207,12 +219,29 @@ struct ChatMessagesView: View {
                     isBottomAnchorVisible: isBottomAnchorVisible
                 ) { performBottomAnchor($0, proxy: proxy) }
             }
+            .onChange(of: bottomInsetComponents, initial: true) { oldComponents, newComponents in
+                handleBottomInsetChange(from: oldComponents, to: newComponents, proxy: proxy)
+            }
+            .onChange(of: compensatesBottomInsetGrowth) { _, compensates in
+                // A keyboard handed back to the composer without a hide (a
+                // sheet dismissed while its own field was focused) can change
+                // no inset at all; make up the growth owed while covered.
+                guard compensates else { return }
+                handleBottomInsetChange(
+                    from: bottomInsetComponents,
+                    to: bottomInsetComponents,
+                    proxy: proxy
+                )
+            }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
                 coordinator.handleKeyboardHeightChange(
                     oldHeight: oldHeight,
                     newHeight: newHeight,
                     messageCount: totalMessageCountForCoordinator(),
-                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
+                    isInitialWindowLoaded: scrollState.isInitialLoadComplete,
+                    // Same inputs, same update as handleBottomInsetChange's
+                    // decision to shift the transcript for this growth.
+                    isInsetGrowthCompensated: compensatesBottomInsetGrowth
                 ) { performBottomAnchor($0, proxy: proxy) }
             }
             .onChange(of: isTextFieldFocused.wrappedValue) { _, isFocused in
@@ -305,6 +334,13 @@ struct ChatMessagesView: View {
             .onTapGesture { isTextFieldFocused.wrappedValue = false }
         }
         .defaultScrollAnchor(.top)
+        .modifier(
+            ChatTranscriptOffsetShifter(
+                request: transcriptOffsetShiftRequest,
+                tracking: transcriptShiftTracking,
+                onUserScrollInteractionBegan: handleUserScrollPhaseBegan
+            )
+        )
         .scrollDismissesKeyboard(.interactively)
         .simultaneousGesture(
             DragGesture(minimumDistance: 2)
@@ -539,6 +575,109 @@ struct ChatMessagesView: View {
         return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
     }
 
+    /// Whether the transcript can be scrolled by inset shifts right now.
+    private var isTranscriptOffsetShiftAvailable: Bool {
+        ChatBottomInsetPolicy.isOffsetShiftAvailable(
+            supportsOffsetShift: ChatTranscriptOffsetShifter.isSupported,
+            isTranscriptRevealed: scrollState.initialLoadPhase == .loaded &&
+                coordinator.isReadyToShow
+        )
+    }
+
+    /// Whether inset growth in the current update is compensated by shifting
+    /// the transcript. The coordinator's keyboard handler reads the same
+    /// value in the same update (`isInsetGrowthCompensated`).
+    private var compensatesBottomInsetGrowth: Bool {
+        ChatBottomInsetPolicy.compensatesGrowth(
+            isOffsetShiftAvailable: isTranscriptOffsetShiftAvailable,
+            isChatActiveAndUncovered: isChatActiveAndUncovered,
+            isComposerFocused: isTextFieldFocused.wrappedValue,
+            isUserScrollGestureActive: isScrollGestureActive
+        )
+    }
+
+    /// Applies a bottom-inset change (keyboard, "Replying to" row, wrapped
+    /// draft lines, attachment strip) to the transcript spacer and scrolls the
+    /// transcript so the content above the composer stays where it was
+    /// instead of sliding under it. See `ChatBottomInsetPolicy` for which
+    /// changes are compensated and why.
+    private func handleBottomInsetChange(
+        from oldComponents: ChatBottomInsetPolicy.Components,
+        to newComponents: ChatBottomInsetPolicy.Components,
+        proxy: ScrollViewProxy
+    ) {
+        let newInset = newComponents.inset
+        switch ChatBottomInsetPolicy.spacerTransition(from: oldComponents, to: newComponents) {
+        case .immediate:
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                transcriptBottomInset = newInset
+            }
+        case .keyboardAnimation:
+            withAnimation(.easeOut(duration: keyboard.animationDuration)) {
+                transcriptBottomInset = newInset
+            }
+        case .inherited:
+            transcriptBottomInset = newInset
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let tracking = transcriptShiftTracking
+        let inputs = ChatBottomInsetPolicy.ShiftInputs(
+            oldComponents: oldComponents,
+            newComponents: newComponents,
+            observedOffsetY: tracking.contentOffsetY,
+            bottomAnchorMaxY: tracking.bottomAnchorMaxY,
+            viewportHeight: tracking.viewportHeight,
+            isOffsetShiftAvailable: isTranscriptOffsetShiftAvailable,
+            compensatesGrowth: compensatesBottomInsetGrowth,
+            defersGrowth: ChatBottomInsetPolicy.defersGrowth(
+                isOffsetShiftAvailable: isTranscriptOffsetShiftAvailable,
+                isChatActiveAndUncovered: isChatActiveAndUncovered,
+                isComposerFocused: isTextFieldFocused.wrappedValue
+            ),
+            isInteractiveDismissal: ChatBottomInsetPolicy.isInteractiveDismissal(
+                isUserScrollInteractionActive: tracking.isUserScrollInteractionActive,
+                lastUserScrollInteractionEndedAt: tracking.lastUserScrollInteractionEndedAt,
+                now: now
+            ),
+            keyboardAnimationDuration: keyboard.animationDuration,
+            now: now
+        )
+        guard let shift = ChatBottomInsetPolicy.shift(
+            for: inputs,
+            state: &tracking.shiftState
+        ) else {
+            return
+        }
+
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "ChatView bottom inset \(oldComponents.inset)->\(newInset); shifting transcript \(tracking.contentOffsetY)->\(shift.targetY) animated=\(shift.animationDuration != nil) takeover=\(coordinator.isUserScrollTakeoverActive)",
+            category: .ui
+        )
+        if shift.direction == .towardNewer {
+            coordinator.handleCompensatedInsetGrowth(
+                settlingIn: shift.settleDuration
+            ) { performBottomAnchor($0, proxy: proxy) }
+        }
+        scrollState.holdWindowForProgrammaticScroll(settlingIn: shift.settleDuration)
+        transcriptOffsetShiftRequest = ChatTranscriptOffsetShifter.Request(
+            id: UUID(),
+            shift: shift
+        )
+    }
+
+    /// The reader started moving the transcript by any means (drag,
+    /// trackpad, mouse wheel): release the holds a programmatic inset shift
+    /// placed on the coordinator's settle check and the virtual window.
+    private func handleUserScrollPhaseBegan() {
+        coordinator.handleUserScrollPhaseBegan()
+        scrollState.handleUserScrollInteractionBegan()
+    }
+
     private func handleBottomAnchorGeometryUpdate(
         geometry: ChatScrollGeometry,
         layoutID: UUID,
@@ -549,6 +688,9 @@ struct ChatMessagesView: View {
             frame: frame,
             viewportSize: geometry.viewportSize
         )
+        transcriptShiftTracking.bottomAnchorMaxY =
+            frame.isNull || frame.isEmpty ? nil : frame.maxY
+        transcriptShiftTracking.viewportHeight = geometry.viewportSize.height
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: rawIsVisible,
             // A null/empty frame means the lazy trailing anchor has not laid
@@ -657,7 +799,10 @@ struct ChatMessagesView: View {
                 viewModel.checkReplyDelivery(messageObjectID: message.messageObjectID)
             }
         }
-        if message.outboundSendDeliveryState == .none {
+        // A just-sent bubble awaiting its echo is refused as a reply target
+        // (sync is about to delete it), so do not offer a Reply that does
+        // nothing.
+        if message.outboundSendDeliveryState == .none && !message.isAwaitingSyncEcho {
             Button(action: { viewModel.setReplyingTo(messageObjectID: message.messageObjectID) }) {
                 SwiftUI.Label("Reply", systemImage: "arrow.turn.up.left")
             }
@@ -718,6 +863,7 @@ struct ChatMessagesView: View {
     }
 
     private func performBottomAnchor(_ step: ChatMessagesCoordinator.BottomAnchorStep, proxy: ScrollViewProxy) {
+        ChatBottomInsetPolicy.coordinatorDidScroll(state: &transcriptShiftTracking.shiftState)
         if step.animated {
             withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
                 Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)

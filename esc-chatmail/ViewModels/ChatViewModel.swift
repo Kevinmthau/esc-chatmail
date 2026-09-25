@@ -351,9 +351,31 @@ final class ChatViewModel: ObservableObject {
               composerState.replyAnchor == nil,
               composerState.recoveredReplyEnvelope == nil,
               composerState.unavailableReplyTargetURI == nil,
-              let lastMessage,
-              isValidReplyTarget(lastMessage) else { return }
-        replyingTo = lastMessage
+              let lastMessage else { return }
+        if isValidReplyTarget(lastMessage) {
+            replyingTo = lastMessage
+            return
+        }
+        // The newest row can be one of the user's own sends that is not a
+        // target (sending, not sent, delivery unknown, or awaiting its echo).
+        // Leaving the target nil read as "the user cleared it", so it stayed
+        // nil for the session and the next reply lost its quote.
+        replyingTo = newestValidReplyTarget()
+    }
+
+    /// Newest visible message that is a valid reply target, looking past the
+    /// few newest rows that can be the user's own unfinished sends.
+    private func newestValidReplyTarget() -> Message? {
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
+        request.predicate = MessagePredicates.visibleInChat(conversation: conversation)
+        request.fetchLimit = 20
+        request.includesPendingChanges = true
+        let candidates = (try? viewContext.fetch(request)) ?? []
+        return candidates.first { isValidReplyTarget($0) }
     }
 
     func discardUnsentReplyAttachments() {
@@ -701,7 +723,14 @@ final class ChatViewModel: ObservableObject {
         guard message.managedObjectContext != nil,
               !message.isDeleted,
               message.conversation?.objectID == conversationObjectID,
-              OutboundSendDeliveryState.resolve(for: message) == .none else {
+              OutboundSendDeliveryState.resolve(for: message) == .none,
+              // A just-sent row its sync echo has not replaced yet: sync
+              // deletes it when the echo lands, so a draft anchored to it
+              // would be refused as `replyTargetUnavailable`. Gmail accepting
+              // the send makes it resolve `.none`, and since the chat
+              // predicate stopped hiding label-less rows it can be the latest
+              // visible message and the automatic target.
+              OutboundSendDeliveryState.localOptimisticMessageID(for: message) == nil else {
             return false
         }
 

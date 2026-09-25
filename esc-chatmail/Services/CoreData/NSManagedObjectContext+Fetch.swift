@@ -209,17 +209,31 @@ enum MessagePredicates {
         NSPredicate(format: "conversation == %@", conversation)
     }
 
+    /// Messages shown in a chat transcript: everything in the conversation
+    /// except drafts, spam and trash.
+    ///
+    /// The exclusion is a SUBQUERY, not `NONE labels.id IN %@`: the SQLite
+    /// store compiles `NONE` over this to-many relationship to a label join,
+    /// which dropped messages with no labels at all and kept excluded ones
+    /// that also carry an allowed label (SPAM + INBOX). In-memory stores (and
+    /// so every unit test) evaluated `NONE` correctly, hiding the bug. The
+    /// dropped messages included every just-sent reply: the optimistic row
+    /// has no labels until its sync echo arrives, so the transcript could not
+    /// publish or scroll to it, and the sent bubble appeared only with the
+    /// echo, often under the keyboard. `MessagePredicatesSQLiteTests` pins
+    /// both overloads against a real SQLite store.
     static func visibleInChat(conversation: Conversation) -> NSPredicate {
         NSPredicate(
-            format: "conversation == %@ AND NONE labels.id IN %@",
+            format: "conversation == %@ AND SUBQUERY(labels, $label, $label.id IN %@).@count == 0",
             conversation,
             chatExcludedLabelIDs
         )
     }
 
+    /// See `visibleInChat(conversation:)`.
     static func visibleInChat(conversationId: UUID) -> NSPredicate {
         NSPredicate(
-            format: "conversation.id == %@ AND NONE labels.id IN %@",
+            format: "conversation.id == %@ AND SUBQUERY(labels, $label, $label.id IN %@).@count == 0",
             conversationId as CVarArg,
             chatExcludedLabelIDs
         )
@@ -229,8 +243,10 @@ enum MessagePredicates {
         NSPredicate(format: "ANY labels.id == %@", labelId)
     }
 
+    /// SUBQUERY for the same SQLite reason as `visibleInChat`: `NONE` over
+    /// `labels` dropped messages with no labels.
     static func notHavingLabel(_ labelId: String) -> NSPredicate {
-        NSPredicate(format: "NONE labels.id == %@", labelId)
+        NSPredicate(format: "SUBQUERY(labels, $label, $label.id == %@).@count == 0", labelId)
     }
 
     static let unread = NSPredicate(format: "isUnread == YES")

@@ -225,6 +225,10 @@ struct ChatMessageRowModel: Equatable {
     let isSendingLocalAttachments: Bool
     let hasFailedLocalAttachmentUploads: Bool
     let outboundSendDeliveryState: OutboundSendDeliveryState
+    /// A just-sent row its sync echo has not replaced yet
+    /// (`OutboundSendDeliveryState.localOptimisticMessageID`). Sync deletes it
+    /// when the echo lands, so it is not offered as a reply target.
+    let isAwaitingSyncEcho: Bool
     let forwardedDisplaySubject: String?
     let outgoingForwardedDisplayContent: ForwardedMessageDisplayContent?
     /// Precomputed so MessageBubble body recomputation does not hash message text.
@@ -356,6 +360,7 @@ enum ChatMessageRowModelMapper {
             isSendingLocalAttachments: message.isSendingLocalAttachments,
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads,
             outboundSendDeliveryState: outboundSendDeliveryState,
+            isAwaitingSyncEcho: OutboundSendDeliveryState.localOptimisticMessageID(for: message) != nil,
             forwardedDisplaySubject: message.forwardedDisplaySubject,
             outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent,
             loadSignatureComponents: MessageBubbleLoadSignatureComponents(

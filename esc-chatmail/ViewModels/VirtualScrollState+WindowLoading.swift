@@ -242,8 +242,19 @@ extension VirtualScrollState {
         )
     }
 
-    func updateVisibleMessages() {
-        guard let window = messageWindow else { return }
+    /// Loads the window for `scrollPosition` if the current one does not
+    /// cover it. Returns whether it started an extension load.
+    ///
+    /// - Parameter extendsWindowOnOverlap: extend the window to the union of
+    ///   the requested range and the current one instead of replacing it.
+    ///   Only the replay after a programmatic inset shift asks for this
+    ///   (`holdWindowForProgrammaticScroll`); normal scrolling keeps the
+    ///   sliding replace, which SwiftUI re-anchors while the reader drags. A
+    ///   union over the window cap trims only the overflow, on the side the
+    ///   reader is moving away from; a disjoint range still replaces.
+    @discardableResult
+    func updateVisibleMessages(extendsWindowOnOverlap: Bool = false) -> Bool {
+        guard let window = messageWindow else { return false }
 
         let startIndex = max(0, scrollPosition - configuration.bufferSize)
         let endIndex = min(totalMessageCount, scrollPosition + configuration.visibleItemCount + configuration.bufferSize)
@@ -253,18 +264,38 @@ extension VirtualScrollState {
             // Keep rendering the whole window so the user can continue scrolling
             // through the buffered messages without the view pruning rows away.
             visibleMessages = resolveCachedRows(for: window.messageIDs)
-        } else {
-            // Need to load a new window.
-            let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
-            taskManager.run("loadWindow") { [weak self] in
-                guard let self = self else { return }
-                _ = await self.loadWindow(
-                    startIndex: startIndex,
-                    endIndex: endIndex,
-                    preferPendingConversationMessages: preferPendingConversationMessages
-                )
+            return false
+        }
+
+        var loadStartIndex = startIndex
+        var loadEndIndex = endIndex
+        let extendsWindow = extendsWindowOnOverlap &&
+            startIndex <= window.endIndex && endIndex >= window.startIndex
+        if extendsWindow {
+            loadStartIndex = min(startIndex, window.startIndex)
+            loadEndIndex = max(endIndex, window.endIndex)
+            if loadEndIndex - loadStartIndex > configuration.maxWindowSize {
+                if endIndex > window.endIndex {
+                    loadStartIndex = loadEndIndex - configuration.maxWindowSize
+                } else {
+                    loadEndIndex = loadStartIndex + configuration.maxWindowSize
+                }
             }
         }
+        let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
+        taskManager.run("loadWindow") { [weak self] in
+            guard let self = self else { return }
+            _ = await self.loadWindow(
+                startIndex: loadStartIndex,
+                endIndex: loadEndIndex,
+                preferPendingConversationMessages: preferPendingConversationMessages,
+                // An extension re-publishes rows already on screen; mapping
+                // only the new ones avoids re-fetching and re-mapping the
+                // whole window on the main actor.
+                reusesCachedRows: extendsWindow
+            )
+        }
+        return extendsWindow
     }
 
     func loadWindow(
@@ -276,7 +307,8 @@ extension VirtualScrollState {
         generation: UInt? = nil,
         datasetGeneration: UInt? = nil,
         datasetRetryAttemptsRemaining: Int = 1,
-        requiredFollowIntentRevision: UInt? = nil
+        requiredFollowIntentRevision: UInt? = nil,
+        reusesCachedRows: Bool = false
     ) async -> LoadedWindowBounds? {
         guard startIndex >= 0, endIndex >= startIndex else {
             return nil
@@ -427,7 +459,9 @@ extension VirtualScrollState {
 
         let messages: [ChatMessageRowModel]
         do {
-            messages = try resolveRowsOnViewContextThrowing(for: page.messageIDs)
+            messages = reusesCachedRows
+                ? try resolveRowsReusingCacheThrowing(for: page.messageIDs)
+                : try resolveRowsOnViewContextThrowing(for: page.messageIDs)
         } catch {
             finishWindowLoadFailure(
                 operation: "window row resolution",

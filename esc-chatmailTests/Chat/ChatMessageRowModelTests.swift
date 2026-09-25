@@ -30,6 +30,23 @@ final class ChatMessageRowModelTests: XCTestCase {
         super.tearDown()
     }
 
+    /// A just-sent row its sync echo has not replaced is flagged, so the
+    /// context menu does not offer a Reply that `isValidReplyTarget` refuses.
+    ///
+    /// Revert-check: mapping `isAwaitingSyncEcho` to a constant false in
+    /// `ChatMessageRowModelMapper.map` fails the optimistic row's assertion.
+    func testMap_optimisticRowAwaitingEcho_isFlaggedAndDurableRowIsNot() throws {
+        let optimisticID = UUID().uuidString
+        let optimistic = MessageBuilder().withId(optimisticID).fromMe().build(in: viewContext)
+        optimistic.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        let echo = MessageBuilder().withId("gmail-echo-id").fromMe().build(in: viewContext)
+        echo.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        try viewContext.save()
+
+        XCTAssertTrue(ChatMessageRowModelMapper.map(optimistic).isAwaitingSyncEcho)
+        XCTAssertFalse(ChatMessageRowModelMapper.map(echo).isAwaitingSyncEcho)
+    }
+
     func testMap_attachmentDimensionsChangeReloadsBubbleContent() async throws {
         let message = MessageBuilder().withId(UUID().uuidString).withAttachments().build(in: viewContext)
         let attachment = viewContext.insertTestObject(Attachment.self)
