@@ -3960,6 +3960,1208 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    /// At the bottom the view's transcript shift already lands on the new
+    /// bottom, so a compensated keyboard show must not also schedule the
+    /// animated scroll-to-bottom (a second scroll ~50ms into the shift).
+    ///
+    /// Revert-check: deleting the `isInsetGrowthCompensated` early return in
+    /// `ChatMessagesCoordinator.handleKeyboardHeightChange` requests the
+    /// bottom anchor and its latest-window loads again.
+    func testKeyboardGrowth_compensatedAtBottom_requestsNoBottomAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let unexpectedLatestLoad = expectation(
+            description: "A compensated keyboard show must not reload the latest window"
+        )
+        unexpectedLatestLoad.isInverted = true
+        // A reverted skip reloads twice (before and inside the step loop);
+        // over-fulfilling would crash the test host instead of failing here.
+        unexpectedLatestLoad.assertForOverFulfill = false
+        var isRejectingLatestLoads = false
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in
+                if isRejectingLatestLoads {
+                    unexpectedLatestLoad.fulfill()
+                }
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchSenderContacts: { _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        XCTAssertFalse(coordinator.isUserScrollTakeoverActive)
+
+        isRejectingLatestLoads = true
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 0,
+            newHeight: 335,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true,
+            isInsetGrowthCompensated: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await fulfillment(of: [unexpectedLatestLoad], timeout: 0.1)
+        XCTAssertTrue(anchorSteps.isEmpty)
+    }
+
+    /// Off the bottom without a takeover (a stranded reveal, or late bubble
+    /// growth after the bottom follow expired) the shift alone would keep the
+    /// reader off the latest message, so the keyboard show still scrolls to
+    /// the bottom as it did before the shift existed.
+    ///
+    /// Revert-check: dropping the whole at-bottom condition
+    /// (`isTrackedBottomAnchorVisible || isCompensatedShiftFromBottomInFlight`)
+    /// from the compensated early return in
+    /// `ChatMessagesCoordinator.handleKeyboardHeightChange` skips this anchor.
+    func testKeyboardGrowth_compensatedWithBottomAnchorOffscreenWithoutTakeover_stillAnchorsBottom() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchSenderContacts: { _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        // Same content geometry, anchor now below the viewport: no growth and
+        // no movement toward history, so the post-reveal follow stays idle.
+        var geometryScrollSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { step in
+            geometryScrollSteps.append(step)
+        }
+        XCTAssertTrue(geometryScrollSteps.isEmpty)
+        XCTAssertFalse(coordinator.isUserScrollTakeoverActive)
+
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 0,
+            newHeight: 335,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true,
+            isInsetGrowthCompensated: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    /// Only growth skips the coordinator's scroll. A hide gets the view's
+    /// return shift and still keeps its scroll-to-bottom; at the bottom both
+    /// land on the same offset (the simulator showed one monotonic
+    /// trajectory).
+    ///
+    /// Revert-check: dropping `newHeight > oldHeight` from the compensated
+    /// early return in `ChatMessagesCoordinator.handleKeyboardHeightChange`
+    /// skips this hide anchor.
+    func testKeyboardHide_withGrowthCompensationAvailable_stillAnchorsBottom() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchSenderContacts: { _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 335,
+            newHeight: 0,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true,
+            isInsetGrowthCompensated: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    /// Without compensation (before iOS 26, a covered chat, a drag in
+    /// progress) a keyboard show at the bottom keeps its scroll-to-bottom.
+    ///
+    /// Revert-check: dropping the `isInsetGrowthCompensated` conjunct from the
+    /// compensated early return in
+    /// `ChatMessagesCoordinator.handleKeyboardHeightChange` skips this anchor.
+    func testKeyboardGrowth_uncompensatedAtBottom_stillAnchorsBottom() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 0,
+            newHeight: 335,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true,
+            isInsetGrowthCompensated: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    /// Opening a chat and tapping the field inside the post-reveal follow
+    /// window: the view animates the transcript to the new bottom itself. The
+    /// spacer growth and the lazy stack's re-estimates arrive with the anchor
+    /// briefly offscreen; the follow must hold instead of jumping over the
+    /// shift, and stay quiet at the settle check when the shift ended at the
+    /// bottom.
+    ///
+    /// Revert-check: deleting the `isHoldingForCompensatedShift` early return
+    /// in `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` requests
+    /// the unanimated post-reveal layout scroll on the first offscreen event.
+    func testCompensatedShift_armedBottomFollow_holdsThroughShiftAndStaysQuietAtBottom() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var settleSleeps = 0
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in settleSleeps += 1 },
+            now: { 1_000 }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        settleSleeps = 0
+
+        let unexpectedFollowScroll = expectation(
+            description: "A shift that ends at the bottom needs no follow scroll"
+        )
+        unexpectedFollowScroll.isInverted = true
+        unexpectedFollowScroll.assertForOverFulfill = false
+        var followSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordFollowStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            followSteps.append(step)
+            unexpectedFollowScroll.fulfill()
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordFollowStep)
+        // Spacer growth, then a lazy re-estimate, both with the anchor
+        // offscreen mid-shift; then the shift lands on the bottom.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100 + 303,
+            viewportHeight: 100,
+            scrollAction: recordFollowStep
+        )
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -150,
+            contentHeight: 100 + 303 + 136,
+            viewportHeight: 100,
+            scrollAction: recordFollowStep
+        )
+        XCTAssertTrue(followSteps.isEmpty)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -439,
+            contentHeight: 100 + 303 + 136,
+            viewportHeight: 100,
+            scrollAction: recordFollowStep
+        )
+
+        await waitUntil { settleSleeps >= 1 }
+        await fulfillment(of: [unexpectedFollowScroll], timeout: 0.1)
+        XCTAssertTrue(followSteps.isEmpty)
+    }
+
+    /// A bubble that finished loading during a shift from the bottom left the
+    /// anchor offscreen when the shift ended; the settle check re-anchors with
+    /// its own animated scroll rather than the follow's unanimated jump.
+    ///
+    /// Revert-check: making `finishCompensatedShiftHold` in
+    /// `ChatMessagesCoordinator` only clear the hold (no scroll) leaves the
+    /// anchor offscreen and this test times out.
+    func testCompensatedShift_bubbleGrowthLeavesAnchorOffscreen_reanchorsAtSettle() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        var followSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordFollowStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            followSteps.append(step)
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordFollowStep)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -301,
+            contentHeight: 100 + 301 + 120,
+            viewportHeight: 100,
+            scrollAction: recordFollowStep
+        )
+        XCTAssertTrue(followSteps.isEmpty)
+
+        await waitUntil { !followSteps.isEmpty }
+        XCTAssertEqual(
+            followSteps.first,
+            .init(
+                delay: 0,
+                animated: true,
+                logMessage: "ChatView compensated shift settle -> bottom anchor"
+            )
+        )
+    }
+
+    /// The follow's grace can run out during the hold. The settle check still
+    /// finishes a shift that started at the bottom with one anchor (and its
+    /// own 1s follow), but must not slide the expired 3s deadline back to
+    /// life.
+    ///
+    /// Revert-check: deleting the `startedAtBottom && anchorsAtSettle` anchor
+    /// branch from `ChatMessagesCoordinator.finishCompensatedShiftHold` falls
+    /// through to the expired follow, which never scrolls; this test times
+    /// out.
+    func testCompensatedShift_followExpiresDuringHold_anchorsOnceWithoutRevivingFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        var advancesClockOnSleep = false
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in
+                if advancesClockOnSleep {
+                    // The follow's 3s grace ends while the shift is in flight.
+                    currentTime += 1
+                }
+            },
+            now: { currentTime }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        // The follow was armed at 1_000 with a 3s grace.
+        currentTime = 1_002.8
+        advancesClockOnSleep = true
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordStep)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -301,
+            contentHeight: 100 + 301 + 120,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+
+        await waitUntil { !steps.isEmpty }
+        XCTAssertEqual(
+            steps,
+            [
+                .init(
+                    delay: 0,
+                    animated: true,
+                    logMessage: "ChatView compensated shift settle -> bottom anchor"
+                )
+            ]
+        )
+
+        // Only the settle's own 1s follow is left; once it has passed, further
+        // growth with the anchor offscreen does not scroll.
+        advancesClockOnSleep = false
+        currentTime += 2
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -301,
+            contentHeight: 100 + 301 + 160,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+        XCTAssertEqual(steps.count, 1)
+    }
+
+    /// The most common reply: open a chat, wait past the follow's grace, tap
+    /// the field at the bottom. The shift can land a couple of points short
+    /// (a lazy re-estimate mid-shift), and with the coordinator's own scroll
+    /// skipped, nothing else would finish it; the anchor would stay offscreen
+    /// and the transcript would stop following new messages while composing.
+    ///
+    /// Revert-check: deleting the `startedAtBottom` anchor at the end of
+    /// `ChatMessagesCoordinator.finishCompensatedShiftHold` leaves the shift
+    /// short and this test times out.
+    func testCompensatedShift_inactiveFollowShiftLandsShortOfBottom_anchorsOnceAtSettle() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        // Long past the follow's grace; the next event retires it.
+        currentTime = 1_100
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { _ in
+            XCTFail("An expired follow must not scroll")
+        }
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordStep)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -301,
+            contentHeight: 100 + 303,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+        XCTAssertTrue(steps.isEmpty)
+
+        await waitUntil { !steps.isEmpty }
+        XCTAssertEqual(
+            steps,
+            [
+                .init(
+                    delay: 0,
+                    animated: true,
+                    logMessage: "ChatView compensated shift settle -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    /// A reader scrolled up in history keeps their place: the settle check
+    /// only finishes shifts that started at the bottom.
+    ///
+    /// Revert-check: removing `guard hold.startedAtBottom` from
+    /// `ChatMessagesCoordinator.finishCompensatedShiftHold` yanks this reader
+    /// to the bottom.
+    func testCompensatedShift_scrolledUpReader_settleDoesNotScroll() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var settleSleeps = 0
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in settleSleeps += 1 },
+            now: { 1_000 }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 150,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { _ in }
+        settleSleeps = 0
+
+        let unexpectedScroll = expectation(description: "A scrolled-up reader stays put")
+        unexpectedScroll.isInverted = true
+        unexpectedScroll.assertForOverFulfill = false
+        let failOnScroll: ChatMessagesCoordinator.BottomAnchorAction = { _ in
+            unexpectedScroll.fulfill()
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: failOnScroll)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 150 - 301,
+            contentHeight: 100 + 301,
+            viewportHeight: 100,
+            scrollAction: failOnScroll
+        )
+
+        await waitUntil { settleSleeps >= 1 }
+        await fulfillment(of: [unexpectedScroll], timeout: 0.1)
+    }
+
+    /// A reader who grabs the transcript mid-shift owns the scroll: the
+    /// pending settle check must not pull them back to the bottom.
+    ///
+    /// Revert-check: removing the `handleUserScrollPhaseBegan()` call from
+    /// `ChatMessagesCoordinator.handleUserScrollInteraction` (which drops
+    /// both the hold reset and the settle-task cancel) lets the settle check
+    /// anchor the reader to the bottom.
+    func testCompensatedShift_userScrollDuringHold_cancelsSettleAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let unexpectedScroll = expectation(description: "The reader's scroll wins")
+        unexpectedScroll.isInverted = true
+        unexpectedScroll.assertForOverFulfill = false
+        let failOnScroll: ChatMessagesCoordinator.BottomAnchorAction = { _ in
+            unexpectedScroll.fulfill()
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: failOnScroll)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -120,
+            contentHeight: 100 + 301,
+            viewportHeight: 100,
+            scrollAction: failOnScroll
+        )
+        coordinator.handleUserScrollInteraction()
+
+        await fulfillment(of: [unexpectedScroll], timeout: 0.1)
+    }
+
+    /// Trackpad, mouse-wheel and pan-driven scrolls never trip the
+    /// transcript's drag gesture; the scroll view's phase reports them, and
+    /// they must cancel a pending settle check the same way.
+    ///
+    /// Revert-check: emptying
+    /// `ChatMessagesCoordinator.handleUserScrollPhaseBegan` lets the settle
+    /// check anchor the reader to the bottom.
+    func testCompensatedShift_nonDragUserScrollDuringHold_cancelsSettleAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let unexpectedScroll = expectation(description: "The reader's scroll wins")
+        unexpectedScroll.isInverted = true
+        unexpectedScroll.assertForOverFulfill = false
+        let failOnScroll: ChatMessagesCoordinator.BottomAnchorAction = { _ in
+            unexpectedScroll.fulfill()
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: failOnScroll)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -120,
+            contentHeight: 100 + 301,
+            viewportHeight: 100,
+            scrollAction: failOnScroll
+        )
+        coordinator.handleUserScrollPhaseBegan()
+
+        await fulfillment(of: [unexpectedScroll], timeout: 0.1)
+    }
+
+    /// A message that syncs in during an at-bottom shift is appended only
+    /// once latest-insertion following resumes, after the settle; the settle
+    /// arms a short follow so that append still lands above the composer.
+    /// (The settle's own anchor makes the check's completion observable; the
+    /// follow is armed the same way when the shift lands exactly.)
+    ///
+    /// Revert-check: removing `armCompensatedShiftSettleFollowIfIdle()` from
+    /// `ChatMessagesCoordinator.finishCompensatedShiftHold` leaves the
+    /// appended message offscreen and this test times out.
+    func testCompensatedShift_settlesAtBottom_followsDeferredAppend() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { currentTime }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        // Past the post-reveal follow; retire it.
+        currentTime = 1_100
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { _ in
+            XCTFail("An expired follow must not scroll")
+        }
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordStep)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -301,
+            contentHeight: 100 + 303,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+        await waitUntil { steps.count == 1 }
+        // The settle anchor lands on the bottom.
+        currentTime += 0.5
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -303,
+            contentHeight: 100 + 303,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+        XCTAssertEqual(steps.count, 1)
+
+        // Following resumed; the deferred message is appended below the anchor.
+        currentTime += 0.2
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -303,
+            contentHeight: 100 + 303 + 90,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+
+        await waitUntil { steps.count >= 2 }
+        XCTAssertEqual(
+            Array(steps.prefix(2)),
+            [
+                .init(
+                    delay: 0,
+                    animated: true,
+                    logMessage: "ChatView compensated shift settle -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    /// A chat left open at the bottom never retires its expired post-reveal
+    /// follow (no geometry event arrives after the grace). Arming the settle
+    /// follow over it must start a fresh lifetime; extending it kept the old
+    /// arm time, capped every slide in the past, and the follow died on the
+    /// first append, leaving it under the composer.
+    ///
+    /// Revert-check: removing the `postRevealBottomFollowArmedAt = now()`
+    /// reset from `ChatMessagesCoordinator.armCompensatedShiftSettleFollowIfIdle`
+    /// makes this test time out.
+    func testCompensatedShift_settleOverUnretiredExpiredFollow_armsFreshFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        var settleSleeps = 0
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in settleSleeps += 1 },
+            now: { currentTime }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        // Long after the grace, with no event that would retire the follow.
+        currentTime = 1_100
+        settleSleeps = 0
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordStep)
+        // The shift lands exactly on the bottom.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -301,
+            contentHeight: 100 + 301,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+        await waitUntil { settleSleeps >= 1 }
+        XCTAssertTrue(steps.isEmpty)
+
+        currentTime += 0.2
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -301,
+            contentHeight: 100 + 301 + 90,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+
+        await waitUntil { !steps.isEmpty }
+        XCTAssertEqual(
+            steps.first,
+            .init(
+                delay: 0,
+                animated: false,
+                logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+            )
+        )
+    }
+
+    /// A shift that did not start at the bottom (the keyboard re-showing
+    /// mid-return after a send) but ended there leaves the same deferred
+    /// append; the settle check arms the follow for it too.
+    ///
+    /// Revert-check: making the at-bottom branch of
+    /// `ChatMessagesCoordinator.finishCompensatedShiftHold` arm only holds
+    /// that started at the bottom makes this test time out.
+    func testCompensatedShift_notFromBottomButEndsAtBottom_armsSettleFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        var settleSleeps = 0
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in settleSleeps += 1 },
+            now: { currentTime }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        // Retire the reveal follow, with the anchor offscreen mid-return.
+        currentTime = 1_100
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -150,
+            contentHeight: 100 + 301,
+            viewportHeight: 100
+        ) { _ in
+            XCTFail("An expired follow must not scroll")
+        }
+        settleSleeps = 0
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordStep)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -301,
+            contentHeight: 100 + 301,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+        await waitUntil { settleSleeps >= 1 }
+        XCTAssertTrue(steps.isEmpty)
+
+        currentTime += 0.2
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -301,
+            contentHeight: 100 + 301 + 90,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+
+        await waitUntil { !steps.isEmpty }
+        XCTAssertEqual(
+            steps.first,
+            .init(
+                delay: 0,
+                animated: false,
+                logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+            )
+        )
+    }
+
+    /// A shift that did not start at the bottom, with the post-send follow
+    /// still live: growth that left the anchor offscreen at the settle is the
+    /// follow's to absorb.
+    ///
+    /// Revert-check: deleting the live-follow branch from
+    /// `ChatMessagesCoordinator.finishCompensatedShiftHold` makes this test
+    /// time out.
+    func testCompensatedShift_notFromBottomWithLiveFollow_followAbsorbsGrowthAtSettle() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        // Anchor offscreen mid-return, no growth: the live follow stays idle.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { _ in
+            XCTFail("No growth, no follow scroll")
+        }
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordStep)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100 + 90,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+        XCTAssertTrue(steps.isEmpty)
+
+        await waitUntil { !steps.isEmpty }
+        XCTAssertEqual(
+            steps.first,
+            .init(
+                delay: 0,
+                animated: false,
+                logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+            )
+        )
+    }
+
+    /// Same, but the follow's grace runs out during the hold: the settle check
+    /// must not slide the expired deadline back to life.
+    ///
+    /// Revert-check: sliding the deadline without the `now() < deadline`
+    /// check in `ChatMessagesCoordinator.finishCompensatedShiftHold` revives
+    /// the follow and requests a layout scroll here.
+    func testCompensatedShift_notFromBottomFollowExpiresDuringHold_isNotRevived() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        var settleSleeps = 0
+        var advancesClockOnSleep = false
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in
+                settleSleeps += 1
+                if advancesClockOnSleep {
+                    currentTime += 1
+                }
+            },
+            now: { currentTime }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { _ in
+            XCTFail("No growth, no follow scroll")
+        }
+        // The follow was armed at 1_000 with a 3s grace.
+        currentTime = 1_002.8
+        settleSleeps = 0
+        advancesClockOnSleep = true
+        let unexpectedScroll = expectation(description: "An expired follow must stay expired")
+        unexpectedScroll.isInverted = true
+        unexpectedScroll.assertForOverFulfill = false
+        let failOnScroll: ChatMessagesCoordinator.BottomAnchorAction = { _ in
+            unexpectedScroll.fulfill()
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: failOnScroll)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100 + 90,
+            viewportHeight: 100,
+            scrollAction: failOnScroll
+        )
+
+        await waitUntil { settleSleeps >= 1 }
+        await fulfillment(of: [unexpectedScroll], timeout: 0.1)
+    }
+
+    /// While the settle check's animated anchor runs, a lazy re-estimate of a
+    /// point or two must not trigger the freshly armed follow's unanimated
+    /// jump over it (a message that arrived mid-shift snapped ~180pt in one
+    /// frame in the simulator).
+    ///
+    /// Revert-check: emptying `ChatMessagesCoordinator.holdThroughSettleAnchor`
+    /// lets the follow answer the re-estimate with a post-reveal layout scroll.
+    func testCompensatedShift_settleAnchorAnimation_isNotInterruptedByFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        var sleepCalls = 0
+        var parksFromSleepCall = Int.max
+        let settleAnchorGate = ParkedSleepGate()
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in
+                sleepCalls += 1
+                guard sleepCalls >= parksFromSleepCall else { return }
+                while await !settleAnchorGate.isReleased(), !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            },
+            now: { currentTime }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        // Retire the reveal follow.
+        currentTime = 1_100
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { _ in
+            XCTFail("An expired follow must not scroll")
+        }
+        // Sleep 1 is the shift's settle; sleep 2, the settle anchor's hold,
+        // stays parked for the rest of the test.
+        sleepCalls = 0
+        parksFromSleepCall = 2
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordStep)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -301,
+            contentHeight: 100 + 301 + 182,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+        await waitUntil { steps.count == 1 }
+        XCTAssertEqual(steps.first?.logMessage, "ChatView compensated shift settle -> bottom anchor")
+
+        // Mid-animation: the anchor is still offscreen and a row re-estimates.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -400,
+            contentHeight: 100 + 301 + 182 + 2,
+            viewportHeight: 100,
+            scrollAction: recordStep
+        )
+
+        XCTAssertEqual(steps.count, 1)
+        await settleAnchorGate.release()
+    }
+
+    /// A keyboard publishing its height in two steps: the first step's
+    /// unanimated spacer growth already pushed the anchor offscreen, but the
+    /// shift in flight started at the bottom and still ends there.
+    ///
+    /// Revert-check: dropping `isCompensatedShiftFromBottomInFlight` from the
+    /// compensated early return in
+    /// `ChatMessagesCoordinator.handleKeyboardHeightChange` schedules the
+    /// double scroll-to-bottom again.
+    func testKeyboardGrowth_secondStepDuringShiftFromBottom_requestsNoBottomAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { 1_000 }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let unexpectedBottomAnchor = expectation(
+            description: "The second keyboard step lands with the shift"
+        )
+        unexpectedBottomAnchor.isInverted = true
+        unexpectedBottomAnchor.assertForOverFulfill = false
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483) { _ in }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -40,
+            contentHeight: 100 + 301,
+            viewportHeight: 100
+        ) { _ in }
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 335,
+            newHeight: 380,
+            messageCount: messages.count,
+            isInitialWindowLoaded: true,
+            isInsetGrowthCompensated: true
+        ) { _ in
+            unexpectedBottomAnchor.fulfill()
+        }
+
+        await fulfillment(of: [unexpectedBottomAnchor], timeout: 0.1)
+    }
+
     func testKeyboardChangeDuringInitialLoad_doesNotBlockReadyStateOrFutureAnimatedScrolls() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
@@ -5555,6 +6757,26 @@ private extension ChatMessagesCoordinator {
             contentMinY: contentMinY,
             contentHeight: contentHeight,
             viewportHeight: viewportHeight,
+            scrollAction: scrollAction
+        )
+    }
+
+    /// Production callers must decide `isInsetGrowthCompensated` explicitly
+    /// (it mirrors the view's same-update transcript shift); tests that
+    /// predate the shift model the uncompensated path.
+    func handleKeyboardHeightChange(
+        oldHeight: CGFloat,
+        newHeight: CGFloat,
+        messageCount: Int,
+        isInitialWindowLoaded: Bool,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        handleKeyboardHeightChange(
+            oldHeight: oldHeight,
+            newHeight: newHeight,
+            messageCount: messageCount,
+            isInitialWindowLoaded: isInitialWindowLoaded,
+            isInsetGrowthCompensated: false,
             scrollAction: scrollAction
         )
     }

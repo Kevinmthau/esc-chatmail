@@ -4304,6 +4304,358 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    /// A programmatic inset shift (the keyboard show) holds row positions
+    /// while it animates, then replays the latest one as an extension that
+    /// keeps the rows above the reader.
+    ///
+    /// Revert-check: replaying with `updateVisibleMessages()` (a replace)
+    /// instead of `extendsWindowOnOverlap: true` in
+    /// `VirtualScrollState.replayHeldVisibleIndex` publishes 5..<10 and drops
+    /// rows 2..<5 above the reader; those drops walked a far-up reader ~24
+    /// messages forward under the in-flight shift.
+    func testProgrammaticScrollHold_replaysHeldPositionAsExtension() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 12)
+        // No edge preloads (threshold 0), so only updateVisibleMessages moves
+        // the window.
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 0
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil { !state.isLoadingMore && !state.visibleMessages.isEmpty }
+        state.markIndexVisible(3)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 2 }
+
+        state.holdWindowForProgrammaticScroll(settlingIn: 60)
+        state.markIndexVisible(6)
+        XCTAssertFalse(state.isLoadingMore)
+        XCTAssertEqual(state.heldVisibleIndex, 6)
+
+        state.handleUserScrollInteractionBegan()
+        await waitUntil {
+            !state.isLoadingMore && state.visibleMessages.count == 8
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 2)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[2..<10]).map(\.objectID)
+        )
+    }
+
+    /// Normal scrolling keeps the sliding replace: SwiftUI re-anchors it
+    /// while the reader drags, and extending on every step grew windows to
+    /// the cap and front-trimmed rows far above the reader, which displaced
+    /// long-thread reading (simulator: 11 of 40 slow drags at the cap).
+    ///
+    /// Revert-check: defaulting `extendsWindowOnOverlap` to true in
+    /// `VirtualScrollState.updateVisibleMessages` keeps rows 0..<2 here.
+    func testMarkIndexVisible_withoutHold_slidesWindowAsBefore() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 10)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 0
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) ==
+                Array(messages.prefix(3)).map(\.objectID) && !state.isLoadingMore
+        }
+
+        state.markIndexVisible(3)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 2 }
+
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[2..<7]).map(\.objectID)
+        )
+    }
+
+    /// A replay whose union would exceed the window cap trims only the
+    /// overflow, on the side the reader is leaving, instead of collapsing to
+    /// the requested range and dropping every row above it at once.
+    ///
+    /// Revert-check: replacing the overflow trim in
+    /// `VirtualScrollState.updateVisibleMessages` with the plain requested
+    /// range starts the window at 11 instead of 4.
+    func testProgrammaticScrollHold_replayOverWindowCap_trimsOnlyOverflow() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 30)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 0,
+            maxWindowSize: 12
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil { !state.isLoadingMore && !state.visibleMessages.isEmpty }
+        state.markIndexVisible(3)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 2 }
+        for (index, expectedEndIndex) in [(6, 10), (9, 13)] {
+            state.holdWindowForProgrammaticScroll(settlingIn: 60)
+            state.markIndexVisible(index)
+            state.handleUserScrollInteractionBegan()
+            await waitUntil {
+                !state.isLoadingMore &&
+                    state.visibleMessages.last?.objectID == messages[expectedEndIndex - 1].objectID
+            }
+        }
+        XCTAssertEqual(state.visibleRangeStartIndex, 2)
+
+        // Requested 11..<16; the union 2..<16 is two rows over the cap of 12.
+        state.holdWindowForProgrammaticScroll(settlingIn: 60)
+        state.markIndexVisible(12)
+        state.handleUserScrollInteractionBegan()
+        await waitUntil {
+            !state.isLoadingMore && state.visibleMessages.last?.objectID == messages[15].objectID
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 4)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[4..<16]).map(\.objectID)
+        )
+    }
+
+    /// A keyboard-hide shift can leave the reader at the window's top edge.
+    /// Replaying that position at rest prepends rows above the viewport,
+    /// which SwiftUI does not re-anchor, so the content moved a row or more;
+    /// the replay waits for the reader's next scroll instead.
+    ///
+    /// Revert-check: removing the `!isUserScrolling` deferral from
+    /// `VirtualScrollState.replayHeldVisibleIndex` extends the window to 4..<16
+    /// at rest.
+    func testProgrammaticScrollHold_leadingReplayAtRest_waitsForUserScroll() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 30)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 3,
+            pageSize: 3,
+            preloadThreshold: 0
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil { !state.isLoadingMore && !state.visibleMessages.isEmpty }
+        state.markIndexVisible(10)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 7 }
+
+        state.holdWindowForProgrammaticScroll(settlingIn: 0.05)
+        state.markIndexVisible(7)
+        await waitUntil { !state.isProgrammaticScrollHoldActive }
+        XCTAssertEqual(state.deferredLeadingReplayIndex, 7)
+        XCTAssertFalse(state.isLoadingMore)
+        XCTAssertEqual(state.visibleRangeStartIndex, 7)
+
+        state.handleUserScrollInteractionBegan()
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 4 }
+
+        XCTAssertNil(state.deferredLeadingReplayIndex)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[4..<16]).map(\.objectID)
+        )
+    }
+
+    /// Row appearances near the stale position (inside the ±2 movement
+    /// guard) load nothing, so they must not drop a deferred replay; one
+    /// that moves the window supersedes it, and so does a new hold.
+    ///
+    /// Revert-check: clearing `deferredLeadingReplayIndex` above the ±2 guard
+    /// in `VirtualScrollState.markIndexVisible` drops the replay at index 8;
+    /// removing the clear in `holdWindowForProgrammaticScroll` keeps it at
+    /// the end.
+    func testDeferredLeadingReplay_survivesNearbyAppearanceAndClearsOnMoveOrNewHold() async throws {
+        let (conversation, _) = try makeConversationWithMessages(count: 40)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 3,
+            pageSize: 3,
+            preloadThreshold: 0
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil { !state.isLoadingMore && !state.visibleMessages.isEmpty }
+        state.markIndexVisible(10)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 7 }
+        state.holdWindowForProgrammaticScroll(settlingIn: 0.05)
+        state.markIndexVisible(7)
+        await waitUntil { !state.isProgrammaticScrollHoldActive }
+        XCTAssertEqual(state.deferredLeadingReplayIndex, 7)
+
+        state.markIndexVisible(8)
+        XCTAssertEqual(state.deferredLeadingReplayIndex, 7)
+
+        state.markIndexVisible(14)
+        XCTAssertNil(state.deferredLeadingReplayIndex)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 11 }
+
+        state.holdWindowForProgrammaticScroll(settlingIn: 0.05)
+        state.markIndexVisible(11)
+        await waitUntil { !state.isProgrammaticScrollHoldActive }
+        XCTAssertEqual(state.deferredLeadingReplayIndex, 11)
+        state.holdWindowForProgrammaticScroll(settlingIn: 60)
+        XCTAssertNil(state.deferredLeadingReplayIndex)
+    }
+
+    /// A send can jump the window to the latest messages while a shift's
+    /// hold is pending; the held historical position must not pull it back.
+    ///
+    /// Revert-check: dropping `window.contains(index: index)` from
+    /// `VirtualScrollState.replayHeldVisibleIndex` reloads the old range.
+    func testProgrammaticScrollHold_heldIndexOutsideReplacedWindow_isDropped() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 30)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 0
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil { !state.isLoadingMore && !state.visibleMessages.isEmpty }
+        state.holdWindowForProgrammaticScroll(settlingIn: 60)
+        state.markIndexVisible(3)
+        _ = await state.loadWindow(startIndex: 20, endIndex: 25)
+        XCTAssertEqual(state.visibleRangeStartIndex, 20)
+
+        state.handleUserScrollInteractionBegan()
+
+        // A replay moves `scrollPosition` synchronously, before its window
+        // load starts, so this is what proves the index was dropped.
+        XCTAssertNotEqual(state.scrollPosition, 3)
+        XCTAssertFalse(state.isLoadingMore)
+        XCTAssertEqual(state.visibleRangeStartIndex, 20)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[20..<25]).map(\.objectID)
+        )
+    }
+
+    /// `resume()` reuses the state after `cleanup()`; a hold or deferred
+    /// replay pending then must not keep swallowing or replaying positions.
+    ///
+    /// Revert-check: removing the `isProgrammaticScrollHoldActive = false`
+    /// reset from `VirtualScrollState.cleanup` leaves the hold active.
+    func testCleanup_clearsPendingProgrammaticScrollHold() async throws {
+        let (conversation, _) = try makeConversationWithMessages(count: 10)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 0
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil { !state.isLoadingMore && !state.visibleMessages.isEmpty }
+        state.holdWindowForProgrammaticScroll(settlingIn: 60)
+        state.markIndexVisible(3)
+        state.deferredLeadingReplayIndex = 2
+
+        state.cleanup()
+
+        XCTAssertFalse(state.isProgrammaticScrollHoldActive)
+        XCTAssertNil(state.heldVisibleIndex)
+        XCTAssertNil(state.deferredLeadingReplayIndex)
+    }
+
+    /// A range disjoint from the window (a jump) still replaces it.
+    func testMarkIndexVisible_rangeDisjointFromWindow_replacesWindow() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 20)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) ==
+                Array(messages.prefix(3)).map(\.objectID) && !state.isLoadingMore
+        }
+
+        state.markIndexVisible(12)
+        await waitUntil {
+            !state.isLoadingMore && state.visibleRangeStartIndex == 11
+        }
+
+        XCTAssertEqual(
+            Array(state.visibleMessages.prefix(5)).map(\.objectID),
+            Array(messages[11..<16]).map(\.objectID)
+        )
+    }
+
     func testDownwardPreloadAfterBackTrim_neverExceedsWindowCap() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 40)
         let configuration = VirtualScrollConfiguration(

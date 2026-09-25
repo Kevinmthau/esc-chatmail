@@ -22,6 +22,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             "replyAdmissionStabilization.\(messageObjectID.uriRepresentation().absoluteString)"
         }
         static let postRevealGeometryCheck = "postRevealGeometryCheck"
+        static let compensatedShiftSettle = "compensatedShiftSettle"
         static let scrollTakeoverRelease = "scrollTakeoverRelease"
     }
 
@@ -50,10 +51,36 @@ final class ChatMessagesCoordinator: ObservableObject {
         let task: Task<Bool, Never>
     }
 
+    /// A transcript shift the view is animating to compensate inset growth
+    /// (`handleCompensatedInsetGrowth`), during which the bottom follow holds.
+    private struct CompensatedShiftHold {
+        let until: TimeInterval
+        /// Some overlapping shift began with the bottom anchor visible, so the
+        /// shift is planned to end at the new bottom. Mid-shift layout (the
+        /// lazy stack re-estimating a row by a couple of points) can still
+        /// leave it short; the settle check corrects that.
+        let startedAtBottom: Bool
+        var didObserveGrowth: Bool
+        /// False for the short hold that covers the settle check's own
+        /// animated anchor (`holdThroughSettleAnchor`): its settle does not
+        /// anchor again.
+        var anchorsAtSettle = true
+    }
+
     private static let maximumInitialScrollAttempts = 2
     private static let maximumPostRevealScrollAttempts = 2
     private static let postRevealBottomFollowGracePeriod: TimeInterval = 3.0
     private static let geometryChangeTolerance: CGFloat = 0.5
+    /// Bottom follow armed when a compensated shift settles at the bottom,
+    /// whether or not it started there. During the shift the anchor sat
+    /// offscreen, so the view turned off latest-insertion following; a message
+    /// that arrived then is appended when the anchor becomes visible again,
+    /// usually as the shift ends, and this follow absorbs it. It is an
+    /// ordinary post-reveal follow: growth slides it like any other (3s
+    /// grace, 30s lifetime), and a user scroll cancels it.
+    private static let compensatedShiftSettleFollowGracePeriod: TimeInterval = 1.0
+    /// Frame or two after the settle anchor's animation before its hold ends.
+    private static let settleAnchorHoldSlack: TimeInterval = 0.1
     /// Hard wall-clock bound on the hidden initial-anchor pass. The retry
     /// budget resets whenever content legitimately grows (async bubble loads),
     /// so an event count alone no longer terminates the pass; this deadline
@@ -145,6 +172,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var trackedContentHeight: CGFloat?
     private var trackedViewportHeight: CGFloat?
     private var postRevealBottomFollowState: PostRevealBottomFollowState = .inactive
+    private var compensatedShiftHold: CompensatedShiftHold?
     private var hasCapturedInitialUnreadSnapshot = false
     private var isVisible = false
     private var userScrollInteractionRevision: UInt = 0
@@ -296,6 +324,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         postRevealBottomFollowState = .inactive
         didObserveGrowthDuringInitialRecheck = false
         didObserveGrowthDuringPostRevealCheck = false
+        compensatedShiftHold = nil
         isUserScrollTakeoverActive = false
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
@@ -484,6 +513,22 @@ final class ChatMessagesCoordinator: ObservableObject {
         // stays bounded. Not slid in .checkingAfterScroll: the in-flight
         // validation task matches on the exact deadline to detect staleness.
         let didObserveGrowth = contentHeightIncreased || viewportHeightDecreased
+
+        if isHoldingForCompensatedShift {
+            if didObserveGrowth {
+                compensatedShiftHold?.didObserveGrowth = true
+            }
+            // The view is animating the transcript to the new bottom itself;
+            // the spacer growth, and the lazy stack re-estimating heights as
+            // the shift realizes rows, arrive here with the anchor briefly
+            // offscreen. Answering them with the follow's unanimated jump
+            // replaced the shift in the most common flow (open a chat, tap the
+            // field within the follow window). The settle check re-anchors if
+            // the shift did not end at the bottom.
+            if isPostRevealBottomFollowArmed {
+                return
+            }
+        }
 
         switch postRevealBottomFollowState {
         case .following(let deadline):
@@ -685,12 +730,172 @@ final class ChatMessagesCoordinator: ObservableObject {
         )
     }
 
+    /// Holds the post-reveal/post-send bottom follow while the view animates
+    /// the transcript to compensate inset growth (`ChatBottomInsetPolicy`),
+    /// then re-checks once the shift has settled.
+    ///
+    /// Without the hold, an armed follow saw the spacer's growth with the
+    /// bottom anchor briefly offscreen and answered with an unanimated jump
+    /// to the bottom over the smooth shift. Absorbing exactly the spacer's
+    /// height was not enough: the lazy stack re-estimates row heights as the
+    /// shift realizes rows (+2pt, then +136pt in the simulator), and each
+    /// re-estimate read as layout growth.
+    func handleCompensatedInsetGrowth(
+        settlingIn settleDuration: TimeInterval,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        // Any hold still present has not had its settle check (the check
+        // clears it), even if its time is up while the main actor is busy
+        // with the end of the shift; merge rather than lose its correction.
+        let currentHold = compensatedShiftHold
+        let until = max(currentHold?.until ?? 0, now() + settleDuration)
+        compensatedShiftHold = CompensatedShiftHold(
+            until: until,
+            startedAtBottom: (currentHold?.startedAtBottom ?? false) || isTrackedBottomAnchorVisible,
+            didObserveGrowth: currentHold?.didObserveGrowth ?? false
+        )
+        if case .checkingAfterScroll(let deadline, _) = postRevealBottomFollowState {
+            // A follow scroll's validation must not fire mid-shift either;
+            // the settle check below takes over its job.
+            taskManager.cancel(TaskKey.postRevealGeometryCheck)
+            didObserveGrowthDuringPostRevealCheck = false
+            postRevealBottomFollowState = .following(deadline: deadline)
+        }
+
+        let remaining = max(0, until - now())
+        taskManager.run(TaskKey.compensatedShiftSettle) { [weak self, sleep] in
+            await sleep(UInt64(remaining * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.finishCompensatedShiftHold(scrollAction: scrollAction)
+        }
+    }
+
+    private var isHoldingForCompensatedShift: Bool {
+        guard let compensatedShiftHold else { return false }
+        return now() < compensatedShiftHold.until
+    }
+
+    private var isPostRevealBottomFollowArmed: Bool {
+        if case .inactive = postRevealBottomFollowState {
+            return false
+        }
+        return true
+    }
+
+    private var isCompensatedShiftFromBottomInFlight: Bool {
+        isHoldingForCompensatedShift && compensatedShiftHold?.startedAtBottom == true
+    }
+
+    private func finishCompensatedShiftHold(scrollAction: @escaping BottomAnchorAction) {
+        guard let hold = compensatedShiftHold else { return }
+        compensatedShiftHold = nil
+
+        if isTrackedBottomAnchorVisible {
+            // Ended at the bottom (including a shift from elsewhere, such as
+            // the keyboard re-showing mid-return after a send).
+            armCompensatedShiftSettleFollowIfIdle()
+            return
+        }
+
+        if hold.startedAtBottom && hold.anchorsAtSettle {
+            // A shift that started at the bottom must end there, follow or
+            // not: the at-bottom keyboard skip relied on it, and an anchor
+            // left offscreen also stopped the transcript following new
+            // messages while the reader composed. Takeover does not block it:
+            // the reader was at the bottom when the shift began, and any
+            // scroll since cleared the hold. Animated, and held through its
+            // animation with the follow armed, because the gap can be a whole
+            // message that arrived mid-shift: an unanimated anchor, or a
+            // follow answering the next re-estimate mid-animation, snapped
+            // ~180pt in one frame in the simulator.
+            scrollAction(
+                BottomAnchorStep(
+                    delay: 0,
+                    animated: true,
+                    logMessage: "ChatView compensated shift settle -> bottom anchor"
+                )
+            )
+            armCompensatedShiftSettleFollowIfIdle()
+            holdThroughSettleAnchor(scrollAction: scrollAction)
+            return
+        }
+
+        // Growth during the shift that left the anchor offscreen at the end
+        // (a bubble finishing its load mid-shift) is exactly what a live
+        // follow exists to absorb.
+        switch postRevealBottomFollowState {
+        case .following(let deadline), .waitingForGrowth(let deadline):
+            // Sliding an expired deadline would revive the follow, and a slide
+            // past the follow's lifetime cap lands in the past.
+            let slidDeadline = now() < deadline
+                ? slidPostRevealFollowDeadline(extending: deadline)
+                : deadline
+            if hold.didObserveGrowth && now() < slidDeadline {
+                requestPostRevealBottomScroll(
+                    deadline: slidDeadline,
+                    scrollAttempts: 1,
+                    scrollAction: scrollAction
+                )
+            } else if now() >= slidDeadline {
+                postRevealBottomFollowState = .inactive
+            }
+        case .checkingAfterScroll, .inactive:
+            break
+        }
+    }
+
+    private func holdThroughSettleAnchor(scrollAction: @escaping BottomAnchorAction) {
+        let duration = UIConfig.scrollAnimationDuration + Self.settleAnchorHoldSlack
+        compensatedShiftHold = CompensatedShiftHold(
+            until: now() + duration,
+            startedAtBottom: true,
+            didObserveGrowth: false,
+            anchorsAtSettle: false
+        )
+        taskManager.run(TaskKey.compensatedShiftSettle) { [weak self, sleep] in
+            await sleep(UInt64(duration * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.finishCompensatedShiftHold(scrollAction: scrollAction)
+        }
+    }
+
+    private func armCompensatedShiftSettleFollowIfIdle() {
+        let deadline = now() + Self.compensatedShiftSettleFollowGracePeriod
+        switch postRevealBottomFollowState {
+        case .following(let currentDeadline) where currentDeadline >= deadline,
+             .waitingForGrowth(let currentDeadline) where currentDeadline >= deadline:
+            // A live follow that already outlasts this one keeps its own
+            // deadline and arm time.
+            return
+        case .checkingAfterScroll:
+            // A follow scroll's validation is in flight and owns the anchor.
+            return
+        case .inactive, .following, .waitingForGrowth:
+            // Arm fresh, including over an expired follow the view never
+            // retired: keeping its old arm time capped every slide at a
+            // lifetime that had already run out, so the follow was dead on
+            // its first growth event.
+            postRevealBottomFollowArmedAt = now()
+            postRevealBottomFollowState = .following(deadline: deadline)
+        }
+    }
+
+    /// The reader started moving the transcript by some means other than the
+    /// transcript's drag gesture (trackpad, mouse wheel, an interactive
+    /// dismissal's pan): a pending compensated-shift settle check must not
+    /// pull them back to the bottom.
+    func handleUserScrollPhaseBegan() {
+        compensatedShiftHold = nil
+        taskManager.cancel(TaskKey.compensatedShiftSettle)
+    }
+
     /// Stops initial auto-anchoring and post-reveal bottom following once the user
     /// takes control of the scroll view.
     func handleUserScrollInteraction() {
         userScrollInteractionRevision &+= 1
         isUserScrollTakeoverActive = true
         taskManager.cancel(TaskKey.scrollTakeoverRelease)
+        handleUserScrollPhaseBegan()
         let wasFollowingPostRevealBottom: Bool
         switch postRevealBottomFollowState {
         case .following, .checkingAfterScroll, .waitingForGrowth:
@@ -848,11 +1053,17 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
+    /// - Parameter isInsetGrowthCompensated: whether the view shifts the
+    ///   transcript by this change's inset growth in the same update
+    ///   (`ChatBottomInsetPolicy.compensatesGrowth`). Deliberately no
+    ///   default, like `hasBottomAnchorGeometry`: every caller must decide
+    ///   it. (Tests use a defaulted overload in their own target.)
     func handleKeyboardHeightChange(
         oldHeight: CGFloat,
         newHeight: CGFloat,
         messageCount: Int,
         isInitialWindowLoaded: Bool,
+        isInsetGrowthCompensated: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
         guard isInitialWindowLoaded, isReadyToShow else {
@@ -864,11 +1075,34 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
             return
         }
+        // Takeover still suppresses the scroll-to-bottom (never yank a reader
+        // out of history). Keeping what they were reading above the keyboard
+        // is the view's inset-growth shift, which runs regardless of takeover.
         guard !isUserScrollTakeoverActive else {
             Log.diagnostic(
                 .chatView,
                 level: .info,
-                "ChatView skipping keyboard bottom anchor during user scroll takeover",
+                "ChatView skipping keyboard bottom anchor during user scroll takeover compensated=\(isInsetGrowthCompensated)",
+                category: .ui
+            )
+            return
+        }
+        // At the bottom the view's shift is planned to land on the new bottom
+        // (and its settle check corrects a short landing); a scroll-to-bottom
+        // here would start a second animated scroll toward the same point
+        // ~50ms into it. Off the bottom without a takeover
+        // (a stranded reveal, late bubble growth after the follow expired) the
+        // scroll-to-bottom still runs, so replying keeps showing the latest
+        // message as it did before the shift existed.
+        // Mid-shift the unanimated spacer growth has already pushed the anchor
+        // offscreen, so a keyboard publishing its height in two steps also
+        // counts a shift that started at the bottom.
+        if isInsetGrowthCompensated && newHeight > oldHeight &&
+            (isTrackedBottomAnchorVisible || isCompensatedShiftFromBottomInFlight) {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView skipping keyboard bottom anchor: inset growth compensated at the bottom",
                 category: .ui
             )
             return

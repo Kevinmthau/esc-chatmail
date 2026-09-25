@@ -208,6 +208,22 @@ final class VirtualScrollState: ObservableObject {
     /// end-anchored windows; the view releases it via `endInitialAnchorHold()`
     /// once the coordinator reveals the transcript.
     var isInitialAnchorHoldActive = false
+    /// While the chat view animates a programmatic inset shift (the transcript
+    /// scrolling with the keyboard, `ChatTranscriptOffsetShifter`), row
+    /// `onAppear` positions are held and replayed once it settles. Honoring
+    /// them mid-animation replaced the window as rows appeared, and a
+    /// replacement drops rows above the viewport; an in-flight programmatic
+    /// scroll does not re-anchor on that, so the newly exposed rows slid the
+    /// window again and one keyboard show walked a far-up reader ~24 messages
+    /// forward (simulator: 9 of 15 runs). See `holdWindowForProgrammaticScroll`.
+    var isProgrammaticScrollHoldActive = false
+    var heldVisibleIndex: Int?
+    /// A held position whose replay would add rows above the window, kept
+    /// until the reader next scrolls (`handleUserScrollInteractionBegan`).
+    /// Prepending at rest is not re-anchored: after a keyboard-hide shift it
+    /// moved the content under a reader near the window top by a row or more.
+    var deferredLeadingReplayIndex: Int?
+    let programmaticScrollHoldTaskKey = "programmaticScrollHold"
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     let taskManager = ViewModelTaskManager()
@@ -274,14 +290,84 @@ final class VirtualScrollState: ObservableObject {
         // Pre-reveal onAppear reflects the hidden top-anchored layout, not
         // user intent; see `isInitialAnchorHoldActive`.
         guard !isInitialAnchorHoldActive else { return }
+        if isProgrammaticScrollHoldActive {
+            heldVisibleIndex = index
+            return
+        }
 
         // Skip small position changes to avoid excessive updates during scroll
         // This prevents 10+ calls per scroll when each visible message fires onAppear
         guard abs(index - scrollPosition) > 2 else { return }
 
+        // A position the reader scrolled to supersedes a deferred replay. Only
+        // one that moves the window: a nearby onAppear that the guard above
+        // ignores must not drop the replay without loading anything.
+        deferredLeadingReplayIndex = nil
+
         scrollPosition = index
         updateVisibleMessages()
         preloadIfNeeded()
+    }
+
+    /// Holds `markIndexVisible` for `duration` while the view animates a
+    /// programmatic inset shift, then replays the latest held position
+    /// (`isProgrammaticScrollHoldActive`). Re-arming restarts the hold with the
+    /// new duration: a later shift supersedes the earlier scroll.
+    func holdWindowForProgrammaticScroll(settlingIn duration: TimeInterval) {
+        isProgrammaticScrollHoldActive = true
+        deferredLeadingReplayIndex = nil
+        taskManager.run(programmaticScrollHoldTaskKey) { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, duration) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.releaseProgrammaticScrollHold(isUserScrolling: false)
+        }
+    }
+
+    /// The reader started moving the transcript: end a programmatic-scroll
+    /// hold early, or run a replay deferred at rest, now that SwiftUI
+    /// re-anchors window changes against the moving content.
+    func handleUserScrollInteractionBegan() {
+        if isProgrammaticScrollHoldActive {
+            taskManager.cancel(programmaticScrollHoldTaskKey)
+            releaseProgrammaticScrollHold(isUserScrolling: true)
+        } else if let index = deferredLeadingReplayIndex {
+            deferredLeadingReplayIndex = nil
+            replayHeldVisibleIndex(index, isUserScrolling: true)
+        }
+    }
+
+    private func releaseProgrammaticScrollHold(isUserScrolling: Bool) {
+        guard isProgrammaticScrollHoldActive else { return }
+        isProgrammaticScrollHoldActive = false
+        guard let index = heldVisibleIndex else { return }
+        heldVisibleIndex = nil
+        replayHeldVisibleIndex(index, isUserScrolling: isUserScrolling)
+    }
+
+    private func replayHeldVisibleIndex(_ index: Int, isUserScrolling: Bool) {
+        // A window replaced meanwhile (a jump to the latest window after a
+        // send) makes the held position meaningless; replaying it would pull
+        // the window back toward the old range.
+        guard let window = messageWindow,
+              window.contains(index: index),
+              !isInitialAnchorHoldActive,
+              abs(index - scrollPosition) > 2 else { return }
+
+        let requestedStartIndex = max(0, index - configuration.bufferSize)
+        if requestedStartIndex < window.startIndex && !isUserScrolling {
+            deferredLeadingReplayIndex = index
+            return
+        }
+
+        scrollPosition = index
+        // Extend rather than replace: the shift exposed a few rows at one
+        // edge, and dropping the rows on the far side (above the viewport for
+        // a keyboard show) moves the content under the reader even at rest.
+        // An extension already leaves `bufferSize` rows of slack, so a
+        // concurrent edge preload would only race it.
+        if !updateVisibleMessages(extendsWindowOnOverlap: true) {
+            preloadIfNeeded()
+        }
     }
 
     /// Releases the initial-anchor hold on `markIndexVisible`; called by the
@@ -456,6 +542,9 @@ final class VirtualScrollState: ObservableObject {
         finishInitialLoadSignpost(outcome: "cancelled")
         windowLoadGeneration &+= 1
         taskManager.cancelAll()
+        isProgrammaticScrollHoldActive = false
+        heldVisibleIndex = nil
+        deferredLeadingReplayIndex = nil
         windowLoadLifecycle = .idle
         needsDatasetReconciliationAfterCurrentLoad = false
         needsUnclassifiedRefreshCountReconciliation = false

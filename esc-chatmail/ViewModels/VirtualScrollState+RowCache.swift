@@ -58,6 +58,26 @@ extension VirtualScrollState {
         return messageIDs.compactMap { resolvedRows[$0] }
     }
 
+    /// `resolveRowsOnViewContextThrowing` for only the IDs whose cached rows
+    /// are kept fresh: those of the current window, which
+    /// `handleViewContextChange` evicts on view-context updates, refreshes
+    /// and deletions of the message or its attachments (the same rows the
+    /// covered-window path renders from `resolveCachedRows`). Anything else
+    /// in the cache (rows a superseded preload resolved after the window
+    /// moved on) is re-mapped, because nothing evicts it.
+    func resolveRowsReusingCacheThrowing(
+        for messageIDs: [NSManagedObjectID]
+    ) throws -> [ChatMessageRowModel] {
+        let trustedMessageIDs = Set(messageWindow?.messageIDs ?? [])
+        let uncachedMessageIDs = messageIDs.filter {
+            !trustedMessageIDs.contains($0) || resolvedRowsByID[$0] == nil
+        }
+        if !uncachedMessageIDs.isEmpty {
+            _ = try resolveRowsOnViewContextThrowing(for: uncachedMessageIDs)
+        }
+        return messageIDs.compactMap { resolvedRowsByID[$0] }
+    }
+
     func row(atAbsoluteIndex index: Int) -> ChatMessageRowModel? {
         guard let window = messageWindow,
               window.contains(index: index) else {
