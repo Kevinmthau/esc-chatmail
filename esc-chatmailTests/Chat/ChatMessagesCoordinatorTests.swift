@@ -6567,6 +6567,577 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    // MARK: - Parked past the content end
+
+    /// iPhone-sized geometry for the past-end tests: a 1000pt transcript in
+    /// a 724pt viewport sits on its content end at contentMinY -276.
+    private static let parkedTestViewportHeight: CGFloat = 724
+    private static let parkedTestContentHeight: CGFloat = 1000
+    private static let contentEndMinY: CGFloat = -276
+    /// 674pt past the end (content end at y 50): the 1pt anchor still
+    /// intersects the viewport near its top, and with any composer spacer over
+    /// ~33pt every bubble sits above the top edge. The blank-transcript band.
+    private static let parkedPastEndMinY: CGFloat = -950
+    private static let pastContentEndCorrectionStep = ChatMessagesCoordinator.BottomAnchorStep(
+        delay: 0,
+        animated: false,
+        logMessage: "ChatView parked past content end -> bottom anchor"
+    )
+
+    /// Opening a chat intermittently showed an empty transcript, with no
+    /// spinner, until the first touch. The suspected cause: the hidden pass
+    /// confirmed the reveal because the 1pt anchor still intersected the
+    /// viewport while the transcript sat parked past its content end.
+    ///
+    /// Revert-check: dropping `!isTrackedContentParkedPastEnd` from the
+    /// pending reveal gate in
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` starts the
+    /// visibility confirmation instead of scrolling.
+    func testInitialReveal_anchorVisibleButParkedPastContentEnd_scrollsInsteadOfRevealing() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        appear(coordinator, rows: rows) { anchorSteps.append($0) }
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY) {
+            anchorSteps.append($0)
+        }
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
+            ]
+        )
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+
+        // The scroll lands on the content end, which reveals as usual.
+        await confirmInitialBottomAnchor(
+            coordinator,
+            contentMinY: Self.contentEndMinY,
+            contentHeight: Self.parkedTestContentHeight,
+            viewportHeight: Self.parkedTestViewportHeight
+        )
+        XCTAssertEqual(anchorSteps.count, 1)
+    }
+
+    /// Late layout parking the transcript during the visibility confirmation
+    /// must not complete the reveal on the second sample.
+    ///
+    /// Revert-check: same gate as above
+    /// (`!isTrackedContentParkedPastEnd` in the pending branch of
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate`); without
+    /// it the validating sample reveals the parked transcript.
+    func testInitialReveal_parkedDuringVisibilityValidation_scrollsInsteadOfRevealing() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        appear(coordinator, rows: rows) { anchorSteps.append($0) }
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        reportParkedTestGeometry(coordinator, contentMinY: Self.contentEndMinY) {
+            anchorSteps.append($0)
+        }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY) {
+            anchorSteps.append($0)
+        }
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    /// A revealed transcript that ends up parked past its content end is
+    /// scrolled back to it. The armed bottom follow returns early for a
+    /// visible anchor, so nothing else would move it.
+    ///
+    /// Revert-check: removing the deferred `updatePastContentEndCorrection`
+    /// call from `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate`
+    /// leaves the transcript parked and this test times out.
+    func testPostReveal_parkedPastContentEnd_scrollsBackToContentEnd() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY) {
+            steps.append($0)
+        }
+        await waitUntil { steps.count == 1 }
+        XCTAssertEqual(steps, [Self.pastContentEndCorrectionStep])
+    }
+
+    /// Parked more than a viewport past the end, the anchor is offscreen too,
+    /// but the follow answers only growth, and this is none.
+    ///
+    /// Revert-check: removing the deferred `updatePastContentEndCorrection`
+    /// call from `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate`.
+    func testPostReveal_parkedAWholeViewportPastContentEnd_scrollsBackToContentEnd() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        reportParkedTestGeometry(
+            coordinator,
+            isBottomAnchorVisible: false,
+            contentMinY: Self.contentEndMinY - 800
+        ) {
+            steps.append($0)
+        }
+        await waitUntil { steps.count == 1 }
+        XCTAssertEqual(steps, [Self.pastContentEndCorrectionStep])
+    }
+
+    /// The correction never scrolls under the reader's finger, but a scroll
+    /// takeover does not block it once the finger lifts: moving back to the
+    /// content end is what the next touch would do, not a jump into history.
+    ///
+    /// Revert-check: dropping `!isTrackedUserScrollInteractionActive` from
+    /// `ChatMessagesCoordinator.canCorrectPastContentEnd` scrolls under the
+    /// finger and fails the inverted expectation.
+    func testPostReveal_parkedPastContentEndUnderFinger_waitsForRelease() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        let scrollUnderFinger = expectation(description: "No correction under the finger")
+        scrollUnderFinger.isInverted = true
+
+        coordinator.handleUserScrollInteraction()
+        reportParkedTestGeometry(
+            coordinator,
+            isUserScrollInteractionActive: true,
+            contentMinY: Self.parkedPastEndMinY
+        ) { _ in
+            scrollUnderFinger.fulfill()
+        }
+        await fulfillment(of: [scrollUnderFinger], timeout: 0.15)
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY) {
+            steps.append($0)
+        }
+        await waitUntil { steps.count == 1 }
+        XCTAssertEqual(steps, [Self.pastContentEndCorrectionStep])
+    }
+
+    /// A transcript passing through a parked-looking position on its own (a
+    /// rubber-band bounce settling back onto the end) is left to finish: each
+    /// update re-arms the delayed check, and an in-range update cancels it.
+    ///
+    /// Revert-check: the in-range `taskManager.cancel` in
+    /// `ChatMessagesCoordinator.updatePastContentEndCorrection` together with
+    /// the task's post-sleep `isTrackedContentParkedPastEnd` re-check.
+    /// HONEST SCOPE: either one alone keeps this test green.
+    func testPostReveal_parkedGeometryThatSettlesOnItsOwn_isNotCorrected() async throws {
+        let correctionGate = ParkedSleepGate()
+        var gatesCorrectionSleeps = false
+        let (coordinator, rows) = try makeParkedTestCoordinator(
+            sleep: { nanoseconds in
+                guard gatesCorrectionSleeps,
+                      nanoseconds == UInt64(UIConfig.initialScrollDelay * 1_000_000_000) else {
+                    return
+                }
+                _ = await correctionGate.arrive()
+                while await !correctionGate.isReleased(), !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            }
+        )
+        await revealAtContentEnd(coordinator, rows: rows)
+        gatesCorrectionSleeps = true
+        let unexpectedCorrection = expectation(description: "A self-settling bounce is not corrected")
+        unexpectedCorrection.isInverted = true
+        let failOnScroll: ChatMessagesCoordinator.BottomAnchorAction = { _ in
+            unexpectedCorrection.fulfill()
+        }
+
+        for minY in [Self.parkedPastEndMinY, Self.contentEndMinY - 120, Self.contentEndMinY] {
+            reportParkedTestGeometry(coordinator, contentMinY: minY, scrollAction: failOnScroll)
+        }
+        await correctionGate.release()
+        await fulfillment(of: [unexpectedCorrection], timeout: 0.15)
+    }
+
+    /// A geometry signal that keeps reading as parked after each correction
+    /// must not scroll on every quiet beat; an in-range report re-arms it.
+    ///
+    /// Revert-check: dropping the
+    /// `maximumConsecutivePastContentEndCorrections` guard from
+    /// `ChatMessagesCoordinator.updatePastContentEndCorrection` lets the third
+    /// report scroll again.
+    func testPostReveal_geometryStuckParked_correctionsAreBounded() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { steps.append($0) }
+
+        for expectedCount in 1...2 {
+            reportParkedTestGeometry(
+                coordinator,
+                contentMinY: Self.parkedPastEndMinY - CGFloat(expectedCount),
+                scrollAction: recordStep
+            )
+            await waitUntil { steps.count == expectedCount }
+        }
+
+        let thirdCorrection = expectation(description: "Corrections stop at the bound")
+        thirdCorrection.isInverted = true
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY) { _ in
+            thirdCorrection.fulfill()
+        }
+        await fulfillment(of: [thirdCorrection], timeout: 0.15)
+
+        reportParkedTestGeometry(coordinator, contentMinY: Self.contentEndMinY, scrollAction: recordStep)
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY, scrollAction: recordStep)
+        await waitUntil { steps.count == 3 }
+        XCTAssertEqual(steps, Array(repeating: Self.pastContentEndCorrectionStep, count: 3))
+    }
+
+    /// The attempts-exhausted fallback reveals whatever the geometry says,
+    /// parked included; the correction follows the reveal.
+    ///
+    /// Revert-check: replacing the `defer` around
+    /// `updatePastContentEndCorrection` in
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` with a plain
+    /// call at the same spot evaluates before this event completes the
+    /// reveal, so no correction follows it.
+    func testFallbackReveal_parkedPastContentEnd_correctsAfterReveal() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { anchorSteps.append($0) }
+        appear(coordinator, rows: rows, scrollAction: recordStep)
+
+        for _ in 0..<2 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            reportParkedTestGeometry(
+                coordinator,
+                contentMinY: Self.parkedPastEndMinY,
+                scrollAction: recordStep
+            )
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+        reportParkedTestGeometry(
+            coordinator,
+            contentMinY: Self.parkedPastEndMinY,
+            scrollAction: recordStep
+        )
+        XCTAssertTrue(coordinator.isReadyToShow)
+
+        await waitUntil { anchorSteps.count == 3 }
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout retry -> bottom anchor"
+                ),
+                Self.pastContentEndCorrectionStep
+            ]
+        )
+    }
+
+    /// Parked reports charge the retry budget, but they are measured
+    /// geometry, so the attempts-exhausted fallback they cause must still arm
+    /// the bottom follow. Otherwise the async bubble growth that follows
+    /// opening a chat, landing after the correction, is left below the
+    /// viewport.
+    ///
+    /// Revert-check: passing `false` instead of
+    /// `didObserveParkedPastEndDuringInitialPass` to the attempts-exhausted
+    /// `completeInitialReveal` in
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` leaves the
+    /// follow inactive and this test times out on the growth.
+    func testFallbackReveal_parkedPastContentEnd_armsBottomFollowForLaterGrowth() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { anchorSteps.append($0) }
+        appear(coordinator, rows: rows, scrollAction: recordStep)
+        for _ in 0..<2 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            reportParkedTestGeometry(
+                coordinator,
+                contentMinY: Self.parkedPastEndMinY,
+                scrollAction: recordStep
+            )
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+        reportParkedTestGeometry(
+            coordinator,
+            contentMinY: Self.parkedPastEndMinY,
+            scrollAction: recordStep
+        )
+        await waitUntil { anchorSteps.contains(Self.pastContentEndCorrectionStep) }
+
+        // The correction lands on the content end; then a bubble finishes
+        // loading and pushes the anchor below the viewport.
+        reportParkedTestGeometry(coordinator, contentMinY: Self.contentEndMinY, scrollAction: recordStep)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: Self.contentEndMinY,
+            contentHeight: Self.parkedTestContentHeight + 200,
+            viewportHeight: Self.parkedTestViewportHeight,
+            scrollAction: recordStep
+        )
+        await waitUntil {
+            anchorSteps.contains {
+                $0.logMessage == "ChatView post-reveal layout scroll -> bottom anchor"
+            }
+        }
+    }
+
+    /// Leaving the chat resets the correction bound, so a transcript that
+    /// used it up before a push is still corrected after the reader comes
+    /// back.
+    ///
+    /// Revert-check: removing `consecutivePastContentEndCorrections = 0` from
+    /// `ChatMessagesCoordinator.handleDisappear` keeps the bound latched
+    /// across the push and this test times out.
+    func testPastContentEndCorrection_boundReachedThenDisappearAndReappear_correctsAgain() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { steps.append($0) }
+        for expectedCount in 1...2 {
+            reportParkedTestGeometry(
+                coordinator,
+                contentMinY: Self.parkedPastEndMinY - CGFloat(expectedCount),
+                scrollAction: recordStep
+            )
+            await waitUntil { steps.count == expectedCount }
+        }
+
+        coordinator.handleDisappear()
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("Re-appearing after a completed reveal must not re-run the initial anchor")
+        }
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY, scrollAction: recordStep)
+
+        await waitUntil { steps.count == 3 }
+        XCTAssertEqual(steps.last, Self.pastContentEndCorrectionStep)
+    }
+
+    /// Trackpad and mouse-wheel scrolling, and a finger resting before it
+    /// moves 2pt, never trip the transcript's drag gesture; the scroll view's
+    /// own phase blocks the correction instead, and its end re-runs the check
+    /// because no further geometry update would.
+    ///
+    /// Revert-check: dropping `!isTrackedScrollPhaseUserDriven` from
+    /// `ChatMessagesCoordinator.canCorrectPastContentEnd` corrects mid-phase
+    /// (the inverted expectation fails); making `handleUserScrollPhaseChange`
+    /// skip `updatePastContentEndCorrection` leaves the parked transcript after
+    /// the phase ends (times out).
+    func testPastContentEndCorrection_scrollPhaseUserDrivenWithoutDrag_waitsForPhaseEnd() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let midPhaseCorrection = expectation(description: "No correction during a user-driven scroll phase")
+        midPhaseCorrection.isInverted = true
+        var hasPhaseEnded = false
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+            if !hasPhaseEnded {
+                midPhaseCorrection.fulfill()
+            }
+        }
+
+        coordinator.handleUserScrollPhaseChange(isUserDriven: true, scrollAction: recordStep)
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY, scrollAction: recordStep)
+        await fulfillment(of: [midPhaseCorrection], timeout: 0.15)
+
+        hasPhaseEnded = true
+        coordinator.handleUserScrollPhaseChange(isUserDriven: false, scrollAction: recordStep)
+        await waitUntil { steps == [Self.pastContentEndCorrectionStep] }
+    }
+
+    /// Geometry that is not past the end never scrolls: the bottom landing
+    /// the simulator measured (content end 0.7pt below the viewport bottom), a
+    /// landing a few points short, and a transcript shorter than the viewport,
+    /// which the view floors to the viewport height.
+    ///
+    /// HONEST SCOPE: guards `ChatMessagesCoordinator.pastContentEndTolerance`
+    /// and the floored-content reading of `isTrackedContentParkedPastEnd`,
+    /// not a fix. The measured landing guards only the comparison's sign; it
+    /// stays green at any tolerance. Revert-check: a tolerance of 2pt corrects
+    /// the 3pt-short landing, the size of the two-step keyboard return's
+    /// recorded miss (`ChatTranscriptOffsetShifter`), whose direction was not
+    /// recorded. Each report gets its own wait, because an in-range report
+    /// cancels a correction the previous one scheduled.
+    func testPostReveal_contentEndWithinRoundingOrFlooredToViewport_isNotCorrected() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+
+        for (label, minY) in [
+            ("measured bottom landing", Self.contentEndMinY + 0.7),
+            ("landing 3pt short", Self.contentEndMinY - 3)
+        ] {
+            let correction = expectation(description: "\(label) is not corrected")
+            correction.isInverted = true
+            reportParkedTestGeometry(coordinator, contentMinY: minY) { _ in
+                correction.fulfill()
+            }
+            await fulfillment(of: [correction], timeout: 0.15)
+        }
+
+        let flooredCorrection = expectation(description: "A floored short transcript is not corrected")
+        flooredCorrection.isInverted = true
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: 0,
+            contentHeight: Self.parkedTestViewportHeight,
+            viewportHeight: Self.parkedTestViewportHeight
+        ) { _ in
+            flooredCorrection.fulfill()
+        }
+        await fulfillment(of: [flooredCorrection], timeout: 0.15)
+    }
+
+    /// A compensated shift owns the scroll until it settles, so a parked
+    /// report mid-shift waits; the settle re-runs the check, because the
+    /// shift's last geometry update can arrive while the hold still stands.
+    ///
+    /// Revert-check: dropping `!self.isHoldingForCompensatedShift` from the
+    /// correction task in `ChatMessagesCoordinator.updatePastContentEndCorrection`
+    /// scrolls mid-shift (the inverted expectation fails); dropping the
+    /// `defer` in `finishCompensatedShiftHold` leaves the parked transcript
+    /// after the settle (times out).
+    func testPastContentEndCorrection_duringCompensatedShift_waitsForSettle() async throws {
+        let settleGate = ParkedSleepGate()
+        let (coordinator, rows) = try makeParkedTestCoordinator(
+            sleep: { nanoseconds in
+                // Only the shift's settle parks; the correction's delay and
+                // the reveal's confirmation run through.
+                guard nanoseconds != UInt64(UIConfig.initialScrollDelay * 1_000_000_000) else {
+                    return
+                }
+                _ = await settleGate.arrive()
+                while await !settleGate.isReleased(), !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            },
+            now: { 1_000 }
+        )
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let midShiftCorrection = expectation(description: "No correction while the shift holds")
+        midShiftCorrection.isInverted = true
+        var isShiftSettled = false
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { step in
+            steps.append(step)
+            if !isShiftSettled {
+                midShiftCorrection.fulfill()
+            }
+        }
+
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.483, scrollAction: recordStep)
+        reportParkedTestGeometry(
+            coordinator,
+            contentMinY: Self.parkedPastEndMinY,
+            scrollAction: recordStep
+        )
+        await fulfillment(of: [midShiftCorrection], timeout: 0.15)
+
+        isShiftSettled = true
+        await settleGate.release()
+        await waitUntil { steps.contains(Self.pastContentEndCorrectionStep) }
+    }
+
+    private func makeParkedTestCoordinator(
+        sleep: @escaping ChatMessagesCoordinator.Sleep = { _ in },
+        now: @escaping ChatMessagesCoordinator.Now = {
+            ProcessInfo.processInfo.systemUptime
+        }
+    ) throws -> (ChatMessagesCoordinator, [ChatMessageRowModel]) {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: sleep,
+            now: now
+        )
+        return (coordinator, messages.map { ChatMessageRowModelMapper.map($0) })
+    }
+
+    private func appear(
+        _ coordinator: ChatMessagesCoordinator,
+        rows: [ChatMessageRowModel],
+        scrollAction: @escaping ChatMessagesCoordinator.BottomAnchorAction
+    ) {
+        coordinator.handleAppear(
+            messageCount: rows.count,
+            lastMessage: nil,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: rows.count,
+            isInitialWindowLoaded: true,
+            scrollAction: scrollAction
+        )
+    }
+
+    private func revealAtContentEnd(
+        _ coordinator: ChatMessagesCoordinator,
+        rows: [ChatMessageRowModel],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("A visible initial anchor must not request a scroll", file: file, line: line)
+        }
+        await confirmInitialBottomAnchor(
+            coordinator,
+            contentMinY: Self.contentEndMinY,
+            contentHeight: Self.parkedTestContentHeight,
+            viewportHeight: Self.parkedTestViewportHeight,
+            file: file,
+            line: line
+        )
+    }
+
+    private func reportParkedTestGeometry(
+        _ coordinator: ChatMessagesCoordinator,
+        isBottomAnchorVisible: Bool = true,
+        isUserScrollInteractionActive: Bool = false,
+        contentMinY: CGFloat,
+        scrollAction: @escaping ChatMessagesCoordinator.BottomAnchorAction
+    ) {
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: isBottomAnchorVisible,
+            isUserScrollInteractionActive: isUserScrollInteractionActive,
+            contentMinY: contentMinY,
+            contentHeight: Self.parkedTestContentHeight,
+            viewportHeight: Self.parkedTestViewportHeight,
+            scrollAction: scrollAction
+        )
+    }
+
     private func makeConversationWithMessages(
         senderEmails: [String]
     ) throws -> (Conversation, [Message]) {

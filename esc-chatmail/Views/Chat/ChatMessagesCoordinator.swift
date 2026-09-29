@@ -24,6 +24,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         static let postRevealGeometryCheck = "postRevealGeometryCheck"
         static let compensatedShiftSettle = "compensatedShiftSettle"
         static let scrollTakeoverRelease = "scrollTakeoverRelease"
+        static let pastContentEndCorrection = "pastContentEndCorrection"
     }
 
     private enum InitialRevealState: Equatable {
@@ -93,6 +94,18 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// retrying remote image) would keep the follow — and its corrective
     /// scroll bursts — alive indefinitely.
     private static let maximumPostRevealBottomFollowLifetime: TimeInterval = 30.0
+    /// How far the content's bottom edge may sit above the viewport's bottom
+    /// edge before the transcript counts as parked past its end
+    /// (`isTrackedContentParkedPastEnd`). A transcript anchored at the bottom
+    /// measured its content end 0.3-1pt *below* the viewport bottom in the
+    /// simulator (never parked), so the value is headroom for a landing a few
+    /// points short: a two-step keyboard's return shift lands ~3pt off
+    /// (`ChatTranscriptOffsetShifter`), direction unrecorded.
+    private static let pastContentEndTolerance: CGFloat = 8
+    /// Corrections of a parked transcript before one lands and the geometry
+    /// reports it back in range. Bounds a geometry signal that keeps reading
+    /// as parked, which would otherwise scroll on every quiet beat.
+    private static let maximumConsecutivePastContentEndCorrections = 2
 
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
@@ -164,6 +177,12 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// observation for the next probe (initial) or validation (post-reveal).
     private var didObserveGrowthDuringInitialRecheck = false
     private var didObserveGrowthDuringPostRevealCheck = false
+    /// A report during this reveal pass read as parked past the content end
+    /// (`isTrackedContentParkedPastEnd`). Parked reports take the offscreen
+    /// path and charge the retry budget, but they are measured geometry, not
+    /// the untrustworthy signal the attempts-exhausted fallback otherwise
+    /// assumes, so that fallback still arms bottom-follow after one.
+    private var didObserveParkedPastEndDuringInitialPass = false
     /// When the current post-reveal follow was armed; bounds deadline sliding
     /// via `maximumPostRevealBottomFollowLifetime`.
     private var postRevealBottomFollowArmedAt: TimeInterval = 0
@@ -171,6 +190,16 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var trackedContentMinY: CGFloat?
     private var trackedContentHeight: CGFloat?
     private var trackedViewportHeight: CGFloat?
+    /// The reader's finger is on the transcript, as of the latest geometry
+    /// update (the view re-reports geometry when its drag state changes).
+    private var isTrackedUserScrollInteractionActive = false
+    /// The scroll view itself is in a user-driven phase (tracking, interacting
+    /// or decelerating). That covers what the transcript's 2pt drag gesture
+    /// misses: trackpad and mouse-wheel scrolling, and a finger resting before
+    /// it moves. Reported only where `ChatTranscriptOffsetShifter` observes
+    /// scroll phases (iOS 26+); below that the drag flag stands alone.
+    private var isTrackedScrollPhaseUserDriven = false
+    private var consecutivePastContentEndCorrections = 0
     private var postRevealBottomFollowState: PostRevealBottomFollowState = .inactive
     private var compensatedShiftHold: CompensatedShiftHold?
     private var hasCapturedInitialUnreadSnapshot = false
@@ -326,6 +355,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         didObserveGrowthDuringPostRevealCheck = false
         compensatedShiftHold = nil
         isUserScrollTakeoverActive = false
+        isTrackedUserScrollInteractionActive = false
+        isTrackedScrollPhaseUserDriven = false
+        consecutivePastContentEndCorrections = 0
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
         pendingAutoReadLayoutOrder.removeAll()
@@ -445,6 +477,9 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// the anchor remains visible through that delay. If late layout moves the anchor
     /// offscreen, up to two nonanimated scrolls are requested. The content is revealed
     /// as a fallback after both attempts so a bad geometry signal cannot block the chat.
+    /// A transcript parked past its content end counts as offscreen for the reveal,
+    /// and after the reveal it is scrolled back once the geometry is quiet
+    /// (`isTrackedContentParkedPastEnd`).
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
         // Deliberately no default: "offscreen" with a never-laid-out anchor
@@ -474,6 +509,10 @@ final class ChatMessagesCoordinator: ObservableObject {
         if let viewportHeight {
             trackedViewportHeight = viewportHeight
         }
+        isTrackedUserScrollInteractionActive = isUserScrollInteractionActive
+        // After every branch below, including the ones that complete the
+        // reveal: a fallback reveal can land on a parked transcript.
+        defer { updatePastContentEndCorrection(scrollAction: scrollAction) }
         updateUserScrollTakeoverRelease(
             isBottomAnchorVisible: isBottomAnchorVisible,
             isUserScrollInteractionActive: isUserScrollInteractionActive
@@ -620,7 +659,17 @@ final class ChatMessagesCoordinator: ObservableObject {
 
         guard case let .pending(scrollAttempts, phase) = initialRevealState else { return }
 
-        if isBottomAnchorVisible {
+        if isTrackedContentParkedPastEnd {
+            didObserveParkedPastEndDuringInitialPass = true
+        }
+
+        // The 1pt anchor intersecting the viewport is not enough: parked far
+        // enough past the content end it sits near the top of the viewport
+        // with every bubble above it, and confirming that would reveal a blank
+        // transcript until the reader's first touch (the suspected cause of
+        // "the chat opens blank until I scroll"). Take the offscreen path and
+        // scroll again instead.
+        if isBottomAnchorVisible && !isTrackedContentParkedPastEnd {
             if phase == .validatingVisibility {
                 completeInitialReveal(wasVisiblyConfirmed: true)
                 return
@@ -666,7 +715,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         if let revealDeadline = initialAnchorRevealDeadline, now() >= revealDeadline {
             completeInitialReveal(
                 wasVisiblyConfirmed: false,
-                armsBottomFollowAfterFallback: hasObservedBottomAnchorGeometry
+                armsBottomFollowAfterFallback: hasObservedBottomAnchorGeometry,
+                fallbackReason: "time limit reached"
             )
             return
         }
@@ -687,7 +737,15 @@ final class ChatMessagesCoordinator: ObservableObject {
         // scroll) but leave the budget untouched until real geometry exists.
         if hasObservedBottomAnchorGeometry {
             guard chargedAttempts < Self.maximumInitialScrollAttempts else {
-                completeInitialReveal(wasVisiblyConfirmed: false)
+                // The past-end correction lands a parked transcript on its end
+                // right after this reveal; the follow then absorbs the async
+                // bubble growth that comes next
+                // (`didObserveParkedPastEndDuringInitialPass`).
+                completeInitialReveal(
+                    wasVisiblyConfirmed: false,
+                    armsBottomFollowAfterFallback: didObserveParkedPastEndDuringInitialPass,
+                    fallbackReason: "attempts exhausted"
+                )
                 return
             }
         }
@@ -789,6 +847,10 @@ final class ChatMessagesCoordinator: ObservableObject {
     private func finishCompensatedShiftHold(scrollAction: @escaping BottomAnchorAction) {
         guard let hold = compensatedShiftHold else { return }
         compensatedShiftHold = nil
+        // The shift's last geometry update can arrive while the hold still
+        // stands, which defers the past-end correction; nothing else would
+        // re-evaluate a transcript left parked at rest.
+        defer { updatePastContentEndCorrection(scrollAction: scrollAction) }
 
         if isTrackedBottomAnchorVisible {
             // Ended at the bottom (including a shift from elsewhere, such as
@@ -889,6 +951,20 @@ final class ChatMessagesCoordinator: ObservableObject {
         taskManager.cancel(TaskKey.compensatedShiftSettle)
     }
 
+    /// The scroll view entered or left a user-driven scroll phase
+    /// (`ChatTranscriptOffsetShifter`, iOS 26+). Kept apart from
+    /// `handleUserScrollPhaseBegan`, which the drag path also calls: below iOS
+    /// 26 nothing would report the phase ending. Leaving the phase re-runs the
+    /// past-end check, because a transcript still parked when the reader lets
+    /// go gets no further geometry update to re-arm it.
+    func handleUserScrollPhaseChange(
+        isUserDriven: Bool,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        isTrackedScrollPhaseUserDriven = isUserDriven
+        updatePastContentEndCorrection(scrollAction: scrollAction)
+    }
+
     /// Stops initial auto-anchoring and post-reveal bottom following once the user
     /// takes control of the scroll view.
     func handleUserScrollInteraction() {
@@ -911,6 +987,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         taskManager.cancel(TaskKey.initialGeometryCheck)
         taskManager.cancel(TaskKey.latestWindow)
         taskManager.cancel(TaskKey.postRevealGeometryCheck)
+        taskManager.cancel(TaskKey.pastContentEndCorrection)
 
         guard case .pending = initialRevealState else {
             if wasFollowingPostRevealBottom {
@@ -1520,6 +1597,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         initialAnchorRevealDeadline = now() + Self.initialAnchorRevealTimeLimit
         hasObservedBottomAnchorGeometry = false
         didObserveGrowthDuringInitialRecheck = false
+        didObserveParkedPastEndDuringInitialPass = false
         initialAnchorGeometryCheckID = UUID()
         Log.diagnostic(
             .chatView,
@@ -1554,7 +1632,12 @@ final class ChatMessagesCoordinator: ObservableObject {
                   case .pending(let currentAttempts, .confirmingVisibility) =
                     self.initialRevealState,
                   currentAttempts == scrollAttempts,
-                  self.isTrackedBottomAnchorVisible else {
+                  self.isTrackedBottomAnchorVisible,
+                  // Defensive: a parked report normally reaches the pending
+                  // branch, which leaves .confirmingVisibility before this
+                  // wakes. This covers one that bypasses it (an armed follow
+                  // returning early during a restarted pass).
+                  !self.isTrackedContentParkedPastEnd else {
                 return
             }
             self.initialRevealState = .pending(
@@ -1674,9 +1757,117 @@ final class ChatMessagesCoordinator: ObservableObject {
         )
     }
 
+    /// The transcript is scrolled past its content end: the content's bottom
+    /// edge sits above the viewport's bottom edge, so the space between them
+    /// is empty. A transcript shorter than the viewport never reads as parked,
+    /// because the view floors the content to the viewport height.
+    ///
+    /// Why it is tracked ("the chat opens blank until I scroll"). This is the
+    /// most plausible mechanism for that report, not an observed one: the
+    /// device-side cause was never reproduced. The scroll view does not clamp
+    /// an offset past the end while at rest (simulator probe: an offset forced
+    /// 400pt past the end stayed there, and `proxy.scrollTo(bottomID, anchor:
+    /// .bottom)` from it landed exactly on the end). Before this check, the
+    /// reveal gate and the bottom follow read only whether the 1pt anchor
+    /// intersects the viewport. Parked `d` points past the end, the anchor
+    /// sits `d` points above the viewport bottom, and the newest bubble sits
+    /// the trailing spacer (the composer's height) plus 17pt above the anchor.
+    /// From `d` of about viewport height - spacer - 17pt up to a full
+    /// viewport, the anchor still intersects while every bubble is above the
+    /// top edge: a blank transcript the gate confirmed. Parks of a viewport or
+    /// more hide the anchor too, and after the reveal nothing corrected those
+    /// either, because the follow answers only growth. The ordinary content
+    /// shrinks tried in the simulator (tail rows collapsing, window slides and
+    /// replacements) all clamped. So this checks the resulting geometry rather
+    /// than any one cause.
+    private var isTrackedContentParkedPastEnd: Bool {
+        guard let trackedContentMinY,
+              let trackedContentHeight,
+              let trackedViewportHeight,
+              trackedContentHeight > 0,
+              trackedViewportHeight > 0 else {
+            return false
+        }
+        return trackedContentMinY + trackedContentHeight <
+            trackedViewportHeight - Self.pastContentEndTolerance
+    }
+
+    /// Scrolls a revealed transcript parked past its content end back to it,
+    /// as the reader's next touch would (`isTrackedContentParkedPastEnd`).
+    ///
+    /// Every geometry update re-arms the check, so it fires only after the
+    /// geometry has been quiet for a beat. A rubber-band bounce, an animated
+    /// shift, or a spacer animating with the keyboard settles first and is
+    /// never fought. It is not a jump into history, so user-scroll takeover
+    /// does not block it. A finger on the transcript does, and so does a
+    /// user-driven scroll phase (`isTrackedScrollPhaseUserDriven`).
+    private func updatePastContentEndCorrection(scrollAction: @escaping BottomAnchorAction) {
+        guard isTrackedContentParkedPastEnd else {
+            consecutivePastContentEndCorrections = 0
+            taskManager.cancel(TaskKey.pastContentEndCorrection)
+            return
+        }
+        guard canCorrectPastContentEnd else {
+            taskManager.cancel(TaskKey.pastContentEndCorrection)
+            return
+        }
+        guard consecutivePastContentEndCorrections <
+                Self.maximumConsecutivePastContentEndCorrections else {
+            return
+        }
+        taskManager.run(TaskKey.pastContentEndCorrection) { [weak self, sleep] in
+            await sleep(UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
+            guard !Task.isCancelled,
+                  let self,
+                  self.isTrackedContentParkedPastEnd,
+                  self.canCorrectPastContentEnd,
+                  // A compensated shift owns the scroll until it settles; its
+                  // settle re-runs this check (`finishCompensatedShiftHold`).
+                  !self.isHoldingForCompensatedShift else {
+                return
+            }
+            self.consecutivePastContentEndCorrections += 1
+            Log.diagnostic(
+                .chatView,
+                level: .warning,
+                "ChatView parked past content end; \(self.trackedGeometryDescription)",
+                category: .ui
+            )
+            scrollAction(
+                BottomAnchorStep(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView parked past content end -> bottom anchor"
+                )
+            )
+        }
+    }
+
+    /// Before the reveal the pending reveal machine owns scrolling (and
+    /// treats a parked transcript as offscreen).
+    private var canCorrectPastContentEnd: Bool {
+        guard case .ready = initialRevealState else { return false }
+        return isVisible &&
+            !isTrackedUserScrollInteractionActive &&
+            !isTrackedScrollPhaseUserDriven
+    }
+
+    private var trackedGeometryDescription: String {
+        func describe(_ value: CGFloat?) -> String {
+            value.map { String(format: "%.1f", $0) } ?? "nil"
+        }
+        let contentMaxY = trackedContentMinY.flatMap { minY in
+            trackedContentHeight.map { minY + $0 }
+        }
+        return "anchorVisible=\(isTrackedBottomAnchorVisible) contentMaxY=\(describe(contentMaxY)) contentHeight=\(describe(trackedContentHeight)) viewportHeight=\(describe(trackedViewportHeight))"
+    }
+
+    /// - Parameter fallbackReason: why an unconfirmed reveal happened, for its
+    ///   log line.
     private func completeInitialReveal(
         wasVisiblyConfirmed: Bool,
-        armsBottomFollowAfterFallback: Bool = false
+        armsBottomFollowAfterFallback: Bool = false,
+        fallbackReason: String? = nil
     ) {
         guard case .pending = initialRevealState else { return }
 
@@ -1693,19 +1884,21 @@ final class ChatMessagesCoordinator: ObservableObject {
         initialAnchorRevealDeadline = nil
         didObserveGrowthDuringInitialRecheck = false
         didObserveGrowthDuringPostRevealCheck = false
+        didObserveParkedPastEndDuringInitialPass = false
         isReadyToShow = true
         let logMessage: String
         if wasVisiblyConfirmed {
             logMessage = "ChatView initial anchor remained visible through stabilization"
-        } else if armsBottomFollowAfterFallback {
-            logMessage = "ChatView initial anchor time limit reached; revealing with bottom follow"
         } else {
-            logMessage = "ChatView initial anchor attempts exhausted; revealing fallback"
+            let reason = fallbackReason ?? "fallback"
+            logMessage = armsBottomFollowAfterFallback
+                ? "ChatView initial anchor \(reason); revealing with bottom follow"
+                : "ChatView initial anchor \(reason); revealing fallback"
         }
         Log.diagnostic(
             .chatView,
             level: wasVisiblyConfirmed ? .info : .warning,
-            logMessage,
+            "\(logMessage); \(trackedGeometryDescription)",
             category: .ui
         )
     }
