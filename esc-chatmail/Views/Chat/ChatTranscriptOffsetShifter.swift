@@ -66,6 +66,9 @@ struct ChatTranscriptOffsetShifter: ViewModifier {
     /// Called when the reader starts moving the scroll view by any means
     /// (drag, trackpad, mouse wheel), not only the transcript's drag gesture.
     let onUserScrollInteractionBegan: () -> Void
+    /// Called when the scroll view leaves the user-driven phases (tracking,
+    /// interacting, decelerating), i.e. comes to rest after the reader.
+    let onUserScrollInteractionEnded: () -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
@@ -73,7 +76,8 @@ struct ChatTranscriptOffsetShifter: ViewModifier {
                 ScrollPositionShift(
                     request: request,
                     tracking: tracking,
-                    onUserScrollInteractionBegan: onUserScrollInteractionBegan
+                    onUserScrollInteractionBegan: onUserScrollInteractionBegan,
+                    onUserScrollInteractionEnded: onUserScrollInteractionEnded
                 )
             )
         } else {
@@ -88,6 +92,7 @@ extension ChatTranscriptOffsetShifter {
         let request: Request?
         let tracking: Tracking
         let onUserScrollInteractionBegan: () -> Void
+        let onUserScrollInteractionEnded: () -> Void
 
         @State private var position = ScrollPosition()
 
@@ -126,6 +131,7 @@ extension ChatTranscriptOffsetShifter {
                     } else if wasUserDriven {
                         tracking.lastUserScrollInteractionEndedAt =
                             ProcessInfo.processInfo.systemUptime
+                        onUserScrollInteractionEnded()
                     }
                 }
                 .onChange(of: request) { _, request in

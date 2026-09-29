@@ -338,7 +338,12 @@ struct ChatMessagesView: View {
             ChatTranscriptOffsetShifter(
                 request: transcriptOffsetShiftRequest,
                 tracking: transcriptShiftTracking,
-                onUserScrollInteractionBegan: handleUserScrollPhaseBegan
+                onUserScrollInteractionBegan: {
+                    handleUserScrollPhaseBegan(scrollProxy: scrollProxy)
+                },
+                onUserScrollInteractionEnded: {
+                    handleUserScrollPhaseEnded(scrollProxy: scrollProxy)
+                }
             )
         )
         .scrollDismissesKeyboard(.interactively)
@@ -672,10 +677,22 @@ struct ChatMessagesView: View {
 
     /// The reader started moving the transcript by any means (drag,
     /// trackpad, mouse wheel): release the holds a programmatic inset shift
-    /// placed on the coordinator's settle check and the virtual window.
-    private func handleUserScrollPhaseBegan() {
+    /// placed on the coordinator's settle check and the virtual window, and
+    /// hold off the coordinator's past-end correction until the scroll view
+    /// comes to rest.
+    private func handleUserScrollPhaseBegan(scrollProxy: ScrollViewProxy) {
         coordinator.handleUserScrollPhaseBegan()
+        coordinator.handleUserScrollPhaseChange(isUserDriven: true) {
+            performBottomAnchor($0, proxy: scrollProxy)
+        }
         scrollState.handleUserScrollInteractionBegan()
+    }
+
+    /// The scroll view came to rest after the reader moved it.
+    private func handleUserScrollPhaseEnded(scrollProxy: ScrollViewProxy) {
+        coordinator.handleUserScrollPhaseChange(isUserDriven: false) {
+            performBottomAnchor($0, proxy: scrollProxy)
+        }
     }
 
     private func handleBottomAnchorGeometryUpdate(
