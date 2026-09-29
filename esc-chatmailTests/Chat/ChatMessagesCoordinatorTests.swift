@@ -6975,6 +6975,57 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         await waitUntil { steps == [Self.pastContentEndCorrectionStep] }
     }
 
+    /// A chat that is off screen (another screen pushed over it) does not
+    /// scroll itself: `handleDisappear` cancelled every task, and a late
+    /// report that reads as parked must not schedule a new one against the
+    /// hidden transcript. The reveal survives the push, so without the
+    /// visibility check nothing else would stop it.
+    ///
+    /// Revert-check: dropping `isVisible` from
+    /// `ChatMessagesCoordinator.canCorrectPastContentEnd` corrects the hidden
+    /// transcript and fails the inverted expectation.
+    func testPastContentEndCorrection_parkedReportWhileDisappeared_isNotCorrected() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        let hiddenCorrection = expectation(description: "No correction while the chat is off screen")
+        hiddenCorrection.isInverted = true
+
+        coordinator.handleDisappear()
+        XCTAssertTrue(coordinator.isReadyToShow)
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY) { step in
+            if step == Self.pastContentEndCorrectionStep {
+                hiddenCorrection.fulfill()
+            }
+        }
+        await fulfillment(of: [hiddenCorrection], timeout: 0.15)
+    }
+
+    /// The chat can leave mid-phase (a trackpad scroll or a deceleration
+    /// still running when another screen is pushed), and nothing guarantees
+    /// the scroll view reports the phase ending to a view that is gone. Leaving
+    /// the chat therefore clears the phase, or its latch would block every
+    /// correction after the reader comes back.
+    ///
+    /// Revert-check: removing `isTrackedScrollPhaseUserDriven = false` from
+    /// `ChatMessagesCoordinator.handleDisappear` keeps the phase latched
+    /// across the push and this test times out.
+    func testPastContentEndCorrection_phaseLeftUserDrivenAcrossDisappear_correctsAfterReappear() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { steps.append($0) }
+
+        coordinator.handleUserScrollPhaseChange(isUserDriven: true, scrollAction: recordStep)
+        coordinator.handleDisappear()
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("Re-appearing after a completed reveal must not re-run the initial anchor")
+        }
+        XCTAssertTrue(coordinator.isReadyToShow)
+        reportParkedTestGeometry(coordinator, contentMinY: Self.parkedPastEndMinY, scrollAction: recordStep)
+
+        await waitUntil { steps == [Self.pastContentEndCorrectionStep] }
+    }
+
     /// Geometry that is not past the end never scrolls: the bottom landing
     /// the simulator measured (content end 0.7pt below the viewport bottom), a
     /// landing a few points short, and a transcript shorter than the viewport,
