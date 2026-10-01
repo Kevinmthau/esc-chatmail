@@ -14,6 +14,8 @@ final class MessageBubbleViewModel: ObservableObject {
 
     private let loader: any MessageBubbleLoading
     private var loadingMessageID: String?
+    /// `MessageBubbleLoadContext.displayIdentityKey` of the most recently requested load.
+    private var loadingDisplayIdentityKey: String?
     /// Signature of the most recently *requested* load. Gates late results in `isStillActive`.
     private var lastContentSignature: String?
     /// Signature whose result was actually *published*. Distinct from `lastContentSignature`
@@ -46,9 +48,17 @@ final class MessageBubbleViewModel: ObservableObject {
         // would collapse a tall HTML-source bubble to the ~40pt "Loading..." pill and regrow it
         // asynchronously, shifting chat scroll position. Mirrors EmailContentSection, which keeps
         // `renderedPreview` on screen across background reloads.
-        let refreshesInPlace = hasLoadedContent && loadingMessageID == context.messageID
+        //
+        // Keyed on the display identity, not the message ID, so Gmail's echo replacing the user's
+        // optimistic reply (a new message ID under the same transcript identity, which keeps this
+        // view model alive — `ChatMessageDisplayIdentity`) is such a refresh too: the sent text
+        // stays until the echo's content swaps in. `isStillActive` still compares message IDs, so
+        // a load still in flight for the optimistic row cannot publish over the echo.
+        let refreshesInPlace = hasLoadedContent &&
+            loadingDisplayIdentityKey == context.displayIdentityKey
 
         loadingMessageID = context.messageID
+        loadingDisplayIdentityKey = context.displayIdentityKey
         lastContentSignature = context.contentSignature
 
         if !refreshesInPlace {

@@ -47,6 +47,46 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertFalse(ChatMessageRowModelMapper.map(echo).isAwaitingSyncEcho)
     }
 
+    /// Sync replaces an optimistic reply with Gmail's echo: a new `Message` with a new object ID.
+    /// Both carry the deterministic RFC Message-ID, so they map to one display identity and the
+    /// transcript updates the bubble in place instead of remounting it. Incoming mail never
+    /// shares it, even with a Message-ID in the app's own format.
+    ///
+    /// Revert-check: mapping `displayIdentity` to `.message(message.objectID)` in
+    /// `ChatMessageRowModelMapper.map` fails the optimistic/echo equality.
+    func testMap_echoReplacingOptimisticRow_keepsDisplayIdentity() throws {
+        let optimisticID = UUID().uuidString
+        let rfcMessageID = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        let optimistic = MessageBuilder().withId(optimisticID).fromMe().build(in: viewContext)
+        optimistic.messageId = rfcMessageID
+        let echo = MessageBuilder().withId("gmail-echo-id").fromMe().build(in: viewContext)
+        echo.messageId = rfcMessageID
+        let forgedIncoming = MessageBuilder().withId("incoming-id").build(in: viewContext)
+        forgedIncoming.messageId = rfcMessageID
+        let unrelated = MessageBuilder().withId("unrelated-id").fromMe().build(in: viewContext)
+        unrelated.messageId = "<CAF+external@mail.gmail.com>"
+        try viewContext.save()
+
+        let optimisticRow = ChatMessageRowModelMapper.map(optimistic)
+        let echoRow = ChatMessageRowModelMapper.map(echo)
+
+        XCTAssertNotEqual(optimisticRow.objectID, echoRow.objectID)
+        XCTAssertEqual(
+            optimisticRow.displayIdentity,
+            .outboundSend(optimisticMessageID: optimisticID)
+        )
+        XCTAssertEqual(echoRow.displayIdentity, optimisticRow.displayIdentity)
+        XCTAssertEqual(echoRow.bubbleContentIdentityKey, optimisticRow.bubbleContentIdentityKey)
+        XCTAssertEqual(
+            ChatMessageRowModelMapper.map(forgedIncoming).displayIdentity,
+            .message(forgedIncoming.objectID)
+        )
+        XCTAssertEqual(
+            ChatMessageRowModelMapper.map(unrelated).displayIdentity,
+            .message(unrelated.objectID)
+        )
+    }
+
     func testMap_attachmentDimensionsChangeReloadsBubbleContent() async throws {
         let message = MessageBuilder().withId(UUID().uuidString).withAttachments().build(in: viewContext)
         let attachment = viewContext.insertTestObject(Attachment.self)

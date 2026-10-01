@@ -111,6 +111,11 @@ struct MessageBubble: View {
 
     private static let sendRecoveryBadgeAlignment = VerticalAlignment(SendRecoveryBadgeAlignmentID.self)
 
+    private struct LoadTaskID: Hashable {
+        let messageID: String
+        let signature: String
+    }
+
     @MainActor
     init(
         message: ChatMessageRowModel,
@@ -227,7 +232,10 @@ struct MessageBubble: View {
                 attachments: InlineAttachmentDownloadPolicy.pendingImages(in: message.attachments, isFromMe: message.isFromMe)
             )
         }
-        .task(id: currentLoadSignature) {
+        // Keyed on the message ID too: the transcript keeps this view (and its view model) when
+        // Gmail's echo replaces an optimistic reply (`ChatMessageDisplayIdentity`), and the load
+        // must re-run for the new message even if no signature input happened to change.
+        .task(id: LoadTaskID(messageID: message.id, signature: currentLoadSignature)) {
             await viewModel.loadIfNeeded(using: loadContext(contentSignature: currentLoadSignature))
         }
         .task(id: isSendPending) {
@@ -465,6 +473,7 @@ struct MessageBubble: View {
     private func loadContext(contentSignature: String) -> MessageBubbleLoadContext {
         MessageBubbleLoadContext(
             messageID: message.id,
+            displayIdentityKey: message.bubbleContentIdentityKey,
             contentSignature: contentSignature,
             prefetchedSenderName: prefetchedSenderName,
             senderRequest: senderRequest,

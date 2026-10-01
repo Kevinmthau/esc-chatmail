@@ -465,6 +465,62 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertEqual(senderCallCount, 0)
     }
 
+    /// Gmail's echo replacing the user's optimistic reply reaches this view model as a new message
+    /// ID under the same display identity: the transcript keys rows by
+    /// `ChatMessageDisplayIdentity`, so the view (and this view model) survives the swap. It must
+    /// refresh in place — the sent text stays on screen until the echo's content swaps in — not
+    /// blank to the empty state that renders the "Loading..." pill and collapses the bubble.
+    ///
+    /// Revert-check: keying `refreshesInPlace` in `MessageBubbleViewModel.loadIfNeeded` on
+    /// `loadingMessageID == context.messageID` again clears the content mid-load and fails the
+    /// mid-flight assertions.
+    func testLoadIfNeeded_echoReplacesOptimisticReplyUnderSameDisplayIdentity_refreshesInPlace() async {
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [
+                Self.makeContentResult(text: "Sent body", inlineContentID: "cid-optimistic"),
+                Self.makeContentResult(text: "Echo body", inlineContentID: "cid-echo")
+            ],
+            gatedCallIndex: 2
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+
+        await viewModel.loadIfNeeded(
+            using: makeContext(
+                messageID: "optimistic-uuid",
+                displayIdentityKey: "outbound:optimistic-uuid",
+                signature: "sig-optimistic",
+                includesSenderRequest: false
+            )
+        )
+        XCTAssertEqual(viewModel.fullTextContent, "Sent body")
+
+        let echoLoad = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(
+                    messageID: "gmail-echo-id",
+                    displayIdentityKey: "outbound:optimistic-uuid",
+                    signature: "sig-echo",
+                    hasHTMLSource: true,
+                    includesSenderRequest: false
+                )
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated echo load never started")
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.fullTextContent, "Sent body")
+        XCTAssertEqual(viewModel.htmlAnalysis.referencedInlineContentIDs, ["cid-optimistic"])
+
+        await loader.release()
+        await echoLoad.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.fullTextContent, "Echo body")
+        XCTAssertEqual(viewModel.htmlAnalysis.referencedInlineContentIDs, ["cid-echo"])
+    }
+
     /// The early-return branch records the requested signature even when it skips loading, so a
     /// refresh that is still in flight when the signature returns to the published one is dropped
     /// by `isStillActive` instead of overwriting what is already correct on screen.
@@ -586,6 +642,7 @@ final class MessageBubbleViewModelTests: XCTestCase {
 
     private func makeContext(
         messageID: String = "msg-1",
+        displayIdentityKey: String? = nil,
         signature: String = "sig-1",
         senderEmail: String = "alice@example.com",
         hasHTMLSource: Bool = false,
@@ -593,6 +650,7 @@ final class MessageBubbleViewModelTests: XCTestCase {
     ) -> MessageBubbleLoadContext {
         MessageBubbleLoadContext(
             messageID: messageID,
+            displayIdentityKey: displayIdentityKey,
             contentSignature: signature,
             prefetchedSenderName: "Prefetched Name",
             senderRequest: includesSenderRequest ? MessageBubbleSenderRequest(

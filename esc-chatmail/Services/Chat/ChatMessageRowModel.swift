@@ -258,6 +258,23 @@ struct ChatMessageRowModel: Equatable {
     let outgoingForwardedDisplayContent: ForwardedMessageDisplayContent?
     /// Precomputed so MessageBubble body recomputation does not hash message text.
     let loadSignatureComponents: MessageBubbleLoadSignatureComponents
+    /// The transcript's view identity, shared by an optimistic reply and its
+    /// sync echo (`ChatMessageDisplayIdentity`). Route a collection through
+    /// `ChatTranscriptIdentityPolicy` before using it as `ForEach` identity.
+    let displayIdentity: ChatMessageDisplayIdentity
+
+    /// `displayIdentity` for `MessageBubbleViewModel`'s refresh-in-place
+    /// decision (`MessageBubbleLoadContext.displayIdentityKey`): equal for an
+    /// optimistic reply and its echo, otherwise this row's message ID, which
+    /// is what the view model compared before display identity existed.
+    var bubbleContentIdentityKey: String {
+        switch displayIdentity {
+        case .outboundSend(let optimisticMessageID):
+            return "outbound:\(optimisticMessageID)"
+        case .message:
+            return "message:\(id)"
+        }
+    }
 
     var hasOriginalEmailContent: Bool {
         MessageOriginalEmailOpenPolicy.hasOriginalEmailContent(
@@ -403,6 +420,11 @@ enum ChatMessageRowModelMapper {
                 senderHeaderDisplayName: message.senderName,
                 senderAvatarURL: effectiveSenderPerson?.avatarURL,
                 attachmentSnapshots: attachments.map(\.bubbleSnapshot)
+            ),
+            displayIdentity: ChatMessageDisplayIdentity.resolve(
+                isFromMe: message.isFromMe,
+                rfcMessageID: message.messageIdValue,
+                objectID: message.objectID
             )
         )
     }
