@@ -36,4 +36,24 @@ final class FailedSendRecoveryPolicyTests: XCTestCase {
         XCTAssertNil(FailedSendRecoveryPolicy.prompt(for: .sending))
         XCTAssertNil(FailedSendRecoveryPolicy.prompt(for: .none))
     }
+
+    /// The dialog's action waits for the dialog to go away, so Edit and Resend's composer focus
+    /// and its "Draft Already Open" alert are not made while the dialog is still dismissing.
+    ///
+    /// Revert-check: returning `pending` regardless of `isDialogPresented` in
+    /// `FailedSendRecoveryPolicy.actionToRun` fails the presented assertions.
+    ///
+    /// HONEST SCOPE: pins the decision only. That `MessageBubble` consults it from both the dialog
+    /// button and the presentation change, and that focus and the alert then survive on a device,
+    /// is view wiring with no UI test target.
+    func testActionToRun_dialogStillPresented_waitsUntilDismissed() {
+        typealias Policy = FailedSendRecoveryPolicy
+        XCTAssertNil(Policy.actionToRun(pending: .editAndResend, isDialogPresented: true))
+        XCTAssertNil(Policy.actionToRun(pending: .checkDelivery, isDialogPresented: true))
+
+        XCTAssertEqual(Policy.actionToRun(pending: .editAndResend, isDialogPresented: false), .editAndResend)
+        XCTAssertEqual(Policy.actionToRun(pending: .checkDelivery, isDialogPresented: false), .checkDelivery)
+        // Cancel records nothing, so dismissal runs nothing.
+        XCTAssertNil(Policy.actionToRun(pending: nil, isDialogPresented: false))
+    }
 }

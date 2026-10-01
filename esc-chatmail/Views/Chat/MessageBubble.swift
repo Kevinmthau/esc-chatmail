@@ -65,6 +65,9 @@ struct MessageBubble: View {
     /// Driven by this view's own `.task`, so the timer dies with the row or the pending state.
     @State private var isSendingRevealDue = false
     @State private var isShowingSendRecovery = false
+    /// The failed-send dialog's chosen action, held until the dialog has dismissed
+    /// (`FailedSendRecoveryPolicy.actionToRun`).
+    @State private var pendingSendRecoveryAction: FailedSendRecoveryPolicy.Action?
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
     /// Runs an action the failed-send dialog offered. The caller routes it to the same view-model
     /// path as the long-press menu; the bubble never sends anything itself.
@@ -235,12 +238,16 @@ struct MessageBubble: View {
         ) { prompt in
             ForEach(prompt.actions, id: \.self) { action in
                 Button(action.title) {
-                    onSendRecoveryAction(action)
+                    pendingSendRecoveryAction = action
+                    runPendingSendRecoveryIfDialogDismissed()
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: { prompt in
             Text(prompt.message)
+        }
+        .onChange(of: isShowingSendRecovery) { _, _ in
+            runPendingSendRecoveryIfDialogDismissed()
         }
     }
 
@@ -342,6 +349,26 @@ struct MessageBubble: View {
             return .orange
         case .sending, .sent:
             return .secondary
+        }
+    }
+
+    /// Runs the dialog's chosen action once the dialog is gone. Called from both the dialog button
+    /// and the presentation change because SwiftUI does not promise which of the two lands first
+    /// (the button's action, or `isPresented` turning false): whichever comes second finds both
+    /// and dispatches exactly once. The extra main-actor turn lets SwiftUI finish the update that
+    /// tears the dialog down, focus restoration included, before the action moves focus into the
+    /// composer or raises an alert.
+    private func runPendingSendRecoveryIfDialogDismissed() {
+        guard let action = FailedSendRecoveryPolicy.actionToRun(
+            pending: pendingSendRecoveryAction,
+            isDialogPresented: isShowingSendRecovery
+        ) else {
+            return
+        }
+        pendingSendRecoveryAction = nil
+        let onSendRecoveryAction = onSendRecoveryAction
+        Task { @MainActor in
+            onSendRecoveryAction(action)
         }
     }
 

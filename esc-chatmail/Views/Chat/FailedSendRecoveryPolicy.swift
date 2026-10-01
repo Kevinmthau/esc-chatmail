@@ -56,4 +56,16 @@ enum FailedSendRecoveryPolicy {
             return nil
         }
     }
+
+    /// The dialog's chosen action to run now, or nil while the dialog is still presented.
+    ///
+    /// A dialog button only records its action; the bubble runs it once the dialog is gone.
+    /// Edit and Resend moves focus into the composer and can raise an alert ("Draft Already
+    /// Open", "Couldn’t Recover Reply"). Made in the same update that dismisses a confirmation
+    /// dialog, either can be dropped: the reply lands in the composer with no keyboard, or, with
+    /// a draft already open, nothing visibly happens. The long-press menu runs its actions
+    /// directly, as it always has.
+    static func actionToRun(pending: Action?, isDialogPresented: Bool) -> Action? {
+        isDialogPresented ? nil : pending
+    }
 }
