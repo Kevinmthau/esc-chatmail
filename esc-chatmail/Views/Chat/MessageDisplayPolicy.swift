@@ -74,6 +74,42 @@ enum MessageDisplayPolicy {
         return hasRichHTMLContent
     }
 
+    /// Whether a bubble routed to text (not the HTML preview card) shows the "Loading..." pill
+    /// instead of its text while the async content load is still running.
+    ///
+    /// Incoming HTML keeps the pill: until content detection finishes, the only text on hand is
+    /// raw/partial HTML-derived text that the load may replace or route to a preview card.
+    ///
+    /// The user's own non-forwarded rows with a stored `chatPreviewText` skip it. Their final
+    /// text is already known: the loader publishes the stored preview as `fullTextContent`,
+    /// `resolvedVisibleText` prefers it anyway, and rich-content classification is always false
+    /// for `isFromMe`, so the row ends as this same text bubble. The pill bought nothing there and
+    /// cost a visible text → "Loading..." → text flicker on every reply: sync replaces the
+    /// optimistic row with Gmail's echo, a new object ID, so the bubble remounts with a fresh
+    /// view model, and the echo (always multipart/alternative) has an HTML source. A multi-line
+    /// reply also collapsed to the one-line pill and regrew. Newsletter and calendar-invite rows
+    /// are excluded because they can route to a preview card instead.
+    static func showsTextLoadingPlaceholder(
+        hasLoadedContent: Bool,
+        hasHTMLSource: Bool,
+        isForwardedEmail: Bool,
+        isFromMe: Bool,
+        isNewsletter: Bool,
+        isLikelyCalendarInvite: Bool,
+        chatPreviewText: String?
+    ) -> Bool {
+        guard !hasLoadedContent else { return false }
+        if isForwardedEmail { return true }
+        guard hasHTMLSource else { return false }
+
+        let rendersStoredOwnPreview =
+            isFromMe &&
+            !isNewsletter &&
+            !isLikelyCalendarInvite &&
+            MessagePreviewText.nonEmpty(chatPreviewText) != nil
+        return !rendersStoredOwnPreview
+    }
+
     static func isTrustedTransactionalSender(_ senderEmail: String?) -> Bool {
         PreviewTextUtilities.senderDomain(
             senderEmail,

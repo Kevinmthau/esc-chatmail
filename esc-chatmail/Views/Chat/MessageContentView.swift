@@ -52,10 +52,18 @@ struct MessageContentView: View {
     private var textContent: some View {
         if let forwardedDisplay = resolvedForwardedDisplayContent {
             forwardedTextContent(for: forwardedDisplay)
-        } else if message.isForwardedEmail && !hasLoadedContent {
-            loadingPlaceholder
-        } else if hasHTMLSource && !hasLoadedContent {
-            // Avoid flashing raw/partial HTML-derived text while async content detection is still running.
+        } else if MessageDisplayPolicy.showsTextLoadingPlaceholder(
+            hasLoadedContent: hasLoadedContent,
+            hasHTMLSource: hasHTMLSource,
+            isForwardedEmail: message.isForwardedEmail,
+            isFromMe: message.isFromMe,
+            isNewsletter: message.isNewsletter,
+            isLikelyCalendarInvite: message.isLikelyCalendarInvite,
+            chatPreviewText: message.chatPreviewText
+        ) {
+            // Avoid flashing raw/partial HTML-derived text while async content detection is still
+            // running. The user's own rows with a stored preview are exempt: their text is final,
+            // and the pill flickered on every reply's echo remount (see the policy).
             loadingPlaceholder
         } else {
             if let text = resolvedVisibleText, !text.isEmpty {
