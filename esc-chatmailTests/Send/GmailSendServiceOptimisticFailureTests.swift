@@ -1672,6 +1672,233 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(try conversationCount(in: context), 1)
     }
 
+    func testPreBarrierReplyFailure_retainAsNotSent_keepsNotSentBubbleWithoutDraftOrRequeue() async throws {
+        let context: NSManagedObjectContext = viewContext
+        let fixture = try await makePreflightReplyFixture(attachmentID: "local_retained_preflight")
+        let failure = GmailSendService.SendError.apiError("Token refresh failed")
+        let failingService = PreBarrierFailingSendService(base: sendService, failure: .immediately(failure))
+
+        let operation = ComposeSendOrchestrator(
+            sendService: failingService,
+            syncPerformer: NoOpIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: fixture.input,
+            attachmentReferences: [fixture.reference],
+            optimisticMessageID: fixture.optimisticMessageID,
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+
+        // A chat reply's composer let go of this content at optimistic
+        // persistence, so the bubble keeps it as "Not sent".
+        // Revert-check: routing the generic pre-barrier `catch` of
+        // `ComposeSendOrchestrator.executeInBackground` straight to
+        // `handleDefiniteFailure` fails admission, deletes the bubble and
+        // writes its text back into the conversation's single draft slot.
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        XCTAssertEqual(failingService.sendReplyCallCount, 1)
+        let retained = try XCTUnwrap(sendService.fetchMessageSync(byID: fixture.optimisticMessageID))
+        XCTAssertEqual(retained.bodyText, "Reply that never left")
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: retained), .notSent)
+        let record = try XCTUnwrap(optimisticMutationRecord(in: context, id: fixture.optimisticMessageID))
+        XCTAssertEqual(record.remoteCommittedMessageId, OutboundSendRemoteState.notSentMessageID)
+        XCTAssertEqual(record.failureReason, failure.localizedDescription)
+        XCTAssertNil(try ChatReplyDraftStore(context: context).fetch(conversationID: fixture.conversationID))
+        XCTAssertEqual(fixture.attachment.message?.id, fixture.optimisticMessageID)
+        XCTAssertNil(fixture.attachment.replyDraft)
+        XCTAssertEqual(fixture.attachment.state, .failed)
+    }
+
+    func testPreBarrierReplyFailure_afterTeardownRequest_rollsBackEvenWhenRetainAsNotSent() async throws {
+        let context: NSManagedObjectContext = viewContext
+        let fixture = try await makePreflightReplyFixture(attachmentID: "local_teardown_preflight")
+        // A token refresh cancelled mid-request can surface as an ordinary
+        // error rather than `CancellationError`.
+        let failingService = PreBarrierFailingSendService(
+            base: sendService,
+            failure: .whenCancelled(GmailSendService.SendError.apiError("Refresh interrupted"))
+        )
+
+        let operation = ComposeSendOrchestrator(
+            sendService: failingService,
+            syncPerformer: NoOpIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: fixture.input,
+            attachmentReferences: [fixture.reference],
+            optimisticMessageID: fixture.optimisticMessageID,
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+        await waitUntil { failingService.sendReplyCallCount == 1 }
+
+        // What `OutboundTaskRegistry.closeAdmission` invokes for a preflight
+        // entry during account teardown.
+        // Revert-check: deleting `!cancellationRelay.stopWasRequested` from
+        // the retain branch of `ComposeSendOrchestrator.executeInBackground`
+        // leaves a "Not sent" row behind in the account being torn down.
+        operation.cancelBeforeTransmission()
+        do {
+            try await operation.waitForTransmissionAdmission()
+            XCTFail("A torn-down preflight must not resolve admission")
+        } catch {}
+        await operation.task.value
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: fixture.optimisticMessageID))
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+        XCTAssertFalse(fixture.attachment.isDeleted)
+        XCTAssertEqual(fixture.attachment.state, .queued)
+        XCTAssertNotEqual(fixture.attachment.message?.id, fixture.optimisticMessageID)
+    }
+
+    func testRollbackBeforeTransmission_keepsRollupOfMessageSyncedDuringPreflight() async throws {
+        let context: NSManagedObjectContext = viewContext
+        let recipient = "synced-during-preflight@example.com"
+        let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
+        let archivedAt = Date(timeIntervalSince1970: 100)
+        let previousMessageDate = Date(timeIntervalSince1970: 50)
+
+        let archivedConversation = ConversationBuilder()
+            .withParticipantHash(participantHash)
+            .withDisplayName("Archived Thread")
+            .withSnippet("Previous received message")
+            .withLastMessageDate(previousMessageDate)
+            .hasInboxMessages(false)
+            .archivedOn(archivedAt)
+            .setHidden()
+            .build(in: context)
+        let nonInboxLabel = LabelBuilder()
+            .withId("CATEGORY_PERSONAL")
+            .withName("Personal")
+            .build(in: context)
+        let previousMessage = MessageBuilder()
+            .withId("previous-before-preflight")
+            .withDate(previousMessageDate)
+            .withSnippet("Previous received message")
+            .inConversation(archivedConversation)
+            .build(in: context)
+        previousMessage.addToLabels(nonInboxLabel)
+        try saveViewContext()
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Fails before transmission",
+            optimisticConversation: .participantHash(participantHash)
+        )
+        let optimisticMessage = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        // Sync lands during a slow preflight. Gmail's internalDate predates the
+        // tap, so the message never counted as newer than the optimistic one.
+        let syncedDate = optimisticMessage.internalDate.addingTimeInterval(-1)
+        let syncedMessage = MessageBuilder()
+            .withId("synced-during-preflight")
+            .withDate(syncedDate)
+            .withSnippet("Arrived during preflight")
+            .inConversation(archivedConversation)
+            .build(in: context)
+        syncedMessage.addToLabels(nonInboxLabel)
+        try saveViewContext()
+
+        sendService.rollbackOptimisticMessageBeforeTransmission(
+            byID: handle.optimisticMessageID,
+            fallbackAttachmentReferences: []
+        )
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        // Revert-check: dropping `!Self.remainingMessagesDetermineRollup(...)`
+        // from `finalizeOptimisticFailureCleanup` writes the pre-send snapshot
+        // back over the recompute: the previous message's date and snippet.
+        XCTAssertEqual(archivedConversation.lastMessageDate, syncedDate)
+        XCTAssertEqual(archivedConversation.snippet, syncedMessage.conversationPreviewText)
+        // No remaining message is newer than the failed send, so the pre-send
+        // archive comes back, and the send never claimed inbox presence.
+        XCTAssertEqual(archivedConversation.archivedAt, archivedAt)
+        XCTAssertTrue(archivedConversation.hidden)
+        XCTAssertFalse(archivedConversation.hasInbox)
+        XCTAssertEqual(archivedConversation.displayName, "Archived Thread")
+    }
+
+    private struct PreflightReplyFixture {
+        let conversationID: UUID
+        let attachment: Attachment
+        let reference: LocalAttachmentReference
+        let optimisticMessageID: String
+        let input: ComposeSendOrchestrator.SendInput
+    }
+
+    /// A durable optimistic chat reply (with its recovery envelope and one
+    /// uploading attachment) whose background send has not started.
+    private func makePreflightReplyFixture(attachmentID: String) async throws -> PreflightReplyFixture {
+        let context: NSManagedObjectContext = viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Friend")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .asImage()
+            .queued()
+            .withLocalURL("Attachments/\(attachmentID).jpg")
+            .withPreviewURL("Previews/\(attachmentID).jpg")
+            .build(in: context)
+        try saveViewContext()
+        let attachmentContexts = try OutboundAttachmentContextBuilder(viewContext: context)
+            .buildSendAttachments(from: [attachment])
+        let metadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["friend@example.com"],
+            fromEmail: "me@example.com",
+            fromName: "Me",
+            subject: "Re: Plans",
+            threadId: "plans-thread",
+            inReplyTo: "<plans@example.com>",
+            references: ["<plans@example.com>"],
+            originalMessage: nil
+        )
+        let handle = try await sendService.createOptimisticMessage(
+            to: metadata.recipientEmails,
+            body: "Reply that never left",
+            subject: metadata.subject,
+            threadId: metadata.threadId,
+            attachments: attachmentContexts,
+            optimisticConversation: .existingConversation(.init(objectID: conversation.objectID)),
+            replyMetadata: metadata
+        )
+        let reference = attachmentContexts[0].localAttachmentReference
+        sendService.markAttachmentsAsUploading(references: [reference])
+        XCTAssertNotNil(try optimisticMutationRecord(in: context, id: handle.optimisticMessageID)?.replyEnvelopeData)
+        return PreflightReplyFixture(
+            conversationID: conversation.id,
+            attachment: attachment,
+            reference: reference,
+            optimisticMessageID: handle.optimisticMessageID,
+            input: ComposeSendOrchestrator.SendInput(
+                recipientEmails: metadata.recipientEmails,
+                body: "Reply that never left",
+                htmlBody: nil,
+                subject: metadata.subject,
+                attachmentInfos: attachmentContexts.map(\.info),
+                inlineAttachmentInfos: [],
+                replyMetadata: metadata
+            )
+        )
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () async -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+
     /// Saves the suite's main-queue context directly; the test body is
     /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
     /// the stack's private-queue context instead (see the type comment).
@@ -2013,6 +2240,139 @@ private final class InFlightComposeSendService: ComposeSendServicing, @unchecked
         lock.lock()
         _sendCallCount += 1
         lock.unlock()
+    }
+}
+
+/// Forwards every durable-state call to a real `GmailSendService` but fails
+/// `sendReply` before ever invoking `beforeTransmission`, the way a failed
+/// token refresh or attachment read does.
+private final class PreBarrierFailingSendService: ComposeSendServicing, @unchecked Sendable {
+    enum Failure {
+        case immediately(Error)
+        /// Suspends until the worker is cancelled, then throws this error
+        /// instead of `CancellationError`.
+        case whenCancelled(Error)
+    }
+
+    private let base: GmailSendService
+    private let failure: Failure
+    private let lock = NSLock()
+    private var _sendReplyCallCount = 0
+
+    init(base: GmailSendService, failure: Failure) {
+        self.base = base
+        self.failure = failure
+    }
+
+    var sendReplyCallCount: Int {
+        lock.withLock { _sendReplyCallCount }
+    }
+
+    @MainActor
+    func markAttachmentsAsUploaded(references: [LocalAttachmentReference]) {
+        base.markAttachmentsAsUploaded(references: references)
+    }
+
+    func sendReply(
+        to recipients: [String],
+        fromEmail: String?,
+        fromName: String?,
+        body: String,
+        subject: String,
+        threadId: String,
+        inReplyTo: String?,
+        references: [String],
+        originalMessage: QuotedMessage?,
+        attachmentInfos: [GmailSendService.AttachmentInfo],
+        messageId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
+    ) async throws -> GmailSendService.SendResult {
+        lock.withLock { _sendReplyCallCount += 1 }
+        switch failure {
+        case .immediately(let error):
+            throw error
+        case .whenCancelled(let error):
+            do {
+                try await Task.sleep(nanoseconds: 30_000_000_000)
+            } catch {}
+            throw error
+        }
+    }
+
+    func sendNew(
+        to recipients: [String],
+        body: String,
+        htmlBody: String?,
+        subject: String?,
+        attachmentInfos: [GmailSendService.AttachmentInfo],
+        inlineAttachmentInfos: [GmailSendService.AttachmentInfo],
+        messageId: String?,
+        beforeTransmission: @Sendable () async throws -> Void
+    ) async throws -> GmailSendService.SendResult {
+        throw GmailSendService.SendError.apiError("Unexpected new-message send")
+    }
+
+    @MainActor
+    func recordSendFailureReason(optimisticMessageID: String, reason: String) {
+        base.recordSendFailureReason(optimisticMessageID: optimisticMessageID, reason: reason)
+    }
+
+    @MainActor
+    func remoteCommittedSendResult(optimisticMessageID: String) -> GmailSendService.SendResult? {
+        base.remoteCommittedSendResult(optimisticMessageID: optimisticMessageID)
+    }
+
+    @MainActor
+    func persistOptimisticMessageBeforeTransmission(optimisticMessageID: String) throws {
+        try base.persistOptimisticMessageBeforeTransmission(optimisticMessageID: optimisticMessageID)
+    }
+
+    @MainActor
+    func recordRemoteSendAdmission(optimisticMessageID: String) throws {
+        try base.recordRemoteSendAdmission(optimisticMessageID: optimisticMessageID)
+    }
+
+    @MainActor
+    func recordAmbiguousRemoteSend(optimisticMessageID: String) throws {
+        try base.recordAmbiguousRemoteSend(optimisticMessageID: optimisticMessageID)
+    }
+
+    @MainActor
+    func recordRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws {
+        try base.recordRemoteCommittedSend(optimisticMessageID: optimisticMessageID, result: result)
+    }
+
+    @MainActor
+    func reconcileRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws -> Bool {
+        try base.reconcileRemoteCommittedSend(optimisticMessageID: optimisticMessageID, result: result)
+    }
+
+    @MainActor
+    func rollbackOptimisticMessageBeforeTransmission(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        base.rollbackOptimisticMessageBeforeTransmission(
+            byID: messageID,
+            fallbackAttachmentReferences: fallbackAttachmentReferences
+        )
+    }
+
+    @MainActor
+    func retainDefinitelyUnsentOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        base.retainDefinitelyUnsentOptimisticMessage(
+            byID: messageID,
+            fallbackAttachmentReferences: fallbackAttachmentReferences
+        )
     }
 }
 

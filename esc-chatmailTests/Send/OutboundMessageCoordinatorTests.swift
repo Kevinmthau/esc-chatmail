@@ -312,6 +312,10 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         _ = outboundTaskRegistry.closeAdmission()
         await outboundTaskRegistry.cancelAndAwaitAll()
 
+        // Revert-check: removing the threadless-reply guard from
+        // `OutboundMessageCoordinator.send`'s preparation retains this reply
+        // as "Not sent" (a non-nil result and an empty composer), and its
+        // Edit and resend would fail the same way.
         XCTAssertNil(result)
         XCTAssertNil(viewModel.replyingTo)
         XCTAssertEqual(viewModel.replyText, "Follow-up to the new topic")

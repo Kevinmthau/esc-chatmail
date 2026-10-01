@@ -99,12 +99,33 @@ enum OutboundMessageRequest {
         let body: String
         let attachments: [AttachmentContext]
         let retryMetadata: ReplyMetadata?
+        /// Chat replies pass `.retainAsNotSent`: their composer releases at
+        /// optimistic persistence, so a rollback has no composer to return to.
+        let preTransmissionFailureDisposition: PreTransmissionFailureDisposition
 
-        init(context: ReplyContext, body: String, attachments: [AttachmentContext], retryMetadata: ReplyMetadata? = nil) {
+        init(
+            context: ReplyContext,
+            body: String,
+            attachments: [AttachmentContext],
+            retryMetadata: ReplyMetadata? = nil,
+            preTransmissionFailureDisposition: PreTransmissionFailureDisposition = .rollBackToComposer
+        ) {
             self.context = context
             self.body = body
             self.attachments = attachments
             self.retryMetadata = retryMetadata
+            self.preTransmissionFailureDisposition = preTransmissionFailureDisposition
+        }
+    }
+
+    /// Compose and forward always roll back: ComposeView keeps its content
+    /// (and its spinner) until transmission admission.
+    var preTransmissionFailureDisposition: PreTransmissionFailureDisposition {
+        switch self {
+        case .compose, .forward:
+            return .rollBackToComposer
+        case .reply(let reply):
+            return reply.preTransmissionFailureDisposition
         }
     }
 }
@@ -152,7 +173,14 @@ struct OutboundMessageReconciliationHooks: Sendable {
 protocol OutboundMessageCoordinating: AnyObject {
     func checkDelivery() async throws
     /// Reports the persisted optimistic identity before awaiting local preflight,
-    /// then returns only after durable transmission admission.
+    /// then returns only after durable transmission admission, or once a
+    /// pre-barrier failure of a `.retainAsNotSent` request has been retained
+    /// as "Not sent".
+    ///
+    /// A throw after `onOptimisticMessagePersisted` means the optimistic graph
+    /// was rolled back (a `.rollBackToComposer` failure, or any pre-barrier
+    /// cancellation, including account teardown), so the caller is again the
+    /// only owner of the content it snapshotted.
     func send(
         preparing requestBuilder: @escaping @MainActor () async throws -> OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks,
@@ -236,6 +264,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
         let optimisticConversation: OptimisticConversationReference?
         let replyMetadata: OutboundMessageRequest.ReplyMetadata?
+        let preTransmissionFailureDisposition: PreTransmissionFailureDisposition
     }
 
     private struct OptimisticPreparation {
@@ -249,6 +278,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
     private let outboundReplyContextBuilder: OutboundReplyContextBuilder
     private let mutationTracker: any OutboundSendMutationTracking
     private let outboundTaskRegistry: OutboundTaskRegistry
+    private let sendSequencer: OutboundConversationSendSequencer
 
     init(
         sendService: any OutboundMessageSendServicing,
@@ -256,7 +286,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         messageFormatBuilder: MessageFormatBuilder,
         outboundReplyContextBuilder: OutboundReplyContextBuilder,
         mutationTracker: any OutboundSendMutationTracking,
-        outboundTaskRegistry: OutboundTaskRegistry? = nil
+        outboundTaskRegistry: OutboundTaskRegistry? = nil,
+        sendSequencer: OutboundConversationSendSequencer? = nil
     ) {
         self.sendService = sendService
         self.syncPerformer = syncPerformer
@@ -264,6 +295,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         self.outboundReplyContextBuilder = outboundReplyContextBuilder
         self.mutationTracker = mutationTracker
         self.outboundTaskRegistry = outboundTaskRegistry ?? .shared
+        self.sendSequencer = sendSequencer ?? .shared
     }
 
     func send(
@@ -290,6 +322,18 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             try checkActive(reservation)
             guard !preparedSend.recipientEmails.isEmpty else {
                 throw GmailSendService.SendError.noRecipients
+            }
+            // Refuse a threadless reply before the optimistic row exists. The
+            // background worker refuses it too (`replyTargetUnavailable`), but
+            // that is pre-barrier, where a chat reply is retained as "Not
+            // sent": Edit and resend would rebuild the same threadless
+            // envelope and fail the same way. Refused here, the composer keeps
+            // the text and shows why.
+            if let replyMetadata = preparedSend.replyMetadata {
+                guard let threadId = replyMetadata.threadId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !threadId.isEmpty else {
+                    throw GmailSendService.SendError.replyTargetUnavailable
+                }
             }
 
             let handle = try await sendService.createOptimisticMessage(
@@ -379,6 +423,12 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         )
 
         let effectiveHooks = makeReconciliationHooks(reconciliationHooks)
+        // Enqueued on the main actor right after the optimistic row was
+        // created, so queue order is bubble order. The background operation
+        // finishes the turn on every path.
+        let sendOrderTurn = optimisticSendHandle.conversationReference.map {
+            sendSequencer.enqueue(conversation: $0)
+        }
         let backgroundOperation = ComposeSendOrchestrator(
             sendService: sendService,
             syncPerformer: syncPerformer
@@ -387,6 +437,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             attachmentReferences: preparedSend.attachments.map(\.localAttachmentReference),
             optimisticMessageID: optimisticMessageID,
             reconciliationHooks: effectiveHooks,
+            preTransmissionFailureDisposition: preparedSend.preTransmissionFailureDisposition,
+            sendOrderTurn: sendOrderTurn,
             transmissionAdmission: { [sendService, outboundTaskRegistry] in
                 try outboundTaskRegistry.admitTransmission(
                     reservation,
@@ -417,10 +469,14 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         // and anchor the exact row while MIME work continues.
         onOptimisticMessagePersisted?(optimisticResult)
 
-        // The caller clears its composer only after all local preflight has
-        // completed and the optimistic graph + ambiguity marker are durable at
-        // final Gmail request admission. Failures before admission propagate
-        // while the source composer still owns the user's content.
+        // A `.rollBackToComposer` caller (ComposeView) clears its composer
+        // only after all local preflight has completed and the optimistic
+        // graph + ambiguity marker are durable at final Gmail request
+        // admission; failures before admission propagate while that composer
+        // still owns the user's content. A `.retainAsNotSent` caller (the chat
+        // reply bar) has already released its composer at the callback above;
+        // its send-path failures resolve admission here as a retained "Not
+        // sent" row instead of throwing.
         try await backgroundOperation.waitForTransmissionAdmission()
 
         return optimisticResult
@@ -451,7 +507,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 chatPreviewText: optimisticChatPreviewText(from: body),
                 inlineAttachmentInfos: [],
                 optimisticConversation: compose.optimisticConversation,
-                replyMetadata: nil
+                replyMetadata: nil,
+                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition
             )
 
         case .forward(let forward):
@@ -485,7 +542,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 chatPreviewText: optimisticChatPreviewText(from: userBody),
                 inlineAttachmentInfos: forward.forwardedInlineAttachmentInfos,
                 optimisticConversation: forward.optimisticConversation,
-                replyMetadata: nil
+                replyMetadata: nil,
+                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition
             )
 
         case .reply(let reply):
@@ -508,7 +566,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 chatPreviewText: optimisticChatPreviewText(from: body),
                 inlineAttachmentInfos: [],
                 optimisticConversation: reply.context.optimisticConversation,
-                replyMetadata: metadata
+                replyMetadata: metadata,
+                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition
             )
         }
     }

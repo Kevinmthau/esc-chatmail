@@ -287,11 +287,14 @@ extension GmailSendService {
         )
     }
 
-    /// Rolls back a send that failed before Gmail request admission. The source
-    /// composer is still intact, so retaining a second failed bubble would
-    /// duplicate the user's body and attachments. Detach/requeue the original
-    /// attachment objects before deleting the optimistic graph so the composer
-    /// can retry with the same durable references.
+    /// Rolls back a send that failed before Gmail request admission. Runs for
+    /// `.rollBackToComposer` requests (ComposeView), whose composer is still
+    /// intact, so retaining a second failed bubble would duplicate the user's
+    /// body and attachments, and for any pre-barrier cancellation, including
+    /// account teardown. A chat reply's send-path failure is retained as "Not
+    /// sent" instead (`PreTransmissionFailureDisposition`). Detach/requeue the
+    /// original attachment objects before deleting the optimistic graph so the
+    /// composer can retry with the same durable references.
     @MainActor
     func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
@@ -844,7 +847,9 @@ extension GmailSendService {
 
         let hasSupersedingMessage = cleanup.hasRemainingMessageSupersedingOptimisticMessage(remainingMessages)
         cleanup.restorePreOptimisticConversationStateIfNeeded(
-            restoreRollupFields: restoreRollupFields && !hasSupersedingMessage,
+            restoreRollupFields: restoreRollupFields
+                && !hasSupersedingMessage
+                && !Self.remainingMessagesDetermineRollup(remainingMessages),
             restoreArchiveState: !hasSupersedingMessage
         )
     }
@@ -1286,9 +1291,29 @@ extension GmailSendService {
         }
         snapshot.restoreConversationState(
             conversation,
-            restoreRollupFields: !hasSupersedingMessage,
+            restoreRollupFields: !hasSupersedingMessage
+                && !Self.remainingMessagesDetermineRollup(remainingMessages),
             restoreArchiveState: !hasSupersedingMessage
         )
+    }
+
+    /// Whether the rollup recompute that just ran derived `lastMessageDate`
+    /// and `snippet` from a remaining visible message.
+    ///
+    /// The pre-send snapshot used to overwrite that recompute whenever no
+    /// remaining message was newer than the optimistic one. A message that
+    /// sync persisted during a slow preflight carries Gmail's earlier
+    /// `internalDate`, so it never counted as newer: the conversation list
+    /// went back to the pre-send snippet and time, hiding the message that
+    /// had just arrived. The snapshot now only fills in when the recompute
+    /// had nothing to derive from (it leaves the optimistic values in place
+    /// when a saved draft keeps an otherwise empty conversation listed).
+    /// Archive state keeps its own superseding-message rule.
+    @MainActor
+    private static func remainingMessagesDetermineRollup<Messages: Sequence>(
+        _ remainingMessages: Messages
+    ) -> Bool where Messages.Element == Message {
+        ConversationRollupSnapshot.make(from: Set(remainingMessages)).lastMessageDate != nil
     }
 
     @MainActor
