@@ -96,8 +96,7 @@ extension MimeBuilder {
             mime += "In-Reply-To: \(sanitizeHeaderValue(inReplyTo))\r\n"
         }
 
-        if !references.isEmpty {
-            let referencesHeader = references.map { sanitizeHeaderValue($0) }.joined(separator: " ")
+        if let referencesHeader = formatReferencesHeader(references) {
             mime += "References: \(referencesHeader)\r\n"
         }
 
