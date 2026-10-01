@@ -346,9 +346,42 @@ enum ChatMessageRowModelMapper {
         map([message])[0]
     }
 
+    /// The optimistic message ID a row's RFC Message-ID encodes, decoded once
+    /// per row by the batch path and handed to everything that needs it.
+    ///
+    /// Why: every reply this app ever sent carries an `<esc-…>` Message-ID,
+    /// and `MimeBuilder.optimisticMessageID(from:)` validates by re-encoding —
+    /// one `String(format:)` per byte. The mapper used to decode the same ID
+    /// four times per outgoing row (echo flag, record grouping, confirmation,
+    /// display identity), on the main actor, on every window re-map.
+    private struct OutboundSendDecoding {
+        /// Decoded from a message the user sent: shared by an optimistic row and
+        /// its sync echo (`ChatMessageDisplayIdentity.outboundSend`). Nil for
+        /// incoming mail, whose Message-ID its sender chose.
+        let decodedOutboundSendID: String?
+        /// `OutboundSendDeliveryState.localOptimisticMessageID(for:)`: the row
+        /// is the local optimistic copy itself (its `id` is the decoded ID),
+        /// not the echo. Must stay equivalent to that function.
+        let localOptimisticMessageID: String?
+
+        @MainActor
+        init(_ message: Message) {
+            guard message.isFromMe,
+                  let rfcMessageID = message.messageIdValue,
+                  let decoded = MimeBuilder.optimisticMessageID(from: rfcMessageID) else {
+                decodedOutboundSendID = nil
+                localOptimisticMessageID = nil
+                return
+            }
+            decodedOutboundSendID = decoded
+            localOptimisticMessageID = decoded == message.id ? message.id : nil
+        }
+    }
+
     @MainActor
     private static func map(
         _ message: Message,
+        outboundSendDecoding: OutboundSendDecoding,
         outboundSendDeliveryState: OutboundSendDeliveryState,
         isConfirmedInGmail: Bool
     ) -> ChatMessageRowModel {
@@ -404,7 +437,7 @@ enum ChatMessageRowModelMapper {
             isSendingLocalAttachments: message.isSendingLocalAttachments,
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads,
             outboundSendDeliveryState: outboundSendDeliveryState,
-            isAwaitingSyncEcho: OutboundSendDeliveryState.localOptimisticMessageID(for: message) != nil,
+            isAwaitingSyncEcho: outboundSendDecoding.localOptimisticMessageID != nil,
             isConfirmedInGmail: isConfirmedInGmail,
             forwardedDisplaySubject: message.forwardedDisplaySubject,
             outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent,
@@ -423,7 +456,7 @@ enum ChatMessageRowModelMapper {
             ),
             displayIdentity: ChatMessageDisplayIdentity.resolve(
                 isFromMe: message.isFromMe,
-                rfcMessageID: message.messageIdValue,
+                decodedOutboundSendID: outboundSendDecoding.decodedOutboundSendID,
                 objectID: message.objectID
             )
         )
@@ -480,10 +513,10 @@ enum ChatMessageRowModelMapper {
             var optimisticMessageIDs: Set<String>
         }
 
+        let outboundSendDecodings = messages.map(OutboundSendDecoding.init)
         var groups: [ObjectIdentifier: CandidateGroup] = [:]
-        for message in messages {
-            guard let optimisticMessageID = OutboundSendDeliveryState
-                .localOptimisticMessageID(for: message),
+        for (message, decoding) in zip(messages, outboundSendDecodings) {
+            guard let optimisticMessageID = decoding.localOptimisticMessageID,
                   let context = message.managedObjectContext else {
                 continue
             }
@@ -546,11 +579,11 @@ enum ChatMessageRowModelMapper {
             }
         }
 
-        return messages.map { message in
-            let isOptimistic = OutboundSendDeliveryState
-                .localOptimisticMessageID(for: message) != nil
+        return zip(messages, outboundSendDecodings).map { message, decoding in
+            let isOptimistic = decoding.localOptimisticMessageID != nil
             return map(
                 message,
+                outboundSendDecoding: decoding,
                 outboundSendDeliveryState:
                     statesByMessageObjectID[message.objectID] ?? .none,
                 // A non-optimistic row came from Gmail through sync.

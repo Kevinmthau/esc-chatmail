@@ -28,19 +28,21 @@ enum ChatMessageDisplayIdentity: Hashable {
     /// Every other row.
     case message(NSManagedObjectID)
 
+    /// `decodedOutboundSendID` is `MimeBuilder.optimisticMessageID(from:)` of
+    /// the row's RFC Message-ID, which the mapper decodes once per row and
+    /// shares with its other uses of it.
+    ///
     /// `isFromMe` is required: the Message-ID of incoming mail is chosen by
     /// its sender and must not be able to claim the identity of one of the
     /// user's own sends.
     static func resolve(
         isFromMe: Bool,
-        rfcMessageID: String?,
+        decodedOutboundSendID: String?,
         objectID: NSManagedObjectID
     ) -> Self {
-        guard isFromMe,
-              let rfcMessageID,
-              let optimisticMessageID = MimeBuilder.optimisticMessageID(from: rfcMessageID) else {
+        guard isFromMe, let decodedOutboundSendID else {
             return .message(objectID)
         }
-        return .outboundSend(optimisticMessageID: optimisticMessageID)
+        return .outboundSend(optimisticMessageID: decodedOutboundSendID)
     }
 }
