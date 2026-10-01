@@ -153,6 +153,7 @@ struct MessageBubble: View {
             presentation: sendStatus,
             isSendingRevealDue: isSendingRevealDue,
             isFromMe: message.isFromMe,
+            isConfirmedInGmail: message.isConfirmedInGmail,
             isNewestInTranscript: isNewestInTranscript
         )
         let recoveryPrompt = message.isFromMe

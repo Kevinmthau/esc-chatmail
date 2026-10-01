@@ -40,6 +40,8 @@ enum MessageSendStatusLinePolicy {
     /// - Parameters:
     ///   - presentation: the row's durable status (`MessageSendStatusPresentation.resolve`).
     ///   - isSendingRevealDue: whether the row has been pending for `sendingRevealDelay`.
+    ///   - isConfirmedInGmail: `ChatMessageRowModel.isConfirmedInGmail`, the positive evidence
+    ///     "Sent" requires.
     ///   - isNewestInTranscript: whether the row is the conversation's newest message
     ///     (`newestRowIndex`). Like iMessage's receipt, "Sent" lives only there and leaves the
     ///     row when a newer message arrives.
@@ -47,6 +49,7 @@ enum MessageSendStatusLinePolicy {
         presentation: MessageSendStatusPresentation,
         isSendingRevealDue: Bool,
         isFromMe: Bool,
+        isConfirmedInGmail: Bool,
         isNewestInTranscript: Bool
     ) -> Line? {
         switch presentation {
@@ -60,10 +63,16 @@ enum MessageSendStatusLinePolicy {
         case .sending:
             return isSendingRevealDue ? .sending : nil
         case .none:
-            // `.none` on an own row means Gmail accepted it: an optimistic row whose record has
-            // Gmail's thread ID (it renders as sent while sync persists the echo), or a row sync
-            // brought from Gmail. Drafts never reach the transcript.
-            return isFromMe && isNewestInTranscript ? .sent : nil
+            // `.none` alone is not evidence: the row mapper also falls back to it when an
+            // optimistic row's record fetch fails or finds nothing, and that row may really be
+            // "Delivery unknown" or "Not sent". "Sent" therefore requires `isConfirmedInGmail`:
+            // an optimistic row whose record carries Gmail's committed IDs (it renders as sent
+            // while sync persists the echo), or a row sync brought from Gmail. A synced row proves
+            // Gmail holds the message, not that it went out: the chat excludes only DRAFT, SPAM
+            // and TRASH, so a reply scheduled in Gmail's web client can sync in as an own row
+            // before its send time and, as the newest row, read "Sent" early. The row model
+            // carries no labels to tell it apart.
+            return isFromMe && isConfirmedInGmail && isNewestInTranscript ? .sent : nil
         }
     }
 

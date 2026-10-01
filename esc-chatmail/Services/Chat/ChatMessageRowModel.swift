@@ -229,6 +229,15 @@ struct ChatMessageRowModel: Equatable {
     /// (`OutboundSendDeliveryState.localOptimisticMessageID`). Sync deletes it
     /// when the echo lands, so it is not offered as a reply target.
     let isAwaitingSyncEcho: Bool
+    /// Positive evidence that Gmail holds this message: true for every row sync
+    /// brought from Gmail, and for an optimistic row only once its mutation
+    /// record carries Gmail's committed IDs. It gates the "Sent" receipt
+    /// (`MessageSendStatusLinePolicy.line`), which must not be inferred from
+    /// `outboundSendDeliveryState == .none`: the mapper also falls back to
+    /// `.none` when the record fetch throws or finds no record, and an
+    /// optimistic row in that state may really be "Delivery unknown" or
+    /// "Not sent".
+    let isConfirmedInGmail: Bool
     let forwardedDisplaySubject: String?
     let outgoingForwardedDisplayContent: ForwardedMessageDisplayContent?
     /// Precomputed so MessageBubble body recomputation does not hash message text.
@@ -295,18 +304,20 @@ struct ChatMessageRowModel: Equatable {
 }
 
 enum ChatMessageRowModelMapper {
+    /// One row through the batch path, so a single row and a window resolve
+    /// send state identically: in particular `isConfirmedInGmail` stays false
+    /// when the record fetch fails, where `OutboundSendDeliveryState.resolve`
+    /// would `try?` the failure into a `.none` indistinguishable from "accepted".
     @MainActor
     static func map(_ message: Message) -> ChatMessageRowModel {
-        map(
-            message,
-            outboundSendDeliveryState: OutboundSendDeliveryState.resolve(for: message)
-        )
+        map([message])[0]
     }
 
     @MainActor
     private static func map(
         _ message: Message,
-        outboundSendDeliveryState: OutboundSendDeliveryState
+        outboundSendDeliveryState: OutboundSendDeliveryState,
+        isConfirmedInGmail: Bool
     ) -> ChatMessageRowModel {
         let senderParticipant = message.participants?
             .first(where: { $0.participantKind == .from })
@@ -361,6 +372,7 @@ enum ChatMessageRowModelMapper {
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads,
             outboundSendDeliveryState: outboundSendDeliveryState,
             isAwaitingSyncEcho: OutboundSendDeliveryState.localOptimisticMessageID(for: message) != nil,
+            isConfirmedInGmail: isConfirmedInGmail,
             forwardedDisplaySubject: message.forwardedDisplaySubject,
             outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent,
             loadSignatureComponents: MessageBubbleLoadSignatureComponents(
@@ -455,6 +467,10 @@ enum ChatMessageRowModelMapper {
         var statesByMessageObjectID: [
             NSManagedObjectID: OutboundSendDeliveryState
         ] = [:]
+        // Optimistic rows whose record proves Gmail accepted the send. A row
+        // absent from here (fetch failed, record missing) falls back to `.none`
+        // below but is never confirmed: the receipt fails closed.
+        var confirmedInGmailObjectIDs = Set<NSManagedObjectID>()
         for group in groups.values {
             let records: [OutboundSendMutationRecord]
             do {
@@ -477,19 +493,31 @@ enum ChatMessageRowModelMapper {
             }
             for message in group.messages {
                 guard let record = recordsByID[message.id] else { continue }
-                statesByMessageObjectID[message.objectID] =
-                    OutboundSendRemoteState.deliveryState(
-                        messageID: record.remoteCommittedMessageId,
-                        threadID: record.remoteCommittedThreadId
-                    )
+                let state = OutboundSendRemoteState.deliveryState(
+                    messageID: record.remoteCommittedMessageId,
+                    threadID: record.remoteCommittedThreadId
+                )
+                statesByMessageObjectID[message.objectID] = state
+                // For a record that exists, `.none` is reached only through
+                // Gmail's committed IDs (a thread ID, or a non-marker message
+                // ID); the pre-admission nil and every local marker resolve to
+                // `.sending`, `.notSent`, or `.deliveryUnknown`.
+                if state == .none {
+                    confirmedInGmailObjectIDs.insert(message.objectID)
+                }
             }
         }
 
         return messages.map { message in
-            map(
+            let isOptimistic = OutboundSendDeliveryState
+                .localOptimisticMessageID(for: message) != nil
+            return map(
                 message,
                 outboundSendDeliveryState:
-                    statesByMessageObjectID[message.objectID] ?? .none
+                    statesByMessageObjectID[message.objectID] ?? .none,
+                // A non-optimistic row came from Gmail through sync.
+                isConfirmedInGmail: !isOptimistic ||
+                    confirmedInGmailObjectIDs.contains(message.objectID)
             )
         }
     }

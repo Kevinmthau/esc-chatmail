@@ -8,12 +8,14 @@ final class MessageSendStatusLinePolicyTests: XCTestCase {
         _ presentation: MessageSendStatusPresentation,
         isSendingRevealDue: Bool = false,
         isFromMe: Bool = true,
+        isConfirmedInGmail: Bool = true,
         isNewestInTranscript: Bool = true
     ) -> Policy.Line? {
         Policy.line(
             presentation: presentation,
             isSendingRevealDue: isSendingRevealDue,
             isFromMe: isFromMe,
+            isConfirmedInGmail: isConfirmedInGmail,
             isNewestInTranscript: isNewestInTranscript
         )
     }
@@ -90,6 +92,20 @@ final class MessageSendStatusLinePolicyTests: XCTestCase {
         XCTAssertNil(line(.none, isNewestInTranscript: false))
         // The newest row is someone else's.
         XCTAssertNil(line(.none, isFromMe: false))
+    }
+
+    /// `.none` is also the row mapper's fallback when an optimistic row's record fetch fails or
+    /// finds nothing, so it alone must not produce "Sent": the receipt fails closed to no caption,
+    /// as before receipts existed.
+    ///
+    /// Revert-check: dropping the `isConfirmedInGmail` condition in
+    /// `MessageSendStatusLinePolicy.line` fails this test.
+    func testLine_ownNewestRowWithoutGmailEvidence_showsNothing() {
+        XCTAssertNil(line(.none, isConfirmedInGmail: false))
+        XCTAssertNil(line(.none, isConfirmedInGmail: false, isNewestInTranscript: false))
+        // The evidence never hides a real status.
+        XCTAssertEqual(line(.notSent, isConfirmedInGmail: false), .notSent)
+        XCTAssertEqual(line(.deliveryUnknown, isConfirmedInGmail: false), .deliveryUnknown)
     }
 
     /// Gmail may or may not have an ambiguous send; it must never read as Sent, on any row.
