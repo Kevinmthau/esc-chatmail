@@ -2737,6 +2737,157 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    /// The user's own send is appended to a latest-following window in the
+    /// optimistic save's own turn: no reconcile task, no window load, no
+    /// re-fetch or re-map of the rows already on screen. The count, the window
+    /// bounds, and the auto-read layout refresh all agree before the save
+    /// returns.
+    ///
+    /// Revert-check: removing the `localSendTailAppend` branch from
+    /// `handleViewContextChange` (`VirtualScrollState+ChangeObservation`) sends
+    /// the change through the full reload, which publishes asynchronously:
+    /// the synchronous assertions and the unchanged load generation fail.
+    func testLocalSendTailInsert_followingLatest_publishesInSameTurnWithoutReload() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let state = makeEndAnchoredState(conversation: conversation)
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+        var refreshedEvents: [VirtualScrollInsertedMessageRefresh] = []
+        let refreshedEventsCancellable = state.refreshedInsertedMessageEvents.sink {
+            refreshedEvents.append($0)
+        }
+        defer { refreshedEventsCancellable.cancel() }
+        let loadGenerationBeforeSend = state.windowLoadGeneration
+        let initialRows = state.visibleMessages
+
+        let optimistic = try makeOptimisticMessage(date: 8, conversation: conversation)
+
+        // No suspension between the save and these assertions.
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            initialIDs + [optimistic.objectID]
+        )
+        XCTAssertEqual(Array(state.visibleMessages.prefix(4)), initialRows)
+        XCTAssertEqual(state.visibleMessages.last?.isAwaitingSyncEcho, true)
+        XCTAssertEqual(state.totalMessageCount, 9)
+        XCTAssertEqual(state.visibleRangeStartIndex, 4)
+        XCTAssertTrue(state.isShowingLatestWindow)
+        XCTAssertFalse(state.isLoadingMore)
+        XCTAssertTrue(state.pendingInsertedMessageEvents.isEmpty)
+        XCTAssertEqual(refreshedEvents.last?.layoutID, state.latestWindowLayoutID)
+        XCTAssertEqual(refreshedEvents.last?.messageIDsInLatestWindow, [optimistic.objectID])
+        XCTAssertEqual(state.localSendAppendedMessageIDs, [optimistic.objectID])
+        // The grouping lookahead past the window end finds no unpublished row,
+        // so the view's body never runs its offset fetch.
+        XCTAssertNil(state.rowForGrouping(atAbsoluteIndex: 9))
+
+        // Nothing follows up with a reload either.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(state.windowLoadGeneration, loadGenerationBeforeSend)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            initialIDs + [optimistic.objectID]
+        )
+    }
+
+    /// A tail insert from sync (incoming mail, a send's echo) keeps the full
+    /// reload — the healing path for rows changed without a precise
+    /// notification — so cached rows are not reused wholesale.
+    ///
+    /// Revert-check: dropping the `localOptimisticMessageID` requirement in
+    /// `localSendTailAppendMessages` publishes this row synchronously and fails
+    /// the first assertion.
+    func testSyncTailInsert_followingLatest_takesFullReload() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let state = makeEndAnchoredState(conversation: conversation)
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+        let loadGenerationBeforeInsert = state.windowLoadGeneration
+
+        let incoming = makeMessage(id: "virtual-scroll-incoming-tail", date: 8, conversation: conversation)
+        // Permanent before the announcing save, as a merged sync insert is, so
+        // only the local-send requirement can send it to the reload.
+        try viewContext.obtainPermanentIDs(for: [incoming])
+        try viewContext.save()
+
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), initialIDs)
+        XCTAssertTrue(state.localSendAppendedMessageIDs.isEmpty)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs + [incoming.objectID] &&
+                !state.isLoadingMore
+        }
+        XCTAssertNotEqual(state.windowLoadGeneration, loadGenerationBeforeInsert)
+        XCTAssertTrue(state.localSendAppendedMessageIDs.isEmpty)
+    }
+
+    /// A local send that lands in the same save as an ordered update (another
+    /// row's date moving) is not insertion-only, so it takes the full reload,
+    /// which re-sorts the window.
+    ///
+    /// Revert-check: dropping `!hasOrderedDatasetUpdate` from the
+    /// `localSendTailAppend` condition in `handleViewContextChange` appends in
+    /// place over the stale order and fails the first assertion.
+    func testLocalSendTailInsert_withOrderedUpdateInSameChange_takesFullReload() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let state = makeEndAnchoredState(conversation: conversation)
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        // messages[5] moves to the end of the window's own range.
+        messages[5].internalDate = Date(timeIntervalSince1970: 7.5)
+        let optimistic = try makeOptimisticMessage(date: 8, conversation: conversation)
+
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), initialIDs)
+        let reorderedIDs = [messages[4], messages[6], messages[7], messages[5]].map(\.objectID) +
+            [optimistic.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID).suffix(5) == reorderedIDs[...] &&
+                !state.isLoadingMore
+        }
+        XCTAssertTrue(state.localSendAppendedMessageIDs.isEmpty)
+    }
+
+    /// A local send that does not sort after the window's last row (a newer
+    /// message already in the window, e.g. a skewed server date) is not a tail
+    /// append; the full reload places it.
+    ///
+    /// Revert-check: dropping the `compareSortOrder` check in
+    /// `localSendTailAppendMessages` appends it at the end synchronously and
+    /// fails the first assertion.
+    func testLocalSendInsert_sortingInsideWindow_takesFullReload() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let state = makeEndAnchoredState(conversation: conversation)
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        let optimistic = try makeOptimisticMessage(date: 6.5, conversation: conversation)
+
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), initialIDs)
+        // The reload may also re-size the window; only the placement matters.
+        let expectedTailIDs = [messages[6].objectID, optimistic.objectID, messages[7].objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID).suffix(3) == expectedTailIDs[...] &&
+                !state.isLoadingMore
+        }
+        XCTAssertTrue(state.localSendAppendedMessageIDs.isEmpty)
+    }
+
     func testPostSendLatestReloadPreservesAccumulatedWindowRows() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 12)
         let configuration = VirtualScrollConfiguration(
@@ -4791,6 +4942,43 @@ final class VirtualScrollStateTests: XCTestCase {
             .withDate(Date(timeIntervalSince1970: date))
             .inConversation(conversation)
             .build(in: viewContext)
+    }
+
+    private func makeEndAnchoredState(conversation: Conversation) -> VirtualScrollState {
+        let stack = self.stack!
+        return VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: VirtualScrollConfiguration(
+                visibleItemCount: 4,
+                bufferSize: 1,
+                pageSize: 3,
+                preloadThreshold: 1
+            ),
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+    }
+
+    /// The user's own reply as `createOptimisticMessage` saves it: a UUID ID,
+    /// the deterministic RFC Message-ID that encodes it, and a permanent object
+    /// ID before the save that announces it.
+    private func makeOptimisticMessage(
+        date: TimeInterval,
+        conversation: Conversation
+    ) throws -> Message {
+        let optimisticID = UUID().uuidString
+        let message = MessageBuilder()
+            .withId(optimisticID)
+            .withSubject(optimisticID)
+            .withDate(Date(timeIntervalSince1970: date))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        message.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        try viewContext.obtainPermanentIDs(for: [message])
+        try viewContext.save()
+        return message
     }
 
     private func makeExcludedLabels() -> (draft: Label, spam: Label, trash: Label) {

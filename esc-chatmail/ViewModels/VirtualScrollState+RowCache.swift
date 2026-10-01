@@ -7,6 +7,7 @@ extension VirtualScrollState {
     func setMessageWindow(_ window: MessageWindow) {
         messageWindow = window
         resolvedRowsByAbsoluteIndex.removeAll()
+        localSendAppendedMessageIDs.removeAll()
 
         let allowedIDs = Set(window.messageIDs)
         resolvedRowsByID = resolvedRowsByID.filter { allowedIDs.contains($0.key) }
