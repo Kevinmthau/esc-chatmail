@@ -55,7 +55,7 @@ struct OutboundReplyContextBuilder {
               conversation.managedObjectContext != nil,
               !conversation.isDeleted,
               !conversation.isRetainedDrainedShell else {
-            throw GmailSendService.SendError.replyTargetUnavailable
+            throw GmailSendService.SendError.replyConversationUnavailable
         }
         let replyingTo: ReplyTargetSnapshot?
         if let replyingToMessageObjectID = context.replyingToMessageObjectID {
@@ -87,7 +87,7 @@ struct OutboundReplyContextBuilder {
                                 context: OutboundMessageRequest.ReplyContext) throws {
         guard let conversation = fetchConversation(objectID: context.conversationObjectID),
               !conversation.isDeleted, !conversation.isRetainedDrainedShell else {
-            throw GmailSendService.SendError.replyTargetUnavailable
+            throw GmailSendService.SendError.replyConversationUnavailable
         }
         let auth = replyMetadataBuilder.authSession
         let selected = try ReplyFromAddressSelector(

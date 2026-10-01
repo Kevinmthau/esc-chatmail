@@ -553,10 +553,13 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
                     ConversationReference(objectID: conversation.objectID)
                 )
             )
-            XCTFail("Expected replyTargetUnavailable")
+            XCTFail("Expected replyConversationUnavailable")
         } catch {
-            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
-                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            // Revert-check: throwing `replyTargetUnavailable` again from
+            // `GmailSendService.createOptimisticMessage`'s anchor guard
+            // fails this; its copy blames the selected message.
+            guard case GmailSendService.SendError.replyConversationUnavailable = error else {
+                return XCTFail("Expected replyConversationUnavailable, got \(error)")
             }
         }
 
@@ -587,10 +590,13 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
                 body: "Must not attach to a deleted target",
                 optimisticConversation: .existingConversation(reference)
             )
-            XCTFail("Expected replyTargetUnavailable")
+            XCTFail("Expected replyConversationUnavailable")
         } catch {
-            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
-                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            // Revert-check: throwing `replyTargetUnavailable` again from
+            // `GmailSendService.createOptimisticMessage`'s anchor guard
+            // fails this; its copy blames the selected message.
+            guard case GmailSendService.SendError.replyConversationUnavailable = error else {
+                return XCTFail("Expected replyConversationUnavailable, got \(error)")
             }
         }
 

@@ -565,7 +565,7 @@ final class ChatViewModel: ObservableObject {
                 category: .message
             )
             sendErrorAlert = ChatSendErrorAlert(
-                message: "This conversation moved while you were replying. Your draft and attachments are still here."
+                message: GmailSendService.SendError.replyConversationUnavailable.localizedDescription
             )
             return nil
         }

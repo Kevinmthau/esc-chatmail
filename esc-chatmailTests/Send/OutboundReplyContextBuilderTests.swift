@@ -1271,10 +1271,15 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
 
         do {
             _ = try await metadataTask.value
-            XCTFail("Expected replyTargetUnavailable")
+            XCTFail("Expected replyConversationUnavailable")
         } catch {
-            guard case GmailSendService.SendError.replyTargetUnavailable = error else {
-                return XCTFail("Expected replyTargetUnavailable, got \(error)")
+            // The chat itself moved, so the selected-message advice of
+            // `replyTargetUnavailable` would send the user in circles.
+            // Revert-check: throwing `replyTargetUnavailable` again from
+            // `OutboundReplyContextBuilder.buildReplyMetadata`'s post-alias
+            // anchor guard fails this.
+            guard case GmailSendService.SendError.replyConversationUnavailable = error else {
+                return XCTFail("Expected replyConversationUnavailable, got \(error)")
             }
         }
     }

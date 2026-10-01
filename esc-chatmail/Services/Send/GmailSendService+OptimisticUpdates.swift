@@ -106,7 +106,7 @@ extension GmailSendService {
                     "Blocked optimistic reply insertion into an invalid conversation anchor",
                     category: .message
                 )
-                throw SendError.replyTargetUnavailable
+                throw SendError.replyConversationUnavailable
             }
         } else {
             // Use the same alias set the sync router excludes so the optimistic
