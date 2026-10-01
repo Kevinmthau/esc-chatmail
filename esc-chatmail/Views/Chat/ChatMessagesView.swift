@@ -308,7 +308,10 @@ struct ChatMessagesView: View {
                         contactRefreshToken: coordinator.contactRefreshToken,
                         isLastFromSender: isLastFromSender,
                         isNewestInTranscript: index == newestRowIndex,
-                        onOpenFullMessage: onOpenFullMessage
+                        onOpenFullMessage: onOpenFullMessage,
+                        onSendRecoveryAction: { action in
+                            performSendRecovery(action, messageObjectID: message.messageObjectID)
+                        }
                     )
                     .id(message.objectID)
                     .contentShape(Rectangle())
@@ -809,16 +812,14 @@ struct ChatMessagesView: View {
     private func messageContextMenu(for message: ChatMessageRowModel) -> some View {
         if message.outboundSendDeliveryState == .notSent {
             Button("Edit and resend", systemImage: "square.and.pencil") {
-                if viewModel.editFailedReply(messageObjectID: message.messageObjectID) {
-                    isTextFieldFocused.wrappedValue = true
-                }
+                performSendRecovery(.editAndResend, messageObjectID: message.messageObjectID)
             }
             Button("View send error", systemImage: "exclamationmark.circle") {
                 viewModel.showReplyFailure(messageObjectID: message.messageObjectID)
             }
         } else if message.outboundSendDeliveryState == .deliveryUnknown {
             Button("Check delivery", systemImage: "arrow.clockwise") {
-                viewModel.checkReplyDelivery(messageObjectID: message.messageObjectID)
+                performSendRecovery(.checkDelivery, messageObjectID: message.messageObjectID)
             }
         }
         // A just-sent bubble awaiting its echo is refused as a reply target
@@ -836,6 +837,23 @@ struct ChatMessagesView: View {
             Button(action: { onOpenFullMessage(message.messageObjectID, .contextMenu) }) {
                 SwiftUI.Label("View original email", systemImage: "doc.richtext")
             }
+        }
+    }
+
+    /// The one route from a failed-send affordance (long-press menu, or the bubble's recovery
+    /// dialog) into the view model's existing recovery paths. Neither adds a send path: Edit and
+    /// Resend only refills the composer, and Check Delivery only re-reads Gmail.
+    private func performSendRecovery(
+        _ action: FailedSendRecoveryPolicy.Action,
+        messageObjectID: NSManagedObjectID
+    ) {
+        switch action {
+        case .editAndResend:
+            if viewModel.editFailedReply(messageObjectID: messageObjectID) {
+                isTextFieldFocused.wrappedValue = true
+            }
+        case .checkDelivery:
+            viewModel.checkReplyDelivery(messageObjectID: messageObjectID)
         }
     }
 

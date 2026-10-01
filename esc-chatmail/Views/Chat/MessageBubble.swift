@@ -64,7 +64,11 @@ struct MessageBubble: View {
     /// Whether a pending send has outlasted `MessageSendStatusLinePolicy.sendingRevealDelay`.
     /// Driven by this view's own `.task`, so the timer dies with the row or the pending state.
     @State private var isSendingRevealDue = false
+    @State private var isShowingSendRecovery = false
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
+    /// Runs an action the failed-send dialog offered. The caller routes it to the same view-model
+    /// path as the long-press menu; the bubble never sends anything itself.
+    let onSendRecoveryAction: (FailedSendRecoveryPolicy.Action) -> Void
 
     private var showHTMLPreview: Bool {
         guard resolvedForwardedDisplayContent == nil else {
@@ -92,6 +96,17 @@ struct MessageBubble: View {
         viewModel.forwardedDisplayContent ?? message.outgoingForwardedDisplayContent
     }
 
+    /// Vertical alignment that centers the failed-send badge on the content bubble. Defaults to
+    /// center, so a row with no content bubble (attachments only) centers the badge on the column
+    /// instead of hanging it below the row.
+    private enum SendRecoveryBadgeAlignmentID: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat {
+            context[VerticalAlignment.center]
+        }
+    }
+
+    private static let sendRecoveryBadgeAlignment = VerticalAlignment(SendRecoveryBadgeAlignmentID.self)
+
     @MainActor
     init(
         message: ChatMessageRowModel,
@@ -105,7 +120,8 @@ struct MessageBubble: View {
         isLastFromSender: Bool = true,
         isNewestInTranscript: Bool = false,
         style: MessageBubbleStyle = .standard,
-        onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
+        onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void,
+        onSendRecoveryAction: @escaping (FailedSendRecoveryPolicy.Action) -> Void
     ) {
         self.message = message
         self.htmlContentHandler = htmlContentHandler
@@ -118,6 +134,7 @@ struct MessageBubble: View {
         self.isNewestInTranscript = isNewestInTranscript
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
+        self.onSendRecoveryAction = onSendRecoveryAction
         self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(loader: messageBubbleLoader))
     }
 
@@ -138,8 +155,14 @@ struct MessageBubble: View {
             isFromMe: message.isFromMe,
             isNewestInTranscript: isNewestInTranscript
         )
+        let recoveryPrompt = message.isFromMe
+            ? FailedSendRecoveryPolicy.prompt(for: message.outboundSendDeliveryState)
+            : nil
 
-        HStack(alignment: .bottom, spacing: 8) {
+        // With a recovery badge, center it on the content bubble rather than on the row's
+        // bottom (the timestamp line). Only then: the custom guide would also move an incoming
+        // row's avatar off the bottom.
+        HStack(alignment: recoveryPrompt == nil ? .bottom : Self.sendRecoveryBadgeAlignment, spacing: 8) {
             if !message.isFromMe {
                 leadingContent
             } else {
@@ -167,20 +190,30 @@ struct MessageBubble: View {
                     fullEmailOpener: fullEmailOpener,
                     originalEmailSourceWarmer: originalEmailSourceWarmer,
                     htmlSourceSignaturer: htmlContentHandler,
-                    onOpenFullMessage: openFullMessage(source:)
+                    onOpenFullMessage: openFullMessage(source:),
+                    onSendRecoveryTap: recoveryPrompt == nil ? nil : { isShowingSendRecovery = true }
                 )
+                .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
 
                 metadataLine(statusLine: statusLine)
             }
             .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
+
+            if let recoveryPrompt {
+                // Trailing, as in iMessage; the room comes out of the leading spacer of the
+                // outgoing row, whose bubble column is capped at `maxBubbleWidth`.
+                sendRecoveryBadge(prompt: recoveryPrompt, statusLine: statusLine)
+                    .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
+                    .transition(.opacity)
+            }
 
             if !message.isFromMe {
                 Spacer()
             }
         }
         // Crossfades every status change (Sending… → Sent, → Not sent, → Delivery unknown, the
-        // receipt moving to a newer row). None of them changes the row's height: the caption
-        // shares the timestamp's line.
+        // receipt moving to a newer row) and the badge's arrival. None of them changes the row's
+        // height: the caption shares the timestamp's line.
         .animation(.easeInOut(duration: 0.2), value: statusLine)
         .background {
             InlineAttachmentDownloadTrigger(
@@ -192,6 +225,21 @@ struct MessageBubble: View {
         }
         .task(id: isSendPending) {
             await revealSendingAfterGracePeriod(isSendPending: isSendPending)
+        }
+        .confirmationDialog(
+            recoveryPrompt?.title ?? "",
+            isPresented: $isShowingSendRecovery,
+            titleVisibility: .visible,
+            presenting: recoveryPrompt
+        ) { prompt in
+            ForEach(prompt.actions, id: \.self) { action in
+                Button(action.title) {
+                    onSendRecoveryAction(action)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { prompt in
+            Text(prompt.message)
         }
     }
 
@@ -265,6 +313,22 @@ struct MessageBubble: View {
                 }
             }
         }
+    }
+
+    private func sendRecoveryBadge(
+        prompt: FailedSendRecoveryPolicy.Prompt,
+        statusLine: MessageSendStatusLinePolicy.Line?
+    ) -> some View {
+        Button {
+            isShowingSendRecovery = true
+        } label: {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.title3)
+                .foregroundColor(statusLine.map(Self.statusColor) ?? .red)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(prompt.title)
+        .accessibilityHint(FailedSendRecoveryPolicy.accessibilityHint)
     }
 
     /// Red for a definite failure. Orange for an ambiguous send: Gmail may already have it, and a

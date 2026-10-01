@@ -20,4 +20,47 @@ final class MessageOriginalEmailOpenPolicyTests: XCTestCase {
             MessageOriginalEmailOpenPolicy.textBubbleTapOpensOriginal(hasOriginalEmailContent: false)
         )
     }
+
+    /// An optimistic row always has original content (its typed `bodyText`), so a failed reply's
+    /// tap used to open the reader on the user's own unsent text.
+    ///
+    /// Revert-check: dropping the `offersSendRecovery` branch in
+    /// `MessageOriginalEmailOpenPolicy.textBubbleTap` (so original content wins) fails this test.
+    ///
+    /// HONEST SCOPE: pins the decision only. That `MessageBubble` passes `onSendRecoveryTap`
+    /// exactly when `FailedSendRecoveryPolicy.prompt` is non-nil, and that the tap presents the
+    /// dialog, is view wiring with no UI test target.
+    func testTextBubbleTap_failedSendWithOriginalContent_presentsSendRecovery() {
+        XCTAssertEqual(
+            MessageOriginalEmailOpenPolicy.textBubbleTap(
+                hasOriginalEmailContent: true,
+                offersSendRecovery: true
+            ),
+            .sendRecovery
+        )
+        XCTAssertEqual(
+            MessageOriginalEmailOpenPolicy.textBubbleTap(
+                hasOriginalEmailContent: false,
+                offersSendRecovery: true
+            ),
+            .sendRecovery
+        )
+    }
+
+    func testTextBubbleTap_withoutSendRecovery_keepsOriginalEmailRule() {
+        XCTAssertEqual(
+            MessageOriginalEmailOpenPolicy.textBubbleTap(
+                hasOriginalEmailContent: true,
+                offersSendRecovery: false
+            ),
+            .originalEmail
+        )
+        XCTAssertEqual(
+            MessageOriginalEmailOpenPolicy.textBubbleTap(
+                hasOriginalEmailContent: false,
+                offersSendRecovery: false
+            ),
+            .none
+        )
+    }
 }
