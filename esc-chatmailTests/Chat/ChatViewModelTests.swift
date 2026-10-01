@@ -1676,7 +1676,8 @@ final class ChatViewModelTests: XCTestCase {
         // the newer subject the frozen preflight refused; no further
         // collection change would deliver it.
         // Revert-check: removing the `reconcileAutomaticReplyTarget` call
-        // from `ChatViewModel.sendReply` leaves `capturedTarget`.
+        // from `ChatViewModel.sendReply`'s non-manual branch leaves
+        // `capturedTarget`.
         XCTAssertEqual(viewModel.replyingTo, laterTarget)
     }
 
@@ -1926,50 +1927,109 @@ final class ChatViewModelTests: XCTestCase {
     /// returns to the automatic target instead of pinning every later reply
     /// in the session to the selected message.
     ///
-    /// Revert-check: removing `manuallySelectedReplyTargetID = nil` from
-    /// `ChatViewModel.sendReply` keeps the selected message after the send
-    /// and through the later new subject. Removing only the
-    /// `reconcileAutomaticReplyTarget` call after it keeps the selected
-    /// message after the send.
+    /// Revert-check: removing the `replaceSentManualReplyTarget()` call from
+    /// `ChatViewModel.sendReply` (no re-evaluation after a manual send) keeps
+    /// the selected message after the send.
     func testSendReply_manualTargetSendSucceeds_returnsToAutomaticTarget() async throws {
-        let coordinator = MockChatOutboundMessageCoordinator()
-        let tokenManager = MockTokenManager()
-        let deps = Dependencies(
-            authSession: makeTestAuthSession(userEmail: "me@example.com"),
-            tokenManager: tokenManager,
-            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
-            outboundMessageCoordinator: coordinator
-        )
-        let context = deps.viewContext
-        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
-        let older = MessageBuilder().withSubject("Lunch?")
-            .withSender(email: "alice@example.com").hoursAgo(2)
-            .inConversation(conversation).build(in: context)
-        let newer = MessageBuilder().withSubject("Dinner?")
-            .withSender(email: "alice@example.com").hoursAgo(1)
-            .inConversation(conversation).build(in: context)
-        // Persisted rows, as in the app: `sendReply` stabilizes a temporary
-        // anchor ID, which would no longer match the selection's ID.
-        try context.obtainPermanentIDs(for: [conversation, older, newer])
-        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
-        viewModel.initializeReplyingTo(lastMessage: newer)
-        viewModel.setReplyingTo(older)
+        let fixture = try makeManualReplyFixture(olderSubject: "Lunch?", newerSubject: "Dinner?")
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.older)
         viewModel.replyText = "Noon works"
 
         let result = await viewModel.sendReply()
 
         XCTAssertNotNil(result)
-        guard case .reply(let request)? = coordinator.lastRequest else {
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
             return XCTFail("Expected reply request")
         }
-        XCTAssertEqual(request.context.replyingToMessageObjectID, older.objectID)
-        XCTAssertEqual(viewModel.replyingTo, newer)
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.older.objectID)
+        XCTAssertEqual(viewModel.replyingTo, fixture.newer)
 
         let latest = MessageBuilder().withSubject("Brunch?")
             .withSender(email: "alice@example.com")
-            .inConversation(conversation).build(in: context)
+            .inConversation(fixture.conversation).build(in: fixture.context)
         viewModel.updateReplyingToIfNewSubject(lastMessage: latest)
         XCTAssertEqual(viewModel.replyingTo, latest)
+    }
+
+    /// In a Gmail thread the older message the user picked and the newest
+    /// one share "Re: X". Re-evaluating through the subject comparison
+    /// refused to move, so the selection silently became the automatic
+    /// target for the rest of the session.
+    ///
+    /// Revert-check: sending a manual selection through
+    /// `reconcileAutomaticReplyTarget` (replacing the
+    /// `replaceSentManualReplyTarget()` call in `ChatViewModel.sendReply`)
+    /// leaves the target on the older message.
+    func testSendReply_manualTargetSharesNewestSubject_returnsToNewestTarget() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Re: Plans", newerSubject: "Re: Plans")
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.older)
+        viewModel.replyText = "Count me in"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.older.objectID)
+        XCTAssertEqual(viewModel.replyingTo, fixture.newer)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.newer)
+    }
+
+    /// Long-pressing the newest message picks the same message the automatic
+    /// rule would. Once sent, that selection must not keep refusing later
+    /// arrivals as a still-manual target.
+    ///
+    /// Revert-check: removing `manuallySelectedReplyTargetID = nil` from
+    /// `ChatViewModel.sendReply` keeps the target on `newer` through the
+    /// later new subject.
+    func testSendReply_manualSelectionOfNewestMessage_laterArrivalsStillAdvance() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Lunch?", newerSubject: "Dinner?")
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.newer)
+        viewModel.replyText = "Seven works"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(viewModel.replyingTo, fixture.newer)
+        let latest = MessageBuilder().withSubject("Brunch?")
+            .withSender(email: "alice@example.com")
+            .inConversation(fixture.conversation).build(in: fixture.context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: latest)
+        XCTAssertEqual(viewModel.replyingTo, latest)
+    }
+
+    /// Dismissing the quote keeps the selection as the hidden destination.
+    /// After the one-shot send it must not keep supplying the thread (and, in
+    /// a list chat, the audience) of every later unquoted reply.
+    ///
+    /// Revert-check: sending a manual selection through
+    /// `reconcileAutomaticReplyTarget` (replacing the
+    /// `replaceSentManualReplyTarget()` call in `ChatViewModel.sendReply`)
+    /// leaves `replyAnchor` on the older message. Removing
+    /// `if quoteWasDismissed { replyingTo = nil }` from
+    /// `ChatViewModel.replaceSentManualReplyTarget` brings the dismissed
+    /// quote back.
+    func testSendReply_manualTargetWithDismissedQuote_movesHiddenDestinationAndKeepsQuoteDismissed() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Lunch?", newerSubject: "Dinner?")
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.older)
+        viewModel.replyingTo = nil
+        viewModel.replyText = "Noon works"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.older.objectID)
+        XCTAssertFalse(request.context.includesQuotedMessage)
+        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.newer)
     }
 
     /// A failed send keeps the draft, and the user's selection still owns its
@@ -1980,8 +2040,38 @@ final class ChatViewModelTests: XCTestCase {
     /// `manuallySelectedReplyTargetID = nil` in `ChatViewModel.sendReply`
     /// moves ahead of the send's `do` or into its `catch`.
     func testSendReply_manualTargetSendFails_keepsSelectedTarget() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Lunch?", newerSubject: "Dinner?")
+        fixture.coordinator.sendError = MockChatSendError.preflightFailed
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.older)
+        viewModel.replyText = "Noon works"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNil(result)
+        XCTAssertEqual(viewModel.replyText, "Noon works")
+        XCTAssertEqual(viewModel.replyingTo, fixture.older)
+        // Even with the composer emptied, the selection is not automatic.
+        viewModel.replyText = ""
+        viewModel.updateReplyingToIfNewSubject(lastMessage: fixture.newer)
+        XCTAssertEqual(viewModel.replyingTo, fixture.older)
+        viewModel.discardReplyDraft()
+    }
+
+    /// Two inbound messages in a one-to-one chat opened on `newer`, the
+    /// automatic target. Tests make their own context-menu selection.
+    private func makeManualReplyFixture(
+        olderSubject: String,
+        newerSubject: String
+    ) throws -> (
+        coordinator: MockChatOutboundMessageCoordinator,
+        context: NSManagedObjectContext,
+        conversation: Conversation,
+        older: Message,
+        newer: Message,
+        viewModel: ChatViewModel
+    ) {
         let coordinator = MockChatOutboundMessageCoordinator()
-        coordinator.sendError = MockChatSendError.preflightFailed
         let tokenManager = MockTokenManager()
         let deps = Dependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com"),
@@ -1991,10 +2081,10 @@ final class ChatViewModelTests: XCTestCase {
         )
         let context = deps.viewContext
         let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
-        let older = MessageBuilder().withSubject("Lunch?")
+        let older = MessageBuilder().withSubject(olderSubject)
             .withSender(email: "alice@example.com").hoursAgo(2)
             .inConversation(conversation).build(in: context)
-        let newer = MessageBuilder().withSubject("Dinner?")
+        let newer = MessageBuilder().withSubject(newerSubject)
             .withSender(email: "alice@example.com").hoursAgo(1)
             .inConversation(conversation).build(in: context)
         // Persisted rows, as in the app: `sendReply` stabilizes a temporary
@@ -2002,19 +2092,8 @@ final class ChatViewModelTests: XCTestCase {
         try context.obtainPermanentIDs(for: [conversation, older, newer])
         let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
         viewModel.initializeReplyingTo(lastMessage: newer)
-        viewModel.setReplyingTo(older)
-        viewModel.replyText = "Noon works"
-
-        let result = await viewModel.sendReply()
-
-        XCTAssertNil(result)
-        XCTAssertEqual(viewModel.replyText, "Noon works")
-        XCTAssertEqual(viewModel.replyingTo, older)
-        // Even with the composer emptied, the selection is not automatic.
-        viewModel.replyText = ""
-        viewModel.updateReplyingToIfNewSubject(lastMessage: newer)
-        XCTAssertEqual(viewModel.replyingTo, older)
-        viewModel.discardReplyDraft()
+        XCTAssertEqual(viewModel.replyingTo, newer)
+        return (coordinator, context, conversation, older, newer, viewModel)
     }
 
     func testUnreadableDraftCannotBeOverwrittenByAutosaveOrSend() async throws {

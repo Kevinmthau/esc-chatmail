@@ -621,9 +621,38 @@ final class ChatViewModel: ObservableObject {
         // can change what was sent. Re-evaluate once here: a newer message
         // that arrived while the send froze the target fires no further
         // collection change. A failed send keeps its selection.
+        let sentManualSelection = manuallySelectedReplyTargetID != nil
         manuallySelectedReplyTargetID = nil
-        reconcileAutomaticReplyTarget(lastMessage: newestValidReplyTarget())
+        if sentManualSelection {
+            replaceSentManualReplyTarget()
+        } else {
+            reconcileAutomaticReplyTarget(lastMessage: newestValidReplyTarget())
+        }
         return result
+    }
+
+    /// Hands the composer back to the automatic target after a context-menu
+    /// Reply was sent.
+    ///
+    /// The subject comparison in `reconcileAutomaticReplyTarget` cannot do
+    /// this: in a Gmail thread the older message the user picked and the
+    /// newest one both read "Re: X", so it refused to move and the selection
+    /// stayed as the automatic target for the rest of the session.
+    private func replaceSentManualReplyTarget() {
+        // A draft typed while the send was in flight owns its destination,
+        // as in `reconcileAutomaticReplyTarget`.
+        guard !composerState.hasDraftContent,
+              let automaticTarget = newestValidReplyTarget() else {
+            reconcileAutomaticReplyTarget(lastMessage: newestValidReplyTarget())
+            return
+        }
+        // Dismissing the quote kept the selection as the hidden destination
+        // (`replyAnchor`), so later unquoted replies silently took its thread
+        // and, in a list chat, its audience. Move the destination as well,
+        // and keep the quote dismissed.
+        let quoteWasDismissed = replyingTo == nil
+        composerState.replaceReplyTarget(automaticTarget)
+        if quoteWasDismissed { replyingTo = nil }
     }
 
     // MARK: - Durable reply drafts and failed-send recovery
