@@ -5,6 +5,10 @@ import SwiftUI
 struct SendButton: View {
     let isEnabled: Bool
     let isSending: Bool
+    /// ComposeView keeps the spinner: its composer owns the content until
+    /// transmission admission. The chat reply bar passes false because its
+    /// optimistic bubble already shows progress.
+    var showsProgress = true
     let action: () -> Void
 
     var body: some View {
@@ -14,7 +18,7 @@ struct SendButton: View {
                     .fill(isEnabled ? Color.accentColor : Color(.systemGray3))
                     .frame(width: 32, height: 32)
 
-                if isSending {
+                if isSending && showsProgress {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
                         .scaleEffect(0.6)
