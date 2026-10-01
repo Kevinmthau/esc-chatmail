@@ -11,6 +11,9 @@ struct MessageContentView: View {
     let fallbackPreviewText: String?
     let sharedDocumentLinks: [SharedDocumentLink]
     let hasLoadedContent: Bool
+    /// Whether MessageBubble shows any attachments above this content: its filtered set, not
+    /// `message.attachments` (signature and non-displayable inline images are filtered out).
+    let hasDisplayableAttachments: Bool
     let forwardedDisplayContent: ForwardedMessageDisplayContent?
     let fullEmailOpener: any FullEmailOpening
     let originalEmailSourceWarmer: any OriginalEmailSourceWarming
@@ -59,14 +62,16 @@ struct MessageContentView: View {
                 textAndSharedDocumentContent(text: text)
             } else if !sharedDocumentLinks.isEmpty {
                 sharedDocumentCards
-            } else if message.attachments.isEmpty {
-                // No content and no attachments - show a placeholder that opens the original on tap.
+            } else if !hasDisplayableAttachments {
+                // Nothing else is visible - show a placeholder that opens the original on tap.
                 // An HTML body with no extractable text lands here too, deliberately: no
-                // "View original" bubble.
+                // "View original" bubble. Gated on the displayed attachments, not
+                // `message.attachments`: a message whose only attachments are filtered out
+                // (e.g. signature images) would otherwise show nothing to see or tap.
                 noContentPlaceholder
             }
-            // If message has attachments but no text, show nothing (attachments are the content;
-            // any original stays reachable from the long-press menu)
+            // If attachments are displayed but there is no text, show nothing (attachments are the
+            // content; any original stays reachable from the long-press menu)
         }
     }
 
@@ -115,8 +120,7 @@ struct MessageContentView: View {
         let compactCharLimit = style.textLineLimit == nil ? nil : 800
         let (displayText, _) = truncatedText(text, lineLimit: style.textLineLimit, charLimit: compactCharLimit)
 
-        if MessageOriginalEmailOpenPolicy.bodyTapOpensOriginal(
-            showHTMLPreview: showHTMLPreview,
+        if MessageOriginalEmailOpenPolicy.textBubbleTapOpensOriginal(
             hasOriginalEmailContent: message.hasOriginalEmailContent
         ) {
             // The bubble is the tap target; there is deliberately no separate "View original"
@@ -263,12 +267,12 @@ struct MessageContentView: View {
 }
 
 enum MessageOriginalEmailOpenPolicy {
-    /// Whether tapping the message body opens the original email. Tapping the message is the
-    /// only inline way in — there is deliberately no "View original" control beside the bubble
-    /// (the long-press menu keeps "View original email", behind the same content gate). Rich
-    /// previews always open; a text bubble opens whenever there is original content behind it.
-    static func bodyTapOpensOriginal(showHTMLPreview: Bool, hasOriginalEmailContent: Bool) -> Bool {
-        showHTMLPreview || hasOriginalEmailContent
+    /// Whether tapping a text bubble opens the original email. The bubble itself is the inline
+    /// way in — there is deliberately no "View original" control beside it — so it opens whenever
+    /// there is original content behind it, the same gate as the long-press menu's
+    /// "View original email". (Rich preview cards and forwarded bubbles always open on tap.)
+    static func textBubbleTapOpensOriginal(hasOriginalEmailContent: Bool) -> Bool {
+        hasOriginalEmailContent
     }
 
     static func hasOriginalEmailContent(

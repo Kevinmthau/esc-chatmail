@@ -117,6 +117,11 @@ struct MessageBubble: View {
         let currentLoadSignature = loadSignature
         let htmlAnalysis = viewModel.htmlAnalysis
         let showsCalendarInvitePreviewCard = showHTMLPreview && htmlAnalysis.supportsCalendarInvitePreviewCard
+        let displayableAttachments = message.displayableAttachments(
+            using: htmlAnalysis,
+            hidingInlineReferencedInHTML: showHTMLPreview,
+            hidingCalendarInviteAttachments: showsCalendarInvitePreviewCard
+        )
 
         HStack(alignment: .bottom, spacing: 8) {
             if !message.isFromMe {
@@ -130,7 +135,7 @@ struct MessageBubble: View {
 
                 subjectView(showsCalendarInvitePreviewCard: showsCalendarInvitePreviewCard)
 
-                attachmentsView(hidingCalendarInviteAttachments: showsCalendarInvitePreviewCard)
+                attachmentsView(displayableAttachments)
 
                 MessageContentView(
                     message: message,
@@ -141,6 +146,7 @@ struct MessageBubble: View {
                     fallbackPreviewText: message.fallbackPreviewText,
                     sharedDocumentLinks: viewModel.sharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
+                    hasDisplayableAttachments: !displayableAttachments.isEmpty,
                     forwardedDisplayContent: resolvedForwardedDisplayContent,
                     fullEmailOpener: fullEmailOpener,
                     originalEmailSourceWarmer: originalEmailSourceWarmer,
@@ -239,12 +245,7 @@ struct MessageBubble: View {
     }
 
     @ViewBuilder
-    private func attachmentsView(hidingCalendarInviteAttachments: Bool) -> some View {
-        let displayable = message.displayableAttachments(
-            using: viewModel.htmlAnalysis,
-            hidingInlineReferencedInHTML: showHTMLPreview,
-            hidingCalendarInviteAttachments: hidingCalendarInviteAttachments
-        )
+    private func attachmentsView(_ displayable: [ChatMessageAttachmentModel]) -> some View {
         if !displayable.isEmpty {
             if style.showAttachmentGrid {
                 AttachmentGridView(
