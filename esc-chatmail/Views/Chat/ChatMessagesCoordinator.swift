@@ -216,10 +216,16 @@ final class ChatMessagesCoordinator: ObservableObject {
         NSManagedObjectID: OptimisticReplyPublicationAttempt
     ] = [:]
     /// Local reply sends between `beginLocalReplySend` and
-    /// `endLocalReplySend`. While any is in flight, the count-change scroll
-    /// stands down so the optimistic-publication anchor is the send's one
-    /// scroll (`handleMessageCountChange`).
+    /// `endLocalReplySend`. That spans the whole of `sendReply`, local MIME
+    /// and attachment preflight included, so being in flight alone must not
+    /// silence count-change scrolls (`isCountChangeOwnedByLocalReplySend`).
     private var localReplySendsInFlight = Set<UUID>()
+    /// The subset of `localReplySendsInFlight` whose optimistic-publication
+    /// anchor has not finished yet: the short stretch from the tap to the
+    /// send's one scroll, during which that anchor owns every count-change
+    /// scroll (it targets the bottom anchor, so it also covers anything else
+    /// that lands meanwhile).
+    private var localReplySendsAwaitingPublication = Set<UUID>()
     /// When the latest post-send animated scroll finishes. The admission step
     /// waits it out rather than snapping over a slide still in flight.
     private var postSendAnimatedScrollSettlesAt: TimeInterval = 0
@@ -384,6 +390,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         optimisticReplyPublicationAttempts.values.forEach { $0.task.cancel() }
         optimisticReplyPublicationAttempts.removeAll()
         localReplySendsInFlight.removeAll()
+        localReplySendsAwaitingPublication.removeAll()
         postSendAnimatedScrollSettlesAt = 0
         taskManager.cancelAll()
         cancelPrefetch()
@@ -1116,14 +1123,15 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
         } else if isReadyToShow && newCount > oldCount && isShowingLatestWindow {
             updateReplyingToIfNewSubject(lastMessage)
-            if !localReplySendsInFlight.isEmpty {
+            if isCountChangeOwnedByLocalReplySend(lastMessage: lastMessage) {
                 // The optimistic-publication anchor owns this send's scroll
                 // (`handleReplyOptimisticMessagePersisted`). The count bump
-                // from the optimistic save reaches here first; scrolling too
-                // started a second, competing animation under the same task
-                // key — whichever won, the motion differed send to send. A
-                // message arriving from sync during the send is covered by
-                // the bottom follow the publication arms.
+                // from the optimistic save usually reaches here first;
+                // scrolling too started a second, competing animation under
+                // the same task key — whichever won, the motion differed send
+                // to send. A message from sync arriving later in the send
+                // (during attachment preflight) is not the send's own bump and
+                // scrolls normally below.
                 Log.diagnostic(
                     .chatView,
                     level: .info,
@@ -1142,6 +1150,29 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
 
         loadResolvedDisplayName()
+    }
+
+    /// Whether a count increase is the user's own just-sent reply, whose
+    /// scroll belongs to the optimistic-publication anchor.
+    ///
+    /// Only while a local send is in flight, and then in two cases:
+    /// - its publication anchor has not finished: the bump is almost always
+    ///   the send's own (a reload path can raise the count before the window
+    ///   publishes the row, so `lastMessage` may still be the previous one),
+    ///   and anything else that lands is covered by that anchor's scroll;
+    /// - the newest message is a local optimistic send: the bump reached here
+    ///   after the anchor had already scrolled.
+    /// Anything else — another party's message arriving during a slow
+    /// attachment preflight — keeps the animated count-change scroll: the
+    /// post-send follow may have expired by then, and admission's correction
+    /// is a single unanimated snap.
+    private func isCountChangeOwnedByLocalReplySend(lastMessage: Message?) -> Bool {
+        guard !localReplySendsInFlight.isEmpty else { return false }
+        if !localReplySendsAwaitingPublication.isEmpty {
+            return true
+        }
+        guard let lastMessage else { return false }
+        return OutboundSendDeliveryState.localOptimisticMessageID(for: lastMessage) != nil
     }
 
     private func updateUserScrollTakeoverRelease(
@@ -1278,12 +1309,14 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     /// `capturePostSendAnchorIntent` for a reply this chat is about to send,
     /// which also registers the send as in flight: until `endLocalReplySend`,
-    /// the count-change scroll defers to the post-send anchor. The view calls
+    /// the send's own count bump defers to the post-send anchor
+    /// (`isCountChangeOwnedByLocalReplySend`). The view calls
     /// it before `sendReply` (whose optimistic save bumps the count) and must
     /// pair it with `endLocalReplySend` on every exit; disappearing clears it.
     func beginLocalReplySend() -> PostSendAnchorIntent {
         let localReplySendID = UUID()
         localReplySendsInFlight.insert(localReplySendID)
+        localReplySendsAwaitingPublication.insert(localReplySendID)
         return PostSendAnchorIntent(
             userScrollInteractionRevision: userScrollInteractionRevision,
             localReplySendID: localReplySendID
@@ -1294,6 +1327,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     func endLocalReplySend(_ anchorIntent: PostSendAnchorIntent) {
         guard let localReplySendID = anchorIntent.localReplySendID else { return }
         localReplySendsInFlight.remove(localReplySendID)
+        localReplySendsAwaitingPublication.remove(localReplySendID)
     }
 
     func handleReplyOptimisticMessagePersisted(
@@ -1322,12 +1356,16 @@ final class ChatMessagesCoordinator: ObservableObject {
         )
         optimisticReplyPublicationAttempts[targetMessageID]?.task.cancel()
         // The tail-append fast path (`VirtualScrollState+TailAppend`) has
-        // usually published the row in the optimistic save's own turn, and
-        // this callback runs only after the send's preparation task has been
-        // awaited, so the update that lays the row out is not still pending a
-        // fixed delay. If a scroll ever beats that layout, it lands at the old
-        // bottom and the follow armed below absorbs the row's growth.
+        // usually published the row in the optimistic save's own turn. That is
+        // not proof SwiftUI has laid it out: the hops between here and the
+        // scroll are main-actor jobs, which can drain before the run-loop pass
+        // that commits the update, and a scroll resolved against the old
+        // layout slides to the old bottom, then the follow snaps it the rest
+        // of the way. Such a row waits one frame
+        // (`UIConfig.postSendLayoutCommitDelay`), not the 50ms a row this
+        // task still has to load waits.
         let wasAlreadyPublished = isMessagePublished(targetMessageID)
+        let localReplySendID = anchorIntent.localReplySendID
         let publicationAttemptID = UUID()
         let publicationTask = Task { [ensureVisibleMessage] in
             guard !Task.isCancelled else { return false }
@@ -1345,6 +1383,15 @@ final class ChatMessagesCoordinator: ObservableObject {
         ) { [weak self, publicationTask] in
             let didPublishTarget = await publicationTask.value
             guard let self else { return }
+            // On every exit, whether or not it scrolls: from here on the send's
+            // own count bump is recognised by its optimistic row
+            // (`isCountChangeOwnedByLocalReplySend`), and nothing else may be
+            // silenced for the rest of a long preflight.
+            defer {
+                if let localReplySendID {
+                    self.localReplySendsAwaitingPublication.remove(localReplySendID)
+                }
+            }
             guard !Task.isCancelled, self.isVisible else { return }
             guard didPublishTarget else {
                 Log.diagnostic(
@@ -1375,8 +1422,8 @@ final class ChatMessagesCoordinator: ObservableObject {
                 return
             }
 
-            // The send's one scroll: animated, with no fixed delay when the row
-            // was already on screen (only a row this task had to load waits
+            // The send's one scroll: animated, one frame after a row that was
+            // already in the window (only a row this task had to load waits
             // `contentChangeScrollDelay` for its layout). There is no
             // stabilization step any more: the follow armed below corrects
             // growth the slide could not see (a bubble resolving its content
@@ -1384,7 +1431,9 @@ final class ChatMessagesCoordinator: ObservableObject {
             // a transcript that was already at the bottom.
             self.scrollToBottom(
                 messageCount: max(1, max(messageCount, totalMessageCount)),
-                delay: wasAlreadyPublished ? 0 : UIConfig.contentChangeScrollDelay,
+                delay: wasAlreadyPublished
+                    ? UIConfig.postSendLayoutCommitDelay
+                    : UIConfig.contentChangeScrollDelay,
                 reloadLatestWindow: false
             ) { [weak self] step in
                 if step.animated, let self {
@@ -1540,6 +1589,33 @@ final class ChatMessagesCoordinator: ObservableObject {
                 + Self.postRevealBottomFollowGracePeriod
         )
     }
+
+#if DEBUG
+    /// Lets tests join the scheduled bottom-anchor scroll (a count change's or
+    /// a send's) before asserting that no other scroll landed, instead of
+    /// waiting a scheduler-dependent number of yields.
+    func waitForBottomAnchorScrollCompletion() async {
+        await taskManager.waitForCompletion(of: TaskKey.bottomAnchor)
+    }
+
+    /// Lets tests join a send's optimistic-publication anchor, including the
+    /// exits that skip its scroll.
+    func waitForOptimisticReplyPublicationCompletion(
+        targetMessageID: NSManagedObjectID
+    ) async {
+        await taskManager.waitForCompletion(
+            of: TaskKey.optimisticReplyPublication(targetMessageID)
+        )
+    }
+
+    /// Lets tests join a send's admission step before asserting it did not
+    /// scroll.
+    func waitForReplyAdmissionCompletion(targetMessageID: NSManagedObjectID) async {
+        await taskManager.waitForCompletion(
+            of: TaskKey.replyAdmissionStabilization(targetMessageID)
+        )
+    }
+#endif
 
     func handleContactStoreDidChange(senderGroupingMessages: [ChatMessageRowModel]) {
         taskManager.run("contactRefresh") { [invalidateContactsCache, clearPersonCache] in
