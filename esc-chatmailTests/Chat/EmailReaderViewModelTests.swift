@@ -69,7 +69,7 @@ final class EmailReaderViewModelTests: XCTestCase {
         let viewModel = makeViewModel(
             message: message,
             conversation: conversation,
-            source: .bubbleAccessory,
+            source: .textBubble,
             opener: opener
         )
 
