@@ -27,7 +27,7 @@ final class MessageOriginalEmailOpenPolicyTests: XCTestCase {
     /// Revert-check: dropping the `offersSendRecovery` branch in
     /// `MessageOriginalEmailOpenPolicy.textBubbleTap` (so original content wins) fails this test.
     ///
-    /// HONEST SCOPE: pins the decision only. That `MessageBubble` passes `onSendRecoveryTap`
+    /// HONEST SCOPE: pins the decision only. That `MessageBubble` passes `sendRecoveryPrompt`
     /// exactly when `FailedSendRecoveryPolicy.prompt` is non-nil, and that the tap presents the
     /// dialog, is view wiring with no UI test target.
     func testTextBubbleTap_failedSendWithOriginalContent_presentsSendRecovery() {

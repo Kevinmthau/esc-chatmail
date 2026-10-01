@@ -29,9 +29,26 @@ final class FailedSendRecoveryPolicyTests: XCTestCase {
         XCTAssertEqual(prompt.message, "This reply won’t be retried automatically.")
     }
 
-    /// A pending send is still being transmitted, and a `.none` row was accepted (or is a
-    /// `.sendFailed` attachment upload with no recovery path): no dialog, so the bubble keeps its
-    /// normal tap.
+    /// VoiceOver must not call an ambiguous send "unsent": Gmail may already have it, and that
+    /// framing invites a manual duplicate of a non-idempotent send.
+    ///
+    /// Revert-check: giving the `.deliveryUnknown` prompt the "unsent reply" hint in
+    /// `FailedSendRecoveryPolicy.prompt` (the single shared hint this replaced) fails this test.
+    func testPrompt_accessibilityHint_onlyNotSentCallsTheReplyUnsent() throws {
+        let notSent = try XCTUnwrap(FailedSendRecoveryPolicy.prompt(for: .notSent))
+        let deliveryUnknown = try XCTUnwrap(FailedSendRecoveryPolicy.prompt(for: .deliveryUnknown))
+
+        XCTAssertEqual(notSent.accessibilityHint, "Shows options for this unsent reply")
+        XCTAssertEqual(
+            deliveryUnknown.accessibilityHint,
+            "Shows options to check whether this reply was delivered"
+        )
+        XCTAssertFalse(deliveryUnknown.accessibilityHint.localizedCaseInsensitiveContains("unsent"))
+    }
+
+    /// A pending send is still being transmitted, and a `.none` row has nothing to recover (an
+    /// accepted reply, or a `.sendFailed` attachment upload with no recovery path): no dialog, so
+    /// the bubble keeps its normal tap.
     func testPrompt_sendingOrNone_offersNothing() {
         XCTAssertNil(FailedSendRecoveryPolicy.prompt(for: .sending))
         XCTAssertNil(FailedSendRecoveryPolicy.prompt(for: .none))

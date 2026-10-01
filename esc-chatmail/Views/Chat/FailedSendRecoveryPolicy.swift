@@ -33,9 +33,11 @@ enum FailedSendRecoveryPolicy {
         let title: String
         let message: String
         let actions: [Action]
+        /// VoiceOver hint for the bubble and badge that open this dialog. Per prompt, because
+        /// calling an ambiguous send "unsent" invites the manual duplicate the orange badge and
+        /// the "won’t be retried" copy are there to avoid.
+        let accessibilityHint: String
     }
-
-    static let accessibilityHint = "Shows options for this unsent reply"
 
     /// The dialog for a row in `deliveryState`; nil when the row has nothing to recover.
     static func prompt(for deliveryState: OutboundSendDeliveryState) -> Prompt? {
@@ -44,13 +46,15 @@ enum FailedSendRecoveryPolicy {
             return Prompt(
                 title: "Not Sent",
                 message: "This reply was not sent.",
-                actions: [.editAndResend]
+                actions: [.editAndResend],
+                accessibilityHint: "Shows options for this unsent reply"
             )
         case .deliveryUnknown:
             return Prompt(
                 title: "Delivery Unknown",
                 message: "This reply won’t be retried automatically.",
-                actions: [.checkDelivery]
+                actions: [.checkDelivery],
+                accessibilityHint: "Shows options to check whether this reply was delivered"
             )
         case .none, .sending:
             return nil

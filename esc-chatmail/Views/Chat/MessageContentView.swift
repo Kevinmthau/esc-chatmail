@@ -20,8 +20,10 @@ struct MessageContentView: View {
     let htmlSourceSignaturer: any HTMLSourceSignaturing
     let onOpenFullMessage: (EmailReaderOpenSource) -> Void
     /// Non-nil for an outgoing row `FailedSendRecoveryPolicy` offers recovery for ("Not sent",
-    /// "Delivery unknown"): tapping the bubble presents that dialog instead of the email reader.
-    let onSendRecoveryTap: (() -> Void)?
+    /// "Delivery unknown"): tapping the bubble then calls `onSendRecoveryTap`, which presents that
+    /// dialog instead of the email reader, and the prompt supplies the bubble's VoiceOver hint.
+    let sendRecoveryPrompt: FailedSendRecoveryPolicy.Prompt?
+    let onSendRecoveryTap: () -> Void
 
     var body: some View {
         if showHTMLPreview {
@@ -133,18 +135,19 @@ struct MessageContentView: View {
 
         switch MessageOriginalEmailOpenPolicy.textBubbleTap(
             hasOriginalEmailContent: message.hasOriginalEmailContent,
-            offersSendRecovery: onSendRecoveryTap != nil
+            offersSendRecovery: sendRecoveryPrompt != nil
         ) {
         case .sendRecovery:
             // A failed reply's natural tap used to open the reader on the user's own unsent text.
             // The original stays reachable from the long-press menu's "View original email".
             Button {
-                onSendRecoveryTap?()
+                onSendRecoveryTap()
             } label: {
                 textBubbleBody(displayText)
             }
             .buttonStyle(.plain)
-            .accessibilityHint(FailedSendRecoveryPolicy.accessibilityHint)
+            // `.sendRecovery` implies a prompt; the fallback is unreachable.
+            .accessibilityHint(sendRecoveryPrompt?.accessibilityHint ?? "")
         case .originalEmail:
             // The bubble is the tap target; there is deliberately no separate "View original"
             // control. Not `.textSelection(.enabled)`: the bubble is a button, and long-press
@@ -175,7 +178,7 @@ struct MessageContentView: View {
     @ViewBuilder
     private func forwardedTextContent(for content: ForwardedMessageDisplayContent) -> some View {
         Button {
-            if let onSendRecoveryTap {
+            if sendRecoveryPrompt != nil {
                 onSendRecoveryTap()
             } else {
                 openOriginalEmail(source: .previewCard)
@@ -199,11 +202,7 @@ struct MessageContentView: View {
             .cornerRadius(style.bubbleCornerRadius)
         }
         .buttonStyle(.plain)
-        .accessibilityHint(
-            onSendRecoveryTap == nil
-                ? "Opens the full original email"
-                : FailedSendRecoveryPolicy.accessibilityHint
-        )
+        .accessibilityHint(sendRecoveryPrompt?.accessibilityHint ?? "Opens the full original email")
     }
 
     /// Truncates text at the specified limits and adds ellipsis if truncated

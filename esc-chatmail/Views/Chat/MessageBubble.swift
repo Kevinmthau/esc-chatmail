@@ -195,7 +195,8 @@ struct MessageBubble: View {
                     originalEmailSourceWarmer: originalEmailSourceWarmer,
                     htmlSourceSignaturer: htmlContentHandler,
                     onOpenFullMessage: openFullMessage(source:),
-                    onSendRecoveryTap: recoveryPrompt == nil ? nil : { isShowingSendRecovery = true }
+                    sendRecoveryPrompt: recoveryPrompt,
+                    onSendRecoveryTap: { isShowingSendRecovery = true }
                 )
                 .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
 
@@ -336,7 +337,7 @@ struct MessageBubble: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(prompt.title)
-        .accessibilityHint(FailedSendRecoveryPolicy.accessibilityHint)
+        .accessibilityHint(prompt.accessibilityHint)
     }
 
     /// Red for a definite failure. Orange for an ambiguous send: Gmail may already have it, and a
