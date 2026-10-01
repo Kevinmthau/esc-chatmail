@@ -11,6 +11,7 @@ final class InMemoryMigrationFlagStore: MigrationFlagStore {
     private let lock = NSLock()
     private var flags: [String: Bool] = [:]
     private var strings: [String: String] = [:]
+    private var stringWriteCounts: [String: Int] = [:]
 
     func string(forKey defaultName: String) -> String? {
         lock.lock()
@@ -22,6 +23,16 @@ final class InMemoryMigrationFlagStore: MigrationFlagStore {
         lock.lock()
         defer { lock.unlock() }
         strings[defaultName] = value
+        stringWriteCounts[defaultName, default: 0] += 1
+    }
+
+    /// How many times `setString(_:forKey:)` wrote `defaultName`, including
+    /// writes of an unchanged or nil value. Lets a test prove a no-op pass
+    /// skips the write rather than rewriting the same value.
+    func stringWriteCount(forKey defaultName: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return stringWriteCounts[defaultName] ?? 0
     }
 
     func bool(forKey defaultName: String) -> Bool {

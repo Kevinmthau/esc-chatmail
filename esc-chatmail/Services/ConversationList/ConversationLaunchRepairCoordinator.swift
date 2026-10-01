@@ -207,7 +207,14 @@ final class ConversationLaunchRepairCoordinator {
         )
         // In-run cursor over the deferred list. Deliberately not persisted:
         // each run (launch or sync completion) re-checks every deferred row
-        // once, which is a single fetch for rows whose send is still pending.
+        // once. Still-pending rows do not count against a retry batch's
+        // limit, so while nothing has cleared that check is one short hold.
+        //
+        // The checkpoint, like the completion flag, is not account-scoped and
+        // survives sign-out. A replacement account inherits it harmlessly:
+        // the previous account's deferred IDs match no row and drop on the
+        // first retry, and the new account's rows are ingested with the
+        // current derivation. Account teardown therefore does not clear it.
         var retryCursor: String?
         while !Task.isCancelled {
             // Never wait for sync while holding a lease: account teardown
@@ -242,7 +249,12 @@ final class ConversationLaunchRepairCoordinator {
                     retryCursor = batch.lastMessageID
                     isFinished = isComplete || batch.didDrain
                 }
-                storage.migrationFlags.setString(checkpoint.encoded, forKey: pass.checkpointKey)
+                // A retry sweep over still-pending rows leaves the checkpoint
+                // unchanged; skip rewriting the whole deferred list then, since
+                // it repeats on every sync completion while a send is retained.
+                if checkpoint != batchCheckpoint {
+                    storage.migrationFlags.setString(checkpoint.encoded, forKey: pass.checkpointKey)
+                }
                 if isComplete {
                     storage.migrationFlags.set(true, forKey: pass.migrationKey)
                     storage.migrationFlags.setString(nil, forKey: pass.checkpointKey)

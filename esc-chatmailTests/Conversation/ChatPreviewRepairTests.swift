@@ -235,6 +235,90 @@ final class ChatPreviewRepairTests: XCTestCase {
         XCTAssertEqual(protected.chatPreviewText, "Old preview")
     }
 
+    // Revert-check: `prepareDeferredRetryBatch` counting only derived rows
+    // against `limit`. With every examined row counted, the first batch below
+    // would retry just "001" and "002" and stop, so a long conversation with a
+    // retained send cost one gate hold per `limit` still-pending rows on every
+    // sync completion. `lookupChunkSize: 4` makes the sweep cross ID chunks.
+    func testDeferredRetry_stillPendingRowsDoNotCountAgainstLimit_examinesThroughLimitOfDerivedRows() async throws {
+        let retained = ConversationBuilder().build(in: viewContext)
+        var pendingIDs: [String] = []
+        for index in 1...6 {
+            let id = String(format: "%03d", index)
+            let pending = MessageBuilder().withId(id).inConversation(retained).build(in: viewContext)
+            pending.chatPreviewText = "Old preview"
+            pending.bodyStorageURI = try XCTUnwrap(handler.saveHTML(html, for: id)).absoluteString
+            pendingIDs.append(id)
+        }
+        for id in ["007", "008", "009"] { _ = try message(id) }
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = "retained-failed-send"
+        record.createdAt = Date()
+        record.conversationId = retained.id
+        try viewContext.save()
+
+        let repair = ChatPreviewRepair(htmlContentHandler: handler)
+        let deferred = pendingIDs + ["007", "008", "009"]
+        let first = try await repair.prepareDeferredRetryBatch(
+            in: stack.newBackgroundContext(),
+            deferredMessageIDs: deferred,
+            after: nil,
+            limit: 2,
+            lookupChunkSize: 4
+        )
+        XCTAssertEqual(first.retriedMessageIDs, pendingIDs + ["007", "008"])
+        XCTAssertEqual(first.deferredMessageIDs, pendingIDs)
+        XCTAssertEqual(first.changedMessageIDs, ["007", "008"])
+        XCTAssertEqual(first.lastMessageID, "008")
+        XCTAssertFalse(first.didDrain)
+
+        let second = try await repair.prepareDeferredRetryBatch(
+            in: stack.newBackgroundContext(),
+            deferredMessageIDs: deferred,
+            after: first.lastMessageID,
+            limit: 2,
+            lookupChunkSize: 4
+        )
+        XCTAssertEqual(second.retriedMessageIDs, ["009"])
+        XCTAssertEqual(second.changedMessageIDs, ["009"])
+        XCTAssertTrue(second.didDrain)
+
+        let checkpoint = ChatPreviewRepair.Checkpoint(deferredMessageIDs: deferred, isMainScanComplete: true)
+            .advanced(by: first)
+            .advanced(by: second)
+        XCTAssertEqual(checkpoint.deferredMessageIDs, pendingIDs)
+    }
+
+    // Revert-check: the `checkpoint != batchCheckpoint` guard in
+    // `runChatPreviewPass`. Without it every sync completion rewrites the
+    // whole deferred list while a send stays retained, even though the retry
+    // sweep changed nothing.
+    func testCoordinator_retainedSendRetryChangesNothing_doesNotRewriteCheckpoint() async throws {
+        _ = try message("001")
+        let protected = try message("002")
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = "retained-failed-send"
+        record.createdAt = Date()
+        record.conversationId = protected.conversation?.id
+        try viewContext.save()
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        let key = ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey
+        let afterFirstRun = flags.string(forKey: key)
+        XCTAssertEqual(ChatPreviewRepair.Checkpoint.decode(afterFirstRun).deferredMessageIDs, ["002"])
+        let writesAfterFirstRun = flags.stringWriteCount(forKey: key)
+
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertEqual(flags.stringWriteCount(forKey: key), writesAfterFirstRun)
+        XCTAssertEqual(flags.string(forKey: key), afterFirstRun)
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(protected.chatPreviewText, "Old preview")
+        withExtendedLifetime(repair) {}
+    }
+
     // Revert-check: `Checkpoint.advanced(by:)` marking the main scan complete
     // and keeping deferred rows by ID. The old resume-at-first-deferred cursor
     // rescanned every later row on every run while a retained send existed,

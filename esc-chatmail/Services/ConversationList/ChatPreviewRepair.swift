@@ -183,40 +183,71 @@ struct ChatPreviewRepair {
     /// leave the list. The pending set is read inside this `perform`, which
     /// the caller runs under the cleanup-sensitive gate, so a send that lands
     /// first is seen and one that lands after waits for this batch to save.
+    ///
+    /// `limit` bounds the rows this batch derives, not the rows it examines.
+    /// A retained failed or delivery-unknown send can defer a whole long
+    /// conversation indefinitely, and every sync completion re-runs this
+    /// sweep; counting still-pending rows against `limit` turned that into
+    /// one gate hold and one checkpoint rewrite per `limit` deferred rows on
+    /// every sync, none of which changed anything. Still-pending rows cost
+    /// only an ID-chunked fetch (`lookupChunkSize` IDs per `IN` predicate),
+    /// so a sweep that finds nothing to derive is a single short hold.
     func prepareDeferredRetryBatch(
         in context: NSManagedObjectContext,
         deferredMessageIDs: [String],
         after retryCursor: String?,
-        limit: Int = 100
+        limit: Int = 100,
+        lookupChunkSize: Int = 500
     ) async throws -> Batch {
         let remaining = deferredMessageIDs.sorted().filter { id in retryCursor.map { id > $0 } ?? true }
-        let chunk = Array(remaining.prefix(max(1, limit)))
-        var batch = Batch(
-            phase: .deferredRetry,
-            lastMessageID: chunk.last ?? retryCursor,
-            didDrain: remaining.count <= chunk.count,
-            retriedMessageIDs: chunk
-        )
-        guard !chunk.isEmpty else { return batch }
+        guard !remaining.isEmpty else {
+            return Batch(phase: .deferredRetry, lastMessageID: retryCursor, didDrain: true)
+        }
+        let derivationLimit = max(1, limit)
+        let chunkSize = max(1, lookupChunkSize)
         return try await context.perform {
             try Task.checkCancellation()
             let pendingConversationIDs = try Self.pendingConversationIDs(in: context)
-            let request = Message.fetchRequest()
-            request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-                Self.basePredicate(for: pass),
-                NSPredicate(format: "id IN %@", chunk as NSArray)
-            ])
-            request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
-            request.relationshipKeyPathsForPrefetching = ["conversation"]
-            for message in try context.fetch(request) {
+            var batch = Batch(phase: .deferredRetry, lastMessageID: retryCursor)
+            var derivedCount = 0
+            var chunkStart = remaining.startIndex
+            while chunkStart < remaining.endIndex, derivedCount < derivationLimit {
                 try Task.checkCancellation()
-                if let conversationID = message.conversation?.id,
-                   pendingConversationIDs.contains(conversationID) {
-                    batch.deferredMessageIDs.append(message.id)
-                    continue
+                let chunk = Array(remaining[chunkStart..<min(chunkStart + chunkSize, remaining.endIndex)])
+                let request = Message.fetchRequest()
+                request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    Self.basePredicate(for: pass),
+                    NSPredicate(format: "id IN %@", chunk as NSArray)
+                ])
+                request.relationshipKeyPathsForPrefetching = ["conversation"]
+                // Sorted here rather than by the store, so the stop point
+                // below and the `<=` filter agree on one ordering.
+                let messages = try context.fetch(request).sorted { $0.id < $1.id }
+                // The last ID this chunk examined. Stopping at the derivation
+                // limit examines the chunk only through the row that hit it;
+                // later IDs stay untouched for the next batch.
+                var examinedThrough = chunk[chunk.count - 1]
+                for message in messages {
+                    try Task.checkCancellation()
+                    if let conversationID = message.conversation?.id,
+                       pendingConversationIDs.contains(conversationID) {
+                        batch.deferredMessageIDs.append(message.id)
+                        continue
+                    }
+                    applyDerivedPreview(to: message, recordingChangeIn: &batch)
+                    derivedCount += 1
+                    if derivedCount >= derivationLimit {
+                        examinedThrough = message.id
+                        break
+                    }
                 }
-                applyDerivedPreview(to: message, recordingChangeIn: &batch)
+                // IDs the fetch did not return no longer exist or no longer
+                // match the pass; listing them as retried drops them.
+                batch.retriedMessageIDs.append(contentsOf: chunk.filter { $0 <= examinedThrough })
+                batch.lastMessageID = examinedThrough
+                chunkStart += chunk.count
             }
+            batch.didDrain = batch.lastMessageID == remaining.last
             return batch
         }
     }
