@@ -141,7 +141,12 @@ extension GmailSendService {
             case .noRecipients:
                 return "This message has no recipients. Your draft and attachments are still here."
             case .replyTargetUnavailable:
-                return "The message you selected moved or is no longer available. Reopen the conversation and try again."
+                // Only chat replies raise this, before transmission admission,
+                // so the composer still holds the draft. The old advice,
+                // "Reopen the conversation", could not help: draft restore
+                // brought the same moved target back (it now only offers
+                // "Clear target"). Choosing another message fixes it in place.
+                return "The message you selected moved or is no longer available. Your draft is still here. Long-press another message and choose Reply to send it."
             case .sendAsAliasUnavailable(let address):
                 return "This message was sent to \(address), but Gmail is not configured to send from that address. Add it in Gmail Settings -> Accounts -> Send mail as."
             case .ambiguousDelivery(let message):

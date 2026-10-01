@@ -41,6 +41,9 @@ final class SendErrorTests: XCTestCase {
         let error = GmailSendService.SendError.replyTargetUnavailable
         XCTAssertNotNil(error.errorDescription)
         XCTAssertTrue(error.errorDescription!.lowercased().contains("selected"))
+        // Revert-check: restoring "Reopen the conversation and try again."
+        // fails this; reopening could not fix a moved target.
+        XCTAssertFalse(error.errorDescription!.lowercased().contains("reopen"))
     }
 
     // MARK: - Error Equality Tests

@@ -1813,6 +1813,48 @@ final class ChatViewModelTests: XCTestCase {
         reopened.discardReplyDraft()
     }
 
+    /// A draft target that still exists but moved to another chat used to be
+    /// restored as a normal "Replying to:" quote. Every send then failed with
+    /// "reopen the conversation", and reopening restored it again.
+    ///
+    /// Revert-check: dropping the `isValidReplyTarget` filter from
+    /// `ChatViewModel.restoreReplyDraft` restores the moved message as the
+    /// target and leaves `unavailableReplyTargetURI` nil.
+    func testRestoredDraftTargetMovedToAnotherConversation_showsUnavailableTargetAndBlocksSend() async throws {
+        let coordinator = MockChatOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com"),
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let otherConversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let target = MessageBuilder().withSubject("Moving soon")
+            .inConversation(conversation).build(in: context)
+        let first = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        first.replyText = "Draft for a message that moves"
+        first.replyingTo = target
+        await first.saveReplyDraft()
+        let targetURI = target.objectID.uriRepresentation()
+        target.conversation = otherConversation
+        try context.save()
+
+        let reopened = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+
+        XCTAssertEqual(reopened.replyText, "Draft for a message that moves")
+        XCTAssertEqual(reopened.composerState.unavailableReplyTargetURI, targetURI)
+        XCTAssertNil(reopened.replyingTo)
+        XCTAssertNil(reopened.composerState.replyAnchor)
+        let result = await reopened.sendReply()
+        XCTAssertNil(result)
+        XCTAssertNil(coordinator.lastRequest)
+        XCTAssertNotNil(reopened.sendErrorAlert)
+        reopened.discardReplyDraft()
+    }
+
     /// A context-menu Reply is one-shot: once its send succeeds, the composer
     /// returns to the automatic target instead of pinning every later reply
     /// in the session to the selected message.

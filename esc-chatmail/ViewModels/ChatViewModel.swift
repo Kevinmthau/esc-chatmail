@@ -702,7 +702,13 @@ final class ChatViewModel: ObservableObject {
             composerState.recoveredReplyEnvelope = snapshot.recoveredEnvelope
             if let uri = snapshot.targetURI,
                let objectID = viewContext.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: uri) {
-                composerState.replaceReplyTarget(resolveMessage(with: objectID))
+                // A target that still exists but moved to another chat (List-Id
+                // repair, a merge) looked restored, yet every send failed with
+                // "reopen", and reopening restored it again. Route it to the
+                // unavailable state, which shows "Clear target" and blocks send.
+                composerState.replaceReplyTarget(
+                    resolveMessage(with: objectID).flatMap { isValidReplyTarget($0) ? $0 : nil }
+                )
                 if composerState.replyAnchor == nil { composerState.unavailableReplyTargetURI = uri }
                 if snapshot.includesQuotedMessage == false { replyingTo = nil }
             } else if let uri = snapshot.targetURI {
