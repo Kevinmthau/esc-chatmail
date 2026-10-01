@@ -72,6 +72,10 @@ final class ChatReplyBarTests: XCTestCase {
     ///
     /// Revert-check: re-adding the non-empty-subject requirement to
     /// `ReplyIndicatorPolicy.header` returns `.none` for both targets.
+    /// HONEST SCOPE: this covers the policy, not the view wiring. Nothing
+    /// renders `ChatReplyBar`, so re-adding a subject gate in its `body` (the
+    /// original bug site) instead of switching on the policy's `.replyingTo`
+    /// passes every test here.
     func testReplyIndicator_subjectlessTarget_showsDismissibleRowLabeledBySnippet() {
         XCTAssertEqual(
             ReplyIndicatorPolicy.header(
