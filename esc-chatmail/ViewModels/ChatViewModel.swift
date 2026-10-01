@@ -23,6 +23,10 @@ final class ChatComposerState: ObservableObject {
     @Published var isProcessingAttachments = false
     @Published var recoveredReplyEnvelope: StoredReplyEnvelope?
     @Published var unavailableReplyTargetURI: URL?
+    /// True only from the send tap until the optimistic message is durable
+    /// (`ChatViewModel.sendReply`): milliseconds, during which the composer's
+    /// content lives in the send's snapshot. It blocks a second send, draft
+    /// autosave and target changes for that window, not typing.
     @Published private(set) var isSending = false
     private var discardsAttachmentsWhenSendFinishes = false
 
@@ -161,6 +165,8 @@ final class ChatViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let draftStore: ChatReplyDraftStore
     private let draftAccountEmail: String?
+    private let tokenManager: any TokenManagerProtocol
+    private var tokenPrewarmTask: Task<Void, Never>?
     private let conversationMutationSerializer: ConversationRollupMutationSerializer
     @Published private(set) var draftRestoreFailed = false
 
@@ -216,6 +222,7 @@ final class ChatViewModel: ObservableObject {
         self.viewContext = chatDependencies.storage.viewContext
         self.draftStore = ChatReplyDraftStore(context: chatDependencies.storage.viewContext)
         self.draftAccountEmail = chatDependencies.session.authSession.userEmail
+        self.tokenManager = chatDependencies.session.tokenManager
         self.conversationMutationSerializer = conversationMutationSerializer
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
@@ -539,9 +546,22 @@ final class ChatViewModel: ObservableObject {
         destination = nil
     }
 
-    /// Reports the durable optimistic identity as soon as it exists, but keeps
-    /// the draft owned and locked until local preflight reaches transmission
-    /// admission. The returned result represents that later admission point.
+    /// Sends the composer's reply the way iMessage does: the field empties in
+    /// the tap's main-actor turn and the composer is released for the next
+    /// reply as soon as the optimistic message is durable.
+    ///
+    /// `isSending` spans only tap → `onOptimisticMessagePersisted`
+    /// (milliseconds). Until then `snapshot` is the only owner of the content,
+    /// so every failure before it restores the snapshot (merged with anything
+    /// typed meanwhile) and shows the alert. After it the optimistic graph and
+    /// its `OutboundSendMutationRecord` own the content: a send-path failure
+    /// before the barrier is retained as a "Not sent" bubble with Edit and
+    /// resend (`.retainAsNotSent`), with no alert and no restore. The only
+    /// later throw is a rollback (cancellation or account teardown), which
+    /// deleted the bubble, so the snapshot is restored then too.
+    ///
+    /// The returned result still represents transmission admission, which the
+    /// transcript coordinator uses for its final anchoring pass.
     func sendReply(
         onOptimisticMessagePersisted: @escaping @MainActor (OutboundMessageResult) -> Void = { _ in }
     ) async -> OutboundMessageResult? {
@@ -558,8 +578,13 @@ final class ChatViewModel: ObservableObject {
         let attachments = composerState.attachments
         guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return nil }
         guard composerState.beginSending() else { return nil }
+        // Cleared once the optimistic message is persisted: from then on a
+        // newer send may own `isSending`, and this call must not end it.
+        var ownsComposer = true
         defer {
-            composerState.finishSending()
+            // Runs after any restore below, so the save persists the restored
+            // content rather than the cleared composer.
+            if ownsComposer { composerState.finishSending() }
             scheduleReplyDraftSave()
         }
 
@@ -574,7 +599,7 @@ final class ChatViewModel: ObservableObject {
             return nil
         }
 
-        let result: OutboundMessageResult?
+        let request: OutboundMessageRequest
         do {
             if let target = composerState.replyAnchor, target.objectID.isTemporaryID {
                 try viewContext.obtainPermanentIDs(for: [target])
@@ -582,45 +607,85 @@ final class ChatViewModel: ObservableObject {
             let attachmentContexts = try outboundAttachmentContextBuilder.buildSendAttachments(
                 from: attachments
             )
-            result = try await outboundMessageCoordinator.send(
-                .reply(
-                    .init(
-                        context: outboundReplyContextBuilder.build(
-                            conversationObjectID: conversation.objectID,
-                            replyingToMessageObjectID: composerState.replyAnchor?.objectID,
-                            optimisticConversation: replyOptimisticConversation,
-                            includesQuotedMessage: replyingTo != nil
-                        ),
-                        body: trimmedReplyText,
-                        attachments: attachmentContexts,
-                        retryMetadata: composerState.recoveredReplyEnvelope?.metadata(
-                            resolver: outboundReplyContextBuilder.replyQuotedHTMLResolver
-                        )
-                    )
-                ),
-                onOptimisticMessagePersisted: onOptimisticMessagePersisted
+            request = .reply(
+                .init(
+                    context: outboundReplyContextBuilder.build(
+                        conversationObjectID: conversation.objectID,
+                        replyingToMessageObjectID: composerState.replyAnchor?.objectID,
+                        optimisticConversation: replyOptimisticConversation,
+                        includesQuotedMessage: replyingTo != nil
+                    ),
+                    body: trimmedReplyText,
+                    attachments: attachmentContexts,
+                    retryMetadata: composerState.recoveredReplyEnvelope?.metadata(
+                        resolver: outboundReplyContextBuilder.replyQuotedHTMLResolver
+                    ),
+                    preTransmissionFailureDisposition: .retainAsNotSent
+                )
             )
         } catch {
             Log.error("Failed to prepare reply send", category: .message, error: error)
             sendErrorAlert = ChatSendErrorAlert(message: error.localizedDescription)
             return nil
         }
-        guard let result else { return nil }
 
-        // Clear only after local preflight reaches durable transmission admission.
-        // Keep the reply target so another message in this chat retains its
-        // subject and threading headers while the sent-message echo arrives.
-        // A recovered envelope serves the same purpose when its original
-        // target is no longer available locally.
+        // Still the tap's main-actor turn: no await has run, so the field
+        // empties in the same frame the send button was tapped. The request
+        // above already captured the body, so nothing typed from here on can
+        // change what is sent. Keep the reply target so another message in
+        // this chat retains its subject and threading headers while the
+        // sent-message echo arrives; a recovered envelope serves the same
+        // purpose when its original target is no longer available locally.
+        let snapshot = ChatReplySendSnapshot(
+            replyText: replyText,
+            attachments: attachments,
+            target: currentReplyTarget()
+        )
+        var targetBaseline = snapshot.target
         replyText = ""
         composerState.attachments = []
-        // A context-menu Reply is one-shot, like an iMessage inline reply.
-        // Kept selected, it silently governed every later reply in the
-        // session (a list reply went to the old post's thread and audience).
-        // This send's request was built before admission, so neither line
-        // can change what was sent. Re-evaluate once here: a newer message
-        // that arrived while the send froze the target fires no further
-        // collection change. A failed send keeps its selection.
+
+        let result: OutboundMessageResult?
+        do {
+            result = try await outboundMessageCoordinator.send(
+                request,
+                onOptimisticMessagePersisted: { [self] optimisticResult in
+                    // Release in the same main-actor turn that publishes the
+                    // bubble: the optimistic save already removed the durable
+                    // draft, and a gate-queued autosave reading the cleared
+                    // composer can only write an empty (or newer) draft.
+                    ownsComposer = false
+                    composerState.finishSending()
+                    reevaluateReplyTargetAfterSend()
+                    targetBaseline = currentReplyTarget()
+                    onOptimisticMessagePersisted(optimisticResult)
+                }
+            )
+        } catch {
+            Log.error("Failed to prepare reply send", category: .message, error: error)
+            restoreUnsentReply(snapshot, ifTargetStillMatches: targetBaseline)
+            sendErrorAlert = ChatSendErrorAlert(message: error.localizedDescription)
+            return nil
+        }
+        guard let result else {
+            restoreUnsentReply(snapshot, ifTargetStillMatches: targetBaseline)
+            return nil
+        }
+        return result
+    }
+
+    /// Re-evaluates the reply target once a send has released the composer.
+    ///
+    /// A context-menu Reply is one-shot, like an iMessage inline reply. Kept
+    /// selected, it silently governed every later reply in the session (a
+    /// list reply went to the old post's thread and audience). The send's
+    /// request was built at tap, so this cannot change what was sent. It runs
+    /// at release, not at admission: from release on the user can pick the
+    /// next reply's target, and a later pass would clear that choice. A newer
+    /// message that arrived while the send froze the target fires no further
+    /// collection change, so re-evaluate once here. A failed send keeps its
+    /// selection (`restoreUnsentReply`).
+    private func reevaluateReplyTargetAfterSend() {
         let sentManualSelection = manuallySelectedReplyTargetID != nil
         manuallySelectedReplyTargetID = nil
         if sentManualSelection {
@@ -628,7 +693,41 @@ final class ChatViewModel: ObservableObject {
         } else {
             reconcileAutomaticReplyTarget(lastMessage: newestValidReplyTarget())
         }
-        return result
+    }
+
+    private func currentReplyTarget() -> ChatReplySendSnapshot.Target {
+        ChatReplySendSnapshot.Target(
+            replyingTo: composerState.replyingTo,
+            replyAnchor: composerState.replyAnchor,
+            recoveredReplyEnvelope: composerState.recoveredReplyEnvelope,
+            manuallySelectedReplyTargetID: manuallySelectedReplyTargetID
+        )
+    }
+
+    /// Puts a reply that never became a durable send back into the composer.
+    ///
+    /// Text typed since the tap is kept after the unsent text, and attachments
+    /// added since are kept after the unsent ones. The target comes back only
+    /// if nobody changed it since `baseline` (the tap, or the release-time
+    /// re-evaluation): a target the user picked for the next reply wins.
+    private func restoreUnsentReply(
+        _ snapshot: ChatReplySendSnapshot,
+        ifTargetStillMatches baseline: ChatReplySendSnapshot.Target
+    ) {
+        replyText = ChatReplyRestorePolicy.restoredText(
+            unsentText: snapshot.replyText,
+            typedSinceSend: replyText
+        )
+        composerState.attachments = ChatReplyRestorePolicy.restoredAttachments(
+            unsent: snapshot.attachments,
+            addedSinceSend: composerState.attachments
+        )
+        guard currentReplyTarget().hasSameIdentity(as: baseline),
+              snapshot.target.isRestorable else { return }
+        composerState.replaceReplyTarget(snapshot.target.replyAnchor)
+        if snapshot.target.replyingTo == nil { replyingTo = nil }
+        composerState.recoveredReplyEnvelope = snapshot.target.recoveredReplyEnvelope
+        manuallySelectedReplyTargetID = snapshot.target.manuallySelectedReplyTargetID
     }
 
     /// Hands the composer back to the automatic target after a context-menu
@@ -683,6 +782,8 @@ final class ChatViewModel: ObservableObject {
     private func saveReplyDraftWithoutCleanupInterleaving() throws {
         // Read live state only after acquiring cleanup's gate: a queued save
         // must not resurrect content that was sent or explicitly discarded.
+        // `sendReply` clears the composer at tap, so a save scheduled by a
+        // keystroke just before the tap reads the cleared composer here.
         guard !composerState.isSending, !draftRestoreFailed,
               authSession.userEmail == draftAccountEmail else { return }
         guard conversation.managedObjectContext === viewContext, !conversation.isDeleted else {
@@ -877,6 +978,25 @@ final class ChatViewModel: ObservableObject {
             prefetchTaskManager.runDetached("prefetchContacts") {
                 await contactsResolver.prewarm(emails: uniqueEmails)
             }
+        }
+    }
+
+    /// Warms the access token when the reply field gains focus, so a refresh
+    /// of a token near expiry (any reply after about an hour in the
+    /// background) happens while the user types instead of between the send
+    /// tap and Gmail admission.
+    ///
+    /// Goes through `getCurrentToken()`, the existing epoch-safe,
+    /// single-flighted path; this adds no token producer. Fire-and-forget:
+    /// errors are left for the send path to report, and an in-flight warm-up
+    /// is never cancelled or duplicated.
+    func prewarmReplySendCredentials() {
+        guard tokenPrewarmTask == nil,
+              authSession.userEmail == draftAccountEmail else { return }
+        let tokenManager = self.tokenManager
+        tokenPrewarmTask = Task { [weak self] in
+            _ = try? await tokenManager.getCurrentToken()
+            self?.tokenPrewarmTask = nil
         }
     }
 
