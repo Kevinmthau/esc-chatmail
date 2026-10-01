@@ -191,7 +191,10 @@ struct DataCleanupService: Sendable {
     /// remove. The refresh drops cached row state because other gated writers
     /// (optimistic sends, draft saves, preview-repair batches) may commit
     /// before the next hold, and a registered object keeps its stale values
-    /// when a later fetch returns its row again.
+    /// when a later fetch returns its row again. The context's `PersonFactory`
+    /// cache is dropped too: its hit check (same context, not deleted) cannot
+    /// see a row another gated writer deleted between holds, so a refreshed
+    /// cached `Person` would pass it and then fail to fulfill when faulted.
     private func settleCleanupSensitiveHold(
         in context: NSManagedObjectContext,
         caller: String
@@ -200,6 +203,7 @@ struct DataCleanupService: Sendable {
         await context.perform {
             if !saved { context.rollback() }
             context.refreshAllObjects()
+            PersonFactory.resetCache(in: context)
         }
     }
 
