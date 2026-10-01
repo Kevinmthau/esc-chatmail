@@ -115,6 +115,9 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     struct PostSendAnchorIntent: Equatable {
         fileprivate let userScrollInteractionRevision: UInt
+        /// Set only by `beginLocalReplySend`, which registers the send as in
+        /// flight until `endLocalReplySend`.
+        fileprivate let localReplySendID: UUID?
     }
 
     typealias BottomAnchorAction = @MainActor (BottomAnchorStep) -> Void
@@ -122,6 +125,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     typealias AsyncAction = () async -> Void
     typealias LatestWindowLoader = (Int?) async -> Void
     typealias MessageVisibilityEnsurer = (NSManagedObjectID) async -> Bool
+    typealias MessagePublicationCheck = (NSManagedObjectID) -> Bool
     typealias Sleep = (UInt64) async -> Void
     typealias Now = () -> TimeInterval
 
@@ -141,6 +145,9 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     private let loadLatestWindowIfNeeded: LatestWindowLoader
     private let ensureVisibleMessage: MessageVisibilityEnsurer
+    /// Whether a row is already in the published window, so the post-send
+    /// anchor can scroll without waiting for layout of a row it just loaded.
+    private let isMessagePublished: MessagePublicationCheck
     private let markConversationAsReadIfNeeded: () -> Void
     private let markUnreadInboxMessagesAsReadIfNeeded: ([NSManagedObjectID]) -> Void
     private let initializeReplyingTo: (Message?) -> Void
@@ -208,6 +215,14 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var optimisticReplyPublicationAttempts: [
         NSManagedObjectID: OptimisticReplyPublicationAttempt
     ] = [:]
+    /// Local reply sends between `beginLocalReplySend` and
+    /// `endLocalReplySend`. While any is in flight, the count-change scroll
+    /// stands down so the optimistic-publication anchor is the send's one
+    /// scroll (`handleMessageCountChange`).
+    private var localReplySendsInFlight = Set<UUID>()
+    /// When the latest post-send animated scroll finishes. The admission step
+    /// waits it out rather than snapping over a slide still in flight.
+    private var postSendAnimatedScrollSettlesAt: TimeInterval = 0
     private var pendingAutoReadMessageIDsByEventID: [UUID: [NSManagedObjectID]] = [:]
     private var pendingAutoReadMessageIDsByLayoutID: [UUID: [NSManagedObjectID]] = [:]
     private var pendingAutoReadLayoutOrder: [UUID] = []
@@ -227,6 +242,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
         self.ensureVisibleMessage = { messageObjectID in
             await scrollState.ensureVisibleMessage(messageObjectID)
+        }
+        self.isMessagePublished = { messageObjectID in
+            scrollState.visibleMessages.contains { $0.objectID == messageObjectID }
         }
         self.markConversationAsReadIfNeeded = {
             viewModel.markConversationAsReadIfNeeded()
@@ -274,10 +292,12 @@ final class ChatMessagesCoordinator: ObservableObject {
         clearPersonCache: @escaping AsyncAction,
         sleep: @escaping Sleep,
         now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
-        ensureVisibleMessage: @escaping MessageVisibilityEnsurer = { _ in true }
+        ensureVisibleMessage: @escaping MessageVisibilityEnsurer = { _ in true },
+        isMessagePublished: @escaping MessagePublicationCheck = { _ in false }
     ) {
         self.loadLatestWindowIfNeeded = loadLatestWindowIfNeeded
         self.ensureVisibleMessage = ensureVisibleMessage
+        self.isMessagePublished = isMessagePublished
         self.markConversationAsReadIfNeeded = markConversationAsReadIfNeeded
         self.markUnreadInboxMessagesAsReadIfNeeded = markUnreadInboxMessagesAsReadIfNeeded
         self.initializeReplyingTo = initializeReplyingTo
@@ -363,6 +383,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         pendingAutoReadLayoutOrder.removeAll()
         optimisticReplyPublicationAttempts.values.forEach { $0.task.cancel() }
         optimisticReplyPublicationAttempts.removeAll()
+        localReplySendsInFlight.removeAll()
+        postSendAnimatedScrollSettlesAt = 0
         taskManager.cancelAll()
         cancelPrefetch()
         if !isReadyToShow {
@@ -1094,7 +1116,21 @@ final class ChatMessagesCoordinator: ObservableObject {
             )
         } else if isReadyToShow && newCount > oldCount && isShowingLatestWindow {
             updateReplyingToIfNewSubject(lastMessage)
-            if isBottomAnchorVisible && !isUserScrollTakeoverActive {
+            if !localReplySendsInFlight.isEmpty {
+                // The optimistic-publication anchor owns this send's scroll
+                // (`handleReplyOptimisticMessagePersisted`). The count bump
+                // from the optimistic save reaches here first; scrolling too
+                // started a second, competing animation under the same task
+                // key — whichever won, the motion differed send to send. A
+                // message arriving from sync during the send is covered by
+                // the bottom follow the publication arms.
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView count change during local send; deferring to post-send anchor messages=\(newCount)",
+                    category: .ui
+                )
+            } else if isBottomAnchorVisible && !isUserScrollTakeoverActive {
                 scrollToBottom(
                     messageCount: newCount,
                     delay: UIConfig.contentChangeScrollDelay,
@@ -1235,8 +1271,29 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// exact-row publication still completes.
     func capturePostSendAnchorIntent() -> PostSendAnchorIntent {
         PostSendAnchorIntent(
-            userScrollInteractionRevision: userScrollInteractionRevision
+            userScrollInteractionRevision: userScrollInteractionRevision,
+            localReplySendID: nil
         )
+    }
+
+    /// `capturePostSendAnchorIntent` for a reply this chat is about to send,
+    /// which also registers the send as in flight: until `endLocalReplySend`,
+    /// the count-change scroll defers to the post-send anchor. The view calls
+    /// it before `sendReply` (whose optimistic save bumps the count) and must
+    /// pair it with `endLocalReplySend` on every exit; disappearing clears it.
+    func beginLocalReplySend() -> PostSendAnchorIntent {
+        let localReplySendID = UUID()
+        localReplySendsInFlight.insert(localReplySendID)
+        return PostSendAnchorIntent(
+            userScrollInteractionRevision: userScrollInteractionRevision,
+            localReplySendID: localReplySendID
+        )
+    }
+
+    /// Ends a send `beginLocalReplySend` registered, whatever its outcome.
+    func endLocalReplySend(_ anchorIntent: PostSendAnchorIntent) {
+        guard let localReplySendID = anchorIntent.localReplySendID else { return }
+        localReplySendsInFlight.remove(localReplySendID)
     }
 
     func handleReplyOptimisticMessagePersisted(
@@ -1264,6 +1321,13 @@ final class ChatMessagesCoordinator: ObservableObject {
             category: .ui
         )
         optimisticReplyPublicationAttempts[targetMessageID]?.task.cancel()
+        // The tail-append fast path (`VirtualScrollState+TailAppend`) has
+        // usually published the row in the optimistic save's own turn, and
+        // this callback runs only after the send's preparation task has been
+        // awaited, so the update that lays the row out is not still pending a
+        // fixed delay. If a scroll ever beats that layout, it lands at the old
+        // bottom and the follow armed below absorbs the row's growth.
+        let wasAlreadyPublished = isMessagePublished(targetMessageID)
         let publicationAttemptID = UUID()
         let publicationTask = Task { [ensureVisibleMessage] in
             guard !Task.isCancelled else { return false }
@@ -1311,13 +1375,24 @@ final class ChatMessagesCoordinator: ObservableObject {
                 return
             }
 
+            // The send's one scroll: animated, with no fixed delay when the row
+            // was already on screen (only a row this task had to load waits
+            // `contentChangeScrollDelay` for its layout). There is no
+            // stabilization step any more: the follow armed below corrects
+            // growth the slide could not see (a bubble resolving its content
+            // late), and a second, unanimated scroll 200ms later only snapped
+            // a transcript that was already at the bottom.
             self.scrollToBottom(
                 messageCount: max(1, max(messageCount, totalMessageCount)),
-                delay: UIConfig.contentChangeScrollDelay,
-                includeStabilizationStep: true,
-                reloadLatestWindow: false,
-                scrollAction: scrollAction
-            )
+                delay: wasAlreadyPublished ? 0 : UIConfig.contentChangeScrollDelay,
+                reloadLatestWindow: false
+            ) { [weak self] step in
+                if step.animated, let self {
+                    self.postSendAnimatedScrollSettlesAt =
+                        self.now() + UIConfig.scrollAnimationDuration
+                }
+                scrollAction(step)
+            }
             // Keep following bounded layout growth while local preflight is
             // still running. Admission refreshes this grace period once more.
             if self.isReadyToShow {
@@ -1328,7 +1403,10 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     /// Reconfirms exact-row publication after local preflight reaches the
     /// durable Gmail-admission boundary, then performs one non-animated
-    /// correction for layout or sync-echo growth that happened during preflight.
+    /// correction for layout or sync-echo growth that happened during preflight
+    /// — only when the bottom anchor is not already on screen. At the bottom
+    /// the correction had nothing to do, and when admission came within ~50ms
+    /// of publication it landed mid-slide and snapped the rest of it.
     func handleReplySendAdmitted(
         targetMessageID: NSManagedObjectID,
         anchorIntent: PostSendAnchorIntent,
@@ -1408,7 +1486,27 @@ final class ChatMessagesCoordinator: ObservableObject {
                 )
                 return
             }
-            scrollAction(step)
+            // Let a post-send slide still in flight finish first: its anchor
+            // reads offscreen until it lands, which must not buy a snap.
+            let remainingSlide = self.postSendAnimatedScrollSettlesAt - self.now()
+            if remainingSlide > 0 {
+                await sleep(UInt64(remainingSlide * 1_000_000_000))
+                guard !Task.isCancelled, self.isVisible,
+                      self.userScrollInteractionRevision ==
+                        anchorIntent.userScrollInteractionRevision else {
+                    return
+                }
+            }
+            if self.isTrackedBottomAnchorVisible {
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView reply admission found bottom anchor visible; no stabilization scroll",
+                    category: .ui
+                )
+            } else {
+                scrollAction(step)
+            }
             self.armPostSendBottomFollow()
         }
     }
@@ -1503,7 +1601,13 @@ final class ChatMessagesCoordinator: ObservableObject {
         taskManager.run("senderGrouping") { [loadSenderGroupingKeys] in
             let groupingKeys = await loadSenderGroupingKeys(uniqueSenderEmails)
             guard !Task.isCancelled else { return }
-            self.senderGroupingKeysByEmail = groupingKeys
+            // This runs on every displayed-ID change, a send and its echo
+            // included, and usually resolves the same keys. Assigning anyway
+            // published objectWillChange, which the chat session forwards, so
+            // every realized bubble re-evaluated its body for nothing.
+            if self.senderGroupingKeysByEmail != groupingKeys {
+                self.senderGroupingKeysByEmail = groupingKeys
+            }
         }
     }
 

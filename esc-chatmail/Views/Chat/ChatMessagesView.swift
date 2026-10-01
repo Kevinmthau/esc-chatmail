@@ -505,7 +505,8 @@ struct ChatMessagesView: View {
             measuredHeight: $replyBarHeight,
             focusBinding: isTextFieldFocused
         ) {
-            let anchorIntent = coordinator.capturePostSendAnchorIntent()
+            let anchorIntent = coordinator.beginLocalReplySend()
+            defer { coordinator.endLocalReplySend(anchorIntent) }
             var persistedOptimisticMessageObjectID: NSManagedObjectID?
             let result = await viewModel.sendReply(
                 onOptimisticMessagePersisted: { optimisticResult in
