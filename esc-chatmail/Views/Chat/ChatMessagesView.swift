@@ -283,7 +283,11 @@ struct ChatMessagesView: View {
         viewportHeight: CGFloat,
         scrollProxy: ScrollViewProxy
     ) -> some View {
-        ScrollView {
+        let newestRowIndex = MessageSendStatusLinePolicy.newestRowIndex(
+            displayedRowCount: displayedMessages.count,
+            isShowingLatestWindow: scrollState.isShowingLatestWindow
+        )
+        return ScrollView {
             LazyVStack(spacing: 8) {
                 ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
                     let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
@@ -303,6 +307,7 @@ struct ChatMessagesView: View {
                         isEffectivelyOneToOneConversation: isEffectivelyOneToOneConversation,
                         contactRefreshToken: coordinator.contactRefreshToken,
                         isLastFromSender: isLastFromSender,
+                        isNewestInTranscript: index == newestRowIndex,
                         onOpenFullMessage: onOpenFullMessage
                     )
                     .id(message.objectID)

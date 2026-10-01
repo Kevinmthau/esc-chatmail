@@ -51,6 +51,9 @@ struct MessageBubble: View {
     var contactRefreshToken: Int = 0
     /// Whether this is the last message from this sender before a different sender (for avatar grouping)
     var isLastFromSender: Bool = true
+    /// Whether this row is the conversation's newest message
+    /// (`MessageSendStatusLinePolicy.newestRowIndex`); only that row carries the "Sent" receipt.
+    var isNewestInTranscript: Bool = false
     /// Display style configuration
     var style: MessageBubbleStyle = .standard
     private let htmlContentHandler: HTMLContentHandler
@@ -58,6 +61,9 @@ struct MessageBubble: View {
     private let originalEmailSourceWarmer: any OriginalEmailSourceWarming
 
     @StateObject private var viewModel: MessageBubbleViewModel
+    /// Whether a pending send has outlasted `MessageSendStatusLinePolicy.sendingRevealDelay`.
+    /// Driven by this view's own `.task`, so the timer dies with the row or the pending state.
+    @State private var isSendingRevealDue = false
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
 
     private var showHTMLPreview: Bool {
@@ -97,6 +103,7 @@ struct MessageBubble: View {
         isEffectivelyOneToOneConversation: Bool,
         contactRefreshToken: Int = 0,
         isLastFromSender: Bool = true,
+        isNewestInTranscript: Bool = false,
         style: MessageBubbleStyle = .standard,
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
     ) {
@@ -108,6 +115,7 @@ struct MessageBubble: View {
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.contactRefreshToken = contactRefreshToken
         self.isLastFromSender = isLastFromSender
+        self.isNewestInTranscript = isNewestInTranscript
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
         self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(loader: messageBubbleLoader))
@@ -121,6 +129,14 @@ struct MessageBubble: View {
             using: htmlAnalysis,
             hidingInlineReferencedInHTML: showHTMLPreview,
             hidingCalendarInviteAttachments: showsCalendarInvitePreviewCard
+        )
+        let sendStatus = sendStatusPresentation
+        let isSendPending = sendStatus == .sending
+        let statusLine = MessageSendStatusLinePolicy.line(
+            presentation: sendStatus,
+            isSendingRevealDue: isSendingRevealDue,
+            isFromMe: message.isFromMe,
+            isNewestInTranscript: isNewestInTranscript
         )
 
         HStack(alignment: .bottom, spacing: 8) {
@@ -154,13 +170,7 @@ struct MessageBubble: View {
                     onOpenFullMessage: openFullMessage(source:)
                 )
 
-                sendStatusView
-
-                MessageMetadata(
-                    date: message.internalDate,
-                    isUnread: message.isUnread,
-                    showUnreadIndicator: style.showUnreadIndicator
-                )
+                metadataLine(statusLine: statusLine)
             }
             .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
 
@@ -168,6 +178,10 @@ struct MessageBubble: View {
                 Spacer()
             }
         }
+        // Crossfades every status change (Sending… → Sent, → Not sent, → Delivery unknown, the
+        // receipt moving to a newer row). None of them changes the row's height: the caption
+        // shares the timestamp's line.
+        .animation(.easeInOut(duration: 0.2), value: statusLine)
         .background {
             InlineAttachmentDownloadTrigger(
                 attachments: InlineAttachmentDownloadPolicy.pendingImages(in: message.attachments, isFromMe: message.isFromMe)
@@ -175,6 +189,9 @@ struct MessageBubble: View {
         }
         .task(id: currentLoadSignature) {
             await viewModel.loadIfNeeded(using: loadContext(contentSignature: currentLoadSignature))
+        }
+        .task(id: isSendPending) {
+            await revealSendingAfterGracePeriod(isSendPending: isSendPending)
         }
     }
 
@@ -218,30 +235,71 @@ struct MessageBubble: View {
         }
     }
 
-    @ViewBuilder
-    private var sendStatusView: some View {
-        switch MessageSendStatusPresentation.resolve(
+    private var sendStatusPresentation: MessageSendStatusPresentation {
+        MessageSendStatusPresentation.resolve(
             deliveryState: message.outboundSendDeliveryState,
             isSendingLocalAttachments: message.isSendingLocalAttachments,
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads
-        ) {
-        case .sending:
-            MessageSendingIndicator()
-        case .notSent:
-            Text(MessageSendStatusPresentation.notSent.label ?? "")
-                .font(.caption2)
-                .foregroundColor(.red)
-        case .deliveryUnknown:
-            Text(MessageSendStatusPresentation.deliveryUnknown.label ?? "")
-                .font(.caption2)
-                .foregroundColor(.orange)
-        case .sendFailed:
-            Text(MessageSendStatusPresentation.sendFailed.label ?? "")
-                .font(.caption2)
-                .foregroundColor(.red)
-        case .none:
-            EmptyView()
+        )
+    }
+
+    /// The timestamp, followed by the send status when there is one ("2:41 PM · Sent").
+    private func metadataLine(statusLine: MessageSendStatusLinePolicy.Line?) -> some View {
+        HStack(spacing: 0) {
+            MessageMetadata(
+                date: message.internalDate,
+                isUnread: message.isUnread,
+                showUnreadIndicator: style.showUnreadIndicator
+            )
+
+            // A ZStack so two captions crossfade in one place ("Sending…" fading out where
+            // "Sent" fades in) instead of sitting side by side mid-transition.
+            ZStack(alignment: .leading) {
+                if let statusLine {
+                    (Text(verbatim: " · ").foregroundColor(.secondary) +
+                        Text(statusLine.label).foregroundColor(Self.statusColor(statusLine)))
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .id(statusLine)
+                        .transition(.opacity)
+                }
+            }
         }
+    }
+
+    /// Red for a definite failure. Orange for an ambiguous send: Gmail may already have it, and a
+    /// red "failed" signal would invite a manual duplicate of a non-idempotent send.
+    private static func statusColor(_ line: MessageSendStatusLinePolicy.Line) -> Color {
+        switch line {
+        case .notSent, .sendFailed:
+            return .red
+        case .deliveryUnknown:
+            return .orange
+        case .sending, .sent:
+            return .secondary
+        }
+    }
+
+    /// Flips `isSendingRevealDue` once a send has been pending for the grace period. `.task(id:)`
+    /// cancels the wait the moment the pending state ends (Gmail answered, the send failed) or
+    /// the row leaves the screen, so a fast send never shows "Sending…".
+    private func revealSendingAfterGracePeriod(isSendPending: Bool) async {
+        guard isSendPending else {
+            if isSendingRevealDue {
+                isSendingRevealDue = false
+            }
+            return
+        }
+        let delay = MessageSendStatusLinePolicy.remainingSendingRevealDelay(
+            pendingSince: message.internalDate,
+            now: Date()
+        )
+        if delay > 0 {
+            guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(delay * 1_000_000_000)) else {
+                return
+            }
+        }
+        isSendingRevealDue = true
     }
 
     @ViewBuilder

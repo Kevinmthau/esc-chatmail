@@ -393,6 +393,68 @@ final class ChatMessageRowModelTests: XCTestCase {
             "Send failed"
         )
     }
+
+    /// From the durable send record to the caption under the newest row: "Sent" appears only once
+    /// Gmail accepted the reply (record carries Gmail's thread ID) or for a row sync brought from
+    /// Gmail, and never for an in-flight, ambiguous, or definitely-unsent record.
+    ///
+    /// Revert-check: in `MessageSendStatusLinePolicy.line`, returning `.sent` for every own newest
+    /// row regardless of presentation fails the in-flight, ambiguous, and not-sent assertions.
+    func testMapThenStatusLine_newestOwnRow_showsSentOnlyOnceGmailAccepted() throws {
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: viewContext)
+        func optimisticRow(messageID: String?, threadID: String?) -> Message {
+            let optimisticID = UUID().uuidString
+            let message = MessageBuilder()
+                .withId(optimisticID)
+                .withBody("Reply \(optimisticID)")
+                .fromMe()
+                .inConversation(conversation)
+                .build(in: viewContext)
+            message.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+            let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+            record.id = optimisticID
+            record.createdAt = Date()
+            record.remoteCommittedMessageId = messageID
+            record.remoteCommittedThreadId = threadID
+            return message
+        }
+        let preAdmission = optimisticRow(messageID: nil, threadID: nil)
+        let inFlight = optimisticRow(messageID: OutboundSendRemoteState.inFlightMessageID, threadID: nil)
+        let ambiguous = optimisticRow(messageID: OutboundSendRemoteState.ambiguousMessageID, threadID: nil)
+        let notSent = optimisticRow(messageID: OutboundSendRemoteState.notSentMessageID, threadID: nil)
+        let accepted = optimisticRow(messageID: "gmail-message-id", threadID: "gmail-thread-id")
+        let synced = MessageBuilder()
+            .withId("gmail-synced-sent-row")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        synced.messageId = "<synced@example.com>"
+        try viewContext.save()
+
+        func newestLine(_ message: Message, isSendingRevealDue: Bool) -> MessageSendStatusLinePolicy.Line? {
+            let row = ChatMessageRowModelMapper.map(message)
+            return MessageSendStatusLinePolicy.line(
+                presentation: MessageSendStatusPresentation.resolve(
+                    deliveryState: row.outboundSendDeliveryState,
+                    isSendingLocalAttachments: row.isSendingLocalAttachments,
+                    hasFailedLocalAttachmentUploads: row.hasFailedLocalAttachmentUploads
+                ),
+                isSendingRevealDue: isSendingRevealDue,
+                isFromMe: row.isFromMe,
+                isNewestInTranscript: true
+            )
+        }
+
+        for isSendingRevealDue in [false, true] {
+            let pendingLine: MessageSendStatusLinePolicy.Line? = isSendingRevealDue ? .sending : nil
+            XCTAssertEqual(newestLine(preAdmission, isSendingRevealDue: isSendingRevealDue), pendingLine)
+            XCTAssertEqual(newestLine(inFlight, isSendingRevealDue: isSendingRevealDue), pendingLine)
+            XCTAssertEqual(newestLine(ambiguous, isSendingRevealDue: isSendingRevealDue), .deliveryUnknown)
+            XCTAssertEqual(newestLine(notSent, isSendingRevealDue: isSendingRevealDue), .notSent)
+            XCTAssertEqual(newestLine(accepted, isSendingRevealDue: isSendingRevealDue), .sent)
+            XCTAssertEqual(newestLine(synced, isSendingRevealDue: isSendingRevealDue), .sent)
+        }
+    }
 }
 
 private actor AttachmentRefreshBubbleLoader: MessageBubbleLoading {
