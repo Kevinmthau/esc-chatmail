@@ -425,18 +425,25 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
     // listing `NSURLErrorNotConnectedToInternet` — the offline failure would be
     // rethrown as `ambiguousDelivery` after one attempt ("Delivery unknown").
     // Also fails if the production retry budget for a pre-transmission failure
-    // (`NetworkConfig.maxRetries` / `initialRetryDelay`) grows past a few seconds.
+    // (`NetworkConfig.maxRetries` / `initialRetryDelay` / `maxRetryDelay`) grows
+    // past a few seconds of backoff, or if `GmailAPIClient.sleepBeforeRetry`
+    // stops sleeping through `retryClock` (no backoff would be recorded, and this
+    // test would go back to burning the real backoff in wall time).
     // HONEST SCOPE: StubURLProtocol answers at once, so this cannot observe
     // URLSession waiting for connectivity; the session-configuration test above
-    // pins that half.
+    // pins that half. The budget is the backoff the engine requests, not a
+    // wall-clock measurement: the fake clock returns at once.
     func testSendMessage_offlineAtDefaultRetryStrategy_failsDefinitelyWithinSeconds() async {
+        let retryClock = FakeSyncClock()
+        // No `retryStrategy:` argument: this pins the production default
+        // (`NetworkRetryStrategy()`), not the short-delay strategy from setUp.
         client = GmailAPIClient(
             tokenManager: tokenManager,
-            session: StubURLProtocol.makeSession()
+            session: StubURLProtocol.makeSession(),
+            retryClock: retryClock
         )
         StubURLProtocol.script = [.error(URLError(.notConnectedToInternet))]
 
-        let start = Date()
         do {
             _ = try await client.sendMessage(rawMessage: "raw")
             XCTFail("Expected a definite offline failure")
@@ -447,16 +454,23 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
-        let elapsed = Date().timeIntervalSince(start)
 
         XCTAssertEqual(
             StubURLProtocol.requestCount,
             NetworkConfig.maxRetries,
             "A never-transmitted send keeps its bounded pre-transmission retries"
         )
-        XCTAssertLessThan(
-            elapsed,
-            10,
+        let backoffs = retryClock.sleeps.map { TimeInterval($0) / 1_000_000_000 }
+        XCTAssertEqual(
+            backoffs.count,
+            NetworkConfig.maxRetries - 1,
+            "Every retry waits out its backoff on the injected clock"
+        )
+        let totalBackoff = backoffs.reduce(0, +)
+        XCTAssertGreaterThan(totalBackoff, 0)
+        XCTAssertLessThanOrEqual(
+            totalBackoff,
+            5,
             "Offline must fail in seconds, far below the \(NetworkConfig.resourceTimeout) s resource timeout"
         )
     }

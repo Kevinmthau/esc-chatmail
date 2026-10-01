@@ -74,6 +74,10 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     let sendSession: URLSession
     let tokenManager: TokenManagerProtocol
     let retryStrategy: RetryStrategy
+    /// Sleep source for the retry engine's backoff waits only. The circuit
+    /// breaker and time-budget checks still read wall-clock `Date()`, so a
+    /// `FakeSyncClock` makes backoff instant without tripping them.
+    let retryClock: any SyncClock
 
     /// Tracks cumulative rate limit backoff time to prevent API exhaustion
     let rateLimitTracker = RateLimitTracker()
@@ -96,10 +100,12 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         tokenManager: TokenManagerProtocol,
         retryStrategy: RetryStrategy = NetworkRetryStrategy(),
         session: URLSession? = nil,
-        sendSession: URLSession? = nil
+        sendSession: URLSession? = nil,
+        retryClock: any SyncClock = SystemSyncClock()
     ) {
         self.tokenManager = tokenManager
         self.retryStrategy = retryStrategy
+        self.retryClock = retryClock
         let resolvedSession = session ?? Self.createSession()
         self.session = resolvedSession
         self.sendSession = sendSession ?? Self.createSendSession(basedOn: resolvedSession)
@@ -509,7 +515,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         lastFailure: Error
     ) async throws {
         do {
-            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            try await retryClock.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         } catch is CancellationError {
             guard !behavior.allowsRetransmission else {
                 throw CancellationError()
