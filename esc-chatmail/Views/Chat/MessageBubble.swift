@@ -61,6 +61,7 @@ struct MessageBubble: View {
     private let originalEmailSourceWarmer: any OriginalEmailSourceWarming
 
     @StateObject private var viewModel: MessageBubbleViewModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     /// Whether a pending send has outlasted `MessageSendStatusLinePolicy.sendingRevealDelay`.
     /// Driven by this view's own `.task`, so the timer dies with the row or the pending state.
     @State private var isSendingRevealDue = false
@@ -218,7 +219,8 @@ struct MessageBubble: View {
         }
         // Crossfades every status change (Sending… → Sent, → Not sent, → Delivery unknown, the
         // receipt moving to a newer row) and the badge's arrival. None of them changes the row's
-        // height: the caption shares the timestamp's line.
+        // height: the caption shares the timestamp's line (below accessibility text sizes; see
+        // `MessageSendStatusLinePolicy.Arrangement`).
         .animation(.easeInOut(duration: 0.2), value: statusLine)
         .background {
             InlineAttachmentDownloadTrigger(
@@ -300,26 +302,58 @@ struct MessageBubble: View {
         )
     }
 
-    /// The timestamp, followed by the send status when there is one ("2:41 PM · Sent").
+    /// The send status, when there is one, and the timestamp ("Sent · 2:41 PM"), arranged per
+    /// `MessageSendStatusLinePolicy.Arrangement`.
+    @ViewBuilder
     private func metadataLine(statusLine: MessageSendStatusLinePolicy.Line?) -> some View {
-        HStack(spacing: 0) {
-            MessageMetadata(
-                date: message.internalDate,
-                isUnread: message.isUnread,
-                showUnreadIndicator: style.showUnreadIndicator
-            )
+        let timestamp = MessageMetadata(
+            date: message.internalDate,
+            isUnread: message.isUnread,
+            showUnreadIndicator: style.showUnreadIndicator
+        )
+        switch MessageSendStatusLinePolicy.arrangement(
+            isAccessibilityTextSize: dynamicTypeSize.isAccessibilitySize
+        ) {
+        case .inline:
+            HStack(spacing: 0) {
+                statusCaption(statusLine, isInline: true)
+                    .lineLimit(1)
+                    // If the column ever runs short, the timestamp gives way, not the status.
+                    .layoutPriority(1)
+                timestamp
+                    // A wrapped timestamp would let a caption's arrival change the row's height.
+                    .lineLimit(1)
+            }
+        case .stacked:
+            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 0) {
+                statusCaption(statusLine, isInline: false)
+                timestamp
+            }
+        }
+    }
 
-            // A ZStack so two captions crossfade in one place ("Sending…" fading out where
-            // "Sent" fades in) instead of sitting side by side mid-transition.
-            ZStack(alignment: .leading) {
-                if let statusLine {
-                    (Text(verbatim: " · ").foregroundColor(.secondary) +
-                        Text(statusLine.label).foregroundColor(Self.statusColor(statusLine)))
-                        .font(.caption2)
-                        .lineLimit(1)
-                        .id(statusLine)
-                        .transition(.opacity)
+    /// A ZStack so two captions crossfade in one place ("Sending…" fading out where "Sent" fades
+    /// in) instead of sitting side by side mid-transition, aligned on the bubble's side so both
+    /// share one edge. Empty, it takes no space.
+    private func statusCaption(
+        _ statusLine: MessageSendStatusLinePolicy.Line?,
+        isInline: Bool
+    ) -> some View {
+        ZStack(alignment: message.isFromMe ? .trailing : .leading) {
+            if let statusLine {
+                Group {
+                    if isInline {
+                        Text(statusLine.label).foregroundColor(Self.statusColor(statusLine)) +
+                            Text(verbatim: " · ").foregroundColor(.secondary)
+                    } else {
+                        // Own line: spacing lives inside the caption so an empty ZStack adds none.
+                        Text(statusLine.label).foregroundColor(Self.statusColor(statusLine))
+                            .padding(.bottom, 2)
+                    }
                 }
+                .font(.caption2)
+                .id(statusLine)
+                .transition(.opacity)
             }
         }
     }

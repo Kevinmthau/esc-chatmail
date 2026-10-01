@@ -133,6 +133,20 @@ final class MessageSendStatusLinePolicyTests: XCTestCase {
         XCTAssertEqual(Policy.Line.sendFailed.label, "Send failed")
     }
 
+    /// At accessibility text sizes the caption gets its own line rather than being truncated
+    /// beside the timestamp in the 280pt column.
+    ///
+    /// Revert-check: returning `.inline` for every size in
+    /// `MessageSendStatusLinePolicy.arrangement` fails the accessibility-size assertion.
+    ///
+    /// HONEST SCOPE: pins the decision only. The inline order (caption ahead of the timestamp, so
+    /// the timestamp's trailing edge stays put), the caption's layout priority, and the
+    /// timestamp's one-line limit are `MessageBubble` view wiring with no UI test target.
+    func testArrangement_accessibilityTextSize_stacksCaptionAboveTimestamp() {
+        XCTAssertEqual(Policy.arrangement(isAccessibilityTextSize: false), .inline)
+        XCTAssertEqual(Policy.arrangement(isAccessibilityTextSize: true), .stacked)
+    }
+
     /// Revert-check: dropping the `isShowingLatestWindow` guard in
     /// `MessageSendStatusLinePolicy.newestRowIndex` fails the older-window assertion.
     func testNewestRowIndex_isLastRowOfLatestWindowOnly() {

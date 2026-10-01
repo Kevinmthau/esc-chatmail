@@ -1,11 +1,12 @@
 import Foundation
 
-/// The send-status caption that follows an outgoing bubble's timestamp ("2:41 PM · Sent").
+/// The send-status caption that leads an outgoing bubble's timestamp ("Sent · 2:41 PM").
 ///
 /// It shares the timestamp's line instead of taking a row of its own. The old standalone status
 /// row grew every reply bubble by ~17pt from its first frame and removed itself, unanimated, the
 /// moment Gmail answered, so the bubble shrank and the transcript dropped. On the timestamp line a
-/// status change never changes the row's height, so every transition can simply crossfade.
+/// status change never changes the row's height, so every transition can simply crossfade. The
+/// one exception is accessibility text sizes (`Arrangement.stacked`).
 enum MessageSendStatusLinePolicy {
     enum Line: Equatable {
         case sending
@@ -29,6 +30,25 @@ enum MessageSendStatusLinePolicy {
                 return MessageSendStatusPresentation.sendFailed.label ?? "Send failed"
             }
         }
+    }
+
+    /// Where the caption sits relative to the timestamp.
+    enum Arrangement: Equatable {
+        /// One line, caption first: "Sent · 2:41 PM". First, because the outgoing column is
+        /// trailing-aligned and the line's width follows the caption ("Sending…" is wider than
+        /// "Sent", and no caption is narrower still). With the caption after the timestamp, every
+        /// change slid "2:41 PM" sideways mid-crossfade. Ahead of it, the timestamp keeps its
+        /// trailing edge and only the caption's leading side moves.
+        case inline
+        /// Accessibility text sizes: the caption on its own line above the timestamp. Inline, the
+        /// 280pt column truncated the caption ("Delivery unkn…") and could wrap the timestamp,
+        /// so a receipt arriving or leaving changed the row's height anyway. Stacked, the height
+        /// changes only when a caption appears or leaves, and only at these sizes.
+        case stacked
+    }
+
+    static func arrangement(isAccessibilityTextSize: Bool) -> Arrangement {
+        isAccessibilityTextSize ? .stacked : .inline
     }
 
     /// How long a send must stay pending before "Sending…" shows. Gmail usually accepts a reply
