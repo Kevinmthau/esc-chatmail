@@ -86,6 +86,12 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// configuration, so a test that injects only a `StubURLProtocol` session
     /// still routes sends through the stub, and no caller can end up with a
     /// send path that waits for connectivity by forgetting the second session.
+    /// The derivation copies the **configuration only**: a delegate or
+    /// delegate queue on an injected `session` (certificate pinning, auth
+    /// challenges, task metrics) does not carry over, because a delegate that
+    /// keys state by task identifier could not tell two sessions' tasks apart.
+    /// A caller that injects a delegate-backed `session` must pass a matching
+    /// `sendSession` too, or messages.send silently bypasses that delegate.
     init(
         tokenManager: TokenManagerProtocol,
         retryStrategy: RetryStrategy = NetworkRetryStrategy(),
@@ -124,9 +130,12 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     ///
     /// Every other setting (timeouts, cache policy, and any injected protocol
     /// classes) is copied from `session`; `URLSession.configuration` already
-    /// returns a copy, so the read session is untouched. The trade-off is a
-    /// separate connection pool, so the first send after launch may pay its own
-    /// TLS handshake instead of reusing the sync session's warm connection.
+    /// returns a copy, so the read session is untouched. The delegate is not
+    /// copied (see `init`). The trade-off is a separate connection pool, so
+    /// the first send after launch, or after the pool has gone idle, may pay
+    /// its own TCP+TLS handshake instead of reusing the sync session's warm
+    /// connection; the optimistic bubble hides it, but it adds to the time
+    /// until the bubble reads Delivered.
     private static func createSendSession(basedOn session: URLSession) -> URLSession {
         let configuration = session.configuration
         configuration.waitsForConnectivity = false
