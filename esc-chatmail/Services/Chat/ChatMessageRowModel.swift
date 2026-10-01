@@ -1,18 +1,17 @@
 import Foundation
 import CoreData
-import CryptoKit
 
 struct MessageBubbleLoadSignatureComponents: Equatable {
     let bodyStorageURI: String?
-    private let bodyTextFingerprint: String
-    private let chatPreviewTextFingerprint: String
-    private let cleanedSnippetFingerprint: String
-    private let snippetFingerprint: String
+    private let bodyTextFingerprint: Int?
+    private let chatPreviewTextFingerprint: Int?
+    private let cleanedSnippetFingerprint: Int?
+    private let snippetFingerprint: Int?
     private let hasHTMLSource: Bool
-    private let senderEmailFingerprint: String
-    private let senderDisplayNameFingerprint: String
-    private let senderHeaderDisplayNameFingerprint: String
-    private let senderAvatarURLFingerprint: String
+    private let senderEmailFingerprint: Int?
+    private let senderDisplayNameFingerprint: Int?
+    private let senderHeaderDisplayNameFingerprint: Int?
+    private let senderAvatarURLFingerprint: Int?
     private let attachmentFingerprint: String
 
     init(
@@ -47,17 +46,17 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
     ) -> String {
         [
             bodyStorageURI ?? "",
-            bodyTextFingerprint,
-            chatPreviewTextFingerprint,
-            cleanedSnippetFingerprint,
-            snippetFingerprint,
+            Self.describe(bodyTextFingerprint),
+            Self.describe(chatPreviewTextFingerprint),
+            Self.describe(cleanedSnippetFingerprint),
+            Self.describe(snippetFingerprint),
             String(hasHTMLSource),
             "source:\(htmlSourceSignature)",
             "contacts:\(contactRefreshToken)",
-            "senderEmail:\(senderEmailFingerprint)",
-            "senderName:\(senderDisplayNameFingerprint)",
-            "senderHeaderName:\(senderHeaderDisplayNameFingerprint)",
-            "senderAvatar:\(senderAvatarURLFingerprint)",
+            "senderEmail:\(Self.describe(senderEmailFingerprint))",
+            "senderName:\(Self.describe(senderDisplayNameFingerprint))",
+            "senderHeaderName:\(Self.describe(senderHeaderDisplayNameFingerprint))",
+            "senderAvatar:\(Self.describe(senderAvatarURLFingerprint))",
             "attachments:\(attachmentFingerprint)"
         ].joined(separator: "|")
     }
@@ -95,11 +94,28 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         )
     }
 
-    private static func contentFingerprint(for text: String?) -> String {
-        guard let text else { return "nil" }
-        return SHA256.hash(data: Data(text.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+    /// An in-process fingerprint of `text`'s UTF-8 bytes; nil for nil, so a
+    /// nil field and an empty one still differ.
+    ///
+    /// The signature is only ever compared within one process (the bubble's
+    /// `.task(id:)` and `MessageBubbleViewModel`'s applied/requested
+    /// signatures); it is never persisted or used as a cache key, so a
+    /// per-process-seeded `Hasher` is enough. It replaced a SHA-256 per field
+    /// hex-encoded with one `String(format:)` per byte — eight digests and
+    /// about 250 format calls per mapped row, multiplied across every row of
+    /// every window re-map on the main actor. The bytes are hashed rather than
+    /// the `String`, whose hash folds canonically equivalent spellings
+    /// together, so exactly the byte-level changes that refreshed a bubble
+    /// before still do (bar a 64-bit collision).
+    private static func contentFingerprint(for text: String?) -> Int? {
+        guard var text else { return nil }
+        var hasher = Hasher()
+        text.withUTF8 { hasher.combine(bytes: UnsafeRawBufferPointer($0)) }
+        return hasher.finalize()
+    }
+
+    private static func describe(_ fingerprint: Int?) -> String {
+        fingerprint.map(String.init) ?? "nil"
     }
 }
 
