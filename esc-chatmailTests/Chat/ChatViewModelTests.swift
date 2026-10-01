@@ -832,7 +832,7 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(ConversationSnapshot(from: conversation).inboxUnreadCount, 1)
     }
 
-    func testOpenEmailReaderFromBubbleAccessoryCreatesReaderRoute() throws {
+    func testOpenEmailReaderFromTextBubbleCreatesReaderRoute() throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder()
@@ -854,14 +854,14 @@ final class ChatViewModelTests: XCTestCase {
 
         viewModel.openEmailReader(
             for: message.objectID,
-            source: .bubbleAccessory,
+            source: .textBubble,
             initialMode: .original
         )
 
         let route = try XCTUnwrap(viewModel.emailReaderRoute)
         XCTAssertEqual(route.messageObjectID, message.objectID)
         XCTAssertEqual(route.conversationObjectID, conversation.objectID)
-        XCTAssertEqual(route.source, .bubbleAccessory)
+        XCTAssertEqual(route.source, .textBubble)
         XCTAssertEqual(route.initialMode, .original)
     }
 
@@ -948,7 +948,7 @@ final class ChatViewModelTests: XCTestCase {
         )
         viewModel.openEmailReader(
             for: message.objectID,
-            source: .bubbleAccessory,
+            source: .textBubble,
             initialMode: .original
         )
 

@@ -18,7 +18,7 @@ struct MessageContentView: View {
     let onOpenFullMessage: (EmailReaderOpenSource) -> Void
 
     var body: some View {
-        if MessageOriginalEmailOpenPolicy.bodyTapOpensOriginal(showHTMLPreview: showHTMLPreview) {
+        if showHTMLPreview {
             htmlPreviewContent
                 .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
         } else {
@@ -59,14 +59,14 @@ struct MessageContentView: View {
                 textAndSharedDocumentContent(text: text)
             } else if !sharedDocumentLinks.isEmpty {
                 sharedDocumentCards
-            } else if hasHTMLSource {
-                // No text content but HTML exists - show a tappable bubble to open full email
-                openEmailBubble
             } else if message.attachments.isEmpty {
-                // No content and no attachments - show placeholder
+                // No content and no attachments - show a placeholder that opens the original on tap.
+                // An HTML body with no extractable text lands here too, deliberately: no
+                // "View original" bubble.
                 noContentPlaceholder
             }
-            // If message has attachments but no text, show nothing (attachments are the content)
+            // If message has attachments but no text, show nothing (attachments are the content;
+            // any original stays reachable from the long-press menu)
         }
     }
 
@@ -115,55 +115,59 @@ struct MessageContentView: View {
         let compactCharLimit = style.textLineLimit == nil ? nil : 800
         let (displayText, _) = truncatedText(text, lineLimit: style.textLineLimit, charLimit: compactCharLimit)
 
-        VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
-            Text(displayText)
-                .padding(style.bubblePadding)
-                .background(style.bubbleBackground(isFromMe: message.isFromMe))
-                .foregroundColor(style.textColor(isFromMe: message.isFromMe))
-                .cornerRadius(style.bubbleCornerRadius)
-                .textSelection(.enabled)
-
-            if MessageOriginalEmailOpenPolicy.showsExplicitOriginalAffordance(
-                hasOriginalEmailContent: message.hasOriginalEmailContent,
-                hasVisibleText: !displayText.isEmpty,
-                showHTMLPreview: showHTMLPreview
-            ) {
-                viewOriginalAccessory
+        if MessageOriginalEmailOpenPolicy.bodyTapOpensOriginal(
+            showHTMLPreview: showHTMLPreview,
+            hasOriginalEmailContent: message.hasOriginalEmailContent
+        ) {
+            // The bubble is the tap target; there is deliberately no separate "View original"
+            // control. Not `.textSelection(.enabled)`: the bubble is a button, and long-press
+            // belongs to the row's message context menu.
+            Button {
+                openOriginalEmail(source: .textBubble)
+            } label: {
+                textBubbleBody(displayText)
             }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the full original email")
+        } else {
+            textBubbleBody(displayText)
+                .textSelection(.enabled)
         }
     }
 
+    private func textBubbleBody(_ displayText: String) -> some View {
+        Text(displayText)
+            .padding(style.bubblePadding)
+            .background(style.bubbleBackground(isFromMe: message.isFromMe))
+            .foregroundColor(style.textColor(isFromMe: message.isFromMe))
+            .cornerRadius(style.bubbleCornerRadius)
+    }
+
+    /// The whole bubble (lead-in note and forwarded card) opens the original, like a text bubble.
     @ViewBuilder
     private func forwardedTextContent(for content: ForwardedMessageDisplayContent) -> some View {
-        VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
+        Button {
+            openOriginalEmail(source: .previewCard)
+        } label: {
             VStack(alignment: .leading, spacing: 10) {
                 if let leadInText = resolvedLeadInText(from: content) {
                     Text(leadInText)
                         .foregroundColor(style.textColor(isFromMe: message.isFromMe))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
                 }
 
-                Button {
-                    openOriginalEmail(source: .previewCard)
-                } label: {
-                    ForwardedMessageCard(
-                        content: content,
-                        subjectFallback: message.forwardedDisplaySubject,
-                        isFromMe: message.isFromMe
-                    )
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Opens the full original email")
+                ForwardedMessageCard(
+                    content: content,
+                    subjectFallback: message.forwardedDisplaySubject,
+                    isFromMe: message.isFromMe
+                )
             }
             .padding(style.bubblePadding)
             .background(style.bubbleBackground(isFromMe: message.isFromMe))
             .cornerRadius(style.bubbleCornerRadius)
-
-            if message.hasOriginalEmailContent {
-                viewOriginalAccessory
-            }
         }
+        .buttonStyle(.plain)
+        .accessibilityHint("Opens the full original email")
     }
 
     /// Truncates text at the specified limits and adds ellipsis if truncated
@@ -204,42 +208,6 @@ struct MessageContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityHint("Opens the full original email")
-    }
-
-    private var openEmailBubble: some View {
-        Button {
-            openOriginalEmail(source: .bubbleAccessory)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "doc.richtext")
-                    .font(.caption)
-                Text("View original")
-                    .font(.caption)
-                    .fontWeight(.medium)
-            }
-            .foregroundColor(.blue)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.blue.opacity(0.1))
-            .cornerRadius(8)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var viewOriginalAccessory: some View {
-        Button {
-            openOriginalEmail(source: .bubbleAccessory)
-        } label: {
-            SwiftUI.Label("View original", systemImage: "doc.richtext")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.blue)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.blue.opacity(0.10))
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("View original email")
     }
 
     private func openOriginalEmail(source: EmailReaderOpenSource) {
@@ -295,8 +263,12 @@ struct MessageContentView: View {
 }
 
 enum MessageOriginalEmailOpenPolicy {
-    static func bodyTapOpensOriginal(showHTMLPreview: Bool) -> Bool {
-        showHTMLPreview
+    /// Whether tapping the message body opens the original email. Tapping the message is the
+    /// only inline way in — there is deliberately no "View original" control beside the bubble
+    /// (the long-press menu keeps "View original email", behind the same content gate). Rich
+    /// previews always open; a text bubble opens whenever there is original content behind it.
+    static func bodyTapOpensOriginal(showHTMLPreview: Bool, hasOriginalEmailContent: Bool) -> Bool {
+        showHTMLPreview || hasOriginalEmailContent
     }
 
     static func hasOriginalEmailContent(
@@ -307,14 +279,6 @@ enum MessageOriginalEmailOpenPolicy {
         hasHTMLSource ||
             nonEmptyText(bodyStorageURI) != nil ||
             nonEmptyText(bodyText) != nil
-    }
-
-    static func showsExplicitOriginalAffordance(
-        hasOriginalEmailContent: Bool,
-        hasVisibleText: Bool,
-        showHTMLPreview: Bool
-    ) -> Bool {
-        hasOriginalEmailContent && hasVisibleText && !showHTMLPreview
     }
 
     private static func nonEmptyText(_ text: String?) -> String? {

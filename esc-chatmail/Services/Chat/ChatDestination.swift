@@ -45,7 +45,7 @@ enum EmailReaderMode: String, Hashable {
 }
 
 enum EmailReaderOpenSource: String, Hashable {
-    case bubbleAccessory
+    case textBubble
     case contextMenu
     case previewCard
     case debugOrFallback
