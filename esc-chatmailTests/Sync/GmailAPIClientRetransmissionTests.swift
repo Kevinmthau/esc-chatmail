@@ -9,6 +9,39 @@ private actor GmailSendAdmissionProbe {
     }
 }
 
+/// Stands in for the client's read session: counts requests and refuses each
+/// one with a non-retryable error, so a send routed here instead of through
+/// `sendSession` fails visibly. Static state is lock-guarded, like
+/// `StubURLProtocol`.
+private final class ReadSessionProbeURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var _requestCount = 0
+
+    static var requestCount: Int {
+        lock.withLock { _requestCount }
+    }
+
+    static func reset() {
+        lock.withLock { _requestCount = 0 }
+    }
+
+    static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ReadSessionProbeURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.withLock { Self._requestCount += 1 }
+        client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+    }
+
+    override func stopLoading() {}
+}
+
 private final class ProbedNetworkRetryStrategy: RetryStrategy, @unchecked Sendable {
     let maxRetries: Int
     let initialDelay: TimeInterval
@@ -339,6 +372,93 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         }
 
         XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
+    // MARK: - Offline sends fail fast and definitely
+
+    // Revert-check: fails if `GmailAPIClient.createSendSession(basedOn:)` stops
+    // turning `waitsForConnectivity` off — an offline send would again wait out
+    // the 60 s resource timeout and end as an ambiguous `NSURLErrorTimedOut`.
+    func testSendSession_productionClient_doesNotWaitForConnectivityButKeepsReadSettings() {
+        let productionClient = GmailAPIClient(tokenManager: MockTokenManager())
+        let readConfiguration = productionClient.session.configuration
+        let sendConfiguration = productionClient.sendSession.configuration
+
+        XCTAssertFalse(productionClient.sendSession === productionClient.session)
+        XCTAssertFalse(sendConfiguration.waitsForConnectivity)
+        XCTAssertTrue(
+            readConfiguration.waitsForConnectivity,
+            "Reads and sync keep riding out short connectivity gaps"
+        )
+        XCTAssertEqual(sendConfiguration.timeoutIntervalForRequest, readConfiguration.timeoutIntervalForRequest)
+        XCTAssertEqual(sendConfiguration.timeoutIntervalForResource, readConfiguration.timeoutIntervalForResource)
+        XCTAssertEqual(sendConfiguration.requestCachePolicy, readConfiguration.requestCachePolicy)
+    }
+
+    // Revert-check: fails if `GmailAPIClient.sendMessage` stops passing
+    // `session: sendSession` to `performRequestWithRetry` — the send would ride
+    // the read session (which waits for connectivity in production), here the
+    // refusing probe.
+    func testSendMessage_injectedSendSession_carriesSendWhileReadsStayOnReadSession() async throws {
+        ReadSessionProbeURLProtocol.reset()
+        defer { ReadSessionProbeURLProtocol.reset() }
+        client = GmailAPIClient(
+            tokenManager: tokenManager,
+            retryStrategy: NetworkRetryStrategy(maxRetries: 3, initialDelay: 0.01, maxDelay: 0.02),
+            session: ReadSessionProbeURLProtocol.makeSession(),
+            sendSession: StubURLProtocol.makeSession()
+        )
+        StubURLProtocol.script = [.data(200, Self.sendResponseBody)]
+
+        let response = try await client.sendMessage(rawMessage: "raw")
+
+        XCTAssertEqual(response.id, "sent-1")
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+        XCTAssertEqual(ReadSessionProbeURLProtocol.requestCount, 0)
+
+        _ = try? await client.getMessage(id: "m1")
+        XCTAssertEqual(ReadSessionProbeURLProtocol.requestCount, 1, "Reads must stay on the read session")
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
+    // Revert-check: fails if `ConnectionErrorDetector.isPreTransmissionError` stops
+    // listing `NSURLErrorNotConnectedToInternet` — the offline failure would be
+    // rethrown as `ambiguousDelivery` after one attempt ("Delivery unknown").
+    // Also fails if the production retry budget for a pre-transmission failure
+    // (`NetworkConfig.maxRetries` / `initialRetryDelay`) grows past a few seconds.
+    // HONEST SCOPE: StubURLProtocol answers at once, so this cannot observe
+    // URLSession waiting for connectivity; the session-configuration test above
+    // pins that half.
+    func testSendMessage_offlineAtDefaultRetryStrategy_failsDefinitelyWithinSeconds() async {
+        client = GmailAPIClient(
+            tokenManager: tokenManager,
+            session: StubURLProtocol.makeSession()
+        )
+        StubURLProtocol.script = [.error(URLError(.notConnectedToInternet))]
+
+        let start = Date()
+        do {
+            _ = try await client.sendMessage(rawMessage: "raw")
+            XCTFail("Expected a definite offline failure")
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            XCTFail("An offline send never left the device; it must not be ambiguous: \(underlying)")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .notConnectedToInternet)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(
+            StubURLProtocol.requestCount,
+            NetworkConfig.maxRetries,
+            "A never-transmitted send keeps its bounded pre-transmission retries"
+        )
+        XCTAssertLessThan(
+            elapsed,
+            10,
+            "Offline must fail in seconds, far below the \(NetworkConfig.resourceTimeout) s resource timeout"
+        )
     }
 
     func testSendMessage_unauthorized_refreshesTokenAndRetries() async throws {

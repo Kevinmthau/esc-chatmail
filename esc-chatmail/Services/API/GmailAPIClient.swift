@@ -69,6 +69,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     @MainActor static let shared = GmailAPIClient(tokenManager: TokenManager.shared)
 
     let session: URLSession
+    /// Carries only messages.send (`sendMessage`); every read, sync, and
+    /// label request stays on `session`. See `createSendSession(basedOn:)`.
+    let sendSession: URLSession
     let tokenManager: TokenManagerProtocol
     let retryStrategy: RetryStrategy
 
@@ -78,14 +81,22 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     // MARK: - Initialization
 
     /// Initializer with injectable dependencies.
+    ///
+    /// When `sendSession` is nil it is derived from the resolved `session`'s
+    /// configuration, so a test that injects only a `StubURLProtocol` session
+    /// still routes sends through the stub, and no caller can end up with a
+    /// send path that waits for connectivity by forgetting the second session.
     init(
         tokenManager: TokenManagerProtocol,
         retryStrategy: RetryStrategy = NetworkRetryStrategy(),
-        session: URLSession? = nil
+        session: URLSession? = nil,
+        sendSession: URLSession? = nil
     ) {
         self.tokenManager = tokenManager
         self.retryStrategy = retryStrategy
-        self.session = session ?? Self.createSession()
+        let resolvedSession = session ?? Self.createSession()
+        self.session = resolvedSession
+        self.sendSession = sendSession ?? Self.createSendSession(basedOn: resolvedSession)
     }
 
     private static func createSession() -> URLSession {
@@ -94,6 +105,31 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         configuration.timeoutIntervalForResource = NetworkConfig.resourceTimeout
         configuration.waitsForConnectivity = true
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }
+
+    /// messages.send must fail fast when there is no network path. With
+    /// `waitsForConnectivity = true` an offline send sat in URLSession until
+    /// the 60 s resource timeout and then surfaced `NSURLErrorTimedOut`, which
+    /// is (correctly) ambiguous for a non-idempotent request — so a message
+    /// that never left the device ended as "Delivery unknown" with no resend.
+    /// Without the wait, URLSession fails immediately with
+    /// `NSURLErrorNotConnectedToInternet`, which
+    /// `ConnectionErrorDetector.isPreTransmissionError` already proves was
+    /// never transmitted: the retry engine gives it its bounded
+    /// pre-transmission retries (about 3 s of backoff at the default
+    /// strategy) and the orchestrator then retains the message as a definite
+    /// "Not sent" with Edit and resend. No error classification changes here;
+    /// timeouts and dropped connections stay ambiguous.
+    ///
+    /// Every other setting (timeouts, cache policy, and any injected protocol
+    /// classes) is copied from `session`; `URLSession.configuration` already
+    /// returns a copy, so the read session is untouched. The trade-off is a
+    /// separate connection pool, so the first send after launch may pay its own
+    /// TLS handshake instead of reusing the sync session's warm connection.
+    private static func createSendSession(basedOn session: URLSession) -> URLSession {
+        let configuration = session.configuration
+        configuration.waitsForConnectivity = false
         return URLSession(configuration: configuration)
     }
 
@@ -177,14 +213,19 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// connection), because the server may have already processed it. Retries are still
     /// performed when the failure proves the request was rejected or never delivered
     /// (401 after token refresh, 429, DNS/connect failures).
+    ///
+    /// `session` overrides the transport for every attempt; nil means the
+    /// client's `session`. Only `sendMessage` passes one (`sendSession`).
     nonisolated func performRequestWithRetry<T: Decodable>(
         _ request: URLRequest,
         maxRetries: Int? = nil,
-        allowsRetransmission: Bool = true
+        allowsRetransmission: Bool = true,
+        session requestSession: URLSession? = nil
     ) async throws -> T {
         try await performRetryingRequest(
             request,
             maxRetries: maxRetries,
+            session: requestSession,
             behavior: GmailRetryPathBehavior(
                 allowsRetransmission: allowsRetransmission,
                 thrownAPIErrorsAbortImmediately: false,
@@ -266,12 +307,18 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// returns the decoded value or throws the path's error mapping — this is
     /// where the intentional 404 divergence lives (`notFound` for messages,
     /// `historyIdExpired` for history).
+    ///
+    /// Every attempt, including a retransmission after a pre-transmission
+    /// failure, uses the same transport: `requestSession` when given,
+    /// otherwise the client's `session`.
     nonisolated func performRetryingRequest<T>(
         _ request: URLRequest,
         maxRetries: Int? = nil,
+        session requestSession: URLSession? = nil,
         behavior: GmailRetryPathBehavior,
         handleStatus: (Int?, Data) async throws -> T
     ) async throws -> T {
+        let transport = requestSession ?? session
         let retries = maxRetries ?? retryStrategy.maxRetries
         let startTime = Date()
         var lastError: Error?
@@ -299,7 +346,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             }
 
             do {
-                let (data, response) = try await session.data(for: currentRequest)
+                let (data, response) = try await transport.data(for: currentRequest)
                 guard let httpResponse = response as? HTTPURLResponse else {
                     return try await handleStatus(nil, data)
                 }

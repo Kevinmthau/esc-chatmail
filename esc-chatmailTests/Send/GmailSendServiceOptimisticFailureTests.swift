@@ -467,6 +467,95 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(coldStartAPIClient.sendMessageCallCount, 0)
     }
 
+    // Revert-check: fails if `ConnectionErrorDetector.isPreTransmissionError` stops
+    // listing `NSURLErrorNotConnectedToInternet`, or if `GmailSendService.sendMessage`
+    // maps the raw offline URLError onto `SendError.ambiguousDelivery` — either way
+    // the orchestrator records "Delivery unknown" (recordAmbiguousRemoteSend) and the
+    // bubble loses Edit and resend.
+    // HONEST SCOPE: StubURLProtocol cannot reproduce URLSession waiting for
+    // connectivity, so this cannot fail if `GmailAPIClient.sendSession` waited
+    // again; `GmailAPIClientRetransmissionTests` pins that configuration and the
+    // send-session routing.
+    func testProductionOfflineSend_notConnectedToInternet_retainsMessageAsNotSent() async throws {
+        StubURLProtocol.reset()
+        defer { StubURLProtocol.reset() }
+        StubURLProtocol.script = [.error(URLError(.notConnectedToInternet))]
+
+        let authSession = AuthSession()
+        authSession.userEmail = "sender@example.com"
+        let productionAPIClient = GmailAPIClient(
+            tokenManager: MockTokenManager(),
+            retryStrategy: NetworkRetryStrategy(
+                maxRetries: 3,
+                initialDelay: 0.01,
+                maxDelay: 0.02
+            ),
+            session: StubURLProtocol.makeSession()
+        )
+        let productionSendService = GmailSendService(
+            viewContext: viewContext,
+            apiClient: productionAPIClient,
+            authSession: authSession
+        )
+        let recipient = "offline-send@example.com"
+        let handle = try await productionSendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Written in airplane mode",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        try saveViewContext()
+
+        var failureIDs: [String] = []
+        var ambiguousIDs: [String] = []
+        let sendTask = ComposeSendOrchestrator(
+            sendService: productionSendService,
+            syncPerformer: NoOpIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: .init(
+                recipientEmails: [recipient],
+                body: "Written in airplane mode",
+                htmlBody: nil,
+                subject: "Offline",
+                attachmentInfos: [],
+                inlineAttachmentInfos: [],
+                replyMetadata: nil
+            ),
+            attachmentReferences: [],
+            optimisticMessageID: handle.optimisticMessageID,
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: { failure in failureIDs.append(failure.optimisticMessageID) },
+                onAmbiguous: { ambiguous in ambiguousIDs.append(ambiguous.optimisticMessageID) }
+            )
+        )
+        // The barrier was crossed, so the composer handed off its content: the
+        // failure must surface on the retained bubble, not as a restored draft.
+        try await sendTask.waitForTransmissionAdmission()
+        await sendTask.task.value
+
+        XCTAssertEqual(
+            StubURLProtocol.requestCount,
+            3,
+            "A never-transmitted send keeps its bounded pre-transmission retries"
+        )
+        XCTAssertEqual(failureIDs, [handle.optimisticMessageID])
+        XCTAssertTrue(ambiguousIDs.isEmpty, "Nothing left the device; delivery is not unknown")
+        let retained = try XCTUnwrap(
+            productionSendService.fetchMessageSync(byID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(retained.bodyText, "Written in airplane mode")
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: retained), .notSent)
+        XCTAssertEqual(
+            try optimisticMutationRecord(
+                in: viewContext,
+                id: handle.optimisticMessageID
+            )?.remoteCommittedMessageId,
+            OutboundSendRemoteState.notSentMessageID
+        )
+    }
+
     func testInFlightSend_coldRecoveryConvertsDurableAdmissionToDeliveryUnknown() async throws {
         let recipient = "in-flight-crash-window@example.com"
         let handle = try await sendService.createOptimisticMessage(
