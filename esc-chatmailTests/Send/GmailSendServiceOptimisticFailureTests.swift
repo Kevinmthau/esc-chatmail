@@ -1816,6 +1816,76 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(archivedConversation.displayName, "Archived Thread")
     }
 
+    func testRollbackBeforeTransmission_keepsArchiveTheUserMadeDuringPreflight() async throws {
+        let context: NSManagedObjectContext = viewContext
+        let fixture = try await makePreflightReplyFixture(attachmentID: "local_archive_during_preflight")
+        let conversation = try XCTUnwrap(
+            sendService.fetchMessageSync(byID: fixture.optimisticMessageID)?.conversation
+        )
+        XCTAssertNil(conversation.archivedAt)
+        // The chat composer released at optimistic persistence, so the user
+        // can archive the chat (menu or list) while the reply is in preflight.
+        let userArchivedAt = Date()
+        conversation.archivedAt = userArchivedAt
+        conversation.hasInbox = false
+        try saveViewContext()
+
+        // A pre-barrier cancellation (background expiry, say) rolls back.
+        let outcome = sendService.rollbackOptimisticMessageBeforeTransmission(
+            byID: fixture.optimisticMessageID,
+            fallbackAttachmentReferences: [fixture.reference]
+        )
+
+        XCTAssertEqual(outcome, .rolledBack)
+        XCTAssertNil(sendService.fetchMessageSync(byID: fixture.optimisticMessageID))
+        // Revert-check: dropping `&& archiveStateIsOptimisticOnly` from
+        // `restoreArchiveState:` in `finalizeOptimisticFailureCleanup` writes
+        // the pre-send `archivedAt = nil` back, and the chat reappears in the
+        // inbox list.
+        XCTAssertEqual(conversation.archivedAt, userArchivedAt)
+        XCTAssertFalse(conversation.hasInbox)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+    }
+
+    func testPreBarrierRollback_whenDraftCannotBeWritten_retainsNotSentAndResolvesAdmission() async throws {
+        let context: NSManagedObjectContext = viewContext
+        let fixture = try await makePreflightReplyFixture(attachmentID: "local_undecodable_envelope")
+        let record = try XCTUnwrap(optimisticMutationRecord(in: context, id: fixture.optimisticMessageID))
+        record.replyEnvelopeData = Data("not an envelope".utf8)
+        try saveViewContext()
+        // Cancellation always takes the rollback path, whatever the request's
+        // disposition.
+        let failingService = PreBarrierFailingSendService(
+            base: sendService,
+            failure: .immediately(CancellationError())
+        )
+
+        let operation = ComposeSendOrchestrator(
+            sendService: failingService,
+            syncPerformer: NoOpIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: fixture.input,
+            attachmentReferences: [fixture.reference],
+            optimisticMessageID: fixture.optimisticMessageID,
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+
+        // The rollback could not hand the content back through a draft, so
+        // it kept the bubble. Admission must not fail, or the chat composer
+        // would restore the same text the "Not sent" bubble still shows.
+        // Revert-check: making `handleDefiniteFailure` call
+        // `admission.fail(error)` regardless of the rollback's
+        // `PreTransmissionRollbackOutcome` throws here.
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let retained = try XCTUnwrap(sendService.fetchMessageSync(byID: fixture.optimisticMessageID))
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: retained), .notSent)
+        XCTAssertNil(try ChatReplyDraftStore(context: context).fetch(conversationID: fixture.conversationID))
+        XCTAssertEqual(fixture.attachment.message?.id, fixture.optimisticMessageID)
+        XCTAssertNil(fixture.attachment.replyDraft)
+    }
+
     private struct PreflightReplyFixture {
         let conversationID: UUID
         let attachment: Attachment
@@ -2213,7 +2283,7 @@ private final class InFlightComposeSendService: ComposeSendServicing, @unchecked
     func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
-    ) {
+    ) -> PreTransmissionRollbackOutcome {
         base.rollbackOptimisticMessageBeforeTransmission(
             byID: messageID,
             fallbackAttachmentReferences: fallbackAttachmentReferences
@@ -2246,6 +2316,9 @@ private final class InFlightComposeSendService: ComposeSendServicing, @unchecked
 /// Forwards every durable-state call to a real `GmailSendService` but fails
 /// `sendReply` before ever invoking `beforeTransmission`, the way a failed
 /// token refresh or attachment read does.
+///
+/// `@unchecked Sendable`: the call count is guarded by `lock`; `base` and
+/// `failure` are immutable.
 private final class PreBarrierFailingSendService: ComposeSendServicing, @unchecked Sendable {
     enum Failure {
         case immediately(Error)
@@ -2357,7 +2430,7 @@ private final class PreBarrierFailingSendService: ComposeSendServicing, @uncheck
     func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
-    ) {
+    ) -> PreTransmissionRollbackOutcome {
         base.rollbackOptimisticMessageBeforeTransmission(
             byID: messageID,
             fallbackAttachmentReferences: fallbackAttachmentReferences

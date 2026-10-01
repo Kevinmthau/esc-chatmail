@@ -183,6 +183,59 @@ final class ChatReplyDraftStoreTests: XCTestCase {
         XCTAssertTrue(try context.fetch(OutboundSendMutationRecord.fetchRequest()).isEmpty)
     }
 
+    func testPreflightRollback_mergesIntoNewerDraftInsteadOfReplacingIt() async throws {
+        try context.obtainPermanentIDs(for: [conversation])
+        let id = conversation.id
+        let service = GmailSendService(viewContext: context)
+        let handle = try await service.createOptimisticMessage(
+            to: metadata.recipientEmails, body: "Rolled back reply", subject: metadata.subject,
+            threadId: metadata.threadId,
+            optimisticConversation: .existingConversation(.init(objectID: conversation.objectID)), replyMetadata: metadata
+        )
+        // The chat composer released at optimistic persistence, and the
+        // user's next reply was autosaved into the same slot.
+        let newerAttachment = AttachmentBuilder().withId("local_newer_draft").withFilename("next.txt").build(in: context)
+        try store.save(.init(text: "Next reply", targetURI: nil, recoveredEnvelope: nil),
+                       attachments: [newerAttachment], conversationID: id)
+
+        let outcome = service.rollbackOptimisticMessageBeforeTransmission(
+            byID: handle.optimisticMessageID,
+            fallbackAttachmentReferences: []
+        )
+        context.reset()
+
+        XCTAssertEqual(outcome, .rolledBack)
+        let (draft, attachments) = try XCTUnwrap(store.load(conversationID: id))
+        // Revert-check: going back to `ChatReplyDraftStore.save` in
+        // `rollbackOptimisticMessageBeforeTransmission` replaces "Next reply"
+        // and drops its attachment.
+        XCTAssertEqual(draft.text, "Rolled back reply\nNext reply")
+        XCTAssertEqual(attachments.map(\.filename), ["next.txt"])
+        // The newer draft had no destination, so the rolled-back reply's
+        // recovered envelope still addresses the merged text.
+        XCTAssertEqual(draft.recoveredEnvelope?.inReplyTo, metadata.inReplyTo)
+    }
+
+    func testSaveMergingUnsentReply_isIdempotentForAnAlreadyMergedReply() throws {
+        let id = conversation.id
+        let newer = AttachmentBuilder().withId("local_merge_newer").withFilename("newer.txt").build(in: context)
+        let unsent = AttachmentBuilder().withId("local_merge_unsent").withFilename("unsent.txt").build(in: context)
+        try store.save(.init(text: "Next reply", targetURI: nil, recoveredEnvelope: nil),
+                       attachments: [newer], conversationID: id)
+        let reply = StoredChatReplyDraft(text: "Unsent reply", targetURI: nil, recoveredEnvelope: nil)
+
+        try store.saveMergingUnsentReply(reply, attachments: [unsent], conversationID: id)
+        // A rollback merges first; the off-screen view model then hands the
+        // same snapshot over.
+        // Revert-check: dropping the `hasPrefix` check from
+        // `ChatReplyRestorePolicy.mergedStoredText` writes the reply twice.
+        try store.saveMergingUnsentReply(reply, attachments: [unsent], conversationID: id)
+
+        let (draft, attachments) = try XCTUnwrap(store.load(conversationID: id))
+        XCTAssertEqual(draft.text, "Unsent reply\nNext reply")
+        XCTAssertEqual(Set(attachments.map(\.filename)), ["newer.txt", "unsent.txt"])
+    }
+
     func testDeliveryUnknownCannotBeMovedToResendDraft() async throws {
         try context.obtainPermanentIDs(for: [conversation])
         let service = GmailSendService(viewContext: context)

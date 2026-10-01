@@ -47,10 +47,10 @@ protocol ComposeSendServicing: AnyObject {
         optimisticMessageID: String,
         result: GmailSendService.SendResult
     ) throws -> Bool
-    @MainActor func rollbackOptimisticMessageBeforeTransmission(
+    @MainActor @discardableResult func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
-    )
+    ) -> PreTransmissionRollbackOutcome
     @MainActor func retainDefinitelyUnsentOptimisticMessage(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
@@ -440,9 +440,9 @@ struct ComposeSendOrchestrator {
                         attachmentReferences: attachmentReferences,
                         optimisticMessageID: optimisticMessageID,
                         reconciliationHooks: reconciliationHooks,
+                        admission: admission,
                         error: error
                     )
-                    await admission.fail(error)
                 }
             } catch is CancellationError {
                 if await transmissionBarrierState.isPersisted {
@@ -463,9 +463,9 @@ struct ComposeSendOrchestrator {
                         attachmentReferences: attachmentReferences,
                         optimisticMessageID: optimisticMessageID,
                         reconciliationHooks: reconciliationHooks,
+                        admission: admission,
                         error: CancellationError()
                     )
-                    await admission.fail(CancellationError())
                 }
             } catch {
                 if await transmissionBarrierState.isPersisted {
@@ -504,9 +504,9 @@ struct ComposeSendOrchestrator {
                         attachmentReferences: attachmentReferences,
                         optimisticMessageID: optimisticMessageID,
                         reconciliationHooks: reconciliationHooks,
+                        admission: admission,
                         error: error
                     )
-                    await admission.fail(error)
                 }
             }
             // Covers failures before the send worker existed; idempotent.
@@ -549,26 +549,47 @@ struct ComposeSendOrchestrator {
         }
     }
 
+    /// Rolls back a pre-barrier failure and resolves admission to match what
+    /// the rollback did. A rollback that had to retain the row as "Not sent"
+    /// (`PreTransmissionRollbackOutcome.retainedAsNotSent`) succeeds
+    /// admission: the bubble owns the content, so the caller must not also
+    /// get it back.
     private func handleDefiniteFailure(
         sendService: ComposeSendServicing,
         attachmentReferences: [LocalAttachmentReference],
         optimisticMessageID: String,
         reconciliationHooks: OutboundMessageReconciliationHooks,
+        admission: ComposeSendTransmissionAdmission,
         error: Error
     ) async {
-        await MainActor.run {
-            sendService.rollbackOptimisticMessageBeforeTransmission(
+        let outcome = await MainActor.run {
+            let outcome = sendService.rollbackOptimisticMessageBeforeTransmission(
                 byID: optimisticMessageID,
                 fallbackAttachmentReferences: attachmentReferences
             )
+            // A cancellation's description is not a reason the user can act
+            // on; the bubble's generic "not sent" text reads better.
+            if outcome == .retainedAsNotSent, !(error is CancellationError) {
+                sendService.recordSendFailureReason(
+                    optimisticMessageID: optimisticMessageID,
+                    reason: error.localizedDescription
+                )
+            }
             reconciliationHooks.onFailure?(
                 .init(
                     optimisticMessageID: optimisticMessageID,
                     errorDescription: error.localizedDescription
                 )
             )
+            return outcome
         }
         Log.error("Background send failed", category: .message, error: error)
+        switch outcome {
+        case .rolledBack:
+            await admission.fail(error)
+        case .retainedAsNotSent:
+            await admission.succeed()
+        }
     }
 
     private func handleRetainedDefiniteFailure(

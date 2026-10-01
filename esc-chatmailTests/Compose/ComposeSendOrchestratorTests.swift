@@ -870,6 +870,94 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         }
     }
 
+    func testExecuteInBackground_sameConversationSecondReplyWaitsForFirstToFinish() async throws {
+        let sendService = MockComposeSendService()
+        let firstGate = TransmissionTestGate()
+        sendService.postAdmissionGatesByBody = ["first reply": firstGate]
+        let sequencer = OutboundConversationSendSequencer()
+        let conversation = ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/fifo-reply-order")!
+        )
+        let metadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["to@example.com"],
+            fromEmail: "me@example.com",
+            fromName: "Me",
+            subject: "Re: Plans",
+            threadId: "plans-thread",
+            inReplyTo: "<plans@example.com>",
+            references: ["<plans@example.com>"],
+            originalMessage: nil
+        )
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        )
+
+        let first = orchestrator.executeInBackground(
+            input: makeInput(body: "first reply", replyMetadata: metadata),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-reply-first",
+            preTransmissionFailureDisposition: .retainAsNotSent,
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        let second = orchestrator.executeInBackground(
+            input: makeInput(body: "second reply", replyMetadata: metadata),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-reply-second",
+            preTransmissionFailureDisposition: .retainAsNotSent,
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        await firstGate.waitUntilEntered()
+        await waitUntil { sequencer.suspendedTurnCount == 1 }
+
+        // Chat replies take the `sendReply` branch, which has its own wait.
+        // Revert-check: deleting `try await sendOrderTurn?.waitUntilFront()`
+        // from the `sendReply` branch of `ComposeSendOrchestrator` admits the
+        // second reply while the first is still uploading.
+        XCTAssertEqual(sendService.snapshot.recordRemoteSendAdmissionCalls, ["fifo-reply-first"])
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 1)
+
+        await firstGate.open()
+        await first.task.value
+        try await second.waitForTransmissionAdmission()
+        await second.task.value
+
+        XCTAssertEqual(
+            sendService.snapshot.recordRemoteSendAdmissionCalls,
+            ["fifo-reply-first", "fifo-reply-second"]
+        )
+        XCTAssertEqual(sendService.snapshot.sendReplyCalls, 2)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 2)
+    }
+
+    func testExecuteInBackground_rollbackThatRetainsAsNotSentResolvesAdmission() async throws {
+        let sendService = MockComposeSendService()
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("attachment unreadable")
+        // The rollback could not write its `ChatReplyDraft`, so it kept the
+        // row as "Not sent" instead.
+        sendService.rollbackOutcome = .retainedAsNotSent
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "rollback-retained"
+        )
+
+        // Revert-check: making `handleDefiniteFailure` fail admission
+        // regardless of `PreTransmissionRollbackOutcome` throws here, and the
+        // chat composer would restore the text the bubble still shows.
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertNotNil(snapshot.failureReasons["rollback-retained"])
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         pollIntervalNanoseconds: UInt64 = 10_000_000,
@@ -956,6 +1044,7 @@ private final class MockComposeSendService: ComposeSendServicing {
         let failedAttachmentReferences: [LocalAttachmentReference]
         let lastReplyOriginalHTML: String?
         let lastReplyHadDeferredOriginalHTML: Bool
+        let failureReasons: [String: String]
     }
 
     private let queue = DispatchQueue(label: "ComposeSendOrchestratorTests.MockComposeSendService")
@@ -963,7 +1052,8 @@ private final class MockComposeSendService: ComposeSendServicing {
     var sendDelayNanoseconds: UInt64 = 0
     var sendNewPreflightError: Error?
     var sendNewError: Error?
-    /// Holds `sendNew` for these bodies after admission (an upload in flight).
+    /// Holds `sendNew` / `sendReply` for these bodies after admission (an
+    /// upload in flight).
     var postAdmissionGatesByBody: [String: TransmissionTestGate] = [:]
     /// Definite post-admission rejections for these bodies.
     var sendNewErrorsByBody: [String: Error] = [:]
@@ -971,6 +1061,9 @@ private final class MockComposeSendService: ComposeSendServicing {
     var recordRemoteSendAdmissionError: Error?
     var recordAmbiguousRemoteSendError: Error?
     var reconcileRemoteCommittedSendError: Error?
+    /// What the rollback reports; `.retainedAsNotSent` stands in for a
+    /// rollback whose `ChatReplyDraft` write failed.
+    var rollbackOutcome: PreTransmissionRollbackOutcome = .rolledBack
 
     private var _markUploadedCalls = 0
     private var _sendNewCalls = 0
@@ -989,6 +1082,7 @@ private final class MockComposeSendService: ComposeSendServicing {
     private var _failedAttachmentReferences: [LocalAttachmentReference] = []
     private var _lastReplyOriginalHTML: String?
     private var _lastReplyHadDeferredOriginalHTML = false
+    private var _failureReasons: [String: String] = [:]
 
     var snapshot: Snapshot {
         queue.sync {
@@ -1008,9 +1102,15 @@ private final class MockComposeSendService: ComposeSendServicing {
                 uploadedAttachmentReferences: _uploadedAttachmentReferences,
                 failedAttachmentReferences: _failedAttachmentReferences,
                 lastReplyOriginalHTML: _lastReplyOriginalHTML,
-                lastReplyHadDeferredOriginalHTML: _lastReplyHadDeferredOriginalHTML
+                lastReplyHadDeferredOriginalHTML: _lastReplyHadDeferredOriginalHTML,
+                failureReasons: _failureReasons
             )
         }
+    }
+
+    @MainActor
+    func recordSendFailureReason(optimisticMessageID: String, reason: String) {
+        queue.sync { _failureReasons[optimisticMessageID] = reason }
     }
 
     @MainActor
@@ -1044,6 +1144,9 @@ private final class MockComposeSendService: ComposeSendServicing {
         try await beforeTransmission()
         queue.sync { _remoteTransmissionCalls += 1 }
 
+        if let gate = postAdmissionGatesByBody[body] {
+            await gate.enterAndWait()
+        }
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
         }
@@ -1158,11 +1261,12 @@ private final class MockComposeSendService: ComposeSendServicing {
     func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
-    ) {
+    ) -> PreTransmissionRollbackOutcome {
         queue.sync {
             _rollbackBeforeTransmissionCalls += 1
             _failedAttachmentReferences = fallbackAttachmentReferences
         }
+        return rollbackOutcome
     }
 
     @MainActor

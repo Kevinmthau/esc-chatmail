@@ -3,7 +3,7 @@ import Foundation
 
 /// A value snapshot of the original reply envelope. Retrying must not borrow
 /// recipients or threading headers from newer messages in the conversation.
-struct StoredReplyEnvelope: Codable, Sendable {
+struct StoredReplyEnvelope: Codable, Equatable, Sendable {
     let recipients: [String]
     let fromEmail: String
     let fromName: String?
@@ -13,7 +13,7 @@ struct StoredReplyEnvelope: Codable, Sendable {
     let references: [String]
     let quote: Quote?
 
-    struct Quote: Codable, Sendable {
+    struct Quote: Codable, Equatable, Sendable {
         let senderName: String?
         let senderEmail: String
         let date: Date
@@ -102,6 +102,37 @@ struct ChatReplyDraftStore {
             try remove(conversationID: conversationID)
         }
         if persist, context.hasChanges { try context.save() }
+    }
+
+    /// Writes a reply that never became a durable send into the
+    /// conversation's draft slot without dropping a draft already there.
+    ///
+    /// The chat composer releases at optimistic persistence, so by the time a
+    /// rollback (or an off-screen view model's restore) needs the slot, the
+    /// user may already have saved the next reply in it. `save` replaced it
+    /// outright. Throws, writing nothing, when the stored draft cannot be
+    /// read, rather than overwrite content it could not see.
+    func saveMergingUnsentReply(
+        _ unsent: StoredChatReplyDraft,
+        attachments: [Attachment],
+        conversationID: UUID,
+        persist: Bool = true
+    ) throws {
+        let stored = try load(conversationID: conversationID)
+        let merged = ChatReplyRestorePolicy.mergedDraft(
+            unsent: unsent,
+            stored: stored?.0,
+            storedHasAttachments: !(stored?.1.isEmpty ?? true)
+        )
+        try save(
+            merged,
+            attachments: ChatReplyRestorePolicy.restoredAttachments(
+                unsent: attachments,
+                addedSinceSend: stored?.1 ?? []
+            ),
+            conversationID: conversationID,
+            persist: persist
+        )
     }
 
     /// Called inside the optimistic-message transaction, after its attachments

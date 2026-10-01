@@ -1669,12 +1669,144 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
     }
 
+    func testSend_rapidChatRepliesToOneConversationReachGmailInTapOrder() async throws {
+        let sendService = MockOutboundMessageSendService(context: viewContext)
+        let firstGate = OutboundSendTestGate()
+        sendService.sendReplyGatesByBody = ["First reply": firstGate]
+        let sequencer = OutboundConversationSendSequencer()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            sendSequencer: sequencer
+        )
+        let request = try makeChatReplyRequest(friendEmail: "rapid@example.com")
+
+        let firstResult = try await coordinator.send(request("First reply"))
+        let first = try XCTUnwrap(firstResult)
+        await firstGate.waitUntilStarted()
+        var secondAdmitted = false
+        let secondTask = Task { @MainActor in
+            let result = try await coordinator.send(request("Second reply"))
+            secondAdmitted = true
+            return result
+        }
+        await waitUntil { sequencer.suspendedTurnCount == 1 }
+
+        // The second reply was accepted (the composer released at
+        // persistence) but is parked strictly before its barrier while the
+        // first is still at Gmail.
+        // Revert-check: passing `sendOrderTurn: nil` from
+        // `OutboundMessageCoordinator.send` to `executeInBackground` admits
+        // the second reply now, ahead of the first's answer.
+        XCTAssertFalse(secondAdmitted)
+        XCTAssertEqual(sendService.snapshot.recordRemoteSendAdmissionCalls, [first.optimisticMessageID])
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 1)
+
+        await firstGate.release()
+        let secondResult = try await secondTask.value
+        let second = try XCTUnwrap(secondResult)
+
+        XCTAssertEqual(
+            sendService.snapshot.recordRemoteSendAdmissionCalls,
+            [first.optimisticMessageID, second.optimisticMessageID]
+        )
+        XCTAssertEqual(sendService.snapshot.sendReplyCalls.map(\.body), ["First reply", "Second reply"])
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 2)
+    }
+
+    func testSend_chatReplyPreBarrierFailureResolvesAdmissionWithRetainedNotSentRow() async throws {
+        let sendService = MockOutboundMessageSendService(context: viewContext)
+        sendService.sendReplyPreflightError = GmailSendService.SendError.apiError("token refresh failed")
+        let mutationTracker = MockOutboundSendMutationTracker()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            mutationTracker: mutationTracker
+        )
+        let request = try makeChatReplyRequest(friendEmail: "not-sent@example.com")
+        var persistedResult: OutboundMessageResult?
+
+        // Revert-check: dropping `preTransmissionFailureDisposition:` from
+        // `OutboundMessageCoordinator.send`'s `executeInBackground` call
+        // (so it defaults to `.rollBackToComposer`) rolls the reply back and
+        // throws here: the bubble disappears instead of reading "Not sent".
+        let admittedResult = try await coordinator.send(
+            request("Reply that never left"),
+            onOptimisticMessagePersisted: { persistedResult = $0 }
+        )
+        let result = try XCTUnwrap(admittedResult)
+
+        XCTAssertEqual(persistedResult?.optimisticMessageID, result.optimisticMessageID)
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.retainedOptimisticMessageIDs, [result.optimisticMessageID])
+        XCTAssertTrue(snapshot.rolledBackOptimisticMessageIDs.isEmpty)
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: result.optimisticMessageID))
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertEqual(mutationTracker.failedMutationIDs, [result.optimisticMessageID])
+        XCTAssertEqual(mutationTracker.pendingMutationCount, 0)
+    }
+
+    /// A chat reply to a fresh one-to-one conversation's only message, built
+    /// the way `ChatViewModel.sendReply` builds it.
+    private func makeChatReplyRequest(
+        friendEmail: String
+    ) throws -> (String) -> OutboundMessageRequest {
+        let conversation = makeReplyConversation(in: viewContext, friendEmail: friendEmail)
+        let replyingTo = MessageBuilder()
+            .withId("target-\(UUID().uuidString)")
+            .withThreadId("thread-\(UUID().uuidString)")
+            .withSubject("Plans")
+            .withSender(email: friendEmail, name: "Friend")
+            .withBody("Original body")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        try viewContext.obtainPermanentIDs(for: [conversation, replyingTo])
+        replyingTo.messageId = "<\(replyingTo.id)@example.com>"
+        let conversationObjectID = conversation.objectID
+        let replyingToObjectID = replyingTo.objectID
+        return { body in
+            .reply(
+                .init(
+                    context: .init(
+                        conversationObjectID: conversationObjectID,
+                        replyingToMessageObjectID: replyingToObjectID,
+                        optimisticConversation: .existingConversation(
+                            ConversationReference(objectID: conversationObjectID)
+                        )
+                    ),
+                    body: body,
+                    attachments: [],
+                    preTransmissionFailureDisposition: .retainAsNotSent
+                )
+            )
+        }
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () async -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+
     private func makeCoordinator(
         sendService: MockOutboundMessageSendService,
         syncPerformer: MockCoordinatorSyncPerformer,
         authSession: AuthSession? = nil,
         mutationTracker: MockOutboundSendMutationTracker? = nil,
-        replyQuotedHTMLResolver: ReplyQuotedHTMLResolver? = nil
+        replyQuotedHTMLResolver: ReplyQuotedHTMLResolver? = nil,
+        sendSequencer: OutboundConversationSendSequencer? = nil
     ) -> OutboundMessageCoordinator {
         let resolvedAuthSession = authSession ?? makeTestAuthSession(userEmail: "me@example.com")
         return OutboundMessageCoordinator(
@@ -1691,7 +1823,10 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                 replyQuotedHTMLResolver: replyQuotedHTMLResolver
             ),
             mutationTracker: mutationTracker ?? MockOutboundSendMutationTracker(),
-            outboundTaskRegistry: outboundTaskRegistry
+            outboundTaskRegistry: outboundTaskRegistry,
+            // Never `.shared`: a turn leaked by one test must not park
+            // another test's sends to a reused conversation URI.
+            sendSequencer: sendSequencer ?? OutboundConversationSendSequencer()
         )
     }
 
@@ -1819,6 +1954,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let sendNewPreflightCancellationObservations: [Bool]
         let recordRemoteSendAdmissionCalls: [String]
         let remoteTransmissionCalls: Int
+        let retainedOptimisticMessageIDs: [String]
     }
 
     private let context: NSManagedObjectContext
@@ -1836,7 +1972,14 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     private var sendNewPreflightCancellationObservations: [Bool] = []
     private var recordRemoteSendAdmissionCalls: [String] = []
     private var remoteTransmissionCalls = 0
+    private var retainedOptimisticMessageIDs: [String] = []
     var sendDelayNanoseconds: UInt64 = 0
+    /// Fails `sendReply` before it invokes `beforeTransmission`, the way a
+    /// failed token refresh or attachment read does.
+    var sendReplyPreflightError: Error?
+    /// Holds `sendReply` for these bodies after admission (an upload in
+    /// flight at Gmail).
+    var sendReplyGatesByBody: [String: OutboundSendTestGate] = [:]
     var sendNewError: Error?
     var sendReplyError: Error?
     var optimisticCreationGate: OutboundSendTestGate?
@@ -1861,7 +2004,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                 sendNewCancellationObservations: sendNewCancellationObservations,
                 sendNewPreflightCancellationObservations: sendNewPreflightCancellationObservations,
                 recordRemoteSendAdmissionCalls: recordRemoteSendAdmissionCalls,
-                remoteTransmissionCalls: remoteTransmissionCalls
+                remoteTransmissionCalls: remoteTransmissionCalls,
+                retainedOptimisticMessageIDs: retainedOptimisticMessageIDs
             )
         }
     }
@@ -1968,9 +2112,15 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
             )
         }
 
+        if let sendReplyPreflightError {
+            throw sendReplyPreflightError
+        }
         try await beforeTransmission()
         queue.sync { remoteTransmissionCalls += 1 }
 
+        if let gate = sendReplyGatesByBody[body] {
+            await gate.waitUntilReleased()
+        }
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
         }
@@ -2107,12 +2257,13 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
-    ) {
+    ) -> PreTransmissionRollbackOutcome {
         queue.sync {
             failedOptimisticMessageIDs.append(messageID)
             rolledBackOptimisticMessageIDs.append(messageID)
         }
         optimisticMessages[messageID] = nil
+        return .rolledBack
     }
 
     @MainActor
@@ -2122,6 +2273,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     ) {
         queue.sync {
             failedOptimisticMessageIDs.append(messageID)
+            retainedOptimisticMessageIDs.append(messageID)
         }
     }
 
