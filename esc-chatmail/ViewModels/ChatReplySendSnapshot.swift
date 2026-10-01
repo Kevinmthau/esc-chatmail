@@ -17,10 +17,14 @@ struct ChatReplySendSnapshot {
         let recoveredReplyEnvelope: StoredReplyEnvelope?
         let manuallySelectedReplyTargetID: NSManagedObjectID?
 
+        /// Envelopes compare by value: Edit and resend replaces one recovered
+        /// envelope with another, and a nil-ness comparison read that swap as
+        /// "unchanged", so a rollback overwrote the newly recovered
+        /// destination.
         func hasSameIdentity(as other: Target) -> Bool {
             replyingTo?.objectID == other.replyingTo?.objectID &&
                 replyAnchor?.objectID == other.replyAnchor?.objectID &&
-                (recoveredReplyEnvelope == nil) == (other.recoveredReplyEnvelope == nil) &&
+                recoveredReplyEnvelope == other.recoveredReplyEnvelope &&
                 manuallySelectedReplyTargetID == other.manuallySelectedReplyTargetID
         }
 
@@ -38,4 +42,15 @@ struct ChatReplySendSnapshot {
     let replyText: String
     let attachments: [Attachment]
     let target: Target
+
+    /// The snapshot as a durable draft, the way
+    /// `ChatViewModel.saveReplyDraft` would have stored this composer.
+    var storedDraft: StoredChatReplyDraft {
+        StoredChatReplyDraft(
+            text: replyText,
+            targetURI: target.replyAnchor?.objectID.uriRepresentation(),
+            recoveredEnvelope: target.recoveredReplyEnvelope,
+            includesQuotedMessage: target.replyingTo != nil
+        )
+    }
 }

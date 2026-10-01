@@ -169,8 +169,11 @@ struct ChatView: View {
             isTextFieldFocused = false
             dismiss()
         }
+        .onAppear {
+            viewModel.composerDidAppear()
+        }
         .onDisappear {
-            viewModel.scheduleReplyDraftSave()
+            viewModel.composerDidDisappear()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { viewModel.scheduleReplyDraftSave() }
@@ -249,11 +252,15 @@ struct ChatView: View {
     /// during a reply send. They used to hide/disable for the whole send, so
     /// the chevron blinked on every reply and a slow preflight (token refresh,
     /// attachments) trapped the user in the chat. Leaving is safe: the
-    /// composer empties at tap, the send Task retains the view model so an
-    /// early-failure restore still reaches its deferred draft save, and from
-    /// optimistic persistence on `OutboundTaskRegistry` and the durable graph
-    /// own the send. Archive and Report Spam keep their action-time
-    /// `allowsConversationExit` guard.
+    /// composer empties at tap, and from optimistic persistence on
+    /// `OutboundTaskRegistry` and the durable graph own the send. Before
+    /// persistence the send's snapshot is the only copy, and the send Task
+    /// keeps the view model alive after the screen is gone; an early failure
+    /// is then handed to the reopened chat's composer, or merged into the
+    /// stored draft, never restored off screen (`ChatReplyComposerDirectory`,
+    /// wired by `onAppear`/`onDisappear` below). Archive and Report Spam keep
+    /// their action-time `allowsConversationExit` guard, and a rollback never
+    /// undoes an archive made meanwhile.
     static func allowsNavigationExit(isSending _: Bool) -> Bool {
         true
     }
