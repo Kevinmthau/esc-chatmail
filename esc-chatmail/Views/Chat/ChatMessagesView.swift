@@ -287,6 +287,7 @@ struct ChatMessagesView: View {
             displayedRowCount: displayedMessages.count,
             isShowingLatestWindow: scrollState.isShowingLatestWindow
         )
+        let localSendAppendedMessageIDs = scrollState.localSendAppendedMessageIDs
         return ScrollView {
             LazyVStack(spacing: 8) {
                 // Keyed by display identity, not object ID, so Gmail's echo replacing a just-sent
@@ -317,6 +318,11 @@ struct ChatMessagesView: View {
                         onSendRecoveryAction: { action in
                             performSendRecovery(action, messageObjectID: message.messageObjectID)
                         }
+                    )
+                    .modifier(
+                        ChatRowEntranceEffect(
+                            animatesEntrance: localSendAppendedMessageIDs.contains(message.objectID)
+                        )
                     )
                     .id(row.id)
                     .contentShape(Rectangle())
