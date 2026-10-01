@@ -746,8 +746,17 @@ final class ChatViewModelTests: XCTestCase {
     /// matched that subject and never moved it back, so later replies quoted
     /// the user's own words.
     ///
-    /// Revert-check: removing the `lastMessage.isFromMe` refusal from
-    /// `ChatViewModel.reconcileAutomaticReplyTarget` retargets to the echo.
+    /// Revert-check: reverting `ChatViewModel.reconcileAutomaticReplyTarget`
+    /// to compare `lastMessage` itself with no own-message handling (the
+    /// pre-fix code) retargets to the echo.
+    /// HONEST SCOPE: two layers refuse the echo here, so reverting either
+    /// alone still passes: `automaticReplyTarget(preferring:)` makes the
+    /// inbound message the candidate, and the `candidate.isFromMe` guard
+    /// refuses an own candidate while the target is inbound.
+    /// `testUpdateReplyingTo_newerInboundBehindOwnEcho_advancesToInboundMessage`
+    /// pins the first and
+    /// `testUpdateReplyingTo_inboundTargetHiddenFromCandidateFetch_neverYieldsToOwnEcho`
+    /// the second.
     func testUpdateReplyingTo_ownReplyEchoArrives_keepsInboundTargetUntilInboundReply() {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
@@ -788,14 +797,17 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.replyingTo, inbound)
     }
 
-    /// A note-to-self has no inbound message, so the user's own messages are
-    /// the only possible targets and must keep advancing.
+    /// In a conversation with no inbound target, the user's own messages are
+    /// the only possible targets and must keep advancing. A note-to-self is
+    /// the main case, but there is no note-to-self conversation type: the
+    /// rule keys on the absence of a valid inbound message, which is all this
+    /// fixture builds (it is a default one-to-one chat).
     ///
     /// Revert-check: making the own-message refusal in
-    /// `ChatViewModel.reconcileAutomaticReplyTarget` unconditional (skipping
-    /// its `newestValidInboundReplyTarget()` fallthrough) leaves the target
-    /// on the first note.
-    func testUpdateReplyingTo_noteToSelf_advancesOntoNewerOwnMessage() {
+    /// `ChatViewModel.reconcileAutomaticReplyTarget` unconditional (refusing
+    /// every own candidate, not only when the current target is inbound)
+    /// leaves the target on the first note.
+    func testUpdateReplyingTo_noInboundTarget_advancesOntoNewerOwnMessage() {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
@@ -832,6 +844,61 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.updateReplyingToIfNewSubject(lastMessage: inboundReply)
 
         XCTAssertEqual(viewModel.replyingTo, inboundReply)
+    }
+
+    /// One sync can save the other person's new-subject message together
+    /// with an even newer echo of the user's own reply. The collection change
+    /// delivers only the echo as the newest row, and no later change delivers
+    /// the inbound message.
+    ///
+    /// Revert-check: making `ChatViewModel.reconcileAutomaticReplyTarget`
+    /// compare `lastMessage` itself instead of
+    /// `automaticReplyTarget(preferring:)`'s candidate refuses the echo and
+    /// leaves the target on "Hello".
+    func testUpdateReplyingTo_newerInboundBehindOwnEcho_advancesToInboundMessage() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let hello = MessageBuilder().withSubject("Hello")
+            .withSender(email: "alice@example.com").hoursAgo(3)
+            .inConversation(conversation).build(in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: hello)
+        XCTAssertEqual(viewModel.replyingTo, hello)
+
+        let dinner = MessageBuilder().withSubject("Dinner Friday?")
+            .withSender(email: "alice@example.com").hoursAgo(2)
+            .inConversation(conversation).build(in: context)
+        let echo = makeSyncedOwnEcho(subject: "Re: Hello", hoursAgo: 1, in: conversation, context: context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: echo)
+
+        XCTAssertEqual(viewModel.replyingTo, dinner)
+    }
+
+    /// A valid inbound target proves the conversation has one, even when the
+    /// candidate fetch cannot see it (here it is trashed, so the chat-visible
+    /// predicate excludes it). The user's own echo must still not take over.
+    ///
+    /// Revert-check: removing the `guard currentReplyingTo.isFromMe` in
+    /// `ChatViewModel.reconcileAutomaticReplyTarget`'s `candidate.isFromMe`
+    /// branch moves the target onto the echo ("Re: Hello" differs from
+    /// "Hello").
+    func testUpdateReplyingTo_inboundTargetHiddenFromCandidateFetch_neverYieldsToOwnEcho() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let hello = MessageBuilder().withSubject("Hello")
+            .withSender(email: "alice@example.com").hoursAgo(2)
+            .inConversation(conversation).build(in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: hello)
+        XCTAssertEqual(viewModel.replyingTo, hello)
+
+        hello.addToLabels(LabelBuilder().trash().build(in: context))
+        let echo = makeSyncedOwnEcho(subject: "Re: Hello", hoursAgo: 1, in: conversation, context: context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: echo)
+
+        XCTAssertEqual(viewModel.replyingTo, hello)
     }
 
     func testBackgroundReadLeavesLaterUnreadCountDurableForBlueDot() async throws {

@@ -452,28 +452,32 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
-        guard let lastMessage, isValidReplyTarget(lastMessage) else { return }
+        // The sync echo of the user's own reply carries "Re: <subject>", so
+        // the subject comparison below read it as a new subject and moved the
+        // target onto it. The other person's next "Re:" reply then matched
+        // that subject and never moved it back: later replies quoted the
+        // user's own message and set In-Reply-To to it. Do not fix this by
+        // normalizing "Re:" prefixes; that would also freeze the target when
+        // the other person replies "Re: X".
+        //
+        // Compare against the automatic candidate, not the newest row itself.
+        // One sync can save a newer inbound message together with an even
+        // newer own echo. Refusing on the echo alone never adopted the inbound
+        // message, and no later collection change delivers it.
+        guard let lastMessage,
+              let candidate = automaticReplyTarget(preferring: lastMessage) else { return }
 
-        if lastMessage.isFromMe {
-            // The sync echo of the user's own reply carries "Re: <subject>",
-            // so the subject comparison below read it as a new subject and
-            // moved the target onto it. The other person's next "Re:" reply
-            // then matched that subject and never moved it back: later
-            // replies quoted the user's own message and set In-Reply-To to
-            // it. Do not fix this by normalizing "Re:" prefixes; that would
-            // also freeze the target when the other person replies "Re: X".
-            guard currentReplyingTo.isFromMe else { return }
-            if let inboundTarget = newestValidInboundReplyTarget() {
-                replyingTo = inboundTarget
-                return
-            }
+        if candidate.isFromMe {
             // No inbound target exists (a note-to-self, or an unanswered chat
-            // the user started): own messages advance like any other.
+            // the user started): own messages advance like any other. A valid
+            // inbound target that the candidate fetch missed still never
+            // yields to the user's own message.
+            guard currentReplyingTo.isFromMe else { return }
         } else if currentReplyingTo.isFromMe {
             // The own target was only a fallback for a conversation with no
             // inbound target. Follow the other person once they write, even
             // when their reply repeats the own target's "Re:" subject.
-            replyingTo = lastMessage
+            replyingTo = candidate
             return
         }
 
@@ -481,14 +485,14 @@ final class ChatViewModel: ObservableObject {
         // share a subject. Follow the newest thread so reply metadata and quoted
         // content do not stay anchored to an older list post.
         let currentSubject = currentReplyingTo.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let newSubject = lastMessage.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let newSubject = candidate.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let listThreadChanged =
             conversation.conversationType == .list &&
-            !lastMessage.gmThreadId.isEmpty &&
-            currentReplyingTo.gmThreadId != lastMessage.gmThreadId
+            !candidate.gmThreadId.isEmpty &&
+            currentReplyingTo.gmThreadId != candidate.gmThreadId
 
         if currentSubject != newSubject || listThreadChanged {
-            replyingTo = lastMessage
+            replyingTo = candidate
         }
     }
 
