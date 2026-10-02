@@ -118,6 +118,47 @@ final class MaintenanceCleanupGateTests: XCTestCase {
         )
     }
 
+    // Revert-check: the `if !saved { context.rollback() }` line in
+    // `DataCleanupService.settleCleanupSensitiveHold`, and the `.saveFailed`
+    // outcome (`didFailSave` in `runMaintenancePassesCooperatively`) that
+    // keeps `runIncrementalCleanup` from marking the cadence. Pass 4
+    // stages a deletion and its hold's save fails. Without the rollback the
+    // staged deletion survives into the next pass, whose save commits it (by
+    // then a reply could have anchored to that conversation); without the
+    // outcome check the run marks the cadence although pass 4's work was lost.
+    func testRunIncrementalCleanup_passSaveFails_rollsBackStagedDeletionAndLeavesCadenceDue() async throws {
+        let victimID = try seedConversationWithMessage()
+        let service = makeServiceFailingPassFourSave(stagingDeletionOf: victimID)
+
+        await service.runIncrementalCleanup(in: stack.newBackgroundContext())
+
+        XCTAssertTrue(
+            conversationExistsInStore(victimID),
+            "A failed pass's staged deletion must not be committed by a later pass"
+        )
+        XCTAssertTrue(
+            DataCleanupService.IncrementalCleanupSchedule.isDue(defaults: scheduleDefaults),
+            "A run with a failed pass save must retry at the next sync"
+        )
+    }
+
+    // Revert-check: `didFailSave` in `runMaintenancePassesCooperatively`.
+    // The rollback leaves the context clean, so `DatabaseMaintenanceService`'s
+    // own save afterwards succeeds; reporting `.completed` here would let
+    // database cleanup report success for a run whose pass never committed.
+    func testRunMaintenanceCleanup_passSaveFails_reportsSaveFailedWithCleanContext() async throws {
+        let victimID = try seedConversationWithMessage()
+        let service = makeServiceFailingPassFourSave(stagingDeletionOf: victimID)
+        let context = stack.newBackgroundContext()
+
+        let outcome = await service.runMaintenanceCleanup(in: context)
+
+        XCTAssertEqual(outcome, .saveFailed)
+        let hasChanges = await context.perform { context.hasChanges }
+        XCTAssertFalse(hasChanges, "The failed pass is rolled back, not left staged")
+        XCTAssertTrue(conversationExistsInStore(victimID))
+    }
+
     // HONEST SCOPE: pins pre-existing cadence gating, now read from the
     // injected defaults; it guards no new fix and has no revert target.
     func testRunIncrementalCleanup_cadenceNotDue_skipsMaintenancePasses() async throws {
@@ -132,22 +173,80 @@ final class MaintenanceCleanupGateTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// Pass 4 (`fixAndMergeIncorrectParticipantHashes`) is the only alias
+    /// caller here. Its hook stages a deletion in the maintenance context and
+    /// returns no aliases, so pass 4 returns before saving anything itself and
+    /// the staged deletion reaches pass 4's hold, whose save is made to fail.
+    /// The deletion stands in for whatever a pass staged when its save failed.
+    private func makeServiceFailingPassFourSave(stagingDeletionOf conversationID: UUID) -> DataCleanupService {
+        let failNextSave = FailNextHoldSave()
+        return makeService(
+            serializer: ConversationRollupMutationSerializer(),
+            identityAliasProvider: { context in
+                await context.perform {
+                    let request = Conversation.fetchRequest()
+                    request.predicate = NSPredicate(format: "id == %@", conversationID as CVarArg)
+                    for conversation in (try? context.fetch(request)) ?? [] {
+                        context.delete(conversation)
+                    }
+                }
+                await failNextSave.arm()
+                return []
+            },
+            saveCleanupHold: { context in
+                if await failNextSave.consume() {
+                    throw InjectedHoldSaveError()
+                }
+                try await context.perform {
+                    guard context.hasChanges else { return }
+                    try context.save()
+                }
+            }
+        )
+    }
+
     private func makeService(
         serializer: ConversationRollupMutationSerializer,
-        identityAliasProvider: @escaping @Sendable (NSManagedObjectContext) async -> Set<String>
+        identityAliasProvider: @escaping @Sendable (NSManagedObjectContext) async -> Set<String>,
+        saveCleanupHold: (@Sendable (NSManagedObjectContext) async throws -> Void)? = nil
     ) -> DataCleanupService {
         let flags = InMemoryMigrationFlagStore()
         // Latch the flag-gated migrations so pass 4 is the only alias caller.
         flags.set(true, forKey: DataCleanupService.participantSetSplitMigrationKey)
         flags.set(true, forKey: DataCleanupService.rfc2047HeaderTextRepairKey)
+        guard let saveCleanupHold else {
+            return DataCleanupService(
+                coreDataStack: coreDataStack,
+                conversationManager: ConversationManager(currentUserEmail: { Self.me }),
+                conversationMutationSerializer: serializer,
+                migrationFlags: flags,
+                identityAliasProvider: identityAliasProvider,
+                maintenanceScheduleDefaults: scheduleDefaults
+            )
+        }
         return DataCleanupService(
             coreDataStack: coreDataStack,
             conversationManager: ConversationManager(currentUserEmail: { Self.me }),
             conversationMutationSerializer: serializer,
             migrationFlags: flags,
             identityAliasProvider: identityAliasProvider,
-            maintenanceScheduleDefaults: scheduleDefaults
+            maintenanceScheduleDefaults: scheduleDefaults,
+            saveCleanupHold: saveCleanupHold
         )
+    }
+
+    /// A conversation with a message: no maintenance pass deletes it on its
+    /// own, so only a staged deletion leaking past a failed save can.
+    private func seedConversationWithMessage() throws -> UUID {
+        let context = stack.viewContext
+        return try context.performAndWait {
+            let conversation = ConversationBuilder().build(in: context)
+            _ = MessageBuilder().withId("maintenance-victim-\(UUID().uuidString)")
+                .inConversation(conversation)
+                .build(in: context)
+            try context.save()
+            return conversation.id
+        }
     }
 
     /// A message-less, participant-less, unpinned shell: exactly what
@@ -223,3 +322,19 @@ private actor CancellationRelay {
         task?.cancel()
     }
 }
+
+/// Fails exactly one hold save, armed from inside the pass that should fail.
+private actor FailNextHoldSave {
+    private var isArmed = false
+
+    func arm() {
+        isArmed = true
+    }
+
+    func consume() -> Bool {
+        defer { isArmed = false }
+        return isArmed
+    }
+}
+
+private struct InjectedHoldSaveError: Error {}
