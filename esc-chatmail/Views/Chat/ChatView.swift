@@ -240,10 +240,11 @@ struct ChatView: View {
         conversationType != .list
     }
 
-    /// Gates actions that would mutate or dismiss the conversation while a
-    /// reply send still owns the composer (Archive, Report Spam, the drained
-    /// auto-dismiss). They act on the conversation the optimistic row is
-    /// about to anchor to, so they wait out the tap → persistence window.
+    /// Gates the drained auto-dismiss while a reply send still owns the
+    /// composer: it would leave the conversation the optimistic row is about
+    /// to anchor to, so it waits out the tap → persistence window. Archive and
+    /// Report Spam wait out the same window, but a tap made in it is kept and
+    /// run when the window closes (`ChatConversationExitActionPolicy`).
     static func allowsConversationExit(isSending: Bool) -> Bool {
         !isSending
     }
@@ -258,9 +259,10 @@ struct ChatView: View {
     /// keeps the view model alive after the screen is gone; an early failure
     /// is then handed to the reopened chat's composer, or merged into the
     /// stored draft, never restored off screen (`ChatReplyComposerDirectory`,
-    /// wired by `onAppear`/`onDisappear` below). Archive and Report Spam keep
-    /// their action-time `allowsConversationExit` guard, and a rollback never
-    /// undoes an archive made meanwhile.
+    /// wired by `onAppear`/`onDisappear` below). Archive and Report Spam
+    /// tapped before persistence run once it lands
+    /// (`ChatConversationExitActionPolicy`), and a rollback never undoes an
+    /// archive made meanwhile.
     static func allowsNavigationExit(isSending _: Bool) -> Bool {
         true
     }
@@ -293,22 +295,14 @@ struct ChatView: View {
         )
     }
 
+    /// Mid-send the view model holds the tap until the reply is durable
+    /// instead of dropping it; the chat then closes as usual.
     private func archiveConversationAndDismiss() {
-        guard Self.allowsConversationExit(
-            isSending: viewModel.composerState.isSending
-        ) else { return }
-
-        viewModel.archiveConversation()
-        dismiss()
+        viewModel.performConversationExitAction(.archive) { dismiss() }
     }
 
     private func reportSpamAndDismiss() {
-        guard Self.allowsConversationExit(
-            isSending: viewModel.composerState.isSending
-        ) else { return }
-
-        viewModel.reportSpam()
-        dismiss()
+        viewModel.performConversationExitAction(.reportSpam) { dismiss() }
     }
 
     private var activeDestination: ChatDestination? {

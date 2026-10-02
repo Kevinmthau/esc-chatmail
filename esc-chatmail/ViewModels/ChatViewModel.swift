@@ -26,7 +26,8 @@ final class ChatComposerState: ObservableObject {
     /// True only from the send tap until the optimistic message is durable
     /// (`ChatViewModel.sendReply`): milliseconds, during which the composer's
     /// content lives in the send's snapshot. It blocks a second send, draft
-    /// autosave and target changes for that window, not typing.
+    /// autosave and target changes for that window, not typing, and defers
+    /// Archive and Report Spam to its end (`ChatConversationExitActionPolicy`).
     @Published private(set) var isSending = false
     private var discardsAttachmentsWhenSendFinishes = false
 
@@ -186,6 +187,13 @@ final class ChatViewModel: ObservableObject {
     /// skipped and anything typed since the tap exists only here. The send's
     /// release saves it or hands it on (`saveComposerLeftWhileSending`).
     private var savesComposerWhenSendReleases = false
+    /// Archive or Report Spam tapped while a send held `isSending`, with the
+    /// dismissal of the screen it was tapped on. The send's release settles
+    /// it (`settleDeferredConversationExitAction`).
+    private var deferredConversationExitAction: (
+        action: ChatConversationExitActionPolicy.Action,
+        dismiss: @MainActor () -> Void
+    )?
 
     // MARK: - Task Management
 
@@ -355,6 +363,81 @@ final class ChatViewModel: ObservableObject {
             await messageActions.reportSpamConversation(conversation: conversation)
         }
     }
+
+    // MARK: - Conversation Exit Actions
+
+    /// The overflow menu's Archive and Report Spam: runs `action` and calls
+    /// `dismiss` now, or, while a reply send holds the composer, once that
+    /// send releases it, re-validated then (`ChatConversationExitActionPolicy`).
+    ///
+    /// The send task retains this view model until it settles, so a deferred
+    /// tap is never lost with the screen; `dismiss` runs only if that screen
+    /// is still the one on screen.
+    func performConversationExitAction(
+        _ action: ChatConversationExitActionPolicy.Action,
+        dismiss: @escaping @MainActor () -> Void
+    ) {
+        switch ChatConversationExitActionPolicy.tapDecision(isSending: composerState.isSending) {
+        case .performNow:
+            perform(action)
+            dismiss()
+        case .deferUntilSendReleases:
+            deferredConversationExitAction = (action, dismiss)
+        }
+    }
+
+    private func perform(_ action: ChatConversationExitActionPolicy.Action) {
+        switch action {
+        case .archive:
+            archiveConversation()
+        case .reportSpam:
+            reportSpam()
+        }
+    }
+
+    /// Called in the turn the send releases `isSending`, before a newer send
+    /// can take the composer again.
+    private func settleDeferredConversationExitAction(
+        after release: ChatConversationExitActionPolicy.SendRelease
+    ) {
+        guard let deferred = deferredConversationExitAction else { return }
+        deferredConversationExitAction = nil
+        let decision = ChatConversationExitActionPolicy.releaseDecision(
+            release: release,
+            accountIsUnchanged: authSession.userEmail == draftAccountEmail,
+            // `isDeleted` first: a deleted row's attributes must not be read.
+            conversationIsAvailable: conversation.managedObjectContext === viewContext &&
+                !conversation.isDeleted &&
+                !isConversationDrained,
+            presentation: conversationExitPresentation
+        )
+        switch decision {
+        case .performAndDismiss:
+            perform(deferred.action)
+            deferred.dismiss()
+        case .performWithoutDismissing:
+            perform(deferred.action)
+        case .drop(let reason):
+            Log.info(
+                "Dropped deferred \(deferred.action.rawValue) after reply send released: \(reason.rawValue)",
+                category: .ui
+            )
+        }
+    }
+
+    private var conversationExitPresentation: ChatConversationExitActionPolicy.Presentation {
+        if isComposerPresented { return .onScreen }
+        return composerDirectory.presentedComposer(for: conversationObjectID) == nil ? .left : .reopened
+    }
+
+#if DEBUG
+    /// Lets tests join the Archive / Report Spam work a settled or immediate
+    /// conversation exit action started; returns at once when none started.
+    func waitForConversationExitActions() async {
+        await taskManager.waitForCompletion(of: "archiveConversation")
+        await taskManager.waitForCompletion(of: "reportSpam")
+    }
+#endif
 
     // MARK: - Reply Actions
 
@@ -630,10 +713,18 @@ final class ChatViewModel: ObservableObject {
         // Cleared once the optimistic message is persisted: from then on a
         // newer send may own `isSending`, and this call must not end it.
         var ownsComposer = true
+        // How a release by the `defer` below settles a deferred Archive or
+        // Report Spam. Every path that reaches it without the persistence
+        // callback returned the reply, except a coordinator that skipped the
+        // callback and still succeeded.
+        var releaseWithoutPersistenceCallback = ChatConversationExitActionPolicy.SendRelease.replyReturned
         defer {
             // Runs after any restore below, so the save persists the restored
             // content rather than the cleared composer.
-            if ownsComposer { composerState.finishSending() }
+            if ownsComposer {
+                composerState.finishSending()
+                settleDeferredConversationExitAction(after: releaseWithoutPersistenceCallback)
+            }
             scheduleReplyDraftSave()
         }
 
@@ -717,6 +808,9 @@ final class ChatViewModel: ObservableObject {
                     reevaluateReplyTargetAfterSend()
                     saveComposerLeftWhileSending()
                     onOptimisticMessagePersisted(optimisticResult)
+                    // Last: the transcript has anchored the new bubble, and
+                    // an Archive tapped during the window may now dismiss.
+                    settleDeferredConversationExitAction(after: .replyPersisted)
                 }
             )
         } catch {
@@ -731,6 +825,7 @@ final class ChatViewModel: ObservableObject {
         // A coordinator always reports persistence before success; this only
         // keeps a missed callback from holding back draft restores.
         unpersistedSend.end()
+        releaseWithoutPersistenceCallback = .replyPersisted
         return result
     }
 

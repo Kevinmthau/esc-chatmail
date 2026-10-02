@@ -2628,6 +2628,243 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(Set(saved.1.map(\.objectID)), Set([unfinished.objectID, finalized.objectID]))
     }
 
+    // MARK: - Archive / Report Spam during a reply send
+
+    /// A chat whose Archive and Report Spam run through a real `MessageActions`
+    /// on a main-queue test context (see the type comment) and queue into a
+    /// `MockPendingActionsManager`, and whose sends go to the mock coordinator.
+    private func makeConversationExitFixture() throws -> (
+        coordinator: MockChatOutboundMessageCoordinator,
+        pendingActionsManager: MockPendingActionsManager,
+        conversation: Conversation,
+        viewModel: ChatViewModel,
+        reopenChat: () -> ChatViewModel
+    ) {
+        let stack = TestCoreDataStack()
+        let messageActionsStack = MainQueueMessageActionsCoreDataStack(wrapping: stack)
+        let context: NSManagedObjectContext = messageActionsStack.viewContext
+        let pendingActionsManager = MockPendingActionsManager()
+        let messageActions = MessageActions(
+            coreDataStack: messageActionsStack,
+            pendingActionsManager: pendingActionsManager,
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+        let coordinator = MockChatOutboundMessageCoordinator()
+        let baseDependencies = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        ).makeChatDependencies()
+        let chatDependencies = ChatDependencies(
+            session: baseDependencies.session,
+            content: baseDependencies.content,
+            messaging: ChatMessagingDependencies(
+                messageActions: messageActions,
+                outboundMessageCoordinator: coordinator,
+                outboundAttachmentContextBuilder: baseDependencies.messaging.outboundAttachmentContextBuilder,
+                outboundReplyContextBuilder: baseDependencies.messaging.outboundReplyContextBuilder,
+                composeForwardModeContextBuilder: baseDependencies.messaging.composeForwardModeContextBuilder
+            ),
+            contacts: baseDependencies.contacts,
+            storage: ChatStorageDependencies(
+                viewContext: context,
+                makeBackgroundContext: { stack.newBackgroundContext() }
+            ),
+            fullEmailOpener: baseDependencies.fullEmailOpener
+        )
+        let conversation = ConversationBuilder()
+            .withDisplayName("Exit Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let inbound = MessageBuilder()
+            .withId("exit-inbound-\(UUID().uuidString)")
+            .withSubject("Plans")
+            .hoursAgo(1)
+            .inConversation(conversation)
+            .build(in: context)
+        inbound.addToLabels(inboxLabel)
+        try context.save()
+        // Per fixture, so no other test's view model can own this chat.
+        let composerDirectory = ChatReplyComposerDirectory()
+        let makeViewModel = {
+            ChatViewModel(
+                conversation: conversation,
+                chatDependencies: chatDependencies,
+                composerDirectory: composerDirectory
+            )
+        }
+        let viewModel = makeViewModel()
+        viewModel.replyingTo = inbound
+        return (coordinator, pendingActionsManager, conversation, viewModel, makeViewModel)
+    }
+
+    func testConversationExitAction_noReplySending_runsAndDismissesAtOnce() async throws {
+        let fixture = try makeConversationExitFixture()
+        var dismissCount = 0
+
+        fixture.viewModel.performConversationExitAction(.archive) { dismissCount += 1 }
+
+        XCTAssertEqual(dismissCount, 1)
+        await fixture.viewModel.waitForConversationExitActions()
+        let queued = await fixture.pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+        XCTAssertNotNil(fixture.conversation.archivedAt)
+    }
+
+    /// The menu stays enabled while a reply goes from tap to optimistic
+    /// persistence; Archive tapped then used to return early with no effect.
+    func testConversationExitAction_tappedBeforeOptimisticPersistence_runsAndDismissesOncePersisted() async throws {
+        let fixture = try makeConversationExitFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        coordinator.suspendsBeforePersistence = true
+        defer { coordinator.resumePersistence() }
+        viewModel.replyText = "Sending, then archiving"
+        var dismissCount = 0
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        viewModel.performConversationExitAction(.archive) { dismissCount += 1 }
+
+        // Revert-check: returning `.performNow` regardless of `isSending` in
+        // `ChatConversationExitActionPolicy.tapDecision` archives and
+        // dismisses here, while the reply has no durable owner.
+        await viewModel.waitForConversationExitActions()
+        XCTAssertEqual(dismissCount, 0)
+        XCTAssertNil(fixture.conversation.archivedAt)
+        let queuedDuringSend = await fixture.pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queuedDuringSend.isEmpty)
+
+        coordinator.resumePersistence()
+        let result = await sendTask.value
+
+        XCTAssertNotNil(result)
+        // Revert-check: deleting `settleDeferredConversationExitAction(after:
+        // .replyPersisted)` from `sendReply`'s persistence callback leaves the
+        // tap unanswered, as the old action-time guard did.
+        XCTAssertEqual(dismissCount, 1)
+        await viewModel.waitForConversationExitActions()
+        let queued = await fixture.pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+        XCTAssertNotNil(fixture.conversation.archivedAt)
+    }
+
+    func testConversationExitAction_tappedTwiceBeforePersistence_runsOnlyTheLatestChoice() async throws {
+        let fixture = try makeConversationExitFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        coordinator.suspendsBeforePersistence = true
+        defer { coordinator.resumePersistence() }
+        viewModel.replyText = "Sending, then reporting"
+        var dismissals: [String] = []
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+        viewModel.performConversationExitAction(.archive) { dismissals.append("archive") }
+        viewModel.performConversationExitAction(.reportSpam) { dismissals.append("reportSpam") }
+
+        coordinator.resumePersistence()
+        _ = await sendTask.value
+        await viewModel.waitForConversationExitActions()
+
+        XCTAssertEqual(dismissals, ["reportSpam"])
+        let queued = await fixture.pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.reportSpam])
+    }
+
+    /// A failure before persistence hands the reply back with an alert.
+    /// Archiving and dismissing then would take the alert away and bury the
+    /// unsent reply as a draft in an archived conversation.
+    func testConversationExitAction_tappedBeforeReplyFails_isDroppedAndReplyStaysInComposer() async throws {
+        let fixture = try makeConversationExitFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        coordinator.suspendsBeforePersistence = true
+        coordinator.sendErrorBeforePersistence = MockChatSendError.preflightFailed
+        defer { coordinator.resumePersistence() }
+        viewModel.replyText = "Will not send"
+        var dismissCount = 0
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+        viewModel.performConversationExitAction(.archive) { dismissCount += 1 }
+
+        coordinator.resumePersistence()
+        let result = await sendTask.value
+        await viewModel.waitForConversationExitActions()
+
+        XCTAssertNil(result)
+        // Revert-check: deleting the `release == .replyPersisted` guard from
+        // `ChatConversationExitActionPolicy.releaseDecision` archives and
+        // dismisses over the restored reply.
+        XCTAssertEqual(dismissCount, 0)
+        XCTAssertNil(fixture.conversation.archivedAt)
+        let queued = await fixture.pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queued.isEmpty)
+        XCTAssertEqual(viewModel.replyText, "Will not send")
+        XCTAssertNotNil(viewModel.sendErrorAlert)
+    }
+
+    /// The user tapped Report Spam and then swiped back before persistence:
+    /// the report still lands, and there is no screen left to dismiss.
+    func testConversationExitAction_chatLeftBeforePersistence_runsWithoutDismissing() async throws {
+        let fixture = try makeConversationExitFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        coordinator.suspendsBeforePersistence = true
+        defer { coordinator.resumePersistence() }
+        viewModel.replyText = "Sending, then reporting"
+        var dismissCount = 0
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+        viewModel.performConversationExitAction(.reportSpam) { dismissCount += 1 }
+        viewModel.composerDidDisappear()
+
+        coordinator.resumePersistence()
+        _ = await sendTask.value
+        await viewModel.waitForConversationExitActions()
+
+        // Revert-check: answering `.onScreen` from
+        // `ChatViewModel.conversationExitPresentation` regardless of
+        // `isComposerPresented` dismisses a screen that is already gone.
+        XCTAssertEqual(dismissCount, 0)
+        let queued = await fixture.pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.reportSpam])
+    }
+
+    /// Left and opened again before persistence: the reopened chat is the
+    /// user's newer choice, so the earlier Archive does not yank it.
+    func testConversationExitAction_chatReopenedBeforePersistence_isDropped() async throws {
+        let fixture = try makeConversationExitFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        coordinator.suspendsBeforePersistence = true
+        defer { coordinator.resumePersistence() }
+        viewModel.replyText = "Sending, then archiving"
+        var dismissCount = 0
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+        viewModel.performConversationExitAction(.archive) { dismissCount += 1 }
+        viewModel.composerDidDisappear()
+        let reopened = fixture.reopenChat()
+
+        coordinator.resumePersistence()
+        _ = await sendTask.value
+        await viewModel.waitForConversationExitActions()
+
+        // Revert-check: answering `.left` from
+        // `ChatViewModel.conversationExitPresentation` whenever this screen
+        // is not presented archives the conversation under the reopened chat.
+        XCTAssertEqual(dismissCount, 0)
+        XCTAssertNil(fixture.conversation.archivedAt)
+        let queued = await fixture.pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queued.isEmpty)
+        withExtendedLifetime(reopened) {}
+    }
+
     /// The user's own message as sync persists it: its Gmail id differs from
     /// the optimistic id its Message-ID encodes, so unlike a row awaiting its
     /// echo it resolves `.none` and is a valid reply target.
