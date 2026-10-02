@@ -393,6 +393,146 @@ final class ChatMessageRowModelTests: XCTestCase {
             "Send failed"
         )
     }
+
+    /// From the durable send record to the caption under the newest row: "Sent" appears only once
+    /// Gmail accepted the reply (record carries Gmail's thread ID) or for a row sync brought from
+    /// Gmail, and never for an in-flight, ambiguous, or definitely-unsent record.
+    ///
+    /// Revert-check: in `MessageSendStatusLinePolicy.line`, returning `.sent` for every own newest
+    /// row regardless of presentation fails the in-flight, ambiguous, and not-sent assertions.
+    func testMapThenStatusLine_newestOwnRow_showsSentOnlyOnceGmailAccepted() throws {
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: viewContext)
+        func optimisticRow(messageID: String?, threadID: String?) -> Message {
+            let optimisticID = UUID().uuidString
+            let message = MessageBuilder()
+                .withId(optimisticID)
+                .withBody("Reply \(optimisticID)")
+                .fromMe()
+                .inConversation(conversation)
+                .build(in: viewContext)
+            message.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+            let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+            record.id = optimisticID
+            record.createdAt = Date()
+            record.remoteCommittedMessageId = messageID
+            record.remoteCommittedThreadId = threadID
+            return message
+        }
+        let preAdmission = optimisticRow(messageID: nil, threadID: nil)
+        let inFlight = optimisticRow(messageID: OutboundSendRemoteState.inFlightMessageID, threadID: nil)
+        let ambiguous = optimisticRow(messageID: OutboundSendRemoteState.ambiguousMessageID, threadID: nil)
+        let notSent = optimisticRow(messageID: OutboundSendRemoteState.notSentMessageID, threadID: nil)
+        let accepted = optimisticRow(messageID: "gmail-message-id", threadID: "gmail-thread-id")
+        let synced = MessageBuilder()
+            .withId("gmail-synced-sent-row")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        synced.messageId = "<synced@example.com>"
+        try viewContext.save()
+
+        func newestLine(_ message: Message, isSendingRevealDue: Bool) -> MessageSendStatusLinePolicy.Line? {
+            let row = ChatMessageRowModelMapper.map(message)
+            return MessageSendStatusLinePolicy.line(
+                presentation: MessageSendStatusPresentation.resolve(
+                    deliveryState: row.outboundSendDeliveryState,
+                    isSendingLocalAttachments: row.isSendingLocalAttachments,
+                    hasFailedLocalAttachmentUploads: row.hasFailedLocalAttachmentUploads
+                ),
+                isSendingRevealDue: isSendingRevealDue,
+                isFromMe: row.isFromMe,
+                isConfirmedInGmail: row.isConfirmedInGmail,
+                isNewestInTranscript: true
+            )
+        }
+
+        for isSendingRevealDue in [false, true] {
+            let pendingLine: MessageSendStatusLinePolicy.Line? = isSendingRevealDue ? .sending : nil
+            XCTAssertEqual(newestLine(preAdmission, isSendingRevealDue: isSendingRevealDue), pendingLine)
+            XCTAssertEqual(newestLine(inFlight, isSendingRevealDue: isSendingRevealDue), pendingLine)
+            XCTAssertEqual(newestLine(ambiguous, isSendingRevealDue: isSendingRevealDue), .deliveryUnknown)
+            XCTAssertEqual(newestLine(notSent, isSendingRevealDue: isSendingRevealDue), .notSent)
+            XCTAssertEqual(newestLine(accepted, isSendingRevealDue: isSendingRevealDue), .sent)
+            XCTAssertEqual(newestLine(synced, isSendingRevealDue: isSendingRevealDue), .sent)
+        }
+    }
+
+    /// A transient fetch failure while mapping must not turn an optimistic row into a "Sent"
+    /// receipt. The mapper logs and falls back to `.none` (it cannot know the record's real
+    /// marker, here the ambiguous one), so the row carries no Gmail evidence and the newest-row
+    /// caption stays empty, as it did before receipts existed. A synced row in the same batch
+    /// keeps its evidence: it does not depend on the record fetch.
+    ///
+    /// Revert-check: in `ChatMessageRowModelMapper.map(_:fetchOutboundSendMutationRecords:)`,
+    /// confirming every row that resolves to `.none` (instead of only rows whose fetched record
+    /// resolved to `.none`) fails the optimistic row's assertions.
+    func testMapMessages_recordFetchFails_optimisticRowNeverReadsSent() throws {
+        struct FetchFailure: Error {}
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: viewContext)
+        let optimisticID = UUID().uuidString
+        let optimistic = MessageBuilder()
+            .withId(optimisticID)
+            .withBody("Reply \(optimisticID)")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        optimistic.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = optimisticID
+        record.createdAt = Date()
+        record.remoteCommittedMessageId = OutboundSendRemoteState.ambiguousMessageID
+        let synced = MessageBuilder()
+            .withId("gmail-synced-row-\(UUID().uuidString)")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        synced.messageId = "<synced-\(UUID().uuidString)@example.com>"
+        try viewContext.save()
+
+        let rows = ChatMessageRowModelMapper.map(
+            [synced, optimistic],
+            fetchOutboundSendMutationRecords: { _, _ in throw FetchFailure() }
+        )
+        let optimisticRow = try XCTUnwrap(rows.last)
+
+        // The fallback the receipt must not trust.
+        XCTAssertEqual(optimisticRow.outboundSendDeliveryState, .none)
+        XCTAssertFalse(optimisticRow.isConfirmedInGmail)
+        XCTAssertNil(MessageSendStatusLinePolicy.line(
+            presentation: .none,
+            isSendingRevealDue: true,
+            isFromMe: optimisticRow.isFromMe,
+            isConfirmedInGmail: optimisticRow.isConfirmedInGmail,
+            isNewestInTranscript: true
+        ))
+        XCTAssertTrue(try XCTUnwrap(rows.first).isConfirmedInGmail)
+    }
+
+    /// An optimistic row with no record (the lookup found nothing) is equally unproven. The
+    /// single-row path resolves through the batch path, so it fails closed the same way.
+    ///
+    /// Revert-check: treating an optimistic row with no fetched record as confirmed in
+    /// `ChatMessageRowModelMapper.map(_:fetchOutboundSendMutationRecords:)` fails the first
+    /// assertion; the committed-record assertion pins that real evidence still confirms.
+    func testMap_optimisticRowEvidence_requiresRecordWithGmailCommittedIDs() throws {
+        let optimisticID = UUID().uuidString
+        let optimistic = MessageBuilder().withId(optimisticID).fromMe().build(in: viewContext)
+        optimistic.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        try viewContext.save()
+
+        XCTAssertFalse(ChatMessageRowModelMapper.map(optimistic).isConfirmedInGmail)
+
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = optimisticID
+        record.createdAt = Date()
+        try viewContext.save()
+        XCTAssertFalse(ChatMessageRowModelMapper.map(optimistic).isConfirmedInGmail)
+
+        record.remoteCommittedMessageId = "gmail-message-id"
+        record.remoteCommittedThreadId = "gmail-thread-id"
+        try viewContext.save()
+        XCTAssertTrue(ChatMessageRowModelMapper.map(optimistic).isConfirmedInGmail)
+    }
 }
 
 private actor AttachmentRefreshBubbleLoader: MessageBubbleLoading {

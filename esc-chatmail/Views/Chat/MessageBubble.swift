@@ -51,6 +51,9 @@ struct MessageBubble: View {
     var contactRefreshToken: Int = 0
     /// Whether this is the last message from this sender before a different sender (for avatar grouping)
     var isLastFromSender: Bool = true
+    /// Whether this row is the conversation's newest message
+    /// (`MessageSendStatusLinePolicy.newestRowIndex`); only that row carries the "Sent" receipt.
+    var isNewestInTranscript: Bool = false
     /// Display style configuration
     var style: MessageBubbleStyle = .standard
     private let htmlContentHandler: HTMLContentHandler
@@ -58,7 +61,18 @@ struct MessageBubble: View {
     private let originalEmailSourceWarmer: any OriginalEmailSourceWarming
 
     @StateObject private var viewModel: MessageBubbleViewModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    /// Whether a pending send has outlasted `MessageSendStatusLinePolicy.sendingRevealDelay`.
+    /// Driven by this view's own `.task`, so the timer dies with the row or the pending state.
+    @State private var isSendingRevealDue = false
+    @State private var isShowingSendRecovery = false
+    /// The failed-send dialog's chosen action, held until the dialog has dismissed
+    /// (`FailedSendRecoveryPolicy.actionToRun`).
+    @State private var pendingSendRecoveryAction: FailedSendRecoveryPolicy.Action?
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
+    /// Runs an action the failed-send dialog offered. The caller routes it to the same view-model
+    /// path as the long-press menu; the bubble never sends anything itself.
+    let onSendRecoveryAction: (FailedSendRecoveryPolicy.Action) -> Void
 
     private var showHTMLPreview: Bool {
         guard resolvedForwardedDisplayContent == nil else {
@@ -86,6 +100,17 @@ struct MessageBubble: View {
         viewModel.forwardedDisplayContent ?? message.outgoingForwardedDisplayContent
     }
 
+    /// Vertical alignment that centers the failed-send badge on the content bubble. Defaults to
+    /// center, so a row with no content bubble (attachments only) centers the badge on the column
+    /// instead of hanging it below the row.
+    private enum SendRecoveryBadgeAlignmentID: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat {
+            context[VerticalAlignment.center]
+        }
+    }
+
+    private static let sendRecoveryBadgeAlignment = VerticalAlignment(SendRecoveryBadgeAlignmentID.self)
+
     @MainActor
     init(
         message: ChatMessageRowModel,
@@ -97,8 +122,10 @@ struct MessageBubble: View {
         isEffectivelyOneToOneConversation: Bool,
         contactRefreshToken: Int = 0,
         isLastFromSender: Bool = true,
+        isNewestInTranscript: Bool = false,
         style: MessageBubbleStyle = .standard,
-        onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
+        onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void,
+        onSendRecoveryAction: @escaping (FailedSendRecoveryPolicy.Action) -> Void
     ) {
         self.message = message
         self.htmlContentHandler = htmlContentHandler
@@ -108,8 +135,10 @@ struct MessageBubble: View {
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.contactRefreshToken = contactRefreshToken
         self.isLastFromSender = isLastFromSender
+        self.isNewestInTranscript = isNewestInTranscript
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
+        self.onSendRecoveryAction = onSendRecoveryAction
         self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(loader: messageBubbleLoader))
     }
 
@@ -122,8 +151,23 @@ struct MessageBubble: View {
             hidingInlineReferencedInHTML: showHTMLPreview,
             hidingCalendarInviteAttachments: showsCalendarInvitePreviewCard
         )
+        let sendStatus = sendStatusPresentation
+        let isSendPending = sendStatus == .sending
+        let statusLine = MessageSendStatusLinePolicy.line(
+            presentation: sendStatus,
+            isSendingRevealDue: isSendingRevealDue,
+            isFromMe: message.isFromMe,
+            isConfirmedInGmail: message.isConfirmedInGmail,
+            isNewestInTranscript: isNewestInTranscript
+        )
+        let recoveryPrompt = message.isFromMe
+            ? FailedSendRecoveryPolicy.prompt(for: message.outboundSendDeliveryState)
+            : nil
 
-        HStack(alignment: .bottom, spacing: 8) {
+        // With a recovery badge, center it on the content bubble rather than on the row's
+        // bottom (the timestamp line). Only then: the custom guide would also move an incoming
+        // row's avatar off the bottom.
+        HStack(alignment: recoveryPrompt == nil ? .bottom : Self.sendRecoveryBadgeAlignment, spacing: 8) {
             if !message.isFromMe {
                 leadingContent
             } else {
@@ -151,23 +195,33 @@ struct MessageBubble: View {
                     fullEmailOpener: fullEmailOpener,
                     originalEmailSourceWarmer: originalEmailSourceWarmer,
                     htmlSourceSignaturer: htmlContentHandler,
-                    onOpenFullMessage: openFullMessage(source:)
+                    onOpenFullMessage: openFullMessage(source:),
+                    sendRecoveryPrompt: recoveryPrompt,
+                    onSendRecoveryTap: { isShowingSendRecovery = true }
                 )
+                .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
 
-                sendStatusView
-
-                MessageMetadata(
-                    date: message.internalDate,
-                    isUnread: message.isUnread,
-                    showUnreadIndicator: style.showUnreadIndicator
-                )
+                metadataLine(statusLine: statusLine)
             }
             .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
+
+            if let recoveryPrompt {
+                // Trailing, as in iMessage; the room comes out of the leading spacer of the
+                // outgoing row, whose bubble column is capped at `maxBubbleWidth`.
+                sendRecoveryBadge(prompt: recoveryPrompt, statusLine: statusLine)
+                    .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
+                    .transition(.opacity)
+            }
 
             if !message.isFromMe {
                 Spacer()
             }
         }
+        // Crossfades every status change (Sending… → Sent, → Not sent, → Delivery unknown, the
+        // receipt moving to a newer row) and the badge's arrival. None of them changes the row's
+        // height: the caption shares the timestamp's line (below accessibility text sizes; see
+        // `MessageSendStatusLinePolicy.Arrangement`).
+        .animation(.easeInOut(duration: 0.2), value: statusLine)
         .background {
             InlineAttachmentDownloadTrigger(
                 attachments: InlineAttachmentDownloadPolicy.pendingImages(in: message.attachments, isFromMe: message.isFromMe)
@@ -175,6 +229,28 @@ struct MessageBubble: View {
         }
         .task(id: currentLoadSignature) {
             await viewModel.loadIfNeeded(using: loadContext(contentSignature: currentLoadSignature))
+        }
+        .task(id: isSendPending) {
+            await revealSendingAfterGracePeriod(isSendPending: isSendPending)
+        }
+        .confirmationDialog(
+            recoveryPrompt?.title ?? "",
+            isPresented: $isShowingSendRecovery,
+            titleVisibility: .visible,
+            presenting: recoveryPrompt
+        ) { prompt in
+            ForEach(prompt.actions, id: \.self) { action in
+                Button(action.title) {
+                    pendingSendRecoveryAction = action
+                    runPendingSendRecoveryIfDialogDismissed()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { prompt in
+            Text(prompt.message)
+        }
+        .onChange(of: isShowingSendRecovery) { _, _ in
+            runPendingSendRecoveryIfDialogDismissed()
         }
     }
 
@@ -218,30 +294,139 @@ struct MessageBubble: View {
         }
     }
 
-    @ViewBuilder
-    private var sendStatusView: some View {
-        switch MessageSendStatusPresentation.resolve(
+    private var sendStatusPresentation: MessageSendStatusPresentation {
+        MessageSendStatusPresentation.resolve(
             deliveryState: message.outboundSendDeliveryState,
             isSendingLocalAttachments: message.isSendingLocalAttachments,
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads
+        )
+    }
+
+    /// The send status, when there is one, and the timestamp ("Sent · 2:41 PM"), arranged per
+    /// `MessageSendStatusLinePolicy.Arrangement`.
+    @ViewBuilder
+    private func metadataLine(statusLine: MessageSendStatusLinePolicy.Line?) -> some View {
+        let timestamp = MessageMetadata(
+            date: message.internalDate,
+            isUnread: message.isUnread,
+            showUnreadIndicator: style.showUnreadIndicator
+        )
+        switch MessageSendStatusLinePolicy.arrangement(
+            isAccessibilityTextSize: dynamicTypeSize.isAccessibilitySize
         ) {
-        case .sending:
-            MessageSendingIndicator()
-        case .notSent:
-            Text(MessageSendStatusPresentation.notSent.label ?? "")
-                .font(.caption2)
-                .foregroundColor(.red)
-        case .deliveryUnknown:
-            Text(MessageSendStatusPresentation.deliveryUnknown.label ?? "")
-                .font(.caption2)
-                .foregroundColor(.orange)
-        case .sendFailed:
-            Text(MessageSendStatusPresentation.sendFailed.label ?? "")
-                .font(.caption2)
-                .foregroundColor(.red)
-        case .none:
-            EmptyView()
+        case .inline:
+            HStack(spacing: 0) {
+                statusCaption(statusLine, isInline: true)
+                    .lineLimit(1)
+                    // If the column ever runs short, the timestamp gives way, not the status.
+                    .layoutPriority(1)
+                timestamp
+                    // A wrapped timestamp would let a caption's arrival change the row's height.
+                    .lineLimit(1)
+            }
+        case .stacked:
+            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 0) {
+                statusCaption(statusLine, isInline: false)
+                timestamp
+            }
         }
+    }
+
+    /// A ZStack so two captions crossfade in one place ("Sending…" fading out where "Sent" fades
+    /// in) instead of sitting side by side mid-transition, aligned on the bubble's side so both
+    /// share one edge. Empty, it takes no space.
+    private func statusCaption(
+        _ statusLine: MessageSendStatusLinePolicy.Line?,
+        isInline: Bool
+    ) -> some View {
+        ZStack(alignment: message.isFromMe ? .trailing : .leading) {
+            if let statusLine {
+                Group {
+                    if isInline {
+                        Text(statusLine.label).foregroundColor(Self.statusColor(statusLine)) +
+                            Text(verbatim: " · ").foregroundColor(.secondary)
+                    } else {
+                        // Own line: spacing lives inside the caption so an empty ZStack adds none.
+                        Text(statusLine.label).foregroundColor(Self.statusColor(statusLine))
+                            .padding(.bottom, 2)
+                    }
+                }
+                .font(.caption2)
+                .id(statusLine)
+                .transition(.opacity)
+            }
+        }
+    }
+
+    private func sendRecoveryBadge(
+        prompt: FailedSendRecoveryPolicy.Prompt,
+        statusLine: MessageSendStatusLinePolicy.Line?
+    ) -> some View {
+        Button {
+            isShowingSendRecovery = true
+        } label: {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.title3)
+                .foregroundColor(statusLine.map(Self.statusColor) ?? .red)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(prompt.title)
+        .accessibilityHint(prompt.accessibilityHint)
+    }
+
+    /// Red for a definite failure. Orange for an ambiguous send: Gmail may already have it, and a
+    /// red "failed" signal would invite a manual duplicate of a non-idempotent send.
+    private static func statusColor(_ line: MessageSendStatusLinePolicy.Line) -> Color {
+        switch line {
+        case .notSent, .sendFailed:
+            return .red
+        case .deliveryUnknown:
+            return .orange
+        case .sending, .sent:
+            return .secondary
+        }
+    }
+
+    /// Runs the dialog's chosen action once the dialog is gone. Called from both the dialog button
+    /// and the presentation change because SwiftUI does not promise which of the two lands first
+    /// (the button's action, or `isPresented` turning false): whichever comes second finds both
+    /// and dispatches exactly once. The extra main-actor turn lets SwiftUI finish the update that
+    /// tears the dialog down, focus restoration included, before the action moves focus into the
+    /// composer or raises an alert.
+    private func runPendingSendRecoveryIfDialogDismissed() {
+        guard let action = FailedSendRecoveryPolicy.actionToRun(
+            pending: pendingSendRecoveryAction,
+            isDialogPresented: isShowingSendRecovery
+        ) else {
+            return
+        }
+        pendingSendRecoveryAction = nil
+        let onSendRecoveryAction = onSendRecoveryAction
+        Task { @MainActor in
+            onSendRecoveryAction(action)
+        }
+    }
+
+    /// Flips `isSendingRevealDue` once a send has been pending for the grace period. `.task(id:)`
+    /// cancels the wait the moment the pending state ends (Gmail answered, the send failed) or
+    /// the row leaves the screen, so a fast send never shows "Sending…".
+    private func revealSendingAfterGracePeriod(isSendPending: Bool) async {
+        guard isSendPending else {
+            if isSendingRevealDue {
+                isSendingRevealDue = false
+            }
+            return
+        }
+        let delay = MessageSendStatusLinePolicy.remainingSendingRevealDelay(
+            pendingSince: message.internalDate,
+            now: Date()
+        )
+        if delay > 0 {
+            guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(delay * 1_000_000_000)) else {
+                return
+            }
+        }
+        isSendingRevealDue = true
     }
 
     @ViewBuilder

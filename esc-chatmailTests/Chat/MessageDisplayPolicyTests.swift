@@ -273,6 +273,68 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertTrue(shouldShow)
     }
 
+    // MARK: - Text loading placeholder
+
+    private func showsTextLoadingPlaceholder(
+        hasLoadedContent: Bool = false,
+        hasHTMLSource: Bool = true,
+        isForwardedEmail: Bool = false,
+        isFromMe: Bool = true,
+        isNewsletter: Bool = false,
+        isLikelyCalendarInvite: Bool = false,
+        chatPreviewText: String? = "On my way, see you at 6"
+    ) -> Bool {
+        MessageDisplayPolicy.showsTextLoadingPlaceholder(
+            hasLoadedContent: hasLoadedContent,
+            hasHTMLSource: hasHTMLSource,
+            isForwardedEmail: isForwardedEmail,
+            isFromMe: isFromMe,
+            isNewsletter: isNewsletter,
+            isLikelyCalendarInvite: isLikelyCalendarInvite,
+            chatPreviewText: chatPreviewText
+        )
+    }
+
+    /// Sync replaces an optimistic reply with Gmail's echo, a new object ID, so the bubble
+    /// remounts with a fresh view model whose content has not loaded, and the echo always has an
+    /// HTML source. Its stored preview is the text the load will publish, so it renders now.
+    ///
+    /// Revert-check: deleting the `rendersStoredOwnPreview` exemption in
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` (back to "HTML source and not loaded →
+    /// pill") fails this test.
+    ///
+    /// HONEST SCOPE: this pins the decision. That `MessageContentView.textContent` renders the
+    /// stored text when it holds is view wiring; there is no UI test target to cover it.
+    func testShowsTextLoadingPlaceholder_ownHTMLEchoWithStoredPreviewBeforeLoad_rendersText() {
+        XCTAssertFalse(showsTextLoadingPlaceholder())
+    }
+
+    /// The comment in `MessageContentView.textContent` still holds for incoming mail: until
+    /// content detection finishes, its only text is raw/partial HTML-derived text.
+    func testShowsTextLoadingPlaceholder_incomingHTMLBeforeLoad_showsPlaceholder() {
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false))
+    }
+
+    func testShowsTextLoadingPlaceholder_ownHTMLWithoutStoredPreview_showsPlaceholder() {
+        XCTAssertTrue(showsTextLoadingPlaceholder(chatPreviewText: nil))
+        XCTAssertTrue(showsTextLoadingPlaceholder(chatPreviewText: " \n\t "))
+    }
+
+    /// Forwarded rows wait for the structured forward summary, and newsletter/invite rows can
+    /// route to a preview card, so the stored preview is not their final text.
+    func testShowsTextLoadingPlaceholder_ownForwardedNewsletterOrInviteBeforeLoad_showsPlaceholder() {
+        XCTAssertTrue(showsTextLoadingPlaceholder(isForwardedEmail: true))
+        XCTAssertTrue(showsTextLoadingPlaceholder(hasHTMLSource: false, isForwardedEmail: true))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isNewsletter: true))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isLikelyCalendarInvite: true))
+    }
+
+    func testShowsTextLoadingPlaceholder_withoutHTMLSourceOrOnceLoaded_rendersText() {
+        XCTAssertFalse(showsTextLoadingPlaceholder(hasHTMLSource: false, isFromMe: false))
+        XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isFromMe: false))
+        XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isForwardedEmail: true))
+    }
+
     func testIsTrustedTransactionalSender_rejectsSpoofedDomains() {
         XCTAssertFalse(MessageDisplayPolicy.isTrustedTransactionalSender("x@members.ebay.com.evil.example"))
         XCTAssertFalse(MessageDisplayPolicy.isTrustedTransactionalSender("\"ship-confirm@amazon.com\" <attacker@evil.example>"))

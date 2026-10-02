@@ -19,6 +19,11 @@ struct MessageContentView: View {
     let originalEmailSourceWarmer: any OriginalEmailSourceWarming
     let htmlSourceSignaturer: any HTMLSourceSignaturing
     let onOpenFullMessage: (EmailReaderOpenSource) -> Void
+    /// Non-nil for an outgoing row `FailedSendRecoveryPolicy` offers recovery for ("Not sent",
+    /// "Delivery unknown"): tapping the bubble then calls `onSendRecoveryTap`, which presents that
+    /// dialog instead of the email reader, and the prompt supplies the bubble's VoiceOver hint.
+    let sendRecoveryPrompt: FailedSendRecoveryPolicy.Prompt?
+    let onSendRecoveryTap: () -> Void
 
     var body: some View {
         if showHTMLPreview {
@@ -52,10 +57,18 @@ struct MessageContentView: View {
     private var textContent: some View {
         if let forwardedDisplay = resolvedForwardedDisplayContent {
             forwardedTextContent(for: forwardedDisplay)
-        } else if message.isForwardedEmail && !hasLoadedContent {
-            loadingPlaceholder
-        } else if hasHTMLSource && !hasLoadedContent {
-            // Avoid flashing raw/partial HTML-derived text while async content detection is still running.
+        } else if MessageDisplayPolicy.showsTextLoadingPlaceholder(
+            hasLoadedContent: hasLoadedContent,
+            hasHTMLSource: hasHTMLSource,
+            isForwardedEmail: message.isForwardedEmail,
+            isFromMe: message.isFromMe,
+            isNewsletter: message.isNewsletter,
+            isLikelyCalendarInvite: message.isLikelyCalendarInvite,
+            chatPreviewText: message.chatPreviewText
+        ) {
+            // Avoid flashing raw/partial HTML-derived text while async content detection is still
+            // running. The user's own rows with a stored preview are exempt: their text is final,
+            // and the pill flickered on every reply's echo remount (see the policy).
             loadingPlaceholder
         } else {
             if let text = resolvedVisibleText, !text.isEmpty {
@@ -120,9 +133,22 @@ struct MessageContentView: View {
         let compactCharLimit = style.textLineLimit == nil ? nil : 800
         let (displayText, _) = truncatedText(text, lineLimit: style.textLineLimit, charLimit: compactCharLimit)
 
-        if MessageOriginalEmailOpenPolicy.textBubbleTapOpensOriginal(
-            hasOriginalEmailContent: message.hasOriginalEmailContent
+        switch MessageOriginalEmailOpenPolicy.textBubbleTap(
+            hasOriginalEmailContent: message.hasOriginalEmailContent,
+            offersSendRecovery: sendRecoveryPrompt != nil
         ) {
+        case .sendRecovery:
+            // A failed reply's natural tap used to open the reader on the user's own unsent text.
+            // The original stays reachable from the long-press menu's "View original email".
+            Button {
+                onSendRecoveryTap()
+            } label: {
+                textBubbleBody(displayText)
+            }
+            .buttonStyle(.plain)
+            // `.sendRecovery` implies a prompt; the fallback is unreachable.
+            .accessibilityHint(sendRecoveryPrompt?.accessibilityHint ?? "")
+        case .originalEmail:
             // The bubble is the tap target; there is deliberately no separate "View original"
             // control. Not `.textSelection(.enabled)`: the bubble is a button, and long-press
             // belongs to the row's message context menu.
@@ -133,7 +159,7 @@ struct MessageContentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityHint("Opens the full original email")
-        } else {
+        case .none:
             textBubbleBody(displayText)
                 .textSelection(.enabled)
         }
@@ -147,11 +173,16 @@ struct MessageContentView: View {
             .cornerRadius(style.bubbleCornerRadius)
     }
 
-    /// The whole bubble (lead-in note and forwarded card) opens the original, like a text bubble.
+    /// The whole bubble (lead-in note and forwarded card) opens the original, like a text bubble —
+    /// and, like a text bubble, presents the failed-send dialog instead for an unsent forward.
     @ViewBuilder
     private func forwardedTextContent(for content: ForwardedMessageDisplayContent) -> some View {
         Button {
-            openOriginalEmail(source: .previewCard)
+            if sendRecoveryPrompt != nil {
+                onSendRecoveryTap()
+            } else {
+                openOriginalEmail(source: .previewCard)
+            }
         } label: {
             VStack(alignment: .leading, spacing: 10) {
                 if let leadInText = resolvedLeadInText(from: content) {
@@ -171,7 +202,7 @@ struct MessageContentView: View {
             .cornerRadius(style.bubbleCornerRadius)
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Opens the full original email")
+        .accessibilityHint(sendRecoveryPrompt?.accessibilityHint ?? "Opens the full original email")
     }
 
     /// Truncates text at the specified limits and adds ellipsis if truncated
@@ -273,6 +304,25 @@ enum MessageOriginalEmailOpenPolicy {
     /// "View original email". (Rich preview cards and forwarded bubbles always open on tap.)
     static func textBubbleTapOpensOriginal(hasOriginalEmailContent: Bool) -> Bool {
         hasOriginalEmailContent
+    }
+
+    /// What tapping a text bubble does.
+    enum TextBubbleTap: Equatable {
+        /// Presents the failed-send dialog (`FailedSendRecoveryPolicy`).
+        case sendRecovery
+        case originalEmail
+        /// Not a button; the text stays selectable.
+        case none
+    }
+
+    /// Send recovery wins over opening the original: an optimistic row always has original
+    /// content (its typed `bodyText`), so a "Not sent" bubble's tap would otherwise open the
+    /// reader on the user's own unsent text instead of offering a way to fix it.
+    static func textBubbleTap(hasOriginalEmailContent: Bool, offersSendRecovery: Bool) -> TextBubbleTap {
+        if offersSendRecovery { return .sendRecovery }
+        return textBubbleTapOpensOriginal(hasOriginalEmailContent: hasOriginalEmailContent)
+            ? .originalEmail
+            : .none
     }
 
     static func hasOriginalEmailContent(
