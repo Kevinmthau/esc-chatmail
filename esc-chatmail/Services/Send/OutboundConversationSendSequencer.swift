@@ -13,6 +13,11 @@ import Foundation
 /// ambiguous or cancelled. Any terminal predecessor releases the next send;
 /// this type never retransmits anything.
 ///
+/// Only chat replies take turns (`OutboundMessageRequest.takesConversationSendTurn`):
+/// ComposeView compose and forward keep their sheet open until admission, so
+/// queueing them behind a chat reply's upload held that sheet for the whole
+/// upload.
+///
 /// The wait is cancellation-aware. A waiting send is still a preflight
 /// `OutboundTaskRegistry` entry, so `closeAdmission` cancels its worker and
 /// the wait throws `CancellationError` at once instead of waiting out the
