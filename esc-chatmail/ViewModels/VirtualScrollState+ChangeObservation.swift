@@ -88,6 +88,19 @@ extension VirtualScrollState {
             orderedDatasetDidChange &&
             !canPreserveHistoricalWindowForTailInsertion
         let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
+        // Classified against the pre-change count and pending-event queue, so
+        // it must run before the bookkeeping below mutates either.
+        let localSendTailAppend = hasVisibleInsertion &&
+            !hasCurrentConversationDeletion &&
+            !hasDeletedWindowMessage &&
+            !hasOrderedDatasetUpdate &&
+            !uncachedRefreshAssessment.orderedDatasetDidChange
+            ? localSendTailAppendMessages(
+                in: notification,
+                window: window,
+                knownTotalCount: knownTotalCount
+            )
+            : nil
         if !insertedMessageIDs.isEmpty {
             let event = VirtualScrollInsertedMessageEvent(
                 id: UUID(),
@@ -131,6 +144,16 @@ extension VirtualScrollState {
             with: affectedMessageIDs
         )
         invalidateCachedRows(for: affectedMessageIDs)
+
+        if let localSendTailAppend {
+            // The dataset generation was bumped above (a visible insertion),
+            // so an edge preload still in flight — preloads run outside the
+            // window-load lifecycle the fast path requires to be idle — drops
+            // its page instead of splicing it onto the pre-append window.
+            publishLocalSendTailAppend(localSendTailAppend, to: window)
+            scheduleUnclassifiedRefreshCountReconciliationIfNeeded()
+            return
+        }
 
         if requiresWindowReconciliation {
             // An in-flight range/latest load owns the user's current scroll
@@ -293,7 +316,7 @@ extension VirtualScrollState {
             compareSortOrder(message, to: lastRow) != .orderedDescending
     }
 
-    private func compareSortOrder(
+    func compareSortOrder(
         _ message: Message,
         to row: ChatMessageRowModel
     ) -> ComparisonResult {
@@ -432,7 +455,7 @@ extension VirtualScrollState {
     /// objectID of the to-one relationship is available without firing the
     /// Conversation's own fault (the previous UUID comparison loaded the
     /// Conversation row for every inserted message in every merge).
-    private func belongsToCurrentConversation(_ message: Message) -> Bool {
+    func belongsToCurrentConversation(_ message: Message) -> Bool {
         let conversationObjectID = currentConversationObjectID()
         let conversationUUID = UUID(uuidString: conversationId)
 
@@ -625,13 +648,13 @@ extension VirtualScrollState {
         }
     }
 
-    private func isVisibleInChat(_ message: Message) -> Bool {
+    func isVisibleInChat(_ message: Message) -> Bool {
         let excludedLabelIDs = Set(MessagePredicates.chatExcludedLabelIDs)
         let labelIDs = message.labels?.map(\.id) ?? []
         return labelIDs.allSatisfy { !excludedLabelIDs.contains($0) }
     }
 
-    private func contextObjects(
+    func contextObjects(
         forKeys keys: [String],
         in notification: Notification
     ) -> Set<NSManagedObject> {

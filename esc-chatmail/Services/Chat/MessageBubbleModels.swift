@@ -180,10 +180,34 @@ struct MessageBubbleContentResult: Sendable, Equatable {
 
 struct MessageBubbleLoadContext: Sendable {
     let messageID: String
+    /// What the bubble on screen *is*, across message-ID changes: equal for an
+    /// optimistic reply and the sync echo that replaces it
+    /// (`ChatMessageRowModel.bubbleContentIdentityKey`). Decides whether a load
+    /// refreshes in place; `messageID` still gates which result may publish.
+    let displayIdentityKey: String
     let contentSignature: String
     let prefetchedSenderName: String?
     let senderRequest: MessageBubbleSenderRequest?
     let contentRequest: MessageBubbleContentRequest
+
+    /// - Parameter displayIdentityKey: nil keys the bubble by `messageID`
+    ///   alone, as `bubbleContentIdentityKey` does for every row that is not
+    ///   one of the user's own sends.
+    init(
+        messageID: String,
+        displayIdentityKey: String? = nil,
+        contentSignature: String,
+        prefetchedSenderName: String?,
+        senderRequest: MessageBubbleSenderRequest?,
+        contentRequest: MessageBubbleContentRequest
+    ) {
+        self.messageID = messageID
+        self.displayIdentityKey = displayIdentityKey ?? "message:\(messageID)"
+        self.contentSignature = contentSignature
+        self.prefetchedSenderName = prefetchedSenderName
+        self.senderRequest = senderRequest
+        self.contentRequest = contentRequest
+    }
 }
 
 protocol MessageBubbleLoading: Sendable {

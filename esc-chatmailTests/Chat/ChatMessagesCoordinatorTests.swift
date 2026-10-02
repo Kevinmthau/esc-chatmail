@@ -2292,7 +2292,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
-    func testPersistedOptimisticReplyPublishesTargetBeforeStabilizedBottomAnchor() async throws {
+    func testPersistedOptimisticReply_targetNotYetPublished_publishesThenScrollsOnceAnimated() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
             "second@example.com"
@@ -2352,33 +2352,31 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
 
         XCTAssertEqual(ensuredMessageIDs, [targetMessageID])
         XCTAssertTrue(latestWindowKnownCounts.isEmpty)
         XCTAssertEqual(
             presentationEvents,
-            ["target-published", "anchor", "anchor"]
+            ["target-published", "anchor"]
         )
         XCTAssertEqual(
             anchorSteps,
             [
+                // One animated scroll, no unanimated stabilization after it:
+                // the re-armed follow owns late growth. The row was not yet
+                // published when the handler ran, so it waits for layout.
                 .init(
                     delay: UIConfig.contentChangeScrollDelay,
                     animated: true,
                     logMessage: "ChatView animated scroll -> bottom anchor"
-                ),
-                .init(
-                    delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
-                    animated: false,
-                    logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
                 )
             ]
         )
     }
 
-    func testReplyAdmissionAddsOneLightweightStabilizationAfterOptimisticPresentation() async throws {
+    func testReplyAdmission_bottomAnchorOffscreen_addsOneUnanimatedStabilization() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
             "second@example.com"
@@ -2411,7 +2409,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { step in
             anchorSteps.append(step)
         }
-        await waitUntil { anchorSteps.count == 2 }
+        await waitUntil { anchorSteps.count == 1 }
+        // Late layout left the bottom anchor offscreen by admission time.
+        reportBottomAnchorOffscreenWithoutGrowth(coordinator)
 
         coordinator.handleReplySendAdmitted(
             targetMessageID: targetMessageID,
@@ -2422,7 +2422,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { step in
             anchorSteps.append(step)
         }
-        await waitUntil { anchorSteps.count == 3 }
+        await waitUntil { anchorSteps.count == 2 }
 
         XCTAssertEqual(
             anchorSteps.last,
@@ -2432,6 +2432,510 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                 logMessage: "ChatView reply-admission stabilization -> bottom anchor"
             )
         )
+    }
+
+    /// A local send gets exactly one scroll, animated: the count bump from the
+    /// optimistic save reaches `handleMessageCountChange` first and must stand
+    /// down for the publication anchor, which — the tail-append fast path
+    /// having already published the row — scrolls one frame later, not after
+    /// the 50ms a row it has to load waits. Once the send ends, count changes
+    /// scroll again.
+    ///
+    /// Revert-check: removing the `localReplySendsAwaitingPublication` clause
+    /// of `isCountChangeOwnedByLocalReplySend` lets this count change (whose
+    /// `lastMessage` is not an optimistic row) schedule its own scroll, which
+    /// the joined bottom-anchor task lands and the empty-steps assertion
+    /// catches; `UIConfig.postSendLayoutCommitDelay` in
+    /// `handleReplyOptimisticMessagePersisted` reverted to `0` fails the
+    /// step's delay and the recorded sleep.
+    func testLocalReplySend_countChangeThenPublishedRow_scrollsOnceAnimatedAfterOneFrame() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var sleeps: [UInt64] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { sleeps.append($0) },
+            isMessagePublished: { $0 == messages.last!.objectID }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count - 1,
+            lastMessage: messages.first,
+            visibleMessages: Array(rows.prefix(1)),
+            senderGroupingMessages: Array(rows.prefix(1)),
+            totalMessageCount: messages.count - 1,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+        sleeps.removeAll()
+
+        let anchorIntent = coordinator.beginLocalReplySend()
+        // The optimistic save bumped the count before the send's persisted
+        // callback ran.
+        coordinator.handleMessageCountChange(
+            oldCount: messages.count - 1,
+            newCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            totalMessageCount: messages.count,
+            stabilizeBottomAnchor: true,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        // A count-change scroll, had one been scheduled, has landed by now.
+        await coordinator.waitForBottomAnchorScrollCompletion()
+        XCTAssertTrue(
+            anchorSteps.isEmpty,
+            "The send's own count bump must defer to its publication anchor"
+        )
+
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: messages.last!.objectID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 1 }
+        await coordinator.waitForBottomAnchorScrollCompletion()
+
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.postSendLayoutCommitDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                )
+            ]
+        )
+        XCTAssertEqual(
+            sleeps,
+            [UInt64(UIConfig.postSendLayoutCommitDelay * 1_000_000_000)],
+            "A published row waits one frame for its layout, not a fixed 50ms"
+        )
+
+        coordinator.endLocalReplySend(anchorIntent)
+        anchorSteps.removeAll()
+        coordinator.handleMessageCountChange(
+            oldCount: messages.count,
+            newCount: messages.count + 1,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            totalMessageCount: messages.count + 1,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 1 }
+        XCTAssertEqual(anchorSteps.first?.logMessage, "ChatView animated scroll -> bottom anchor")
+    }
+
+    /// Another party's message arriving while the reply is still in its
+    /// (possibly long) attachment preflight keeps the animated count-change
+    /// scroll. Suppressing every count change for the whole send left it
+    /// below the fold once the post-send follow expired, until admission's
+    /// unanimated snap.
+    ///
+    /// Revert-check: making `isCountChangeOwnedByLocalReplySend` return
+    /// `!localReplySendsInFlight.isEmpty` (the whole-send suppression) drops
+    /// the incoming message's scroll and times out the second wait.
+    func testLocalReplySend_incomingCountChangeAfterPublication_scrollsAnimated() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let optimisticReply = try makeLocalOptimisticReply(in: conversation, date: 10)
+        let incoming = MessageBuilder()
+            .withId("incoming-during-send")
+            .withDate(Date(timeIntervalSince1970: 20))
+            .withSender(email: "first@example.com")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        try viewContext.save()
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            isMessagePublished: { _ in true }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let anchorIntent = coordinator.beginLocalReplySend()
+        coordinator.handleMessageCountChange(
+            oldCount: messages.count,
+            newCount: messages.count + 1,
+            lastMessage: optimisticReply,
+            visibleMessages: rows,
+            totalMessageCount: messages.count + 1,
+            stabilizeBottomAnchor: true,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: optimisticReply.objectID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count + 1,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 1 }
+        await coordinator.waitForOptimisticReplyPublicationCompletion(
+            targetMessageID: optimisticReply.objectID
+        )
+
+        // Still in preflight: `endLocalReplySend` has not run.
+        coordinator.handleMessageCountChange(
+            oldCount: messages.count + 1,
+            newCount: messages.count + 2,
+            lastMessage: incoming,
+            visibleMessages: rows,
+            totalMessageCount: messages.count + 2,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 2 }
+        XCTAssertEqual(
+            anchorSteps.last,
+            .init(
+                delay: UIConfig.contentChangeScrollDelay,
+                animated: true,
+                logMessage: "ChatView animated scroll -> bottom anchor"
+            )
+        )
+        coordinator.endLocalReplySend(anchorIntent)
+    }
+
+    /// The send's own count bump can reach `handleMessageCountChange` after
+    /// the publication anchor has already scrolled. With the optimistic row
+    /// as the newest message it still defers, so the send keeps its one
+    /// animation.
+    ///
+    /// Revert-check: dropping the `localOptimisticMessageID(for: lastMessage)`
+    /// clause of `isCountChangeOwnedByLocalReplySend` (returning false) lets
+    /// the late bump schedule a second scroll, which the joined bottom-anchor
+    /// task lands and the single-step assertion catches.
+    func testLocalReplySend_ownCountChangeAfterPublicationScroll_staysDeferred() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let optimisticReply = try makeLocalOptimisticReply(in: conversation, date: 10)
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            isMessagePublished: { _ in true }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let anchorIntent = coordinator.beginLocalReplySend()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: optimisticReply.objectID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count + 1,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 1 }
+        await coordinator.waitForOptimisticReplyPublicationCompletion(
+            targetMessageID: optimisticReply.objectID
+        )
+
+        coordinator.handleMessageCountChange(
+            oldCount: messages.count,
+            newCount: messages.count + 1,
+            lastMessage: optimisticReply,
+            visibleMessages: rows,
+            totalMessageCount: messages.count + 1,
+            stabilizeBottomAnchor: true,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await coordinator.waitForBottomAnchorScrollCompletion()
+        XCTAssertEqual(
+            anchorSteps.count,
+            1,
+            "The send's late count bump must not add a second scroll"
+        )
+        coordinator.endLocalReplySend(anchorIntent)
+    }
+
+    /// A publication anchor that ends without scrolling (the row could not be
+    /// published) stops owning count changes; it must not silence the rest
+    /// of the send's preflight.
+    ///
+    /// Revert-check: removing the `defer` that clears
+    /// `localReplySendsAwaitingPublication` in
+    /// `handleReplyOptimisticMessagePersisted` keeps the count change
+    /// suppressed and times out the wait.
+    func testLocalReplySend_publicationSkipped_releasesCountChangeScroll() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            ensureVisibleMessage: { _ in false }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = makeMessageObjectID("unpublished-reply")
+        let anchorIntent = coordinator.beginLocalReplySend()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await coordinator.waitForOptimisticReplyPublicationCompletion(
+            targetMessageID: targetMessageID
+        )
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        coordinator.handleMessageCountChange(
+            oldCount: messages.count,
+            newCount: messages.count + 1,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            totalMessageCount: messages.count + 1,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 1 }
+        XCTAssertEqual(anchorSteps.first?.logMessage, "ChatView animated scroll -> bottom anchor")
+        coordinator.endLocalReplySend(anchorIntent)
+    }
+
+    /// At admission the reply has usually been on screen for a while; with the
+    /// bottom anchor visible the old unanimated correction had nothing to fix,
+    /// and when admission was fast it cut the slide short. It must not scroll —
+    /// but still refresh the post-send follow for late growth.
+    ///
+    /// Revert-check: dropping the `isTrackedBottomAnchorVisible` check in
+    /// `handleReplySendAdmitted` adds the admission step and fails the
+    /// single-step assertion.
+    func testReplyAdmission_bottomAnchorVisible_skipsStabilizationButKeepsFollow() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var currentTime: TimeInterval = 1_000
+        let admissionDelayStarted = expectation(description: "Reply-admission delay started")
+        var shouldObserveAdmissionDelay = false
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { _ in
+                if shouldObserveAdmissionDelay {
+                    shouldObserveAdmissionDelay = false
+                    admissionDelayStarted.fulfill()
+                }
+            },
+            now: { currentTime },
+            isMessagePublished: { _ in true }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.beginLocalReplySend()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 1 }
+
+        // The slide landed: the anchor reads visible again.
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { _ in
+            XCTFail("A visible anchor must not request a scroll")
+        }
+        currentTime += 2.0
+        shouldObserveAdmissionDelay = true
+        coordinator.handleReplySendAdmitted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await fulfillment(of: [admissionDelayStarted], timeout: 1)
+        // Join the admission task: any step it was going to request has
+        // landed by now.
+        await coordinator.waitForReplyAdmissionCompletion(targetMessageID: targetMessageID)
+        coordinator.endLocalReplySend(anchorIntent)
+        XCTAssertEqual(anchorSteps.count, 1, "A visible bottom anchor needs no admission scroll")
+
+        // Past the publication's 3s follow but inside the one admission armed
+        // 2s later: growth with the anchor offscreen must still re-anchor,
+        // which proves admission ran to completion and only skipped the step.
+        currentTime += 1.5
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 400,
+            viewportHeight: 100
+        ) { step in
+            anchorSteps.append(step)
+        }
+        XCTAssertEqual(anchorSteps.count, 2)
+        XCTAssertEqual(anchorSteps.last?.logMessage, "ChatView post-reveal layout scroll -> bottom anchor")
+    }
+
+    /// Admission arriving while the post-send slide is still animating waits it
+    /// out before deciding, instead of snapping over a slide whose anchor reads
+    /// offscreen until it lands.
+    ///
+    /// Revert-check: removing the `postSendAnimatedScrollSettlesAt` wait in
+    /// `handleReplySendAdmitted` drops the second sleep and fails the
+    /// recorded-sleeps assertion.
+    func testReplyAdmission_duringPostSendSlide_waitsForSlideToSettle() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var sleeps: [UInt64] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            sleep: { sleeps.append($0) },
+            now: { 1_000 },
+            isMessagePublished: { _ in true }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        await confirmInitialBottomAnchor(coordinator)
+
+        let targetMessageID = messages.last!.objectID
+        let anchorIntent = coordinator.beginLocalReplySend()
+        coordinator.handleReplyOptimisticMessagePersisted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 1 }
+        reportBottomAnchorOffscreenWithoutGrowth(coordinator)
+        sleeps.removeAll()
+
+        // The fake clock has not advanced: the 0.2s slide is still in flight.
+        coordinator.handleReplySendAdmitted(
+            targetMessageID: targetMessageID,
+            anchorIntent: anchorIntent,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+        await waitUntil { anchorSteps.count == 2 }
+
+        let slideNanoseconds = UInt64(UIConfig.scrollAnimationDuration * 1_000_000_000)
+        let admissionDelayNanoseconds = UInt64(
+            max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration) * 1_000_000_000
+        )
+        XCTAssertEqual(sleeps, [admissionDelayNanoseconds, slideNanoseconds])
+        XCTAssertEqual(anchorSteps.last?.logMessage, "ChatView reply-admission stabilization -> bottom anchor")
     }
 
     func testReplyAdmissionAfterSuccessfulPublicationPreservesNewerUserScroll() async throws {
@@ -2484,10 +2988,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            visibilityAttempts == 1 && anchorSteps.count == 2
+            visibilityAttempts == 1 && anchorSteps.count == 1
         }
 
         coordinator.handleUserScrollInteraction()
+        // Offscreen, so only the newer scroll can explain a skipped step.
+        reportBottomAnchorOffscreenWithoutGrowth(coordinator)
         shouldObserveAdmissionDelay = true
         coordinator.handleReplySendAdmitted(
             targetMessageID: targetMessageID,
@@ -2511,7 +3017,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(
             anchorSteps.count,
-            2,
+            1,
             "A newer user scroll must suppress admission stabilization"
         )
     }
@@ -2564,6 +3070,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
         await fulfillment(of: [earlyAttemptCompleted], timeout: 1)
         XCTAssertTrue(anchorSteps.isEmpty)
+        // The row the retry publishes leaves the anchor offscreen.
+        reportBottomAnchorOffscreenWithoutGrowth(coordinator)
 
         coordinator.handleReplySendAdmitted(
             targetMessageID: targetMessageID,
@@ -2636,6 +3144,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await fulfillment(of: [earlyPublicationStarted], timeout: 1)
+        reportBottomAnchorOffscreenWithoutGrowth(coordinator)
 
         coordinator.handleReplySendAdmitted(
             targetMessageID: targetMessageID,
@@ -2659,7 +3168,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertTrue(anchorSteps.isEmpty)
 
         mayPublishTarget = true
-        await waitUntil { anchorSteps.count == 3 }
+        await waitUntil { anchorSteps.count == 2 }
 
         XCTAssertFalse(observedCancellation)
         XCTAssertEqual(visibilityAttempts, 1)
@@ -2736,6 +3245,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
 
+        reportBottomAnchorOffscreenWithoutGrowth(coordinator)
+
         coordinator.handleReplySendAdmitted(
             targetMessageID: targetMessageID,
             anchorIntent: anchorIntent,
@@ -2747,7 +3258,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
         await waitUntil {
             scrollState.visibleMessages.contains { $0.objectID == targetMessageID } &&
-                anchorSteps.count == 3
+                anchorSteps.count == 2
         }
 
         XCTAssertEqual(anchorSteps.filter(\.animated).count, 1)
@@ -2755,7 +3266,6 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             Set(anchorSteps.map(\.logMessage)),
             Set([
                 "ChatView animated scroll -> bottom anchor",
-                "ChatView stabilization scroll after content change -> bottom anchor",
                 "ChatView reply-admission stabilization -> bottom anchor"
             ])
         )
@@ -2817,7 +3327,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         mayPublishTarget = true
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
         XCTAssertTrue(didPublishTarget)
     }
@@ -3049,7 +3559,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
 
         // Content growing while the bottom anchor is offscreen — a bubble
@@ -3063,7 +3573,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         await waitUntil {
-            anchorSteps.count == 4
+            anchorSteps.count == 3
         }
         XCTAssertEqual(
             Array(anchorSteps.suffix(2)),
@@ -3126,7 +3636,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
 
         coordinator.handleUserScrollInteraction()
@@ -3137,7 +3647,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in
             XCTFail("User scrolling after a send must cancel the re-armed follow")
         }
-        XCTAssertEqual(anchorSteps.count, 2)
+        XCTAssertEqual(anchorSteps.count, 1)
     }
 
     func testRearmedBottomFollowExpiresAfterGracePeriod() async throws {
@@ -3184,7 +3694,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
 
         currentTime += 3.1
@@ -3195,7 +3705,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in
             XCTFail("The re-armed follow must expire after its grace period")
         }
-        XCTAssertEqual(anchorSteps.count, 2)
+        XCTAssertEqual(anchorSteps.count, 1)
     }
 
     func testFailedPostSendPublicationDoesNotRearmBottomFollow() async throws {
@@ -3286,7 +3796,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
 
         coordinator.handleMessageCountChange(
@@ -3363,7 +3873,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         mayPublishTarget = true
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
 
         // The publication completed after the restart; it must not have armed
@@ -3416,7 +3926,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
 
         coordinator.handleDisappear()
@@ -3427,7 +3937,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in
             XCTFail("Disappearing must cancel a send's re-armed bottom follow")
         }
-        XCTAssertEqual(anchorSteps.count, 2)
+        XCTAssertEqual(anchorSteps.count, 1)
     }
 
     func testSecondReplySendRefreshesBottomFollowGrace() async throws {
@@ -3474,7 +3984,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
 
         currentTime += 2.0
@@ -3488,7 +3998,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 4
+            anchorSteps.count == 2
         }
 
         // Past the first send's grace but inside the second's: growth while
@@ -3502,7 +4012,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 6
+            anchorSteps.count == 4
         }
         XCTAssertEqual(
             Array(anchorSteps.suffix(2)),
@@ -3683,7 +4193,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         await waitUntil {
-            anchorSteps.count == 2
+            anchorSteps.count == 1
         }
         XCTAssertTrue(latestWindowKnownCounts.isEmpty)
     }
@@ -6309,7 +6819,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         // Sleep call 1 is the visibility confirmation; call 2 is the pre-send
         // follow's validation timer, which stays parked until released so the
         // send provably re-arms over a live validation window; calls 3+ are
-        // the optimistic publication step delays and pass through. The actor
+        // the optimistic publication step delay and pass through. The actor
         // keeps the cross-executor flag reads race-free, and the parked loop
         // exits on cancellation (the re-arm cancels the parked task).
         let sleepGate = ParkedSleepGate()
@@ -6361,7 +6871,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         // re-arm must replace the follow cycle wholesale. The publication
         // steps landing proves the re-arm ran (it precedes them in the same
         // optimistic-publication continuation): pre-send corrective scroll
-        // (1) + the reply's two publication steps.
+        // (1) + the reply's one publication step.
         coordinator.handleReplyOptimisticMessagePersisted(
             targetMessageID: messages.last!.objectID,
             anchorIntent: coordinator.capturePostSendAnchorIntent(),
@@ -6372,7 +6882,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 3
+            anchorSteps.count == 2
         }
         await sleepGate.release()
 
@@ -6386,7 +6896,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.append(step)
         }
         await waitUntil {
-            anchorSteps.count == 5
+            anchorSteps.count == 4
         }
         // Negative assertion: give a leaked latch's extra pair time to land.
         try? await Task.sleep(nanoseconds: 100_000_000)
@@ -6397,7 +6907,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ) { _ in
             XCTFail("A settled offscreen anchor must wait for growth, not scroll")
         }
-        XCTAssertEqual(anchorSteps.count, 5)
+        XCTAssertEqual(anchorSteps.count, 4)
     }
 
     func testIsRevealRestartableFromEmpty_tracksEmptyReadinessOnly() async throws {
@@ -7222,6 +7732,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         },
         ensureVisibleMessage: @escaping ChatMessagesCoordinator.MessageVisibilityEnsurer = {
             _ in true
+        },
+        isMessagePublished: @escaping ChatMessagesCoordinator.MessagePublicationCheck = {
+            _ in false
         }
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
@@ -7238,8 +7751,48 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             clearPersonCache: {},
             sleep: sleep,
             now: now,
-            ensureVisibleMessage: ensureVisibleMessage
+            ensureVisibleMessage: ensureVisibleMessage,
+            isMessagePublished: isMessagePublished
         )
+    }
+
+    /// The bottom anchor reads offscreen with the content height unchanged
+    /// from `confirmInitialBottomAnchor`'s default, as after a just-published
+    /// row pushed it below the viewport — without the growth that would
+    /// trigger an armed bottom follow.
+    private func reportBottomAnchorOffscreenWithoutGrowth(
+        _ coordinator: ChatMessagesCoordinator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100
+        ) { _ in
+            XCTFail("An offscreen report without growth must not scroll", file: file, line: line)
+        }
+    }
+
+    /// The user's just-sent reply as the optimistic save leaves it: from me,
+    /// with the deterministic RFC Message-ID that encodes its own ID
+    /// (`OutboundSendDeliveryState.localOptimisticMessageID`).
+    private func makeLocalOptimisticReply(
+        in conversation: Conversation,
+        date: TimeInterval
+    ) throws -> Message {
+        let optimisticID = UUID().uuidString
+        let reply = MessageBuilder()
+            .withId(optimisticID)
+            .withDate(Date(timeIntervalSince1970: date))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        reply.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        try viewContext.save()
+        XCTAssertNotNil(OutboundSendDeliveryState.localOptimisticMessageID(for: reply))
+        return reply
     }
 
     private func makeMessageObjectID(_ id: String) -> NSManagedObjectID {

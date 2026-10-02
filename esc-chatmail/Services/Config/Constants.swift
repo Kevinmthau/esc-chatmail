@@ -258,6 +258,13 @@ struct UIConfig {
     /// Delay for scroll after content changes (in seconds)
     static let contentChangeScrollDelay: TimeInterval = 0.05
 
+    /// Delay before the post-send scroll when the sent row was already
+    /// published in the window (in seconds). One 60Hz frame: a timed wait, not
+    /// a zero one, so the main run loop passes the commit that lays the new
+    /// row out before `scrollTo` resolves the bottom anchor. Chained
+    /// main-actor jobs alone can drain ahead of that commit.
+    static let postSendLayoutCommitDelay: TimeInterval = 1.0 / 60.0
+
     /// Duration of scroll animations (in seconds)
     static let scrollAnimationDuration: TimeInterval = 0.2
 }

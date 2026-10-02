@@ -288,9 +288,15 @@ struct ChatMessagesView: View {
             displayedRowCount: displayedMessages.count,
             isShowingLatestWindow: scrollState.isShowingLatestWindow
         )
+        let localSendAppendedMessageIDs = scrollState.localSendAppendedMessageIDs
         return ScrollView {
             LazyVStack(spacing: 8) {
-                ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
+                // Keyed by display identity, not object ID, so Gmail's echo replacing a just-sent
+                // reply updates the bubble in place instead of remounting it
+                // (`ChatMessageDisplayIdentity`; uniqueness: `ChatTranscriptIdentityPolicy`).
+                ForEach(ChatTranscriptIdentityPolicy.rows(for: displayedMessages)) { row in
+                    let index = row.index
+                    let message = row.message
                     let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
                     let nextMessage = messageRow(atAbsoluteIndex: absoluteIndex + 1)
                     let isLastFromSender = ChatMessageRowGrouping.isLastFromSender(
@@ -314,7 +320,12 @@ struct ChatMessagesView: View {
                             performSendRecovery(action, messageObjectID: message.messageObjectID)
                         }
                     )
-                    .id(message.objectID)
+                    .modifier(
+                        ChatRowEntranceEffect(
+                            animatesEntrance: localSendAppendedMessageIDs.contains(message.objectID)
+                        )
+                    )
+                    .id(row.id)
                     .contentShape(Rectangle())
                     .contextMenu { messageContextMenu(for: message) } preview: {
                         MessageContextMenuPreview(message: message)
@@ -506,7 +517,8 @@ struct ChatMessagesView: View {
             measuredHeight: $replyBarHeight,
             focusBinding: isTextFieldFocused
         ) {
-            let anchorIntent = coordinator.capturePostSendAnchorIntent()
+            let anchorIntent = coordinator.beginLocalReplySend()
+            defer { coordinator.endLocalReplySend(anchorIntent) }
             var persistedOptimisticMessageObjectID: NSManagedObjectID?
             let result = await viewModel.sendReply(
                 onOptimisticMessagePersisted: { optimisticResult in

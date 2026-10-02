@@ -1,18 +1,17 @@
 import Foundation
 import CoreData
-import CryptoKit
 
 struct MessageBubbleLoadSignatureComponents: Equatable {
     let bodyStorageURI: String?
-    private let bodyTextFingerprint: String
-    private let chatPreviewTextFingerprint: String
-    private let cleanedSnippetFingerprint: String
-    private let snippetFingerprint: String
+    private let bodyTextFingerprint: Int?
+    private let chatPreviewTextFingerprint: Int?
+    private let cleanedSnippetFingerprint: Int?
+    private let snippetFingerprint: Int?
     private let hasHTMLSource: Bool
-    private let senderEmailFingerprint: String
-    private let senderDisplayNameFingerprint: String
-    private let senderHeaderDisplayNameFingerprint: String
-    private let senderAvatarURLFingerprint: String
+    private let senderEmailFingerprint: Int?
+    private let senderDisplayNameFingerprint: Int?
+    private let senderHeaderDisplayNameFingerprint: Int?
+    private let senderAvatarURLFingerprint: Int?
     private let attachmentFingerprint: String
 
     init(
@@ -47,17 +46,17 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
     ) -> String {
         [
             bodyStorageURI ?? "",
-            bodyTextFingerprint,
-            chatPreviewTextFingerprint,
-            cleanedSnippetFingerprint,
-            snippetFingerprint,
+            Self.describe(bodyTextFingerprint),
+            Self.describe(chatPreviewTextFingerprint),
+            Self.describe(cleanedSnippetFingerprint),
+            Self.describe(snippetFingerprint),
             String(hasHTMLSource),
             "source:\(htmlSourceSignature)",
             "contacts:\(contactRefreshToken)",
-            "senderEmail:\(senderEmailFingerprint)",
-            "senderName:\(senderDisplayNameFingerprint)",
-            "senderHeaderName:\(senderHeaderDisplayNameFingerprint)",
-            "senderAvatar:\(senderAvatarURLFingerprint)",
+            "senderEmail:\(Self.describe(senderEmailFingerprint))",
+            "senderName:\(Self.describe(senderDisplayNameFingerprint))",
+            "senderHeaderName:\(Self.describe(senderHeaderDisplayNameFingerprint))",
+            "senderAvatar:\(Self.describe(senderAvatarURLFingerprint))",
             "attachments:\(attachmentFingerprint)"
         ].joined(separator: "|")
     }
@@ -95,11 +94,28 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         )
     }
 
-    private static func contentFingerprint(for text: String?) -> String {
-        guard let text else { return "nil" }
-        return SHA256.hash(data: Data(text.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+    /// An in-process fingerprint of `text`'s UTF-8 bytes; nil for nil, so a
+    /// nil field and an empty one still differ.
+    ///
+    /// The signature is only ever compared within one process (the bubble's
+    /// `.task(id:)` and `MessageBubbleViewModel`'s applied/requested
+    /// signatures); it is never persisted or used as a cache key, so a
+    /// per-process-seeded `Hasher` is enough. It replaced a SHA-256 per field
+    /// hex-encoded with one `String(format:)` per byte — eight digests and
+    /// about 250 format calls per mapped row, multiplied across every row of
+    /// every window re-map on the main actor. The bytes are hashed rather than
+    /// the `String`, whose hash folds canonically equivalent spellings
+    /// together, so exactly the byte-level changes that refreshed a bubble
+    /// before still do (bar a 64-bit collision).
+    private static func contentFingerprint(for text: String?) -> Int? {
+        guard var text else { return nil }
+        var hasher = Hasher()
+        text.withUTF8 { hasher.combine(bytes: UnsafeRawBufferPointer($0)) }
+        return hasher.finalize()
+    }
+
+    private static func describe(_ fingerprint: Int?) -> String {
+        fingerprint.map(String.init) ?? "nil"
     }
 }
 
@@ -242,6 +258,23 @@ struct ChatMessageRowModel: Equatable {
     let outgoingForwardedDisplayContent: ForwardedMessageDisplayContent?
     /// Precomputed so MessageBubble body recomputation does not hash message text.
     let loadSignatureComponents: MessageBubbleLoadSignatureComponents
+    /// The transcript's view identity, shared by an optimistic reply and its
+    /// sync echo (`ChatMessageDisplayIdentity`). Route a collection through
+    /// `ChatTranscriptIdentityPolicy` before using it as `ForEach` identity.
+    let displayIdentity: ChatMessageDisplayIdentity
+
+    /// `displayIdentity` for `MessageBubbleViewModel`'s refresh-in-place
+    /// decision (`MessageBubbleLoadContext.displayIdentityKey`): equal for an
+    /// optimistic reply and its echo, otherwise this row's message ID, which
+    /// is what the view model compared before display identity existed.
+    var bubbleContentIdentityKey: String {
+        switch displayIdentity {
+        case .outboundSend(let optimisticMessageID):
+            return "outbound:\(optimisticMessageID)"
+        case .message:
+            return "message:\(id)"
+        }
+    }
 
     var hasOriginalEmailContent: Bool {
         MessageOriginalEmailOpenPolicy.hasOriginalEmailContent(
@@ -313,9 +346,42 @@ enum ChatMessageRowModelMapper {
         map([message])[0]
     }
 
+    /// The optimistic message ID a row's RFC Message-ID encodes, decoded once
+    /// per row by the batch path and handed to everything that needs it.
+    ///
+    /// Why: every reply this app ever sent carries an `<esc-…>` Message-ID,
+    /// and `MimeBuilder.optimisticMessageID(from:)` validates by re-encoding —
+    /// one `String(format:)` per byte. The mapper used to decode the same ID
+    /// four times per outgoing row (echo flag, record grouping, confirmation,
+    /// display identity), on the main actor, on every window re-map.
+    private struct OutboundSendDecoding {
+        /// Decoded from a message the user sent: shared by an optimistic row and
+        /// its sync echo (`ChatMessageDisplayIdentity.outboundSend`). Nil for
+        /// incoming mail, whose Message-ID its sender chose.
+        let decodedOutboundSendID: String?
+        /// `OutboundSendDeliveryState.localOptimisticMessageID(for:)`: the row
+        /// is the local optimistic copy itself (its `id` is the decoded ID),
+        /// not the echo. Must stay equivalent to that function.
+        let localOptimisticMessageID: String?
+
+        @MainActor
+        init(_ message: Message) {
+            guard message.isFromMe,
+                  let rfcMessageID = message.messageIdValue,
+                  let decoded = MimeBuilder.optimisticMessageID(from: rfcMessageID) else {
+                decodedOutboundSendID = nil
+                localOptimisticMessageID = nil
+                return
+            }
+            decodedOutboundSendID = decoded
+            localOptimisticMessageID = decoded == message.id ? message.id : nil
+        }
+    }
+
     @MainActor
     private static func map(
         _ message: Message,
+        outboundSendDecoding: OutboundSendDecoding,
         outboundSendDeliveryState: OutboundSendDeliveryState,
         isConfirmedInGmail: Bool
     ) -> ChatMessageRowModel {
@@ -371,7 +437,7 @@ enum ChatMessageRowModelMapper {
             isSendingLocalAttachments: message.isSendingLocalAttachments,
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads,
             outboundSendDeliveryState: outboundSendDeliveryState,
-            isAwaitingSyncEcho: OutboundSendDeliveryState.localOptimisticMessageID(for: message) != nil,
+            isAwaitingSyncEcho: outboundSendDecoding.localOptimisticMessageID != nil,
             isConfirmedInGmail: isConfirmedInGmail,
             forwardedDisplaySubject: message.forwardedDisplaySubject,
             outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent,
@@ -387,6 +453,11 @@ enum ChatMessageRowModelMapper {
                 senderHeaderDisplayName: message.senderName,
                 senderAvatarURL: effectiveSenderPerson?.avatarURL,
                 attachmentSnapshots: attachments.map(\.bubbleSnapshot)
+            ),
+            displayIdentity: ChatMessageDisplayIdentity.resolve(
+                isFromMe: message.isFromMe,
+                decodedOutboundSendID: outboundSendDecoding.decodedOutboundSendID,
+                objectID: message.objectID
             )
         )
     }
@@ -442,10 +513,10 @@ enum ChatMessageRowModelMapper {
             var optimisticMessageIDs: Set<String>
         }
 
+        let outboundSendDecodings = messages.map(OutboundSendDecoding.init)
         var groups: [ObjectIdentifier: CandidateGroup] = [:]
-        for message in messages {
-            guard let optimisticMessageID = OutboundSendDeliveryState
-                .localOptimisticMessageID(for: message),
+        for (message, decoding) in zip(messages, outboundSendDecodings) {
+            guard let optimisticMessageID = decoding.localOptimisticMessageID,
                   let context = message.managedObjectContext else {
                 continue
             }
@@ -508,11 +579,11 @@ enum ChatMessageRowModelMapper {
             }
         }
 
-        return messages.map { message in
-            let isOptimistic = OutboundSendDeliveryState
-                .localOptimisticMessageID(for: message) != nil
+        return zip(messages, outboundSendDecodings).map { message, decoding in
+            let isOptimistic = decoding.localOptimisticMessageID != nil
             return map(
                 message,
+                outboundSendDecoding: decoding,
                 outboundSendDeliveryState:
                     statesByMessageObjectID[message.objectID] ?? .none,
                 // A non-optimistic row came from Gmail through sync.

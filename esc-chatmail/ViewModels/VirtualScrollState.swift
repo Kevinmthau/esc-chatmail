@@ -48,6 +48,8 @@ struct VirtualScrollInsertedMessageRefresh: Equatable {
 ///   observation and inserted/refreshed/deleted message classification.
 /// - `VirtualScrollState+RowCache.swift` — row-model cache, absolute-index
 ///   resolution, and the static page loaders.
+/// - `VirtualScrollState+TailAppend.swift` — the in-place append of the
+///   user's own just-sent rows, published in the optimistic save's turn.
 /// Members shared across facets are internal (Swift `private` is
 /// file-scoped); `private` marks state used only in this file.
 @MainActor
@@ -194,6 +196,14 @@ final class VirtualScrollState: ObservableObject {
     var syncCompletedCancellable: AnyCancellable?
     var cachedConversationObjectID: NSManagedObjectID?
     var pendingInsertedMessageEvents: [VirtualScrollInsertedMessageEvent] = []
+    /// Rows the latest local-send tail append published
+    /// (`publishLocalSendTailAppend`): the only rows the transcript gives an
+    /// entrance animation (`ChatRowEntranceEffect`), so initial loads,
+    /// pagination, and sync inserts appear without one. Read when a row's view
+    /// is first created; `setMessageWindow` clears it on the next window
+    /// publication, so a row the lazy stack re-creates after scrolling away
+    /// and back does not animate in again.
+    var localSendAppendedMessageIDs: Set<NSManagedObjectID> = []
     private var followsLatestInsertions = true
     var followIntentRevision: UInt = 0
     /// While the coordinator's initial bottom-anchor pass is still positioning
