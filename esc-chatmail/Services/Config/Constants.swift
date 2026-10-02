@@ -248,6 +248,15 @@ struct NetworkConfig {
     /// Maximum allowed Retry-After header value (in seconds)
     /// Prevents honoring excessively long server-requested delays
     static let maxRetryAfterSeconds: TimeInterval = 60.0
+
+    /// Longest a send worker waits, strictly before its transmission barrier,
+    /// for an unsatisfied network path to come back (in seconds). The send
+    /// session fails fast instead of waiting for connectivity, so without
+    /// this a Wi-Fi-to-cellular handoff or a gap between stations ended as
+    /// "Not sent". Short enough that a ComposeView send, whose sheet keeps
+    /// its spinner until admission, gives the content back in reasonable
+    /// time when the device stays offline.
+    static let sendConnectivityWaitTimeout: TimeInterval = 30.0
 }
 
 // MARK: - UI Configuration

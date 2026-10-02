@@ -211,6 +211,79 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "A TLS handshake failure proves no application data was sent; retry is safe")
     }
 
+    /// The system refuses to bring up a data path for these before any
+    /// connection opens: roaming off (-1018), voice call on a network without
+    /// simultaneous voice and data (-1019), cellular data off (-1020).
+    private static let noDataPathCodes: [URLError.Code] = [
+        .internationalRoamingOff,
+        .callIsActive,
+        .dataNotAllowed
+    ]
+
+    // Revert-check: fails if `ConnectionErrorDetector.isPreTransmissionError`
+    // stops listing NSURLErrorInternationalRoamingOff / NSURLErrorCallIsActive /
+    // NSURLErrorDataNotAllowed — the retry engine blocks retransmission after
+    // the first attempt and the send never reaches the scripted 200.
+    func testSendMessage_noDataPathRefusal_isRetriedAsPreTransmission() async throws {
+        for code in Self.noDataPathCodes {
+            StubURLProtocol.reset()
+            client = GmailAPIClient(
+                tokenManager: tokenManager,
+                session: StubURLProtocol.makeSession(),
+                retryClock: FakeSyncClock()
+            )
+            StubURLProtocol.script = [
+                .error(URLError(code)),
+                .data(200, Self.sendResponseBody)
+            ]
+
+            let response = try await client.sendMessage(rawMessage: "raw")
+
+            XCTAssertEqual(response.id, "sent-1", "\(code.rawValue)")
+            XCTAssertEqual(
+                StubURLProtocol.requestCount,
+                2,
+                "\(code.rawValue) proves the request never left the device; retry is safe"
+            )
+        }
+    }
+
+    // Revert-check: fails if `ConnectionErrorDetector.isPreTransmissionError`
+    // stops listing any of the three no-data-path codes — `isAmbiguousSendFailure`
+    // then wraps the refusal as `ambiguousDelivery` after one attempt, and the
+    // bubble reads "Delivery unknown" with no resend for a message that never
+    // left the device.
+    func testSendMessage_persistentNoDataPathRefusal_failsDefinitelyNotAmbiguous() async {
+        for code in Self.noDataPathCodes {
+            StubURLProtocol.reset()
+            let retryClock = FakeSyncClock()
+            client = GmailAPIClient(
+                tokenManager: tokenManager,
+                session: StubURLProtocol.makeSession(),
+                retryClock: retryClock
+            )
+            StubURLProtocol.script = [.error(URLError(code))]
+
+            do {
+                _ = try await client.sendMessage(rawMessage: "raw")
+                XCTFail("Expected a definite failure for \(code.rawValue)")
+            } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+                XCTFail("\(code.rawValue) never reached Gmail; it must not be ambiguous: \(underlying)")
+            } catch let error as URLError {
+                XCTAssertEqual(error.code, code)
+            } catch {
+                XCTFail("Unexpected error for \(code.rawValue): \(error)")
+            }
+
+            XCTAssertEqual(
+                StubURLProtocol.requestCount,
+                NetworkConfig.maxRetries,
+                "\(code.rawValue) keeps the same bounded pre-transmission retries as -1009"
+            )
+            XCTAssertEqual(retryClock.sleeps.count, NetworkConfig.maxRetries - 1)
+        }
+    }
+
     func testSendMessage_definiteClientRejection_isNotAmbiguous() async {
         StubURLProtocol.script = [.status(400)]
 

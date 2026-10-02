@@ -186,16 +186,23 @@ struct ComposeSendOrchestrator {
     let sendService: ComposeSendServicing
     let syncPerformer: IncrementalSyncPerforming
     private let backgroundTaskManager: any OutboundBackgroundTaskManaging
+    private let networkPathMonitor: any OutboundNetworkPathMonitoring
+    /// Times only the pre-barrier connectivity wait's deadline.
+    private let connectivityWaitClock: any SyncClock
 
     @MainActor
     init(
         sendService: ComposeSendServicing,
         syncPerformer: IncrementalSyncPerforming,
-        backgroundTaskManager: (any OutboundBackgroundTaskManaging)? = nil
+        backgroundTaskManager: (any OutboundBackgroundTaskManaging)? = nil,
+        networkPathMonitor: (any OutboundNetworkPathMonitoring)? = nil,
+        connectivityWaitClock: any SyncClock = SystemSyncClock()
     ) {
         self.sendService = sendService
         self.syncPerformer = syncPerformer
         self.backgroundTaskManager = backgroundTaskManager ?? UIKitOutboundBackgroundTaskManager()
+        self.networkPathMonitor = networkPathMonitor ?? OutboundNetworkPathMonitor.shared
+        self.connectivityWaitClock = connectivityWaitClock
     }
 
     private actor TransmissionBarrierState {
@@ -227,7 +234,8 @@ struct ComposeSendOrchestrator {
     ///     roll back regardless.
     ///   - sendOrderTurn: This send's place in its conversation's FIFO. It is
     ///     awaited strictly before the transmission barrier and finished on
-    ///     every path.
+    ///     every path. nil for sends outside the FIFO (ComposeView compose and
+    ///     forward; see `OutboundMessageRequest.takesConversationSendTurn`).
     @MainActor
     @discardableResult
     func executeInBackground(
@@ -242,6 +250,8 @@ struct ComposeSendOrchestrator {
         // Capture services for background task
         let sendService = self.sendService
         let syncPerformer = self.syncPerformer
+        let networkPathMonitor = self.networkPathMonitor
+        let connectivityWaitClock = self.connectivityWaitClock
         let admission = ComposeSendTransmissionAdmission()
         let cancellationRelay = ComposeSendCancellationRelay()
         let backgroundLease = OutboundSendBackgroundLease(manager: backgroundTaskManager) {
@@ -277,6 +287,19 @@ struct ComposeSendOrchestrator {
                     let transmit: @Sendable () async throws -> GmailSendService.SendResult = {
                         let result: GmailSendService.SendResult
 
+                        // Bounded wait for a usable network path, strictly
+                        // before the barrier and before the conversation turn:
+                        // each queued send starts its own deadline when it
+                        // starts, instead of serially behind its predecessor's
+                        // wait. A deadline failure is a pre-transmission
+                        // `-1009`, so the disposition below decides it like
+                        // any other pre-barrier failure; cancellation rolls
+                        // back. Never repeated after the barrier.
+                        try await OutboundConnectivityGate.waitForUsablePath(
+                            monitor: networkPathMonitor,
+                            clock: connectivityWaitClock
+                        )
+
                         let beforeTransmission: @Sendable () async throws -> Void = {
                             // GmailSendService invokes this only after attachment
                             // loading and MIME construction, immediately before the
@@ -310,9 +333,12 @@ struct ComposeSendOrchestrator {
                             } else {
                                 originalMessage = nil
                             }
-                            // Strictly before the barrier: everything up to here
-                            // overlaps the previous send, and a cancelled wait is
-                            // a definite pre-barrier failure.
+                            // Strictly before the barrier, and a cancelled wait
+                            // is a definite pre-barrier failure. Only the
+                            // connectivity wait and quoted-HTML resolution above
+                            // overlap the previous send; attachment reads and
+                            // MIME construction run inside `sendReply`, after
+                            // this turn.
                             try await sendOrderTurn?.waitUntilFront()
                             result = try await sendService.sendReply(
                                 to: replyMetadata.recipientEmails,

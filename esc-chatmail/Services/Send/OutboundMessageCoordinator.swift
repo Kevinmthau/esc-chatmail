@@ -128,6 +128,28 @@ enum OutboundMessageRequest {
             return reply.preTransmissionFailureDisposition
         }
     }
+
+    /// Whether this send takes a turn in its conversation's
+    /// `OutboundConversationSendSequencer` FIFO.
+    ///
+    /// Only chat replies do. The chat composer releases at optimistic
+    /// persistence, so the user can tap a second reply while the first is
+    /// still uploading; that is the reordering the FIFO exists to stop.
+    /// ComposeView compose and forward hold their sheet and spinner until
+    /// admission, so one of them parked behind a chat reply's photo upload
+    /// kept the sheet open for the whole upload (and, backgrounded, could
+    /// roll back at expiry). They neither wait on nor hold the turn; a compose
+    /// that overtakes an earlier in-flight chat reply to the same people may
+    /// land first in the transcript, accepted because it came from a
+    /// different composer the user opened separately.
+    var takesConversationSendTurn: Bool {
+        switch self {
+        case .compose, .forward:
+            return false
+        case .reply:
+            return true
+        }
+    }
 }
 
 struct OutboundMessageResult {
@@ -265,6 +287,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let optimisticConversation: OptimisticConversationReference?
         let replyMetadata: OutboundMessageRequest.ReplyMetadata?
         let preTransmissionFailureDisposition: PreTransmissionFailureDisposition
+        let takesConversationSendTurn: Bool
     }
 
     private struct OptimisticPreparation {
@@ -279,6 +302,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
     private let mutationTracker: any OutboundSendMutationTracking
     private let outboundTaskRegistry: OutboundTaskRegistry
     private let sendSequencer: OutboundConversationSendSequencer
+    private let networkPathMonitor: any OutboundNetworkPathMonitoring
 
     init(
         sendService: any OutboundMessageSendServicing,
@@ -287,7 +311,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         outboundReplyContextBuilder: OutboundReplyContextBuilder,
         mutationTracker: any OutboundSendMutationTracking,
         outboundTaskRegistry: OutboundTaskRegistry? = nil,
-        sendSequencer: OutboundConversationSendSequencer? = nil
+        sendSequencer: OutboundConversationSendSequencer? = nil,
+        networkPathMonitor: (any OutboundNetworkPathMonitoring)? = nil
     ) {
         self.sendService = sendService
         self.syncPerformer = syncPerformer
@@ -296,6 +321,10 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         self.mutationTracker = mutationTracker
         self.outboundTaskRegistry = outboundTaskRegistry ?? .shared
         self.sendSequencer = sendSequencer ?? .shared
+        // Resolved here, not per send: the coordinator is built with the app's
+        // dependencies, so the shared monitor starts at launch and has
+        // normally reported a path before the first send consults it.
+        self.networkPathMonitor = networkPathMonitor ?? OutboundNetworkPathMonitor.shared
     }
 
     func send(
@@ -425,13 +454,18 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let effectiveHooks = makeReconciliationHooks(reconciliationHooks)
         // Enqueued on the main actor right after the optimistic row was
         // created, so queue order is bubble order. The background operation
-        // finishes the turn on every path.
-        let sendOrderTurn = optimisticSendHandle.conversationReference.map {
-            sendSequencer.enqueue(conversation: $0)
-        }
+        // finishes the turn on every path. Chat replies only
+        // (`takesConversationSendTurn`): compose and forward neither wait on
+        // nor hold a turn.
+        let sendOrderTurn = preparedSend.takesConversationSendTurn
+            ? optimisticSendHandle.conversationReference.map {
+                sendSequencer.enqueue(conversation: $0)
+            }
+            : nil
         let backgroundOperation = ComposeSendOrchestrator(
             sendService: sendService,
-            syncPerformer: syncPerformer
+            syncPerformer: syncPerformer,
+            networkPathMonitor: networkPathMonitor
         ).executeInBackground(
             input: sendInput,
             attachmentReferences: preparedSend.attachments.map(\.localAttachmentReference),
@@ -508,7 +542,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 inlineAttachmentInfos: [],
                 optimisticConversation: compose.optimisticConversation,
                 replyMetadata: nil,
-                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition
+                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition,
+                takesConversationSendTurn: request.takesConversationSendTurn
             )
 
         case .forward(let forward):
@@ -543,7 +578,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 inlineAttachmentInfos: forward.forwardedInlineAttachmentInfos,
                 optimisticConversation: forward.optimisticConversation,
                 replyMetadata: nil,
-                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition
+                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition,
+                takesConversationSendTurn: request.takesConversationSendTurn
             )
 
         case .reply(let reply):
@@ -567,7 +603,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 inlineAttachmentInfos: [],
                 optimisticConversation: reply.context.optimisticConversation,
                 replyMetadata: metadata,
-                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition
+                preTransmissionFailureDisposition: request.preTransmissionFailureDisposition,
+                takesConversationSendTurn: request.takesConversationSendTurn
             )
         }
     }
