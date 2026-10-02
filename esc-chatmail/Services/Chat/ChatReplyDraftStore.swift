@@ -112,9 +112,15 @@ struct ChatReplyDraftStore {
     /// user may already have saved the next reply in it. `save` replaced it
     /// outright. Throws, writing nothing, when the stored draft cannot be
     /// read, rather than overwrite content it could not see.
+    ///
+    /// `typedAfterUnsent` is text the sending composer received after its
+    /// tap. It goes last, after the merge: folded into `unsent` first, it
+    /// defeated the merge's idempotence check, and a stored draft that still
+    /// held the unsent text (saved before the tap) got it a second time.
     func saveMergingUnsentReply(
         _ unsent: StoredChatReplyDraft,
         attachments: [Attachment],
+        typedAfterUnsent: String = "",
         conversationID: UUID,
         persist: Bool = true
     ) throws {
@@ -125,7 +131,15 @@ struct ChatReplyDraftStore {
             storedHasAttachments: !(stored?.1.isEmpty ?? true)
         )
         try save(
-            merged,
+            StoredChatReplyDraft(
+                text: ChatReplyRestorePolicy.restoredText(
+                    unsentText: merged.text,
+                    typedSinceSend: typedAfterUnsent
+                ),
+                targetURI: merged.targetURI,
+                recoveredEnvelope: merged.recoveredEnvelope,
+                includesQuotedMessage: merged.includesQuotedMessage
+            ),
             attachments: ChatReplyRestorePolicy.restoredAttachments(
                 unsent: attachments,
                 addedSinceSend: stored?.1 ?? []

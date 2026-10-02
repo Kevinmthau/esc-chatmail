@@ -17,13 +17,42 @@ import CoreData
 /// writes it from its own composer again (`ChatViewModel.saveReplyDraft`); it
 /// hands an unsent reply to the presented composer, or merges it into the
 /// stored draft when no composer is on screen.
+///
+/// It also counts the conversation's reply sends that have not made their
+/// optimistic message durable yet (`UnpersistedSend`). Until then the stored
+/// draft still holds the text being sent (the autosave that ran before the
+/// tap), and only the send's own transaction removes it. A composer opened in
+/// that window restored that text, so the sent reply reappeared, ready to be
+/// sent twice, or was doubled when a failed send handed it over too.
 @MainActor
 final class ChatReplyComposerDirectory {
     static let shared = ChatReplyComposerDirectory()
 
+    /// One reply send from the tap until its content has a durable owner
+    /// again: the optimistic message, the open composer that took it back, or
+    /// the stored draft it was merged into. `end()` is idempotent.
+    @MainActor
+    final class UnpersistedSend {
+        private let directory: ChatReplyComposerDirectory
+        private let conversationObjectID: NSManagedObjectID
+        private var hasEnded = false
+
+        fileprivate init(directory: ChatReplyComposerDirectory, conversationObjectID: NSManagedObjectID) {
+            self.directory = directory
+            self.conversationObjectID = conversationObjectID
+        }
+
+        func end() {
+            guard !hasEnded else { return }
+            hasEnded = true
+            directory.endUnpersistedSend(for: conversationObjectID)
+        }
+    }
+
     private var nextGeneration: UInt64 = 0
     private var draftOwnerGenerations: [NSManagedObjectID: UInt64] = [:]
     private var presentedComposers: [NSManagedObjectID: (generation: UInt64, composer: () -> ChatViewModel?)] = [:]
+    private var unpersistedSendCounts: [NSManagedObjectID: Int] = [:]
 
     /// Makes `composer` the on-screen composer and the draft owner for the
     /// conversation, superseding any earlier one. Returns its generation.
@@ -48,5 +77,23 @@ final class ChatReplyComposerDirectory {
 
     func presentedComposer(for conversationObjectID: NSManagedObjectID) -> ChatViewModel? {
         presentedComposers[conversationObjectID]?.composer()
+    }
+
+    /// Registers a reply send in its tap turn, before anything awaits.
+    func beginUnpersistedSend(for conversationObjectID: NSManagedObjectID) -> UnpersistedSend {
+        unpersistedSendCounts[conversationObjectID, default: 0] += 1
+        return UnpersistedSend(directory: self, conversationObjectID: conversationObjectID)
+    }
+
+    /// Whether the conversation's stored draft may still hold a reply that is
+    /// being sent (see the type comment). A composer created meanwhile starts
+    /// empty instead of restoring it.
+    func hasUnpersistedSend(for conversationObjectID: NSManagedObjectID) -> Bool {
+        (unpersistedSendCounts[conversationObjectID] ?? 0) > 0
+    }
+
+    fileprivate func endUnpersistedSend(for conversationObjectID: NSManagedObjectID) {
+        let remaining = (unpersistedSendCounts[conversationObjectID] ?? 0) - 1
+        unpersistedSendCounts[conversationObjectID] = remaining > 0 ? remaining : nil
     }
 }
