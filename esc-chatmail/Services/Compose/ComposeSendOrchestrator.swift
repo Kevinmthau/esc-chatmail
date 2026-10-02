@@ -146,12 +146,29 @@ private final class ComposeSendCancellationRelay: @unchecked Sendable {
         }
     }
 
-    /// Account teardown or OS expiration asked this send to stop. Its
+    /// Account teardown asked this send to stop before admission. Its
     /// pre-barrier failure can then surface as an arbitrary error (a token
     /// refresh cancelled mid-request, say), and must still roll back rather
     /// than leave a "Not sent" row in an account being torn down.
-    var stopWasRequested: Bool {
-        lock.withLock { cancellationRequested || backgroundTimeExpired }
+    ///
+    /// Background-time expiry alone is deliberately not part of this: before
+    /// the connectivity wait existed it was a rare preflight edge case, but a
+    /// send parked offline on `OutboundConnectivityGate` (up to
+    /// `sendConnectivityWaitTimeout`, about UIKit's whole background
+    /// allowance) is now routinely expired when the user locks the phone right
+    /// after sending. Rolling that back deleted the bubble the user saw as
+    /// sent and alerted a raw `CancellationError`; nothing was admitted, so a
+    /// `.retainAsNotSent` reply keeps its "Not sent" row instead.
+    var teardownRequested: Bool {
+        lock.withLock { cancellationRequested }
+    }
+
+    /// OS background-time expiry, and not account teardown, is what stopped
+    /// this send. A pre-barrier `CancellationError` is attributed to expiry
+    /// only on this positive evidence: a cancellation with no recorded cause
+    /// still rolls back.
+    var backgroundTimeExpiredWithoutTeardown: Bool {
+        lock.withLock { backgroundTimeExpired && !cancellationRequested }
     }
 
     func workerFinished() {
@@ -186,16 +203,23 @@ struct ComposeSendOrchestrator {
     let sendService: ComposeSendServicing
     let syncPerformer: IncrementalSyncPerforming
     private let backgroundTaskManager: any OutboundBackgroundTaskManaging
+    private let networkPathMonitor: any OutboundNetworkPathMonitoring
+    /// Times only the pre-barrier connectivity wait's deadline.
+    private let connectivityWaitClock: any SyncClock
 
     @MainActor
     init(
         sendService: ComposeSendServicing,
         syncPerformer: IncrementalSyncPerforming,
-        backgroundTaskManager: (any OutboundBackgroundTaskManaging)? = nil
+        backgroundTaskManager: (any OutboundBackgroundTaskManaging)? = nil,
+        networkPathMonitor: (any OutboundNetworkPathMonitoring)? = nil,
+        connectivityWaitClock: any SyncClock = SystemSyncClock()
     ) {
         self.sendService = sendService
         self.syncPerformer = syncPerformer
         self.backgroundTaskManager = backgroundTaskManager ?? UIKitOutboundBackgroundTaskManager()
+        self.networkPathMonitor = networkPathMonitor ?? OutboundNetworkPathMonitor.shared
+        self.connectivityWaitClock = connectivityWaitClock
     }
 
     private actor TransmissionBarrierState {
@@ -223,11 +247,13 @@ struct ComposeSendOrchestrator {
     ///   - attachmentReferences: Attachment references for post-send state updates
     ///   - optimisticMessageID: ID of the pre-created optimistic message
     ///   - preTransmissionFailureDisposition: What a non-cancellation send-path
-    ///     failure before the barrier does. Cancellation and account teardown
-    ///     roll back regardless.
+    ///     failure before the barrier does, and also a background-time expiry
+    ///     before it. Account teardown and any other cancellation roll back
+    ///     regardless.
     ///   - sendOrderTurn: This send's place in its conversation's FIFO. It is
     ///     awaited strictly before the transmission barrier and finished on
-    ///     every path.
+    ///     every path. nil for sends outside the FIFO (ComposeView compose and
+    ///     forward; see `OutboundMessageRequest.takesConversationSendTurn`).
     @MainActor
     @discardableResult
     func executeInBackground(
@@ -242,6 +268,8 @@ struct ComposeSendOrchestrator {
         // Capture services for background task
         let sendService = self.sendService
         let syncPerformer = self.syncPerformer
+        let networkPathMonitor = self.networkPathMonitor
+        let connectivityWaitClock = self.connectivityWaitClock
         let admission = ComposeSendTransmissionAdmission()
         let cancellationRelay = ComposeSendCancellationRelay()
         let backgroundLease = OutboundSendBackgroundLease(manager: backgroundTaskManager) {
@@ -277,6 +305,19 @@ struct ComposeSendOrchestrator {
                     let transmit: @Sendable () async throws -> GmailSendService.SendResult = {
                         let result: GmailSendService.SendResult
 
+                        // Bounded wait for a usable network path, strictly
+                        // before the barrier and before the conversation turn:
+                        // each queued send starts its own deadline when it
+                        // starts, instead of serially behind its predecessor's
+                        // wait. A deadline failure is a pre-transmission
+                        // `-1009`, so the disposition below decides it like
+                        // any other pre-barrier failure; cancellation rolls
+                        // back. Never repeated after the barrier.
+                        try await OutboundConnectivityGate.waitForUsablePath(
+                            monitor: networkPathMonitor,
+                            clock: connectivityWaitClock
+                        )
+
                         let beforeTransmission: @Sendable () async throws -> Void = {
                             // GmailSendService invokes this only after attachment
                             // loading and MIME construction, immediately before the
@@ -310,9 +351,12 @@ struct ComposeSendOrchestrator {
                             } else {
                                 originalMessage = nil
                             }
-                            // Strictly before the barrier: everything up to here
-                            // overlaps the previous send, and a cancelled wait is
-                            // a definite pre-barrier failure.
+                            // Strictly before the barrier, and a cancelled wait
+                            // is a definite pre-barrier failure. Only the
+                            // connectivity wait and quoted-HTML resolution above
+                            // overlap the previous send; attachment reads and
+                            // MIME construction run inside `sendReply`, after
+                            // this turn.
                             try await sendOrderTurn?.waitUntilFront()
                             result = try await sendService.sendReply(
                                 to: replyMetadata.recipientEmails,
@@ -457,6 +501,26 @@ struct ComposeSendOrchestrator {
                     )
                     await admission.succeed()
                     Log.info("Background send outcome was ambiguous for optimistic message \(optimisticMessageID)", category: .message)
+                } else if preTransmissionFailureDisposition == .retainAsNotSent,
+                          cancellationRelay.backgroundTimeExpiredWithoutTeardown {
+                    // Background time ran out before the barrier — typically a
+                    // reply parked offline in the connectivity wait when the
+                    // phone was locked. Nothing reached Gmail, so retaining is
+                    // duplicate-safe, and the chat composer may already hold
+                    // the next reply (see `teardownRequested`). Teardown and
+                    // a cancellation with no recorded cause still roll back.
+                    Log.info(
+                        "Retaining reply whose background time expired before transmission as not sent",
+                        category: .message
+                    )
+                    await handleRetainedDefiniteFailure(
+                        sendService: sendService,
+                        attachmentReferences: attachmentReferences,
+                        optimisticMessageID: optimisticMessageID,
+                        reconciliationHooks: reconciliationHooks,
+                        error: CancellationError()
+                    )
+                    await admission.succeed()
                 } else {
                     await handleDefiniteFailure(
                         sendService: sendService,
@@ -481,7 +545,7 @@ struct ComposeSendOrchestrator {
                     )
                     await admission.succeed()
                 } else if preTransmissionFailureDisposition == .retainAsNotSent,
-                          !cancellationRelay.stopWasRequested {
+                          !cancellationRelay.teardownRequested {
                     // The chat reply composer released this content at optimistic
                     // persistence and may hold the next reply. Nothing reached
                     // Gmail, so keeping the row as definitely unsent is
@@ -604,7 +668,14 @@ struct ComposeSendOrchestrator {
                 byID: optimisticMessageID,
                 fallbackAttachmentReferences: attachmentReferences
             )
-            sendService.recordSendFailureReason(optimisticMessageID: optimisticMessageID, reason: error.localizedDescription)
+            // As in `handleDefiniteFailure`: a cancellation (background
+            // expiry before the barrier) has no reason the user can act on.
+            if !(error is CancellationError) {
+                sendService.recordSendFailureReason(
+                    optimisticMessageID: optimisticMessageID,
+                    reason: error.localizedDescription
+                )
+            }
             reconciliationHooks.onFailure?(
                 .init(
                     optimisticMessageID: optimisticMessageID,

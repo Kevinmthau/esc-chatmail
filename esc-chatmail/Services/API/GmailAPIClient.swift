@@ -132,7 +132,10 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// pre-transmission retries (about 3 s of backoff at the default
     /// strategy) and the orchestrator then retains the message as a definite
     /// "Not sent" with Edit and resend. No error classification changes here;
-    /// timeouts and dropped connections stay ambiguous.
+    /// timeouts and dropped connections stay ambiguous. Short outages are
+    /// ridden out before the transmission barrier instead, by the send
+    /// worker's bounded `OutboundConnectivityGate` wait, where waiting is
+    /// duplicate-safe.
     ///
     /// Every other setting (timeouts, cache policy, and any injected protocol
     /// classes) is copied from `session`; `URLSession.configuration` already

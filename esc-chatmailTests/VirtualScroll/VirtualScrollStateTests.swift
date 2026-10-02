@@ -2785,8 +2785,19 @@ final class VirtualScrollStateTests: XCTestCase {
         // so the view's body never runs its offset fetch.
         XCTAssertNil(state.rowForGrouping(atAbsoluteIndex: 9))
 
-        // Nothing follows up with a reload either.
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        // Nothing follows up with a reload either. Join every managed task a
+        // change notification can schedule a reload through (dataset
+        // reconcile, unclassified-count reconcile, post-sync validation)
+        // rather than sleeping: once each has drained, any follow-up reload
+        // would already have bumped `windowLoadGeneration`, so the negative
+        // assertion below is observed, not hoped for.
+        for key in [
+            state.datasetReconcileTaskKey,
+            state.unclassifiedRefreshCountTaskKey,
+            state.postSyncValidationTaskKey
+        ] {
+            await state.taskManager.waitForCompletion(of: key)
+        }
         XCTAssertEqual(state.windowLoadGeneration, loadGenerationBeforeSend)
         XCTAssertEqual(
             state.visibleMessages.map(\.objectID),

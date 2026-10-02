@@ -1714,6 +1714,148 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 2)
     }
 
+    func testSend_composeToConversationWithInFlightChatReply_transmitsWithoutWaiting() async throws {
+        try await assertComposerSendIsNotParkedBehindInFlightChatReply { conversation in
+            .compose(
+                .init(
+                    recipientEmails: ["fifo-scope@example.com"],
+                    subject: "Separate thought",
+                    body: "Sent from ComposeView",
+                    attachments: [],
+                    optimisticConversation: .existingConversation(conversation)
+                )
+            )
+        }
+    }
+
+    func testSend_forwardToConversationWithInFlightChatReply_transmitsWithoutWaiting() async throws {
+        try await assertComposerSendIsNotParkedBehindInFlightChatReply { conversation in
+            .forward(
+                .init(
+                    recipientEmails: ["fifo-scope@example.com"],
+                    subject: "Fwd: Plans",
+                    body: "Sent from ComposeView",
+                    attachments: [],
+                    forwardedPlainTextBody: "Forwarded body",
+                    forwardedHTMLBody: nil,
+                    forwardedInlineAttachmentInfos: [],
+                    optimisticConversation: .existingConversation(conversation)
+                )
+            )
+        }
+    }
+
+    func testSend_chatReplyToConversationWithInFlightCompose_isNotParkedBehindIt() async throws {
+        let sendService = MockOutboundMessageSendService(context: viewContext)
+        // Holds every `sendNew` (the compose) at Gmail after admission.
+        let composeGate = OutboundSendTestGate()
+        sendService.sendNewGate = composeGate
+        let sequencer = OutboundConversationSendSequencer()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            sendSequencer: sequencer
+        )
+        let request = try makeChatReplyRequest(friendEmail: "fifo-hold@example.com")
+        // Establish the conversation through a reply that completes.
+        let anchorResult = try await coordinator.send(request("Earlier reply"))
+        let conversation = try XCTUnwrap(anchorResult?.conversationReference)
+        await waitUntil { sendService.snapshot.remoteTransmissionCalls == 1 }
+
+        _ = try await coordinator.send(
+            .compose(
+                .init(
+                    recipientEmails: ["fifo-hold@example.com"],
+                    subject: "Large attachment",
+                    body: "Still uploading",
+                    attachments: [],
+                    optimisticConversation: .existingConversation(conversation)
+                )
+            )
+        )
+        await composeGate.waitUntilStarted()
+
+        var replyAdmitted = false
+        let replyTask = Task { @MainActor in
+            let result = try await coordinator.send(request("Reply while compose uploads"))
+            replyAdmitted = true
+            return result
+        }
+        // The mock counts a transmission on the detached send worker after
+        // `beforeTransmission` returns, which nothing orders before the
+        // MainActor flag write, so the count joins the wait condition rather
+        // than being read the instant the flag flips.
+        await waitUntil { replyAdmitted && sendService.snapshot.remoteTransmissionCalls == 3 }
+
+        // Revert-check: making `OutboundMessageRequest.takesConversationSendTurn`
+        // return true for `.compose` gives the compose a turn it holds until
+        // Gmail answers, so this reply parks in the sequencer and is never
+        // admitted while the compose uploads.
+        XCTAssertTrue(replyAdmitted)
+        XCTAssertEqual(sequencer.suspendedTurnCount, 0)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 3)
+
+        await composeGate.release()
+        _ = try await replyTask.value
+    }
+
+    /// Sends a chat reply that stays at Gmail (a photo upload), then a
+    /// ComposeView request built by `makeRequest` into the same conversation,
+    /// and asserts the latter reaches its barrier while the reply is still
+    /// in flight.
+    private func assertComposerSendIsNotParkedBehindInFlightChatReply(
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ makeRequest: (ConversationReference) -> OutboundMessageRequest
+    ) async throws {
+        let sendService = MockOutboundMessageSendService(context: viewContext)
+        let replyGate = OutboundSendTestGate()
+        sendService.sendReplyGatesByBody = ["Photo reply": replyGate]
+        let sequencer = OutboundConversationSendSequencer()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: MockCoordinatorSyncPerformer(),
+            sendSequencer: sequencer
+        )
+        let request = try makeChatReplyRequest(friendEmail: "fifo-scope@example.com")
+
+        let replyResult = try await coordinator.send(request("Photo reply"))
+        let reply = try XCTUnwrap(replyResult, file: file, line: line)
+        let conversation = try XCTUnwrap(reply.conversationReference, file: file, line: line)
+        await replyGate.waitUntilStarted()
+
+        var composerSendAdmitted = false
+        let composerRequest = makeRequest(conversation)
+        let composerTask = Task { @MainActor in
+            let result = try await coordinator.send(composerRequest)
+            composerSendAdmitted = true
+            return result
+        }
+        // The mock counts a transmission on the detached send worker after
+        // `beforeTransmission` returns, which nothing orders before the
+        // MainActor flag write, so the count joins the wait condition rather
+        // than being read the instant the flag flips.
+        await waitUntil(file: file, line: line) {
+            composerSendAdmitted && sendService.snapshot.remoteTransmissionCalls == 2
+        }
+
+        // ComposeView keeps its sheet and spinner until admission; it must
+        // not wait out the chat reply's upload.
+        // Revert-check: making `OutboundMessageRequest.takesConversationSendTurn`
+        // return true for `.compose` / `.forward` parks this send in the
+        // sequencer behind the reply, and it is never admitted while the
+        // reply is in flight.
+        XCTAssertTrue(composerSendAdmitted, file: file, line: line)
+        XCTAssertEqual(sequencer.suspendedTurnCount, 0, file: file, line: line)
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls.count, 1, file: file, line: line)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 2, file: file, line: line)
+        XCTAssertEqual(snapshot.recordRemoteSendAdmissionCalls.first, reply.optimisticMessageID, file: file, line: line)
+
+        await replyGate.release()
+        _ = try await composerTask.value
+    }
+
     func testSend_chatReplyPreBarrierFailureResolvesAdmissionWithRetainedNotSentRow() async throws {
         let sendService = MockOutboundMessageSendService(context: viewContext)
         sendService.sendReplyPreflightError = GmailSendService.SendError.apiError("token refresh failed")

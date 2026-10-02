@@ -282,7 +282,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
         isFromMe: Bool = true,
         isNewsletter: Bool = false,
         isLikelyCalendarInvite: Bool = false,
-        chatPreviewText: String? = "On my way, see you at 6"
+        chatPreviewText: String? = "On my way, see you at 6",
+        hasDisplayableAttachments: Bool = false
     ) -> Bool {
         MessageDisplayPolicy.showsTextLoadingPlaceholder(
             hasLoadedContent: hasLoadedContent,
@@ -291,7 +292,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             isFromMe: isFromMe,
             isNewsletter: isNewsletter,
             isLikelyCalendarInvite: isLikelyCalendarInvite,
-            chatPreviewText: chatPreviewText
+            chatPreviewText: chatPreviewText,
+            hasDisplayableAttachments: hasDisplayableAttachments
         )
     }
 
@@ -318,6 +320,36 @@ final class MessageDisplayPolicyTests: XCTestCase {
     func testShowsTextLoadingPlaceholder_ownHTMLWithoutStoredPreview_showsPlaceholder() {
         XCTAssertTrue(showsTextLoadingPlaceholder(chatPreviewText: nil))
         XCTAssertTrue(showsTextLoadingPlaceholder(chatPreviewText: " \n\t "))
+    }
+
+    /// An attachments-only reply has no stored preview (no text of its own) and an HTML source,
+    /// and its load finds no text either: the attachments are the whole bubble. The pill showed
+    /// "Loading..." under them and then vanished, on every fresh mount of the row (reopening the
+    /// chat, the row re-entering the window, an echo that landed while the chat was closed).
+    ///
+    /// Revert-check: dropping `&& !hasDisplayableAttachments` from
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` fails this test.
+    ///
+    /// HONEST SCOPE: this pins the decision. That `MessageContentView.textContent` passes the
+    /// bubble's displayed (filtered) attachments is view wiring with no UI test target.
+    func testShowsTextLoadingPlaceholder_ownAttachmentsOnlyRowWithoutStoredPreview_skipsPlaceholder() {
+        XCTAssertFalse(showsTextLoadingPlaceholder(chatPreviewText: nil, hasDisplayableAttachments: true))
+        XCTAssertFalse(showsTextLoadingPlaceholder(chatPreviewText: " \n\t ", hasDisplayableAttachments: true))
+    }
+
+    /// Only the user's own text-routed rows are exempt. Incoming mail still waits for content
+    /// detection, and forwarded, newsletter and invite rows can still route elsewhere, whatever
+    /// attachments they carry.
+    func testShowsTextLoadingPlaceholder_attachmentsOnIncomingForwardedNewsletterOrInvite_showsPlaceholder() {
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: nil, hasDisplayableAttachments: true))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, hasDisplayableAttachments: true))
+        XCTAssertTrue(
+            showsTextLoadingPlaceholder(isForwardedEmail: true, chatPreviewText: nil, hasDisplayableAttachments: true)
+        )
+        XCTAssertTrue(showsTextLoadingPlaceholder(isNewsletter: true, chatPreviewText: nil, hasDisplayableAttachments: true))
+        XCTAssertTrue(
+            showsTextLoadingPlaceholder(isLikelyCalendarInvite: true, chatPreviewText: nil, hasDisplayableAttachments: true)
+        )
     }
 
     /// Forwarded rows wait for the structured forward summary, and newsletter/invite rows can

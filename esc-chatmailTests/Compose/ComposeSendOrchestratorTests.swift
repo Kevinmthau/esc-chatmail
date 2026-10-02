@@ -958,6 +958,359 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertNotNil(snapshot.failureReasons["rollback-retained"])
     }
 
+    // MARK: - Pre-barrier connectivity wait
+
+    func testExecuteInBackground_satisfiedPath_proceedsWithoutStartingDeadline() async throws {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: true)
+        let clock = FakeSyncClock()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            networkPathMonitor: pathMonitor,
+            connectivityWaitClock: clock
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "path-satisfied")
+
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 1)
+        XCTAssertTrue(clock.sleeps.isEmpty, "A satisfied path never starts the deadline")
+    }
+
+    func testExecuteInBackground_knownOfflinePath_waitsBeforeTransmittingUntilPathReturns() async throws {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        let clock = ParkedSyncClock()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            networkPathMonitor: pathMonitor,
+            connectivityWaitClock: clock
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "path-returns",
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+        // The gate's path wait and deadline are sibling task-group children
+        // with no ordering between them: wait for both before asserting.
+        await waitUntil { pathMonitor.suspendedWaiterCount == 1 && clock.sleeps.count == 1 }
+
+        // Revert-check: deleting the `OutboundConnectivityGate.waitForUsablePath`
+        // call from `ComposeSendOrchestrator.executeInBackground`'s `transmit`
+        // sends at once into the outage (the fail-fast session's -1009 then
+        // ends it as "Not sent"), so nothing is ever suspended here.
+        XCTAssertEqual(sendService.snapshot.sendNewCalls, 0)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(sendService.snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(
+            clock.sleeps,
+            [UInt64(NetworkConfig.sendConnectivityWaitTimeout * 1_000_000_000)]
+        )
+
+        // The handoff completes: the send goes out by itself.
+        pathMonitor.pathDidChange(isSatisfied: true)
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.recordRemoteSendAdmissionCalls, ["path-returns"])
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.recordRemoteCommittedSendCalls, ["path-returns"])
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 0)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+    }
+
+    func testExecuteInBackground_pathDownPastDeadline_chatReplyRetainsAsNotSentWithoutTransmitting() async throws {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        // Fires the deadline at once.
+        let clock = FakeSyncClock()
+        var failureIDs: [String] = []
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            networkPathMonitor: pathMonitor,
+            connectivityWaitClock: clock
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "path-deadline-reply",
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: { failure in failureIDs.append(failure.optimisticMessageID) }
+            ),
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+
+        // Revert-check: making `OutboundConnectivityGate.waitForUsablePath`
+        // throw `CancellationError` at the deadline (instead of the
+        // pre-transmission -1009) rolls the reply back and fails admission
+        // here; deleting its call transmits.
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 0, "Preflight never started")
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+        XCTAssertEqual(
+            snapshot.failureReasons["path-deadline-reply"],
+            URLError(.notConnectedToInternet).localizedDescription
+        )
+        XCTAssertEqual(failureIDs, ["path-deadline-reply"])
+        XCTAssertEqual(
+            clock.sleeps,
+            [UInt64(NetworkConfig.sendConnectivityWaitTimeout * 1_000_000_000)]
+        )
+    }
+
+    func testExecuteInBackground_pathDownPastDeadline_composeRollsBackToComposer() async {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            networkPathMonitor: pathMonitor,
+            connectivityWaitClock: FakeSyncClock()
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "path-deadline-compose")
+
+        // Revert-check: deleting the `OutboundConnectivityGate.waitForUsablePath`
+        // call from `transmit` admits and transmits this send.
+        do {
+            try await operation.waitForTransmissionAdmission()
+            XCTFail("An offline compose must hand its content back to the composer")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .notConnectedToInternet)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 0)
+    }
+
+    func testExecuteInBackground_cancelWhileWaitingForPath_rollsBackWithoutWaitingOutDeadline() async {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            networkPathMonitor: pathMonitor,
+            connectivityWaitClock: ParkedSyncClock()
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "path-cancelled",
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+        await waitUntil { pathMonitor.suspendedWaiterCount == 1 }
+        var finished = false
+        let watcher = Task { @MainActor in
+            await operation.task.value
+            finished = true
+        }
+
+        // What `OutboundTaskRegistry.closeAdmission` invokes for a preflight
+        // entry. Neither the path nor the deadline ever fires here.
+        // Revert-check: dropping the `onCancel` handler from
+        // `OutboundNetworkPathMonitor.waitUntilPathSatisfied` leaves the send
+        // parked on the path, and this wait times out.
+        operation.cancelBeforeTransmission()
+        await waitUntil { finished }
+        if !finished {
+            // Unpark the stuck send so a failing run ends instead of hanging.
+            pathMonitor.pathDidChange(isSatisfied: true)
+        }
+        await watcher.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        // Teardown rolls back even a `.retainAsNotSent` send.
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 0)
+        XCTAssertEqual(pathMonitor.suspendedWaiterCount, 0)
+        do {
+            try await operation.waitForTransmissionAdmission()
+            XCTFail("A cancelled waiting send must not be admitted")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
+    func testExecuteInBackground_backgroundExpiryWhileWaitingForPath_chatReplyRetainsAsNotSent() async throws {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        var failureIDs: [String] = []
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks,
+            networkPathMonitor: pathMonitor,
+            // The deadline never fires: UIKit's allowance runs out first.
+            connectivityWaitClock: ParkedSyncClock()
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "path-expired-reply",
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: { failure in failureIDs.append(failure.optimisticMessageID) }
+            ),
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+        await waitUntil { pathMonitor.suspendedWaiterCount == 1 }
+
+        // The user sent offline and locked the phone.
+        // Revert-check: dropping the `backgroundTimeExpiredWithoutTeardown`
+        // branch from the `catch is CancellationError` of
+        // `ComposeSendOrchestrator.executeInBackground` rolls the reply back
+        // (its bubble vanishes into the draft) and fails admission here.
+        backgroundTasks.expire()
+        XCTAssertEqual(backgroundTasks.endedIdentifiers.count, 1, "Return UIKit's time immediately")
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 0, "Preflight never started")
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+        // A cancellation has no reason the user can act on.
+        XCTAssertNil(snapshot.failureReasons["path-expired-reply"])
+        XCTAssertEqual(failureIDs, ["path-expired-reply"])
+        XCTAssertEqual(pathMonitor.suspendedWaiterCount, 0)
+    }
+
+    func testExecuteInBackground_backgroundExpiryWhileWaitingForPath_composeRollsBackToComposer() async {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks,
+            networkPathMonitor: pathMonitor,
+            connectivityWaitClock: ParkedSyncClock()
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "path-expired-compose")
+        await waitUntil { pathMonitor.suspendedWaiterCount == 1 }
+
+        // ComposeView still owns its content until admission, so expiry hands
+        // it back exactly as the deadline would.
+        backgroundTasks.expire()
+        do {
+            try await operation.waitForTransmissionAdmission()
+            XCTFail("An expired compose must hand its content back to the composer")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 0)
+    }
+
+    func testExecuteInBackground_backgroundExpiryThenPreflightError_chatReplyRetainsAsNotSent() async throws {
+        let sendService = MockComposeSendService()
+        // An ordinary error, as a token refresh cancelled mid-request can
+        // surface, rather than `CancellationError`.
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("Refresh interrupted")
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "expired-preflight-reply",
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+
+        // MainActor has not yielded to the worker yet: it is installed
+        // already expired.
+        // Revert-check: making the generic pre-barrier retain branch of
+        // `ComposeSendOrchestrator.executeInBackground` also refuse on
+        // `backgroundTimeExpired` (the retired `stopWasRequested`) rolls the
+        // reply back and fails admission here.
+        backgroundTasks.expire()
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+    }
+
+    func testExecuteInBackground_queuedSendsWaitForPathConcurrentlyThenTransmitInOrder() async throws {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        let clock = ParkedSyncClock()
+        let sequencer = OutboundConversationSendSequencer()
+        let conversation = ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/path-fifo")!
+        )
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            networkPathMonitor: pathMonitor,
+            connectivityWaitClock: clock
+        )
+
+        let first = orchestrator.executeInBackground(
+            input: makeInput(body: "first"),
+            attachmentReferences: [],
+            optimisticMessageID: "path-fifo-first",
+            preTransmissionFailureDisposition: .retainAsNotSent,
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        let second = orchestrator.executeInBackground(
+            input: makeInput(body: "second"),
+            attachmentReferences: [],
+            optimisticMessageID: "path-fifo-second",
+            preTransmissionFailureDisposition: .retainAsNotSent,
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+
+        // Both sends wait on the path at once, each on its own deadline,
+        // rather than the second waiting in the FIFO for the first's wait.
+        // Revert-check: moving the `OutboundConnectivityGate.waitForUsablePath`
+        // call after `sendOrderTurn?.waitUntilFront()` parks the second send
+        // in the sequencer instead, and only one path waiter ever appears.
+        // Both sends' deadline children too: they race their path waits.
+        await waitUntil { pathMonitor.suspendedWaiterCount == 2 && clock.sleeps.count == 2 }
+        XCTAssertEqual(sequencer.suspendedTurnCount, 0)
+        XCTAssertEqual(clock.sleeps.count, 2)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)
+
+        pathMonitor.pathDidChange(isSatisfied: true)
+        try await first.waitForTransmissionAdmission()
+        try await second.waitForTransmissionAdmission()
+        await first.task.value
+        await second.task.value
+
+        XCTAssertEqual(
+            sendService.snapshot.recordRemoteSendAdmissionCalls,
+            ["path-fifo-first", "path-fifo-second"]
+        )
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 2)
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         pollIntervalNanoseconds: UInt64 = 10_000_000,

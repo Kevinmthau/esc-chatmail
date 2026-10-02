@@ -52,7 +52,21 @@ extension DatabaseMaintenanceService {
 
         guard succeeded else { return false }
 
-        await cleanupService.runMaintenanceCleanup(in: context)
+        // A pass whose save failed was rolled back, so the save below finds
+        // nothing to commit and would report success; the outcome is the only
+        // signal. A cancelled run skipped its remaining passes. Either way the
+        // run is incomplete, and the orphan-file sweeps below wait for one
+        // that completes.
+        switch await cleanupService.runMaintenanceCleanup(in: context) {
+        case .completed:
+            break
+        case .cancelled:
+            Log.info("Database cleanup cancelled before its last maintenance pass", category: .coreData)
+            return false
+        case .saveFailed:
+            Log.error("Database cleanup failed: a maintenance pass could not save and was rolled back", category: .coreData)
+            return false
+        }
 
         guard coreDataStack.saveIfNeeded(context: context) else {
             Log.error("Database cleanup failed while saving maintenance changes", category: .coreData)

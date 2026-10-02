@@ -89,6 +89,19 @@ enum MessageDisplayPolicy {
     /// view model, and the echo (always multipart/alternative) has an HTML source. A multi-line
     /// reply also collapsed to the one-line pill and regrew. Newsletter and calendar-invite rows
     /// are excluded because they can route to a preview card instead.
+    ///
+    /// The same own rows with no stored preview but with displayed attachments skip it too: an
+    /// attachments-only reply. Its stored preview is blank because it has no text of its own
+    /// (its plain body is at most the quoted original, which chat display strips), so the load
+    /// finds no text either and the bubble ends as it renders before the load: the attachments,
+    /// plus the row's fallback preview if it has one. The pill bought nothing there either: it
+    /// showed "Loading..." under the attachments and then vanished. Since the transcript keeps
+    /// one view across Gmail's echo (`ChatMessageDisplayIdentity`), the echo itself refreshes in
+    /// place and no longer reaches this branch, but every fresh mount of such a row still did:
+    /// reopening the chat, the row re-entering the loaded window, or an echo that landed while
+    /// the chat was closed. A legacy own row with text but no stored preview (the backfill fills
+    /// those) shows its fallback preview, if any, until the load swaps in its text, instead of
+    /// the pill.
     static func showsTextLoadingPlaceholder(
         hasLoadedContent: Bool,
         hasHTMLSource: Bool,
@@ -96,18 +109,17 @@ enum MessageDisplayPolicy {
         isFromMe: Bool,
         isNewsletter: Bool,
         isLikelyCalendarInvite: Bool,
-        chatPreviewText: String?
+        chatPreviewText: String?,
+        hasDisplayableAttachments: Bool
     ) -> Bool {
         guard !hasLoadedContent else { return false }
         if isForwardedEmail { return true }
         guard hasHTMLSource else { return false }
 
-        let rendersStoredOwnPreview =
-            isFromMe &&
-            !isNewsletter &&
-            !isLikelyCalendarInvite &&
-            MessagePreviewText.nonEmpty(chatPreviewText) != nil
-        return !rendersStoredOwnPreview
+        let isOwnTextBubble = isFromMe && !isNewsletter && !isLikelyCalendarInvite
+        guard isOwnTextBubble else { return true }
+        let rendersStoredOwnPreview = MessagePreviewText.nonEmpty(chatPreviewText) != nil
+        return !rendersStoredOwnPreview && !hasDisplayableAttachments
     }
 
     static func isTrustedTransactionalSender(_ senderEmail: String?) -> Bool {
