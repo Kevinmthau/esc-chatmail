@@ -521,6 +521,77 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.htmlAnalysis.referencedInlineContentIDs, ["cid-echo"])
     }
 
+    /// The P2 on PR #276: an attachments-only reply flashed "Loading..." when Gmail's echo (HTML
+    /// source, no stored preview) replaced it. With the transcript keeping one view across the
+    /// echo, the optimistic row's completed load (no text, no HTML source) stays published while
+    /// the echo loads, so the text loading placeholder never comes up on this path. Pinned with
+    /// the policy's attachments exemption off (`hasDisplayableAttachments: false`), so only the
+    /// view model's in-place refresh can keep the pill away; the exemption, which covers fresh
+    /// mounts of such rows, is pinned in `MessageDisplayPolicyTests`.
+    ///
+    /// Revert-check: keying `refreshesInPlace` in `MessageBubbleViewModel.loadIfNeeded` on
+    /// `loadingMessageID == context.messageID` again blanks the content mid-load (an HTML-source
+    /// placeholder that is not loaded) and fails the mid-flight assertions.
+    func testLoadIfNeeded_echoReplacesAttachmentsOnlyReply_neverShowsTextLoadingPlaceholder() async {
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [
+                Self.makeTextlessContentResult(hasHTMLSource: false),
+                Self.makeTextlessContentResult(hasHTMLSource: true)
+            ],
+            gatedCallIndex: 2
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+        func showsLoadingPlaceholder() -> Bool {
+            MessageDisplayPolicy.showsTextLoadingPlaceholder(
+                hasLoadedContent: viewModel.hasLoadedContent,
+                hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
+                isForwardedEmail: false,
+                isFromMe: true,
+                isNewsletter: false,
+                isLikelyCalendarInvite: false,
+                chatPreviewText: nil,
+                hasDisplayableAttachments: false
+            )
+        }
+
+        await viewModel.loadIfNeeded(
+            using: makeContext(
+                messageID: "optimistic-uuid",
+                displayIdentityKey: "outbound:optimistic-uuid",
+                signature: "sig-optimistic",
+                includesSenderRequest: false
+            )
+        )
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertFalse(showsLoadingPlaceholder())
+
+        let echoLoad = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(
+                    messageID: "gmail-echo-id",
+                    displayIdentityKey: "outbound:optimistic-uuid",
+                    signature: "sig-echo",
+                    hasHTMLSource: true,
+                    includesSenderRequest: false
+                )
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated echo load never started")
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertFalse(showsLoadingPlaceholder())
+
+        await loader.release()
+        await echoLoad.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
+        XCTAssertNil(viewModel.fullTextContent)
+        XCTAssertFalse(showsLoadingPlaceholder())
+    }
+
     /// The early-return branch records the requested signature even when it skips loading, so a
     /// refresh that is still in flight when the signature returns to the published one is dropped
     /// by `isStillActive` instead of overwriting what is already correct on screen.
@@ -637,6 +708,17 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 nonDisplayableInlineContentIDs: [],
                 supportsCalendarInvitePreviewCard: false
             )
+        )
+    }
+
+    /// An attachments-only reply's content: no text of its own, nothing else to publish.
+    private static func makeTextlessContentResult(hasHTMLSource: Bool) -> MessageBubbleContentResult {
+        MessageBubbleContentResult(
+            fullTextContent: nil,
+            hasRichHTMLContent: false,
+            sharedDocumentLinks: [],
+            forwardedDisplayContent: nil,
+            htmlAnalysis: .placeholder(hasHTMLSource: hasHTMLSource)
         )
     }
 

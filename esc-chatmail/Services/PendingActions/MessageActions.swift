@@ -805,11 +805,34 @@ final class MessageActions: ObservableObject {
             message.removeFromLabels(inboxLabel)
             message.localModifiedAt = modificationDate
             affected += 1
-            if !message.id.isEmpty {
-                messageIds.append(message.id)
+            if let gmailMessageID = Self.gmailMessageIDForConversationAction(message) {
+                messageIds.append(gmailMessageID)
             }
         }
         return (messageIds, affected)
+    }
+
+    /// The ID a conversation-wide Gmail action may name for `message`, or nil
+    /// when the row has no Gmail ID of its own.
+    ///
+    /// The user's own reply keeps the local UUID of its optimistic send until
+    /// sync replaces it with Gmail's echo (`OutboundSendDeliveryState
+    /// .localOptimisticMessageID`): while it sends, and for good once retained
+    /// as "Not sent" or "Delivery unknown". That is not a Gmail message ID.
+    /// One such ID in the single `batchModify` this action becomes made Gmail
+    /// reject the whole request, and the processor abandons a non-retryable
+    /// failure at once, so the archive or spam report never reached Gmail for
+    /// any message in the conversation. Archive and Report Spam tapped during
+    /// a send now run right after the optimistic row is created
+    /// (`ChatConversationExitActionPolicy`), which made that the usual case.
+    /// The row still takes the local change; its echo arrives as an outgoing
+    /// message, which is never inbox presence.
+    private static func gmailMessageIDForConversationAction(_ message: Message) -> String? {
+        guard !message.id.isEmpty,
+              OutboundSendDeliveryState.localOptimisticMessageID(for: message) == nil else {
+            return nil
+        }
+        return message.id
     }
 
     private func applySpamLocalChanges(
@@ -827,8 +850,8 @@ final class MessageActions: ObservableObject {
                 message.addToLabels(spamLabel)
             }
             message.localModifiedAt = modificationDate
-            if !message.id.isEmpty {
-                messageIds.append(message.id)
+            if let gmailMessageID = Self.gmailMessageIDForConversationAction(message) {
+                messageIds.append(gmailMessageID)
             }
         }
         return messageIds

@@ -248,6 +248,100 @@ final class MessageActionsTests: XCTestCase {
         await syncRunCoordinator.endRun(blockingRun)
     }
 
+    /// The user's own reply keeps its optimistic send's local UUID until sync
+    /// replaces it with Gmail's echo. In the conversation's single
+    /// `batchModify` that ID made Gmail reject the whole request, so the
+    /// archive never reached Gmail for the conversation's other messages.
+    /// Archive tapped during a reply send now runs right after the optimistic
+    /// row exists (`ChatConversationExitActionPolicy`).
+    ///
+    /// Revert-check: appending every non-empty `message.id` again in
+    /// `MessageActions.applyArchiveLocalChanges` (instead of
+    /// `gmailMessageIDForConversationAction`) queues the optimistic ID and
+    /// fails this test.
+    func testArchiveConversation_withUnechoedOwnReply_queuesOnlyGmailMessageIDs() async throws {
+        let fixture = try makeConversationWithUnechoedOwnReply(
+            gmailMessageID: "gmail-archive-inbox",
+            inboxLabel: LabelBuilder().inbox().build(in: viewContext)
+        )
+
+        await messageActions.archiveConversation(conversation: fixture.conversation)
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+        XCTAssertEqual(queued.first?.messageIds, ["gmail-archive-inbox"])
+        // The local change still covers the reply's row.
+        XCTAssertNotNil(fixture.optimisticReply.localModifiedAt)
+        XCTAssertNotNil(fixture.conversation.archivedAt)
+    }
+
+    /// Revert-check: appending every non-empty `message.id` again in
+    /// `MessageActions.applySpamLocalChanges` queues the optimistic ID and
+    /// fails this test.
+    func testReportSpamConversation_withUnechoedOwnReply_queuesOnlyGmailMessageIDs() async throws {
+        let fixture = try makeConversationWithUnechoedOwnReply(
+            gmailMessageID: "gmail-spam-inbox",
+            inboxLabel: LabelBuilder().inbox().build(in: viewContext)
+        )
+
+        await messageActions.reportSpamConversation(conversation: fixture.conversation)
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.reportSpam])
+        XCTAssertEqual(queued.first?.messageIds, ["gmail-spam-inbox"])
+        XCTAssertNotNil(fixture.optimisticReply.localModifiedAt)
+    }
+
+    /// The list's batch Archive and Report Spam share the same helpers.
+    func testBatchArchiveAndReportSpam_withUnechoedOwnReply_queueOnlyGmailMessageIDs() async throws {
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
+        let archived = try makeConversationWithUnechoedOwnReply(
+            gmailMessageID: "gmail-batch-archive",
+            inboxLabel: inboxLabel
+        )
+        let reported = try makeConversationWithUnechoedOwnReply(
+            gmailMessageID: "gmail-batch-spam",
+            inboxLabel: inboxLabel
+        )
+
+        await messageActions.archiveConversations(conversations: [archived.conversation])
+        await messageActions.reportSpamConversations(conversations: [reported.conversation])
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation, .reportSpam])
+        XCTAssertEqual(queued.map { $0.messageIds }, [["gmail-batch-archive"], ["gmail-batch-spam"]])
+    }
+
+    /// An inbox conversation holding one Gmail message and the user's own
+    /// reply as its optimistic row: a local UUID `id` whose RFC Message-ID
+    /// encodes it (`OutboundSendDeliveryState.localOptimisticMessageID`).
+    private func makeConversationWithUnechoedOwnReply(
+        gmailMessageID: String,
+        inboxLabel: Label
+    ) throws -> (conversation: Conversation, optimisticReply: Message) {
+        let conversation = ConversationBuilder()
+            .visible()
+            .build(in: viewContext)
+        let gmailMessage = MessageBuilder()
+            .withId(gmailMessageID)
+            .inConversation(conversation)
+            .build(in: viewContext)
+        gmailMessage.addToLabels(inboxLabel)
+        let optimisticID = UUID().uuidString
+        let optimisticReply = MessageBuilder()
+            .withId(optimisticID)
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        optimisticReply.messageId = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        try saveViewContext()
+        XCTAssertEqual(
+            OutboundSendDeliveryState.localOptimisticMessageID(for: optimisticReply),
+            optimisticID
+        )
+        return (conversation, optimisticReply)
+    }
+
     func testStar_doesNotQueuePendingActionWhenLocalSaveFails() async throws {
         _ = LabelBuilder().starred().build(in: viewContext)
         let message = MessageBuilder()

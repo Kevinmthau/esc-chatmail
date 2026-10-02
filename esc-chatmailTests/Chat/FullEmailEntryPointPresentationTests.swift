@@ -126,8 +126,10 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
     func testConversationMutatingActions_whileReplySendOwnsComposer_wait() {
         // Revert-check: removing the isSending gate from
         // ChatView.allowsConversationExit makes this test fail.
-        // HONEST SCOPE: this pins the policy behind Archive, Report Spam and
-        // the drained auto-dismiss, not their call sites.
+        // HONEST SCOPE: this pins the policy behind the drained auto-dismiss,
+        // not its call site. Archive and Report Spam defer through
+        // ChatConversationExitActionPolicy (ChatConversationExitActionPolicyTests,
+        // and the ChatViewModelTests `testConversationExitAction_` cases).
         XCTAssertFalse(ChatView.allowsConversationExit(isSending: true))
         XCTAssertTrue(ChatView.allowsConversationExit(isSending: false))
     }
