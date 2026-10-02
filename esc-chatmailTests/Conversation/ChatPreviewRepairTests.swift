@@ -349,8 +349,8 @@ final class ChatPreviewRepairTests: XCTestCase {
         XCTAssertEqual(checkpoint.deferredConversations.map(\.id), [retained.id])
     }
 
-    // Revert-check: the `checkpoint != batchCheckpoint` guard in
-    // `runChatPreviewPass`. Without it every sync completion rewrites the
+    // Revert-check: the `next != previous` guard in
+    // `persistChatPreviewCheckpoint`. Without it every sync completion rewrites the
     // whole deferred list while a send stays retained, even though the retry
     // sweep changed nothing.
     func testCoordinator_retainedSendRetryChangesNothing_doesNotRewriteCheckpoint() async throws {
@@ -615,6 +615,129 @@ final class ChatPreviewRepairTests: XCTestCase {
         }
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey))
+        withExtendedLifetime(repair) {}
+    }
+
+    // Revert-check: the `chatPreviewRetryAnchors.anchors(source)` guard in
+    // `DataCleanupService.rehomeMessagesByParticipantSet`. Without it the
+    // split, which this sync's cleanup runs before the `.syncCompleted` retry,
+    // moves the mis-homed row out of the deferred conversation; the retry then
+    // re-derives only the row left behind, drops the entry, and the moved row
+    // keeps "Old preview" for good.
+    // HONEST SCOPE: the other half of the fix, `persistChatPreviewCheckpoint`
+    // writing inside the cleanup-sensitive hold rather than after it, is not
+    // exercised: this test cannot run a split between the hold and a later
+    // write.
+    func testDeferredConversation_participantSetSplitWaitsForRetry_movedRowIsRederived() async throws {
+        let bob = "bob@example.com"
+        let relay = "relay@icloud.com"
+        // Legacy shape: the stored hash and rows still count a Hide My Email
+        // relay, so the split re-homes the identity-bearing row to `p|bob`.
+        let deferred = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [bob, relay]))
+            .visible()
+            .build(in: viewContext)
+        addConversationParticipant(email: bob, to: deferred)
+        addConversationParticipant(email: relay, displayName: "Hide My Email", to: deferred)
+        let misHomed = try identityRow("001", from: bob, in: deferred)
+        // No participant rows: the split leaves it, so the conversation survives.
+        let resident = MessageBuilder().withId("002").inConversation(deferred).build(in: viewContext)
+        resident.chatPreviewText = "Old preview"
+        resident.bodyStorageURI = try XCTUnwrap(handler.saveHTML(html, for: "002")).absoluteString
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = "retained-not-sent"
+        record.createdAt = Date()
+        record.conversationId = deferred.id
+        try viewContext.save()
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertEqual(
+            ChatPreviewRepair.Checkpoint.decode(
+                flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey)
+            ).deferredConversations.map(\.id),
+            [deferred.id]
+        )
+
+        // The record clears (discard, or the echo consuming it) and the next
+        // sync's cleanup runs the split before the retry.
+        viewContext.delete(record)
+        try viewContext.save()
+        let cleanup = cleanupService()
+        await cleanup.splitConversationsByParticipantSetIfNeeded(in: stack.newBackgroundContext())
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(misHomed.conversation?.id, deferred.id, "The split must wait for the retry")
+        XCTAssertFalse(flags.bool(forKey: DataCleanupService.participantSetSplitMigrationKey))
+
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        await cleanup.splitConversationsByParticipantSetIfNeeded(in: stack.newBackgroundContext())
+
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(misHomed.conversation?.participantHash, calculateParticipantHash(from: [bob]))
+        XCTAssertEqual(misHomed.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
+        XCTAssertEqual(resident.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
+        XCTAssertTrue(flags.bool(forKey: DataCleanupService.participantSetSplitMigrationKey))
+        withExtendedLifetime(repair) {}
+    }
+
+    // Revert-check: the `chatPreviewRetryAnchors.anchors(conv)` skip in
+    // `DataCleanupService.fixAndMergeIncorrectParticipantHashes`. Without it
+    // maintenance corrects the deferred conversation's hash and merges it into
+    // the larger canonical chat; the retry then looks for it through its
+    // recorded, now-stale hash, finds nothing, and drops the entry with the
+    // moved row still on "Old preview".
+    func testDeferredConversation_hashCorrectingMergeWaitsForRetry_mergedRowIsRederived() async throws {
+        let alex = "alex@example.com"
+        let relay = "relay@icloud.com"
+        let canonical = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [alex]))
+            .visible()
+            .build(in: viewContext)
+        addConversationParticipant(email: alex, to: canonical)
+        // More rows than the legacy chat, so the canonical one wins the merge.
+        for id in ["010", "011"] {
+            _ = MessageBuilder().withId(id).inConversation(canonical).build(in: viewContext)
+        }
+        let legacy = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [alex, relay]))
+            .visible()
+            .build(in: viewContext)
+        addConversationParticipant(email: alex, to: legacy)
+        addConversationParticipant(email: relay, displayName: "Hide My Email", to: legacy)
+        // Captured now: a reverted skip merges the row away, and faulting the
+        // deleted object afterwards would crash rather than fail.
+        let legacyID = legacy.id
+        let legacyRow = MessageBuilder().withId("001").inConversation(legacy).build(in: viewContext)
+        legacyRow.chatPreviewText = "Old preview"
+        legacyRow.bodyStorageURI = try XCTUnwrap(handler.saveHTML(html, for: "001")).absoluteString
+        let record = viewContext.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = "retained-not-sent"
+        record.createdAt = Date()
+        record.conversationId = legacyID
+        try viewContext.save()
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+
+        viewContext.delete(record)
+        try viewContext.save()
+        let cleanup = cleanupService()
+        await cleanup.fixAndMergeIncorrectParticipantHashes(in: stack.newBackgroundContext())
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(legacyRow.conversation?.id, legacyID, "The merge must wait for the retry")
+
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        await cleanup.fixAndMergeIncorrectParticipantHashes(in: stack.newBackgroundContext())
+
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(legacyRow.conversation?.id, canonical.id)
+        XCTAssertEqual(legacyRow.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         withExtendedLifetime(repair) {}
     }
 
@@ -923,6 +1046,41 @@ final class ChatPreviewRepairTests: XCTestCase {
         message.chatPreviewText = "Old preview"
         if storedHTML { message.bodyStorageURI = try XCTUnwrap(handler.saveHTML(html, for: id)).absoluteString }
         return message
+    }
+
+    /// A received row whose From/To participant rows give it a strict
+    /// identity, so the participant-set split can re-home it.
+    private func identityRow(_ id: String, from sender: String, in conversation: Conversation) throws -> Message {
+        let message = MessageBuilder()
+            .withId(id)
+            .withSender(email: sender)
+            .inConversation(conversation)
+            .build(in: viewContext)
+        _ = try MessageParticipantFactory.create(from: sender, kind: .from, for: message, in: viewContext)
+        _ = try MessageParticipantFactory.create(from: "me@example.com", kind: .to, for: message, in: viewContext)
+        message.chatPreviewText = "Old preview"
+        message.bodyStorageURI = try XCTUnwrap(handler.saveHTML(html, for: id)).absoluteString
+        return message
+    }
+
+    private func addConversationParticipant(email: String, displayName: String? = nil, to conversation: Conversation) {
+        let participant = viewContext.insertTestObject(ConversationParticipant.self)
+        participant.id = UUID()
+        participant.role = ParticipantRole.normal.rawValue
+        participant.person = PersonBuilder().withEmail(email).withDisplayName(displayName).build(in: viewContext)
+        participant.conversation = conversation
+    }
+
+    /// Shares the suite's flag store, where the coordinator persists the
+    /// checkpoints the cleanup passes read.
+    private func cleanupService() -> DataCleanupService {
+        DataCleanupService(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: stack.persistentContainer),
+            conversationManager: ConversationManager(currentUserEmail: { "me@example.com" }),
+            conversationMutationSerializer: ConversationRollupMutationSerializer(),
+            migrationFlags: flags,
+            identityAliasProvider: { _ in ["me@example.com"] }
+        )
     }
 
     private func coordinator(save: ((NSManagedObjectContext) -> Bool)? = nil) -> ConversationLaunchRepairCoordinator {

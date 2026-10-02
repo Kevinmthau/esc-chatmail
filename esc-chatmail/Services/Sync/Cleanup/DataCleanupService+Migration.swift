@@ -80,11 +80,13 @@ extension DataCleanupService {
             var deletedObjectIDs = [NSManagedObjectID]()
             let pendingSendConversationIds: Set<UUID>
             let pendingActionsByConversationID: [UUID: [PendingAction]]
+            let chatPreviewRetryAnchors: ChatPreviewRepair.DeferredRetryAnchors
             do {
                 pendingSendConversationIds = try pendingSendConversationIDs(in: context)
                 pendingActionsByConversationID = try PendingAction.referencesByConversationID(
                     in: context
                 )
+                chatPreviewRetryAnchors = try self.chatPreviewRetryAnchors(in: context)
             } catch {
                 Log.error(
                     "Failed to fetch protected references before participant hash repair",
@@ -110,6 +112,11 @@ extension DataCleanupService {
                 // deleting its final excluded participant here would make the
                 // following empty-conversation sweep delete the send's anchor.
                 if pendingSendConversationIds.contains(conv.id) { continue }
+                // A deferred chat-preview retry finds this conversation's rows
+                // by its ID, or by its recorded hash once a merge deletes it.
+                // Rehashing it or merging it into a different hash strands
+                // those rows on the old preview; this pass retries next run.
+                if chatPreviewRetryAnchors.anchors(conv) { continue }
 
                 // Match routing identity by excluding both the user's aliases
                 // and Hide-My-Email placeholder participants.
@@ -400,7 +407,7 @@ extension DataCleanupService {
 
         guard !rehome.blockedByProtectedConversation else {
             Log.debug(
-                "Participant-set split repaired available conversations but left its flag clear for a protected send anchor",
+                "Participant-set split repaired available conversations but left its flag clear for a protected anchor",
                 category: .coreData
             )
             return
@@ -422,7 +429,8 @@ extension DataCleanupService {
         /// Where each source conversation's messages last went, so user state
         /// (pinned/muted) can follow a fully-drained shell to its destination.
         let lastDestinationBySource: [NSManagedObjectID: NSManagedObjectID]
-        /// A retained send anchor still needs re-homing after its record clears.
+        /// A retained send anchor still needs re-homing after its record
+        /// clears, or a chat-preview retry anchor after the retry drops it.
         let blockedByProtectedConversation: Bool
     }
 
@@ -467,14 +475,16 @@ extension DataCleanupService {
 
             let outboundSendRecords: [OutboundSendMutationRecord]
             let pendingSendConversationIds: Set<UUID>
+            let chatPreviewRetryAnchors: ChatPreviewRepair.DeferredRetryAnchors
             do {
                 outboundSendRecords = try context.fetch(OutboundSendMutationRecord.fetchRequest())
                 pendingSendConversationIds = try pendingSendConversationIDs(
                     in: context, sendRecords: outboundSendRecords
                 )
+                chatPreviewRetryAnchors = try self.chatPreviewRetryAnchors(in: context)
             } catch {
                 Log.error(
-                    "Failed to fetch pending sends before participant-set re-home",
+                    "Failed to fetch protected references before participant-set re-home",
                     category: .coreData,
                     error: error
                 )
@@ -541,6 +551,18 @@ extension DataCleanupService {
                     }
                     if let source,
                        pendingSendConversationIds.contains(source.id) {
+                        blockedByProtectedConversation = true
+                        return
+                    }
+                    // A deferred chat-preview retry re-derives this source's
+                    // rows by its ID (or, once merged away, its hash); moving
+                    // one to another hash now strands it on the old preview,
+                    // because the main scan already passed it. The common path:
+                    // a retained send defers the source, its record clears,
+                    // and this sync's cleanup runs before the `.syncCompleted`
+                    // retry. Leave the flag clear and move it once the retry
+                    // has re-derived it and dropped the entry.
+                    if let source, chatPreviewRetryAnchors.anchors(source) {
                         blockedByProtectedConversation = true
                         return
                     }

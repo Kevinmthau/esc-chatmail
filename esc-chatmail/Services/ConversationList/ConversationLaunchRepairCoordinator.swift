@@ -117,13 +117,21 @@ final class ConversationLaunchRepairCoordinator {
             .store(in: &cancellables)
     }
 
-    static let chatPreviewRepairMigrationKey = "chatPreviewRepair." + CacheVersioning.chatPreviewDerivationVersion
-    static let chatPreviewRepairCheckpointKey = chatPreviewRepairMigrationKey + ".checkpoint"
+    nonisolated static let chatPreviewRepairMigrationKey = "chatPreviewRepair." + CacheVersioning.chatPreviewDerivationVersion
+    nonisolated static let chatPreviewRepairCheckpointKey = chatPreviewRepairMigrationKey + ".checkpoint"
     /// Not tied to the derivation version: the backfill stores what the bubble
     /// already showed, so a derivation change re-runs the re-derivation pass
     /// (which owns received HTML rows) rather than this one.
-    static let blankChatPreviewBackfillMigrationKey = "chatPreviewBlankBackfill.v1"
-    static let blankChatPreviewBackfillCheckpointKey = blankChatPreviewBackfillMigrationKey + ".checkpoint"
+    nonisolated static let blankChatPreviewBackfillMigrationKey = "chatPreviewBlankBackfill.v1"
+    nonisolated static let blankChatPreviewBackfillCheckpointKey = blankChatPreviewBackfillMigrationKey + ".checkpoint"
+    /// Every pass's checkpoint. Conversation maintenance reads their deferred
+    /// lists (`ChatPreviewRepair.DeferredRetryAnchors`) so it does not move
+    /// rows a deferred retry still has to find; hence `nonisolated` on these
+    /// keys, since that maintenance runs off the main actor.
+    nonisolated static let chatPreviewRepairCheckpointKeys = [
+        chatPreviewRepairCheckpointKey,
+        blankChatPreviewBackfillCheckpointKey
+    ]
     private static let chatPreviewRepairTaskKey = "repairPersistedChatPreviews"
     /// Rows per cleanup-sensitive hold. Each re-derivation row reads an HTML
     /// file and runs the preview derivation while the gate is held, and an
@@ -235,7 +243,7 @@ final class ConversationLaunchRepairCoordinator {
             let batchRetryCursor = retryCursor
             let batch = await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
                 await self.prepareAndSaveChatPreviewBatch(
-                    repair: pass.repair,
+                    pass: pass,
                     lease: lease,
                     checkpoint: batchCheckpoint,
                     retryAfter: batchRetryCursor
@@ -244,6 +252,7 @@ final class ConversationLaunchRepairCoordinator {
             var isComplete = false
             var isFinished = true
             if let batch {
+                // Already persisted inside the hold; this is the same value.
                 checkpoint = batchCheckpoint.advanced(by: batch)
                 isComplete = checkpoint.isComplete
                 switch batch.phase {
@@ -258,18 +267,6 @@ final class ConversationLaunchRepairCoordinator {
                     retryCursor = batch.retryCursor
                     isFinished = isComplete || batch.didDrain
                 }
-                // A retry sweep over still-pending conversations leaves the
-                // checkpoint unchanged; skip the write then, since it repeats
-                // on every sync completion while a send is retained. A retry
-                // batch that is still inside a cleared conversation also leaves
-                // it unchanged: only a finished conversation leaves the list.
-                if checkpoint != batchCheckpoint {
-                    storage.migrationFlags.setString(checkpoint.encoded, forKey: pass.checkpointKey)
-                }
-                if isComplete {
-                    storage.migrationFlags.set(true, forKey: pass.migrationKey)
-                    storage.migrationFlags.setString(nil, forKey: pass.checkpointKey)
-                }
             }
             await accountWorkCoordinator.endRun(lease)
             guard batch != nil, !isFinished else {
@@ -280,8 +277,16 @@ final class ConversationLaunchRepairCoordinator {
         return .stopped
     }
 
+    /// Runs inside the cleanup-sensitive hold, and persists the advanced
+    /// checkpoint there too, with no suspension after the save: the
+    /// participant-set split and the hash-correcting merge take the same gate
+    /// and read the deferred lists (`ChatPreviewRepair.DeferredRetryAnchors`)
+    /// to leave deferred conversations' rows in place. Persisting after the
+    /// hold would let a split queued on the gate run between a batch that
+    /// deferred a conversation and the write that records it, and move rows
+    /// the retry then never finds.
     private func prepareAndSaveChatPreviewBatch(
-        repair: ChatPreviewRepair,
+        pass: ChatPreviewPass,
         lease: SyncRun,
         checkpoint: ChatPreviewRepair.Checkpoint,
         retryAfter retryCursor: ChatPreviewRepair.RetryCursor?
@@ -290,7 +295,7 @@ final class ConversationLaunchRepairCoordinator {
         let context = storage.makeBackgroundContext()
         context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
         do {
-            let batch = try await repair.prepareNextBatch(
+            let batch = try await pass.repair.prepareNextBatch(
                 in: context,
                 checkpoint: checkpoint,
                 retryAfter: retryCursor,
@@ -301,6 +306,7 @@ final class ConversationLaunchRepairCoordinator {
                 await context.perform { context.rollback() }
                 return nil
             }
+            persistChatPreviewCheckpoint(checkpoint.advanced(by: batch), replacing: checkpoint, for: pass)
             if !batch.changedMessageIDs.isEmpty,
                let accountContext = CacheCoordinator.shared.captureInvalidationAccountContext() {
                 var plan = CacheCoordinator.CacheInvalidationPlan()
@@ -312,6 +318,25 @@ final class ConversationLaunchRepairCoordinator {
             await context.perform { context.rollback() }
             Log.error("Chat preview repair will retry after an incomplete batch", category: .conversation, error: error)
             return nil
+        }
+    }
+
+    private func persistChatPreviewCheckpoint(
+        _ next: ChatPreviewRepair.Checkpoint,
+        replacing previous: ChatPreviewRepair.Checkpoint,
+        for pass: ChatPreviewPass
+    ) {
+        // A retry sweep over still-pending conversations leaves the
+        // checkpoint unchanged; skip the write then, since it repeats
+        // on every sync completion while a send is retained. A retry
+        // batch that is still inside a cleared conversation also leaves
+        // it unchanged: only a finished conversation leaves the list.
+        if next != previous {
+            storage.migrationFlags.setString(next.encoded, forKey: pass.checkpointKey)
+        }
+        if next.isComplete {
+            storage.migrationFlags.set(true, forKey: pass.migrationKey)
+            storage.migrationFlags.setString(nil, forKey: pass.checkpointKey)
         }
     }
 

@@ -11,6 +11,8 @@ import Foundation
 /// - `ChatPreviewRepair.swift` - passes, batches, and preview derivation
 /// - `ChatPreviewRepair+Checkpoint.swift` - the durable checkpoint and its
 ///   deferred-conversation list, including legacy checkpoint decoding
+/// - `ChatPreviewRepair+RetryAnchors.swift` - the deferred conversations
+///   that hash-changing conversation maintenance must leave in place
 struct ChatPreviewRepair {
     enum Pass: Sendable {
         /// Re-derives received previews from local HTML after a derivation
@@ -164,16 +166,18 @@ struct ChatPreviewRepair {
     /// participant hash, so a gone conversation is retried through every
     /// conversation with its recorded hash, unless one of those is pending.
     /// Rows sync re-homes out of a deferred conversation get a freshly
-    /// processed preview in that same save.
+    /// processed preview in that same save. The maintenance passes that move
+    /// rows to a different hash (the participant-set split migration and the
+    /// hash-correcting merge, `DataCleanupService+Migration`) would take them
+    /// out of reach, and the main scan has already passed them, so those
+    /// passes skip every conversation this sweep still has to visit
+    /// (`DeferredRetryAnchors`) and move its rows only after it leaves the
+    /// list; the split keeps its flag clear until then.
     ///
-    /// HONEST SCOPE: two moves are not followed. The one-shot participant-set
-    /// split migration (`DataCleanupService+Migration`) can move rows of a
-    /// surviving deferred conversation into a conversation with a different
-    /// hash, and those rows keep their previous derivation until they are next
-    /// ingested. A blank-preview row that sync re-homes with no preview at all
-    /// stays blank, which the bubble loader's compatibility path still renders.
-    /// The per-row list this replaced followed both, at the cost of growing
-    /// with every deferred row.
+    /// HONEST SCOPE: a blank-preview row that sync re-homes with no preview at
+    /// all stays blank, which the bubble loader's compatibility path still
+    /// renders. The per-row list this replaced followed it, at the cost of
+    /// growing with every deferred row.
     ///
     /// `limit` bounds the rows this batch derives, not the conversations it
     /// examines: a retained failed or delivery-unknown send can defer a

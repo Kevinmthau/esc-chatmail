@@ -1781,7 +1781,11 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             replyAdmitted = true
             return result
         }
-        await waitUntil { replyAdmitted }
+        // The mock counts a transmission on the detached send worker after
+        // `beforeTransmission` returns, which nothing orders before the
+        // MainActor flag write, so the count joins the wait condition rather
+        // than being read the instant the flag flips.
+        await waitUntil { replyAdmitted && sendService.snapshot.remoteTransmissionCalls == 3 }
 
         // Revert-check: making `OutboundMessageRequest.takesConversationSendTurn`
         // return true for `.compose` gives the compose a turn it holds until
@@ -1827,7 +1831,13 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             composerSendAdmitted = true
             return result
         }
-        await waitUntil(file: file, line: line) { composerSendAdmitted }
+        // The mock counts a transmission on the detached send worker after
+        // `beforeTransmission` returns, which nothing orders before the
+        // MainActor flag write, so the count joins the wait condition rather
+        // than being read the instant the flag flips.
+        await waitUntil(file: file, line: line) {
+            composerSendAdmitted && sendService.snapshot.remoteTransmissionCalls == 2
+        }
 
         // ComposeView keeps its sheet and spinner until admission; it must
         // not wait out the chat reply's upload.

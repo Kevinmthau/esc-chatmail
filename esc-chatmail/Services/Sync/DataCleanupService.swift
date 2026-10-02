@@ -275,4 +275,20 @@ struct DataCleanupService: Sendable {
         return Set(sends.compactMap(\.conversationId))
             .union(try context.fetch(draftRequest).map(\.conversationId))
     }
+
+    /// Conversations a chat-preview pass's deferred retry still has to visit.
+    /// Passes that move rows to a different participant hash skip them like
+    /// pending-send anchors; see `ChatPreviewRepair.DeferredRetryAnchors`.
+    /// Call inside `context.perform` under the cleanup-sensitive gate, and
+    /// fail closed if it throws.
+    func chatPreviewRetryAnchors(
+        in context: NSManagedObjectContext
+    ) throws -> ChatPreviewRepair.DeferredRetryAnchors {
+        try ChatPreviewRepair.DeferredRetryAnchors.load(
+            encodedCheckpoints: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKeys.map {
+                migrationFlags.string(forKey: $0)
+            },
+            in: context
+        )
+    }
 }
