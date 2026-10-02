@@ -86,10 +86,15 @@ extension GmailAPIClient {
         // an ambiguous failure (timeout, 5xx) could deliver the email twice. Preserve
         // that distinction for the optimistic-send recovery layer instead of reducing
         // it to an ordinary API failure that would enable a duplicate retry.
+        //
+        // `sendSession` does not wait for connectivity, so an offline send fails at
+        // once with a pre-transmission error (definite "Not sent") rather than
+        // waiting out the resource timeout into an ambiguous one.
         do {
             return try await performRequestWithRetry(
                 request,
-                allowsRetransmission: false
+                allowsRetransmission: false,
+                session: sendSession
             )
         } catch {
             if Self.isAmbiguousSendFailure(error) {

@@ -240,6 +240,71 @@ extension MimeBuilder {
         return "\(rfc2047Prefix)\(base64)\(rfc2047Suffix)"
     }
 
+    /// RFC 5322 §2.1.1 line limits, excluding the CRLF: a line MUST NOT exceed
+    /// 998 characters and SHOULD NOT exceed 78.
+    static let headerLineHardLimit = 998
+    static let headerLineSoftLimit = 78
+
+    /// How many of the most recent References IDs a reply keeps, in addition to
+    /// the thread's first ID (`trimmedReferences`).
+    static let referencesRecentIDLimit = 20
+
+    private static let referencesFieldPrefix = "References: "
+
+    /// The folded `References:` value (without the field name or the final
+    /// CRLF), or nil when no usable ID remains.
+    ///
+    /// Every reply copies its parent's References and appends the parent's
+    /// Message-ID, so a long chat grows the chain by one ID per message. This
+    /// app's own Message-IDs are ~96 characters, so one space-joined line passed
+    /// the 998-character hard limit after about ten replies; receiving MTAs and
+    /// clients may then truncate or rewrap it and break threading outside Gmail.
+    /// The chain is trimmed (`trimmedReferences`) and folded with the same CRLF
+    /// + SP the encoded-word path uses, packing IDs greedily so a line stays at
+    /// or under 78 characters unless a single ID is longer by itself — a msg-id
+    /// cannot be folded internally, so such an ID gets a line of its own.
+    static func formatReferencesHeader(_ references: [String]) -> String? {
+        let ids = trimmedReferences(references)
+        guard let firstID = ids.first else { return nil }
+
+        var value = firstID
+        var lineLength = referencesFieldPrefix.utf8.count + firstID.utf8.count
+        for id in ids.dropFirst() {
+            let idLength = id.utf8.count
+            if lineLength + 1 + idLength <= headerLineSoftLimit {
+                value += " " + id
+                lineLength += 1 + idLength
+            } else {
+                value += rfc2047Fold + id
+                lineLength = 1 + idLength
+            }
+        }
+        return value
+    }
+
+    /// The References IDs a reply emits: the thread's first ID plus the most
+    /// recent `referencesRecentIDLimit`, in their original order (RFC 5322
+    /// §3.6.4 permits trimming the chain; the root and the latest ancestors are
+    /// what threading clients use, and the last ID — the parent's Message-ID —
+    /// is always kept last).
+    ///
+    /// Entries are re-tokenized on whitespace after CRLF sanitization: the
+    /// stored chain is split on spaces only (`ReplyTargetSnapshot`), so one
+    /// entry can still carry several IDs or folding whitespace, and the cap and
+    /// the fold must both count real IDs. An ID too long to fit on any header
+    /// line even alone is dropped rather than emitted past the hard limit — it
+    /// can only come from a malformed or hostile inbound header, and
+    /// In-Reply-To (unchanged) still names the parent.
+    static func trimmedReferences(_ references: [String]) -> [String] {
+        let maxIDLength = headerLineHardLimit - referencesFieldPrefix.utf8.count
+        let ids = references
+            .flatMap { sanitizeHeaderValue($0).split(whereSeparator: \.isWhitespace) }
+            .map(String.init)
+            .filter { $0.utf8.count <= maxIDLength }
+        guard ids.count > referencesRecentIDLimit + 1 else { return ids }
+        return [ids[0]] + ids.suffix(referencesRecentIDLimit)
+    }
+
     static func formatFromHeader(email: String, name: String?) -> String {
         let sanitizedEmail = sanitizeHeaderValue(email)
         let sanitizedName = sanitizeHeaderValue(name ?? "")
