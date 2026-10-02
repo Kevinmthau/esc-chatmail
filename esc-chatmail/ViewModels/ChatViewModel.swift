@@ -23,6 +23,10 @@ final class ChatComposerState: ObservableObject {
     @Published var isProcessingAttachments = false
     @Published var recoveredReplyEnvelope: StoredReplyEnvelope?
     @Published var unavailableReplyTargetURI: URL?
+    /// True only from the send tap until the optimistic message is durable
+    /// (`ChatViewModel.sendReply`): milliseconds, during which the composer's
+    /// content lives in the send's snapshot. It blocks a second send, draft
+    /// autosave and target changes for that window, not typing.
     @Published private(set) var isSending = false
     private var discardsAttachmentsWhenSendFinishes = false
 
@@ -161,8 +165,27 @@ final class ChatViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let draftStore: ChatReplyDraftStore
     private let draftAccountEmail: String?
+    private let tokenManager: any TokenManagerProtocol
+    private var tokenPrewarmTask: Task<Void, Never>?
     private let conversationMutationSerializer: ConversationRollupMutationSerializer
     @Published private(set) var draftRestoreFailed = false
+    private let composerDirectory: ChatReplyComposerDirectory
+    /// This view model's presentation in `composerDirectory`. Only the newest
+    /// presentation for the conversation writes its durable draft.
+    private var composerPresentationGeneration: UInt64 = 0
+    /// Unsent replies waiting for the cleanup gate to merge them into the
+    /// stored draft (`handOffUnsentReply`), with the text this composer
+    /// received after the tap and the send registration the merge ends.
+    private var unsentRepliesAwaitingDraftMerge: [(
+        snapshot: ChatReplySendSnapshot,
+        typedSinceSend: String,
+        notice: UnsentReplyNotice,
+        unpersistedSend: ChatReplyComposerDirectory.UnpersistedSend?
+    )] = []
+    /// The screen went away while a send held `isSending`, so its save was
+    /// skipped and anything typed since the tap exists only here. The send's
+    /// release saves it or hands it on (`saveComposerLeftWhileSending`).
+    private var savesComposerWhenSendReleases = false
 
     // MARK: - Task Management
 
@@ -204,7 +227,8 @@ final class ChatViewModel: ObservableObject {
     init(
         conversation: Conversation,
         chatDependencies: ChatDependencies,
-        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared
+        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        composerDirectory: ChatReplyComposerDirectory? = nil
     ) {
         if conversation.objectID.isTemporaryID {
             try? chatDependencies.storage.viewContext.obtainPermanentIDs(for: [conversation])
@@ -216,7 +240,9 @@ final class ChatViewModel: ObservableObject {
         self.viewContext = chatDependencies.storage.viewContext
         self.draftStore = ChatReplyDraftStore(context: chatDependencies.storage.viewContext)
         self.draftAccountEmail = chatDependencies.session.authSession.userEmail
+        self.tokenManager = chatDependencies.session.tokenManager
         self.conversationMutationSerializer = conversationMutationSerializer
+        self.composerDirectory = composerDirectory ?? .shared
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
         self.conversationDisplayNameHint = conversation.displayName
@@ -238,6 +264,10 @@ final class ChatViewModel: ObservableObject {
             .debounce(for: .milliseconds(350), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.scheduleReplyDraftSave() }
             .store(in: &cancellables)
+        // Created for a screen that is about to show it: from here on this
+        // composer owns the conversation's draft, superseding any view model
+        // that a still-running send keeps alive for a screen that is gone.
+        composerPresentationGeneration = self.composerDirectory.present(self, for: conversationObjectID)
     }
 
     // MARK: - Message Actions
@@ -329,6 +359,10 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Reply Actions
 
     private var manuallySelectedReplyTargetID: NSManagedObjectID?
+    /// The target as an automatic pass (load, sync arrival, the release-time
+    /// re-evaluation) last moved it. A target still equal to it was not
+    /// changed by the user, which `restoreUnsentReply` needs to tell apart.
+    private var lastAutomaticReplyTarget: ChatReplySendSnapshot.Target?
 
     func setReplyingTo(_ message: Message) {
         guard !composerState.isSending,
@@ -346,6 +380,12 @@ final class ChatViewModel: ObservableObject {
 
     /// Sets the initial replyingTo message when the conversation loads
     func initializeReplyingTo(lastMessage: Message?) {
+        recordingAutomaticReplyTargetChange {
+            initializeAutomaticReplyTarget(lastMessage: lastMessage)
+        }
+    }
+
+    private func initializeAutomaticReplyTarget(lastMessage: Message?) {
         guard !composerState.isSending,
               !composerState.hasDraftContent,
               composerState.replyAnchor == nil,
@@ -433,7 +473,22 @@ final class ChatViewModel: ObservableObject {
     /// because no inbound target existed) yields to the first inbound one.
     func updateReplyingToIfNewSubject(lastMessage: Message?) {
         guard !composerState.isSending else { return }
-        reconcileAutomaticReplyTarget(lastMessage: lastMessage)
+        recordingAutomaticReplyTargetChange {
+            reconcileAutomaticReplyTarget(lastMessage: lastMessage)
+        }
+    }
+
+    /// Runs an automatic target pass and remembers where it left the target
+    /// if it moved it. Only moves are recorded: recording an unchanged target
+    /// would bless a user's pick (which automatic passes never move) as
+    /// automatic.
+    private func recordingAutomaticReplyTargetChange(_ pass: () -> Void) {
+        let before = currentReplyTarget()
+        pass()
+        let after = currentReplyTarget()
+        if !after.hasSameIdentity(as: before) {
+            lastAutomaticReplyTarget = after
+        }
     }
 
     /// The body of `updateReplyingToIfNewSubject` without its in-flight-send
@@ -539,9 +594,23 @@ final class ChatViewModel: ObservableObject {
         destination = nil
     }
 
-    /// Reports the durable optimistic identity as soon as it exists, but keeps
-    /// the draft owned and locked until local preflight reaches transmission
-    /// admission. The returned result represents that later admission point.
+    /// Sends the composer's reply the way iMessage does: the field empties in
+    /// the tap's main-actor turn and the composer is released for the next
+    /// reply as soon as the optimistic message is durable.
+    ///
+    /// `isSending` spans only tap → `onOptimisticMessagePersisted`
+    /// (milliseconds). Until then `snapshot` is the only owner of the content,
+    /// so every failure before it restores the snapshot (merged with anything
+    /// typed meanwhile) and shows the alert, in whichever composer is on
+    /// screen (`returnUnsentReply`). After it the optimistic graph and
+    /// its `OutboundSendMutationRecord` own the content: a send-path failure
+    /// before the barrier is retained as a "Not sent" bubble with Edit and
+    /// resend (`.retainAsNotSent`), with no alert and no restore. The only
+    /// later throw is a rollback (cancellation or account teardown), which
+    /// deleted the bubble, so the snapshot is restored then too.
+    ///
+    /// The returned result still represents transmission admission, which the
+    /// transcript coordinator uses for its final anchoring pass.
     func sendReply(
         onOptimisticMessagePersisted: @escaping @MainActor (OutboundMessageResult) -> Void = { _ in }
     ) async -> OutboundMessageResult? {
@@ -558,8 +627,13 @@ final class ChatViewModel: ObservableObject {
         let attachments = composerState.attachments
         guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return nil }
         guard composerState.beginSending() else { return nil }
+        // Cleared once the optimistic message is persisted: from then on a
+        // newer send may own `isSending`, and this call must not end it.
+        var ownsComposer = true
         defer {
-            composerState.finishSending()
+            // Runs after any restore below, so the save persists the restored
+            // content rather than the cleared composer.
+            if ownsComposer { composerState.finishSending() }
             scheduleReplyDraftSave()
         }
 
@@ -574,7 +648,7 @@ final class ChatViewModel: ObservableObject {
             return nil
         }
 
-        let result: OutboundMessageResult?
+        let request: OutboundMessageRequest
         do {
             if let target = composerState.replyAnchor, target.objectID.isTemporaryID {
                 try viewContext.obtainPermanentIDs(for: [target])
@@ -582,53 +656,300 @@ final class ChatViewModel: ObservableObject {
             let attachmentContexts = try outboundAttachmentContextBuilder.buildSendAttachments(
                 from: attachments
             )
-            result = try await outboundMessageCoordinator.send(
-                .reply(
-                    .init(
-                        context: outboundReplyContextBuilder.build(
-                            conversationObjectID: conversation.objectID,
-                            replyingToMessageObjectID: composerState.replyAnchor?.objectID,
-                            optimisticConversation: replyOptimisticConversation,
-                            includesQuotedMessage: replyingTo != nil
-                        ),
-                        body: trimmedReplyText,
-                        attachments: attachmentContexts,
-                        retryMetadata: composerState.recoveredReplyEnvelope?.metadata(
-                            resolver: outboundReplyContextBuilder.replyQuotedHTMLResolver
-                        )
-                    )
-                ),
-                onOptimisticMessagePersisted: onOptimisticMessagePersisted
+            request = .reply(
+                .init(
+                    context: outboundReplyContextBuilder.build(
+                        conversationObjectID: conversation.objectID,
+                        replyingToMessageObjectID: composerState.replyAnchor?.objectID,
+                        optimisticConversation: replyOptimisticConversation,
+                        includesQuotedMessage: replyingTo != nil
+                    ),
+                    body: trimmedReplyText,
+                    attachments: attachmentContexts,
+                    retryMetadata: composerState.recoveredReplyEnvelope?.metadata(
+                        resolver: outboundReplyContextBuilder.replyQuotedHTMLResolver
+                    ),
+                    preTransmissionFailureDisposition: .retainAsNotSent
+                )
             )
         } catch {
             Log.error("Failed to prepare reply send", category: .message, error: error)
             sendErrorAlert = ChatSendErrorAlert(message: error.localizedDescription)
             return nil
         }
-        guard let result else { return nil }
 
-        // Clear only after local preflight reaches durable transmission admission.
-        // Keep the reply target so another message in this chat retains its
-        // subject and threading headers while the sent-message echo arrives.
-        // A recovered envelope serves the same purpose when its original
-        // target is no longer available locally.
+        // Still the tap's main-actor turn: no await has run, so the field
+        // empties in the same frame the send button was tapped. The request
+        // above already captured the body, so nothing typed from here on can
+        // change what is sent. Keep the reply target so another message in
+        // this chat retains its subject and threading headers while the
+        // sent-message echo arrives; a recovered envelope serves the same
+        // purpose when its original target is no longer available locally.
+        //
+        // HONEST SCOPE: the field stays focused, and a plain SwiftUI text
+        // field cannot commit pending input first. An uncommitted IME
+        // composition (marked CJK text) is not in the binding yet: it is left
+        // out of the sent body and stays in the field after this clear.
+        let snapshot = ChatReplySendSnapshot(
+            replyText: replyText,
+            attachments: attachments,
+            target: currentReplyTarget()
+        )
+        // The stored draft still holds this text (the autosave before the
+        // tap) until the optimistic transaction removes it. A chat reopened
+        // meanwhile must not load it as a draft (`restoreReplyDraft`).
+        let unpersistedSend = composerDirectory.beginUnpersistedSend(for: conversationObjectID)
         replyText = ""
         composerState.attachments = []
-        // A context-menu Reply is one-shot, like an iMessage inline reply.
-        // Kept selected, it silently governed every later reply in the
-        // session (a list reply went to the old post's thread and audience).
-        // This send's request was built before admission, so neither line
-        // can change what was sent. Re-evaluate once here: a newer message
-        // that arrived while the send froze the target fires no further
-        // collection change. A failed send keeps its selection.
-        let sentManualSelection = manuallySelectedReplyTargetID != nil
-        manuallySelectedReplyTargetID = nil
-        if sentManualSelection {
-            replaceSentManualReplyTarget()
-        } else {
-            reconcileAutomaticReplyTarget(lastMessage: newestValidReplyTarget())
+
+        let result: OutboundMessageResult?
+        do {
+            result = try await outboundMessageCoordinator.send(
+                request,
+                onOptimisticMessagePersisted: { [self] optimisticResult in
+                    // Release in the same main-actor turn that publishes the
+                    // bubble: the optimistic save already removed the durable
+                    // draft, and a gate-queued autosave reading the cleared
+                    // composer can only write an empty (or newer) draft.
+                    ownsComposer = false
+                    unpersistedSend.end()
+                    composerState.finishSending()
+                    reevaluateReplyTargetAfterSend()
+                    saveComposerLeftWhileSending()
+                    onOptimisticMessagePersisted(optimisticResult)
+                }
+            )
+        } catch {
+            Log.error("Failed to prepare reply send", category: .message, error: error)
+            returnUnsentReply(snapshot, notice: .notSent(error.localizedDescription), unpersistedSend: unpersistedSend)
+            return nil
         }
+        guard let result else {
+            returnUnsentReply(snapshot, notice: .notSent(nil), unpersistedSend: unpersistedSend)
+            return nil
+        }
+        // A coordinator always reports persistence before success; this only
+        // keeps a missed callback from holding back draft restores.
+        unpersistedSend.end()
         return result
+    }
+
+    /// The release half of `composerDidDisappear` for a screen that left
+    /// while this composer was sending: its save then skipped (`isSending`),
+    /// so text typed after the tap was in no draft.
+    private func saveComposerLeftWhileSending() {
+        guard savesComposerWhenSendReleases else { return }
+        savesComposerWhenSendReleases = false
+        if isComposerPresented {
+            // The same screen came back.
+            scheduleReplyDraftSave()
+        } else if composerDirectory.ownsDraft(generation: composerPresentationGeneration, for: conversationObjectID) {
+            // Off screen `scheduleReplyDraftSave` is a no-op; this is the
+            // save the disappearance could not make.
+            taskManager.run("saveReplyDraft") { [self] in
+                await saveReplyDraft()
+            }
+        } else if composerState.hasDraftContent {
+            // The chat was opened again since; that composer owns the draft
+            // and never saw this text.
+            let typed = ChatReplySendSnapshot(
+                replyText: replyText,
+                attachments: composerState.attachments,
+                target: currentReplyTarget()
+            )
+            replyText = ""
+            composerState.attachments = []
+            handOffUnsentReply(typed, notice: .none, unpersistedSend: nil)
+        }
+    }
+
+    /// Re-evaluates the reply target once a send has released the composer.
+    ///
+    /// A context-menu Reply is one-shot, like an iMessage inline reply. Kept
+    /// selected, it silently governed every later reply in the session (a
+    /// list reply went to the old post's thread and audience). The send's
+    /// request was built at tap, so this cannot change what was sent. It runs
+    /// at release, not at admission: from release on the user can pick the
+    /// next reply's target, and a later pass would clear that choice. A newer
+    /// message that arrived while the send froze the target fires no further
+    /// collection change, so re-evaluate once here. A failed send keeps its
+    /// selection (`restoreUnsentReply`).
+    private func reevaluateReplyTargetAfterSend() {
+        recordingAutomaticReplyTargetChange {
+            let sentManualSelection = manuallySelectedReplyTargetID != nil
+            manuallySelectedReplyTargetID = nil
+            if sentManualSelection {
+                replaceSentManualReplyTarget()
+            } else {
+                reconcileAutomaticReplyTarget(lastMessage: newestValidReplyTarget())
+            }
+        }
+    }
+
+    private func currentReplyTarget() -> ChatReplySendSnapshot.Target {
+        ChatReplySendSnapshot.Target(
+            replyingTo: composerState.replyingTo,
+            replyAnchor: composerState.replyAnchor,
+            recoveredReplyEnvelope: composerState.recoveredReplyEnvelope,
+            manuallySelectedReplyTargetID: manuallySelectedReplyTargetID
+        )
+    }
+
+    /// Gives a reply that never became a durable send (or was rolled back)
+    /// back to whichever composer the user can see.
+    ///
+    /// Navigation stays available during a send, and the send task keeps
+    /// this view model alive after its screen is gone. Restoring into an
+    /// off-screen composer hid the alert, and its draft save raced the
+    /// reopened chat's composer, which then deleted the restored draft on its
+    /// own empty save. See `ChatReplyComposerDirectory`.
+    private func returnUnsentReply(
+        _ snapshot: ChatReplySendSnapshot,
+        notice: UnsentReplyNotice,
+        unpersistedSend: ChatReplyComposerDirectory.UnpersistedSend
+    ) {
+        guard isComposerPresented else {
+            handOffUnsentReply(snapshot, notice: notice, unpersistedSend: unpersistedSend)
+            return
+        }
+        // Back on screen: the restore keeps what was typed since the tap, and
+        // `sendReply`'s deferred save persists it.
+        savesComposerWhenSendReleases = false
+        restoreUnsentReply(snapshot)
+        unpersistedSend.end()
+        if case .notSent(let alertMessage?) = notice {
+            sendErrorAlert = ChatSendErrorAlert(message: alertMessage)
+        }
+    }
+
+    /// How a hand-off is announced to the composer that takes it.
+    private enum UnsentReplyNotice {
+        /// Text typed here after a send tap that did persist: nothing failed.
+        case none
+        /// A reply that was not sent, with the failure's message if any.
+        case notSent(String?)
+    }
+
+    /// This screen is gone: the chat's open composer takes the reply, or,
+    /// with none open, the stored draft does (merged, under the cleanup gate
+    /// like every draft write, and re-checking for a composer opened since).
+    ///
+    /// Text typed into this composer after the tap whose save the screen's
+    /// disappearance skipped (`savesComposerWhenSendReleases`) goes with it,
+    /// after the reply's own text, and leaves this composer: nothing off
+    /// screen saves it, and this composer must not write it again. Text the
+    /// disappearance did save is already in the stored draft (or the reopened
+    /// composer that loaded it) and is not sent along a second time.
+    ///
+    /// `unpersistedSend` ends only once the content has its new owner, so a
+    /// chat opened while the merge waits for the gate does not also load the
+    /// stored copy and then receive the reply a second time.
+    private func handOffUnsentReply(
+        _ snapshot: ChatReplySendSnapshot,
+        notice: UnsentReplyNotice,
+        unpersistedSend: ChatReplyComposerDirectory.UnpersistedSend?
+    ) {
+        var typedSinceSend = ""
+        if savesComposerWhenSendReleases {
+            savesComposerWhenSendReleases = false
+            typedSinceSend = replyText
+            replyText = ""
+        }
+        if let presented = composerDirectory.presentedComposer(for: conversationObjectID),
+           presented !== self {
+            presented.adoptUnsentReply(snapshot, typedSinceSend: typedSinceSend, notice: notice)
+            unpersistedSend?.end()
+            return
+        }
+        unsentRepliesAwaitingDraftMerge.append((snapshot, typedSinceSend, notice, unpersistedSend))
+        taskManager.run("mergeUnsentReply-\(UUID().uuidString)") { [self] in
+            do {
+                try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
+                    try await mergeUnsentRepliesIntoDraftWithoutCleanupInterleaving()
+                }
+            } catch {
+                Log.error("Failed to keep an unsent reply as a draft", category: .message, error: error)
+            }
+        }
+    }
+
+    private func mergeUnsentRepliesIntoDraftWithoutCleanupInterleaving() throws {
+        let replies = unsentRepliesAwaitingDraftMerge
+        unsentRepliesAwaitingDraftMerge.removeAll()
+        defer { replies.forEach { $0.unpersistedSend?.end() } }
+        guard authSession.userEmail == draftAccountEmail else { return }
+        for reply in replies {
+            if let presented = composerDirectory.presentedComposer(for: conversationObjectID),
+               presented !== self {
+                presented.adoptUnsentReply(reply.snapshot, typedSinceSend: reply.typedSinceSend, notice: reply.notice)
+                continue
+            }
+            guard conversation.managedObjectContext === viewContext, !conversation.isDeleted else {
+                throw ReplyDraftPersistenceError.conversationUnavailable
+            }
+            try draftStore.saveMergingUnsentReply(
+                reply.snapshot.storedDraft,
+                attachments: reply.snapshot.attachments,
+                typedAfterUnsent: reply.typedSinceSend,
+                conversationID: conversation.id
+            )
+        }
+    }
+
+    /// Takes a reply that another view model for this conversation, whose
+    /// screen is gone, could not send (or text it received after a send tap).
+    private func adoptUnsentReply(
+        _ snapshot: ChatReplySendSnapshot,
+        typedSinceSend: String,
+        notice: UnsentReplyNotice
+    ) {
+        restoreUnsentReply(ChatReplySendSnapshot(
+            replyText: ChatReplyRestorePolicy.restoredText(
+                unsentText: snapshot.replyText,
+                typedSinceSend: typedSinceSend
+            ),
+            attachments: snapshot.attachments,
+            target: snapshot.target
+        ))
+        if case .notSent(let alertMessage) = notice {
+            sendErrorAlert = ChatSendErrorAlert(
+                title: "Reply Not Sent",
+                message: alertMessage ?? "Your reply was not sent. It is back in the reply field."
+            )
+        }
+        scheduleReplyDraftSave()
+    }
+
+    /// Puts a reply that never became a durable send back into the composer.
+    ///
+    /// Text typed since the tap is kept after the unsent text, and attachments
+    /// added since are kept after the unsent ones. The target comes back
+    /// unless the user steered the composer since: a target picked or cleared
+    /// by hand, or typed text, wins. An automatic move does not count. The
+    /// composer releases at persistence, so sync can move an idle target
+    /// (a newer list post, a new subject) while the send is in preflight;
+    /// counting that as a change restored the text onto the new target, in a
+    /// list chat another post's thread and audience.
+    private func restoreUnsentReply(_ snapshot: ChatReplySendSnapshot) {
+        let typedSinceSend = composerState.hasDraftContent
+        let current = currentReplyTarget()
+        let targetIsUntouched = current.hasSameIdentity(as: snapshot.target) || (
+            !typedSinceSend &&
+                lastAutomaticReplyTarget.map { current.hasSameIdentity(as: $0) } == true
+        )
+        replyText = ChatReplyRestorePolicy.restoredText(
+            unsentText: snapshot.replyText,
+            typedSinceSend: replyText
+        )
+        composerState.attachments = ChatReplyRestorePolicy.restoredAttachments(
+            unsent: snapshot.attachments,
+            addedSinceSend: composerState.attachments
+        )
+        guard targetIsUntouched, snapshot.target.isRestorable else { return }
+        composerState.replaceReplyTarget(snapshot.target.replyAnchor)
+        if snapshot.target.replyingTo == nil { replyingTo = nil }
+        composerState.recoveredReplyEnvelope = snapshot.target.recoveredReplyEnvelope
+        manuallySelectedReplyTargetID = snapshot.target.manuallySelectedReplyTargetID
     }
 
     /// Hands the composer back to the automatic target after a context-menu
@@ -659,10 +980,41 @@ final class ChatViewModel: ObservableObject {
 
     /// Retain the screen state until its lifecycle-triggered save finishes, even
     /// after navigation releases the view. Repeated requests replace older work.
+    ///
+    /// Off screen this is a no-op: `composerDidDisappear` already scheduled
+    /// the save of what the user left, and a later request (the send's
+    /// deferred save at admission, a debounced keystroke) would replace it
+    /// with a stale composer. An empty one removed the draft a reopened chat
+    /// had saved since.
     func scheduleReplyDraftSave() {
+        guard isComposerPresented else { return }
         taskManager.run("saveReplyDraft") { [self] in
             await saveReplyDraft()
         }
+    }
+
+    /// Whether this composer is the one on screen for its conversation.
+    private var isComposerPresented: Bool {
+        composerDirectory.presentedComposer(for: conversationObjectID) === self
+    }
+
+    /// `ChatView.onAppear`. The view model is presented at creation; this
+    /// only matters if the same screen comes back after disappearing.
+    func composerDidAppear() {
+        guard !isComposerPresented else { return }
+        composerPresentationGeneration = composerDirectory.present(self, for: conversationObjectID)
+    }
+
+    /// `ChatView.onDisappear`: saves what the user left, then stops treating
+    /// this composer as the visible one. It keeps owning the stored draft
+    /// until the chat is opened again, so that save still lands; a reply that
+    /// fails later is handed off instead of restored here
+    /// (`returnUnsentReply`).
+    func composerDidDisappear() {
+        // The save below skips while this composer is sending.
+        if composerState.isSending { savesComposerWhenSendReleases = true }
+        scheduleReplyDraftSave()
+        composerDirectory.withdraw(generation: composerPresentationGeneration, for: conversationObjectID)
     }
 
     func saveReplyDraft(onEnqueued: (@Sendable () async -> Void)? = nil) async {
@@ -683,8 +1035,17 @@ final class ChatViewModel: ObservableObject {
     private func saveReplyDraftWithoutCleanupInterleaving() throws {
         // Read live state only after acquiring cleanup's gate: a queued save
         // must not resurrect content that was sent or explicitly discarded.
+        // `sendReply` clears the composer at tap, so a save scheduled by a
+        // keystroke just before the tap reads the cleared composer here.
         guard !composerState.isSending, !draftRestoreFailed,
               authSession.userEmail == draftAccountEmail else { return }
+        // A composer opened for this chat since (see
+        // `ChatReplyComposerDirectory`) loaded the stored draft and owns it
+        // now; this one's content is stale.
+        guard composerDirectory.ownsDraft(
+            generation: composerPresentationGeneration,
+            for: conversationObjectID
+        ) else { return }
         guard conversation.managedObjectContext === viewContext, !conversation.isDeleted else {
             if composerState.hasDraftContent { throw ReplyDraftPersistenceError.conversationUnavailable }
             return
@@ -728,6 +1089,13 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func restoreReplyDraft() {
+        // A reply sent from an earlier screen of this chat has not become
+        // durable yet, so the stored draft is that reply (saved before its
+        // tap). Loaded here, it reappeared ready to be sent again, and a
+        // failure that handed the reply over doubled it. The send's
+        // transaction removes the stored copy; a failure hands it to this
+        // composer, or merges it back into the store.
+        guard !composerDirectory.hasUnpersistedSend(for: conversationObjectID) else { return }
         do {
             guard let (snapshot, attachments) = try draftStore.load(conversationID: conversation.id) else { return }
             replyText = snapshot.text
@@ -753,6 +1121,14 @@ final class ChatViewModel: ObservableObject {
             sendErrorAlert = ChatSendErrorAlert(title: "Couldn’t Restore Draft", message: error.localizedDescription)
         }
     }
+
+#if DEBUG
+    /// Lets tests join the scheduled draft save (`scheduleReplyDraftSave`,
+    /// `composerDidDisappear`) instead of racing it.
+    func waitForScheduledReplyDraftSave() async {
+        await taskManager.waitForCompletion(of: "saveReplyDraft")
+    }
+#endif
 
     func discardReplyDraft() {
         guard !composerState.isSending, !composerState.isProcessingAttachments else { return }
@@ -877,6 +1253,25 @@ final class ChatViewModel: ObservableObject {
             prefetchTaskManager.runDetached("prefetchContacts") {
                 await contactsResolver.prewarm(emails: uniqueEmails)
             }
+        }
+    }
+
+    /// Warms the access token when the reply field gains focus, so a refresh
+    /// of a token near expiry (any reply after about an hour in the
+    /// background) happens while the user types instead of between the send
+    /// tap and Gmail admission.
+    ///
+    /// Goes through `getCurrentToken()`, the existing epoch-safe,
+    /// single-flighted path; this adds no token producer. Fire-and-forget:
+    /// errors are left for the send path to report, and an in-flight warm-up
+    /// is never cancelled or duplicated.
+    func prewarmReplySendCredentials() {
+        guard tokenPrewarmTask == nil,
+              authSession.userEmail == draftAccountEmail else { return }
+        let tokenManager = self.tokenManager
+        tokenPrewarmTask = Task { [weak self] in
+            _ = try? await tokenManager.getCurrentToken()
+            self?.tokenPrewarmTask = nil
         }
     }
 

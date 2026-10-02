@@ -264,7 +264,8 @@ final class Dependencies: ObservableObject {
 
         return ChatDependencies(
             session: ChatSessionDependencies(
-                authSession: authSession
+                authSession: authSession,
+                tokenManager: tokenManager
             ),
             content: ChatContentDependencies(
                 htmlContentHandler: htmlContentHandler,

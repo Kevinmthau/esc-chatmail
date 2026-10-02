@@ -9,6 +9,9 @@ struct ChatView: View {
     @State private var presentedSheetDestination: ChatDestination?
     @State private var composerHasDraft = false
     // Mirror only send ownership so typing does not invalidate the full thread.
+    // It now flips only for the tap → optimistic-persistence window and feeds
+    // only `shouldDismissDrainedConversation`, which is evaluated in `body`
+    // and needs the reactivity; navigation no longer depends on it.
     @State private var replySendIsInFlight = false
     private let chatDependencies: ChatDependencies
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
@@ -63,8 +66,7 @@ struct ChatView: View {
         )
         .navigationTitle(navigationDisplayName)
         .navigationBarTitleDisplayMode(.inline)
-        // Keep the composer on screen while its draft is handed off to the send.
-        .navigationBarBackButtonHidden(!allowsConversationExit)
+        .navigationBarBackButtonHidden(!allowsNavigationExit)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Text(navigationDisplayName)
@@ -97,7 +99,7 @@ struct ChatView: View {
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
-                .disabled(!allowsConversationExit)
+                .disabled(!allowsNavigationExit)
             }
         }
         .sheet(item: activeDestinationBinding, onDismiss: {
@@ -167,8 +169,11 @@ struct ChatView: View {
             isTextFieldFocused = false
             dismiss()
         }
+        .onAppear {
+            viewModel.composerDidAppear()
+        }
         .onDisappear {
-            viewModel.scheduleReplyDraftSave()
+            viewModel.composerDidDisappear()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { viewModel.scheduleReplyDraftSave() }
@@ -235,8 +240,29 @@ struct ChatView: View {
         conversationType != .list
     }
 
+    /// Gates actions that would mutate or dismiss the conversation while a
+    /// reply send still owns the composer (Archive, Report Spam, the drained
+    /// auto-dismiss). They act on the conversation the optimistic row is
+    /// about to anchor to, so they wait out the tap → persistence window.
     static func allowsConversationExit(isSending: Bool) -> Bool {
         !isSending
+    }
+
+    /// The back button, swipe-back and the overflow menu stay available
+    /// during a reply send. They used to hide/disable for the whole send, so
+    /// the chevron blinked on every reply and a slow preflight (token refresh,
+    /// attachments) trapped the user in the chat. Leaving is safe: the
+    /// composer empties at tap, and from optimistic persistence on
+    /// `OutboundTaskRegistry` and the durable graph own the send. Before
+    /// persistence the send's snapshot is the only copy, and the send Task
+    /// keeps the view model alive after the screen is gone; an early failure
+    /// is then handed to the reopened chat's composer, or merged into the
+    /// stored draft, never restored off screen (`ChatReplyComposerDirectory`,
+    /// wired by `onAppear`/`onDisappear` below). Archive and Report Spam keep
+    /// their action-time `allowsConversationExit` guard, and a rollback never
+    /// undoes an archive made meanwhile.
+    static func allowsNavigationExit(isSending _: Bool) -> Bool {
+        true
     }
 
     static func shouldDismissDrainedConversation(
@@ -253,8 +279,8 @@ struct ChatView: View {
         ) && !hasDraft && allowsConversationExit(isSending: isSending)
     }
 
-    private var allowsConversationExit: Bool {
-        Self.allowsConversationExit(isSending: replySendIsInFlight)
+    private var allowsNavigationExit: Bool {
+        Self.allowsNavigationExit(isSending: replySendIsInFlight)
     }
 
     private var shouldDismissDrainedConversation: Bool {

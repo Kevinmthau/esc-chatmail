@@ -112,11 +112,22 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         )
     }
 
-    func testChatExitIsBlockedWhileReplySendPreflightOwnsDraft() {
+    func testChatNavigation_duringReplySend_staysAvailable() {
+        // The back chevron, swipe-back and menu used to hide or disable for
+        // every send, so the navigation bar blinked on each reply.
+        // Revert-check: making ChatView.allowsNavigationExit return
+        // !isSending makes this test fail.
+        // HONEST SCOPE: XCTest cannot inspect the navigation modifier; this
+        // pins the policy the back button and the action menu share.
+        XCTAssertTrue(ChatView.allowsNavigationExit(isSending: true))
+        XCTAssertTrue(ChatView.allowsNavigationExit(isSending: false))
+    }
+
+    func testConversationMutatingActions_whileReplySendOwnsComposer_wait() {
         // Revert-check: removing the isSending gate from
         // ChatView.allowsConversationExit makes this test fail.
-        // HONEST SCOPE: XCTest cannot inspect the navigation modifier; this
-        // pins the policy shared by the native back gate and action menu.
+        // HONEST SCOPE: this pins the policy behind Archive, Report Spam and
+        // the drained auto-dismiss, not their call sites.
         XCTAssertFalse(ChatView.allowsConversationExit(isSending: true))
         XCTAssertTrue(ChatView.allowsConversationExit(isSending: false))
     }

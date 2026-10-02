@@ -66,6 +66,37 @@ final class ChatReplyBarTests: XCTestCase {
         )
     }
 
+    /// The whole bar used to be `.disabled(isSending)`, and SwiftUI takes
+    /// focus from a disabled field: the keyboard dropped on every send.
+    ///
+    /// Revert-check: making `ChatReplyBarControlPolicy.isTextFieldEnabled`
+    /// return `!isSending` fails this test.
+    /// HONEST SCOPE: this covers the policy, not the view wiring. Nothing
+    /// renders `ChatReplyBar`, so re-adding a bar-wide `.disabled(isSending)`
+    /// passes every test here.
+    func testReplyBar_whileSending_textFieldStaysEnabled() {
+        XCTAssertTrue(ChatReplyBarControlPolicy.isTextFieldEnabled(isSending: true))
+        XCTAssertTrue(ChatReplyBarControlPolicy.isTextFieldEnabled(isSending: false))
+    }
+
+    /// Revert-check: making `ChatReplyBarControlPolicy.allowsDraftMutation`
+    /// return true fails this test.
+    /// HONEST SCOPE: policy only, as above.
+    func testReplyBar_whileSending_attachmentAndTargetControlsWait() {
+        XCTAssertFalse(ChatReplyBarControlPolicy.allowsDraftMutation(isSending: true))
+        XCTAssertTrue(ChatReplyBarControlPolicy.allowsDraftMutation(isSending: false))
+    }
+
+    /// The optimistic bubble shows its own sending indicator.
+    ///
+    /// Revert-check: setting `ChatReplyBarControlPolicy.sendButtonShowsProgress`
+    /// to true fails this test.
+    /// HONEST SCOPE: policy only; ComposeView's `SendButton` keeps the
+    /// spinner through the `showsProgress` default.
+    func testReplyBar_sendButton_showsNoProgress() {
+        XCTAssertFalse(ChatReplyBarControlPolicy.sendButtonShowsProgress)
+    }
+
     /// The quote is sent whenever a target exists, but the row with its
     /// dismiss button used to require a non-empty subject, so a subjectless
     /// message was quoted with no indication and no way to drop it.

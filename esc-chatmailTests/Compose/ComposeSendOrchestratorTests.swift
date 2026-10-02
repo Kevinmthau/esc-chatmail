@@ -649,6 +649,332 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 2)
     }
 
+    func testExecuteInBackground_sameConversationSecondSendWaitsForFirstToFinish() async throws {
+        let sendService = MockComposeSendService()
+        let firstGate = TransmissionTestGate()
+        sendService.postAdmissionGatesByBody = ["first": firstGate]
+        let sequencer = OutboundConversationSendSequencer()
+        let conversation = ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/fifo-order")!
+        )
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        )
+
+        let first = orchestrator.executeInBackground(
+            input: makeInput(body: "first"),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-first",
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        let second = orchestrator.executeInBackground(
+            input: makeInput(body: "second"),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-second",
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        await firstGate.waitUntilEntered()
+        await waitUntil { sequencer.suspendedTurnCount == 1 }
+
+        // The first reply is uploading; the second has finished everything up
+        // to its turn and is parked strictly before its barrier.
+        // Revert-check: deleting `try await sendOrderTurn?.waitUntilFront()`
+        // from the `sendNew` branch of `ComposeSendOrchestrator` admits the
+        // second send now, and no turn is ever suspended.
+        XCTAssertEqual(sendService.snapshot.recordRemoteSendAdmissionCalls, ["fifo-first"])
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 1)
+
+        await firstGate.open()
+        await first.task.value
+        try await second.waitForTransmissionAdmission()
+        await second.task.value
+
+        XCTAssertEqual(
+            sendService.snapshot.recordRemoteSendAdmissionCalls,
+            ["fifo-first", "fifo-second"]
+        )
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 2)
+        XCTAssertEqual(sequencer.suspendedTurnCount, 0)
+    }
+
+    func testExecuteInBackground_waitingSendIsCancelledBeforeTransmissionWithoutWaitingForFirst() async {
+        let sendService = MockComposeSendService()
+        let firstGate = TransmissionTestGate()
+        sendService.postAdmissionGatesByBody = ["first": firstGate]
+        let sequencer = OutboundConversationSendSequencer()
+        let conversation = ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/fifo-cancel")!
+        )
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        )
+
+        let first = orchestrator.executeInBackground(
+            input: makeInput(body: "first"),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-cancel-first",
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        let second = orchestrator.executeInBackground(
+            input: makeInput(body: "second"),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-cancel-second",
+            preTransmissionFailureDisposition: .retainAsNotSent,
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        await firstGate.waitUntilEntered()
+        await waitUntil { sequencer.suspendedTurnCount == 1 }
+        var secondFinished = false
+        let secondWatcher = Task { @MainActor in
+            await second.task.value
+            secondFinished = true
+        }
+
+        // What `OutboundTaskRegistry.closeAdmission` invokes for a preflight
+        // entry. The waiting send must unwind while the first is still out.
+        // Revert-check: dropping the `onCancel` handler from
+        // `OutboundConversationSendSequencer.waitUntilFront` leaves the second
+        // send parked until the first finishes, and this wait times out.
+        second.cancelBeforeTransmission()
+        await waitUntil { secondFinished }
+
+        XCTAssertEqual(sendService.snapshot.recordRemoteSendAdmissionCalls, ["fifo-cancel-first"])
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 1)
+        // Teardown rolls back even a `.retainAsNotSent` send.
+        XCTAssertEqual(sendService.snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(sendService.snapshot.retainDefinitelyUnsentCalls, 0)
+
+        // Opened only now, so a failing run still unwinds instead of hanging.
+        await firstGate.open()
+        await first.task.value
+        await secondWatcher.value
+        do {
+            try await second.waitForTransmissionAdmission()
+            XCTFail("A cancelled waiting send must not be admitted")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(sendService.snapshot.recordRemoteSendAdmissionCalls, ["fifo-cancel-first"])
+    }
+
+    func testExecuteInBackground_failedFirstSendReleasesSecondWithoutRetransmitting() async throws {
+        let sendService = MockComposeSendService()
+        let firstGate = TransmissionTestGate()
+        sendService.postAdmissionGatesByBody = ["first": firstGate]
+        sendService.sendNewErrorsByBody = ["first": GmailSendService.SendError.apiError("rejected")]
+        let sequencer = OutboundConversationSendSequencer()
+        let conversation = ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/fifo-failure")!
+        )
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        )
+
+        let first = orchestrator.executeInBackground(
+            input: makeInput(body: "first"),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-failure-first",
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        let second = orchestrator.executeInBackground(
+            input: makeInput(body: "second"),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-failure-second",
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        await firstGate.waitUntilEntered()
+        await waitUntil { sequencer.suspendedTurnCount == 1 }
+
+        // Revert-check: removing `await sendOrderTurn?.finish()` from both the
+        // send worker's `catch` and the operation's trailing cleanup leaves
+        // the second send parked behind the failed first one.
+        await firstGate.open()
+        await first.task.value
+        await waitUntil { sendService.snapshot.recordRemoteSendAdmissionCalls.count == 2 }
+        guard sendService.snapshot.recordRemoteSendAdmissionCalls.count == 2 else {
+            // Unpark the stuck send so a failing run ends instead of hanging.
+            second.cancelBeforeTransmission()
+            await second.task.value
+            return
+        }
+        try await second.waitForTransmissionAdmission()
+        await second.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(
+            snapshot.recordRemoteSendAdmissionCalls,
+            ["fifo-failure-first", "fifo-failure-second"]
+        )
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 2, "The failed first send is never retransmitted")
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
+        XCTAssertEqual(snapshot.reconcileRemoteCommittedSendCalls, ["fifo-failure-second"])
+    }
+
+    func testExecuteInBackground_retainAsNotSentPreflightFailureRetainsAndResolvesAdmission() async throws {
+        let sendService = MockComposeSendService()
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("token refresh failed")
+        var failureIDs: [String] = []
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "retain-preflight",
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: { failure in failureIDs.append(failure.optimisticMessageID) }
+            ),
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+
+        // Revert-check: routing the generic pre-barrier `catch` of
+        // `ComposeSendOrchestrator.executeInBackground` straight to
+        // `handleDefiniteFailure` rolls back and fails admission here.
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
+        XCTAssertEqual(failureIDs, ["retain-preflight"])
+    }
+
+    func testExecuteInBackground_retainAsNotSentPreflightCancellationStillRollsBack() async {
+        let sendService = MockComposeSendService()
+        sendService.sendNewPreflightError = CancellationError()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "retain-preflight-cancel",
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 0)
+        do {
+            try await operation.waitForTransmissionAdmission()
+            XCTFail("A pre-barrier cancellation must fail admission")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
+    func testExecuteInBackground_sameConversationSecondReplyWaitsForFirstToFinish() async throws {
+        let sendService = MockComposeSendService()
+        let firstGate = TransmissionTestGate()
+        sendService.postAdmissionGatesByBody = ["first reply": firstGate]
+        let sequencer = OutboundConversationSendSequencer()
+        let conversation = ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/fifo-reply-order")!
+        )
+        let metadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["to@example.com"],
+            fromEmail: "me@example.com",
+            fromName: "Me",
+            subject: "Re: Plans",
+            threadId: "plans-thread",
+            inReplyTo: "<plans@example.com>",
+            references: ["<plans@example.com>"],
+            originalMessage: nil
+        )
+        let orchestrator = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        )
+
+        let first = orchestrator.executeInBackground(
+            input: makeInput(body: "first reply", replyMetadata: metadata),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-reply-first",
+            preTransmissionFailureDisposition: .retainAsNotSent,
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        let second = orchestrator.executeInBackground(
+            input: makeInput(body: "second reply", replyMetadata: metadata),
+            attachmentReferences: [],
+            optimisticMessageID: "fifo-reply-second",
+            preTransmissionFailureDisposition: .retainAsNotSent,
+            sendOrderTurn: sequencer.enqueue(conversation: conversation)
+        )
+        await firstGate.waitUntilEntered()
+        await waitUntil { sequencer.suspendedTurnCount == 1 }
+
+        // Chat replies take the `sendReply` branch, which has its own wait.
+        // Revert-check: deleting `try await sendOrderTurn?.waitUntilFront()`
+        // from the `sendReply` branch of `ComposeSendOrchestrator` admits the
+        // second reply while the first is still uploading.
+        XCTAssertEqual(sendService.snapshot.recordRemoteSendAdmissionCalls, ["fifo-reply-first"])
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 1)
+
+        await firstGate.open()
+        await first.task.value
+        try await second.waitForTransmissionAdmission()
+        await second.task.value
+
+        XCTAssertEqual(
+            sendService.snapshot.recordRemoteSendAdmissionCalls,
+            ["fifo-reply-first", "fifo-reply-second"]
+        )
+        XCTAssertEqual(sendService.snapshot.sendReplyCalls, 2)
+        XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 2)
+    }
+
+    func testExecuteInBackground_rollbackThatRetainsAsNotSentResolvesAdmission() async throws {
+        let sendService = MockComposeSendService()
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("attachment unreadable")
+        // The rollback could not write its `ChatReplyDraft`, so it kept the
+        // row as "Not sent" instead.
+        sendService.rollbackOutcome = .retainedAsNotSent
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "rollback-retained"
+        )
+
+        // Revert-check: making `handleDefiniteFailure` fail admission
+        // regardless of `PreTransmissionRollbackOutcome` throws here, and the
+        // chat composer would restore the text the bubble still shows.
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertNotNil(snapshot.failureReasons["rollback-retained"])
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () async -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+
     private func makeInput(
         body: String = "hello",
         replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
@@ -718,6 +1044,7 @@ private final class MockComposeSendService: ComposeSendServicing {
         let failedAttachmentReferences: [LocalAttachmentReference]
         let lastReplyOriginalHTML: String?
         let lastReplyHadDeferredOriginalHTML: Bool
+        let failureReasons: [String: String]
     }
 
     private let queue = DispatchQueue(label: "ComposeSendOrchestratorTests.MockComposeSendService")
@@ -725,10 +1052,18 @@ private final class MockComposeSendService: ComposeSendServicing {
     var sendDelayNanoseconds: UInt64 = 0
     var sendNewPreflightError: Error?
     var sendNewError: Error?
+    /// Holds `sendNew` / `sendReply` for these bodies after admission (an
+    /// upload in flight).
+    var postAdmissionGatesByBody: [String: TransmissionTestGate] = [:]
+    /// Definite post-admission rejections for these bodies.
+    var sendNewErrorsByBody: [String: Error] = [:]
     var sendReplyError: Error?
     var recordRemoteSendAdmissionError: Error?
     var recordAmbiguousRemoteSendError: Error?
     var reconcileRemoteCommittedSendError: Error?
+    /// What the rollback reports; `.retainedAsNotSent` stands in for a
+    /// rollback whose `ChatReplyDraft` write failed.
+    var rollbackOutcome: PreTransmissionRollbackOutcome = .rolledBack
 
     private var _markUploadedCalls = 0
     private var _sendNewCalls = 0
@@ -747,6 +1082,7 @@ private final class MockComposeSendService: ComposeSendServicing {
     private var _failedAttachmentReferences: [LocalAttachmentReference] = []
     private var _lastReplyOriginalHTML: String?
     private var _lastReplyHadDeferredOriginalHTML = false
+    private var _failureReasons: [String: String] = [:]
 
     var snapshot: Snapshot {
         queue.sync {
@@ -766,9 +1102,15 @@ private final class MockComposeSendService: ComposeSendServicing {
                 uploadedAttachmentReferences: _uploadedAttachmentReferences,
                 failedAttachmentReferences: _failedAttachmentReferences,
                 lastReplyOriginalHTML: _lastReplyOriginalHTML,
-                lastReplyHadDeferredOriginalHTML: _lastReplyHadDeferredOriginalHTML
+                lastReplyHadDeferredOriginalHTML: _lastReplyHadDeferredOriginalHTML,
+                failureReasons: _failureReasons
             )
         }
+    }
+
+    @MainActor
+    func recordSendFailureReason(optimisticMessageID: String, reason: String) {
+        queue.sync { _failureReasons[optimisticMessageID] = reason }
     }
 
     @MainActor
@@ -802,6 +1144,9 @@ private final class MockComposeSendService: ComposeSendServicing {
         try await beforeTransmission()
         queue.sync { _remoteTransmissionCalls += 1 }
 
+        if let gate = postAdmissionGatesByBody[body] {
+            await gate.enterAndWait()
+        }
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
         }
@@ -830,11 +1175,17 @@ private final class MockComposeSendService: ComposeSendServicing {
         try await beforeTransmission()
         queue.sync { _remoteTransmissionCalls += 1 }
 
+        if let gate = postAdmissionGatesByBody[body] {
+            await gate.enterAndWait()
+        }
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
         }
         if let sendNewError {
             throw sendNewError
+        }
+        if let error = sendNewErrorsByBody[body] {
+            throw error
         }
         return GmailSendService.SendResult(messageId: "sent-id", threadId: "thread-id")
     }
@@ -910,11 +1261,12 @@ private final class MockComposeSendService: ComposeSendServicing {
     func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
-    ) {
+    ) -> PreTransmissionRollbackOutcome {
         queue.sync {
             _rollbackBeforeTransmissionCalls += 1
             _failedAttachmentReferences = fallbackAttachmentReferences
         }
+        return rollbackOutcome
     }
 
     @MainActor
@@ -926,6 +1278,39 @@ private final class MockComposeSendService: ComposeSendServicing {
             _retainDefinitelyUnsentCalls += 1
             _failedAttachmentReferences = fallbackAttachmentReferences
         }
+    }
+}
+
+/// Parks one send after admission until the test opens it.
+private actor TransmissionTestGate {
+    private var entered = false
+    private var isOpen = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var openWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func enterAndWait() async {
+        entered = true
+        let waiters = enteredWaiters
+        enteredWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            openWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { continuation in
+            enteredWaiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let waiters = openWaiters
+        openWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 }
 

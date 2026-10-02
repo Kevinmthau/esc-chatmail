@@ -245,6 +245,7 @@ struct ChatMessagesView: View {
                 ) { performBottomAnchor($0, proxy: proxy) }
             }
             .onChange(of: isTextFieldFocused.wrappedValue) { _, isFocused in
+                if isFocused { viewModel.prewarmReplySendCredentials() }
                 coordinator.handleTextFieldFocusChange(
                     isFocused: isFocused,
                     messageCount: totalMessageCountForCoordinator(),

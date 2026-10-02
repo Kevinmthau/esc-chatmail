@@ -12,6 +12,8 @@ struct ChatDependencies {
 
 struct ChatSessionDependencies {
     let authSession: AuthSession
+    /// Used only to warm the access token when the reply field gains focus.
+    let tokenManager: any TokenManagerProtocol
 }
 
 struct ChatContentDependencies {

@@ -1541,14 +1541,20 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(metadata.originalMessage)
     }
 
-    func testSendReply_preflightFailureAfterOptimisticPublicationRetainsDraftState() async {
-        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+    /// One inbound target in a visible chat, with the mock coordinator
+    /// injected, for the composer-release tests below.
+    private func makeComposerSendFixture() -> (
+        coordinator: MockChatOutboundMessageCoordinator,
+        context: NSManagedObjectContext,
+        conversation: Conversation,
+        replyTarget: Message,
+        viewModel: ChatViewModel,
+        reopenChat: () -> ChatViewModel
+    ) {
         let coordinator = MockChatOutboundMessageCoordinator()
-        coordinator.suspendsSend = true
-        coordinator.sendError = MockChatSendError.preflightFailed
         let tokenManager = MockTokenManager()
         let deps = Dependencies(
-            authSession: authSession,
+            authSession: makeTestAuthSession(userEmail: "me@example.com"),
             tokenManager: tokenManager,
             gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
             outboundMessageCoordinator: coordinator
@@ -1560,23 +1566,205 @@ final class ChatViewModelTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
         let replyTarget = MessageBuilder()
-            .withId("retryable-reply-target")
+            .withId("composer-target-\(UUID().uuidString)")
+            .withSubject("Captured Subject")
+            .hoursAgo(2)
             .inConversation(conversation)
             .build(in: context)
-        let attachmentID = "local_retryable-draft-attachment"
-        let attachment = AttachmentBuilder()
+        // Per fixture, so no other test's view model can own this chat.
+        let composerDirectory = ChatReplyComposerDirectory()
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies(),
+            composerDirectory: composerDirectory
+        )
+        viewModel.replyingTo = replyTarget
+        // A second screen for the same chat, as `ChatView` creates when the
+        // user opens it again.
+        let reopenChat = {
+            ChatViewModel(
+                conversation: conversation,
+                chatDependencies: deps.makeChatDependencies(),
+                composerDirectory: composerDirectory
+            )
+        }
+        return (coordinator, context, conversation, replyTarget, viewModel, reopenChat)
+    }
+
+    private func makeDraftAttachment(in context: NSManagedObjectContext) -> Attachment {
+        let attachmentID = "local_composer-\(UUID().uuidString)"
+        return AttachmentBuilder()
             .withId(attachmentID)
             .withFilename("draft.txt")
             .withLocalURL(AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "txt"))
             .build(in: context)
+    }
 
-        let viewModel = ChatViewModel(
-            conversation: conversation,
-            chatDependencies: deps.makeChatDependencies()
-        )
-        viewModel.replyText = "Retryable reply"
-        viewModel.replyingTo = replyTarget
+    func testSendReply_tap_clearsComposerAndFreezesTargetUntilOptimisticPersistence() async {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let laterTarget = MessageBuilder()
+            .withId("later-target-\(UUID().uuidString)")
+            .withSubject("Later Subject")
+            .hoursAgo(1)
+            .inConversation(fixture.conversation)
+            .build(in: fixture.context)
+        let attachment = makeDraftAttachment(in: fixture.context)
+        coordinator.suspendsBeforePersistence = true
+        coordinator.suspendsSend = true
+        viewModel.replyText = "Captured reply"
         viewModel.composerState.attachments = [attachment]
+        defer {
+            coordinator.resumePersistence()
+            coordinator.resumeSend()
+        }
+        var persistedOptimisticResult: OutboundMessageResult?
+
+        let sendTask = Task {
+            await viewModel.sendReply { result in
+                persistedOptimisticResult = result
+            }
+        }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        // The field empties in the tap's main-actor turn, before the
+        // optimistic message exists.
+        // Revert-check: moving `sendReply`'s tap-time `replyText = ""` and
+        // `composerState.attachments = []` after the `send` await leaves
+        // "Captured reply" and the attachment here.
+        XCTAssertEqual(viewModel.replyText, "")
+        XCTAssertEqual(viewModel.composerState.attachments, [])
+        XCTAssertTrue(viewModel.composerState.isSending)
+        guard case .reply(let request)? = coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.body, "Captured reply")
+        XCTAssertEqual(request.attachments.count, 1)
+        XCTAssertEqual(request.preTransmissionFailureDisposition, .retainAsNotSent)
+
+        // Until persistence the send still owns the target and the composer.
+        viewModel.setReplyingTo(laterTarget)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: laterTarget)
+        XCTAssertEqual(viewModel.replyingTo, fixture.replyTarget)
+        viewModel.replyText = "Typed during preflight"
+        let duplicateResult = await viewModel.sendReply()
+        XCTAssertNil(duplicateResult)
+        XCTAssertEqual(coordinator.requests.count, 1)
+        XCTAssertEqual(viewModel.replyText, "Typed during preflight")
+
+        coordinator.resumePersistence()
+        await waitUntil { persistedOptimisticResult != nil }
+
+        XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertEqual(viewModel.replyText, "Typed during preflight")
+        coordinator.resumeSend()
+        let result = await sendTask.value
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.optimisticMessageID, persistedOptimisticResult?.optimisticMessageID)
+        XCTAssertEqual(viewModel.replyText, "Typed during preflight")
+    }
+
+    func testSendReply_afterOptimisticPersistence_releasesComposerForSecondSend() async {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let laterTarget = MessageBuilder()
+            .withId("later-target-\(UUID().uuidString)")
+            .withSubject("Later Subject")
+            .hoursAgo(1)
+            .inConversation(fixture.conversation)
+            .build(in: fixture.context)
+        coordinator.suspendsSend = true
+        viewModel.replyText = "First reply"
+        defer { coordinator.resumeSend() }
+        var firstPersisted: OutboundMessageResult?
+
+        let firstTask = Task {
+            await viewModel.sendReply { result in
+                firstPersisted = result
+            }
+        }
+        await waitUntil { firstPersisted != nil }
+
+        // Gmail has not admitted the first reply yet, but the composer is free.
+        // Revert-check: deleting `composerState.finishSending()` from
+        // `sendReply`'s `onOptimisticMessagePersisted` closure keeps
+        // `isSending` true until admission, and the second send returns nil.
+        XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertEqual(viewModel.replyText, "")
+        // Released, the automatic target catches up with the newer subject the
+        // frozen send refused; no further collection change would deliver it.
+        // Revert-check: removing `reevaluateReplyTargetAfterSend()` from that
+        // closure leaves the captured target.
+        XCTAssertEqual(viewModel.replyingTo, laterTarget)
+
+        viewModel.replyText = "Second reply"
+        var secondPersisted: OutboundMessageResult?
+        let secondTask = Task {
+            await viewModel.sendReply { result in
+                secondPersisted = result
+            }
+        }
+        await waitUntil { secondPersisted != nil }
+
+        XCTAssertEqual(coordinator.requests.count, 2)
+        guard case .reply(let secondRequest)? = coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(secondRequest.body, "Second reply")
+        XCTAssertEqual(secondRequest.context.replyingToMessageObjectID, laterTarget.objectID)
+        XCTAssertEqual(viewModel.replyText, "")
+
+        coordinator.resumeSend()
+        let firstResult = await firstTask.value
+        let secondResult = await secondTask.value
+        XCTAssertNotNil(firstResult)
+        XCTAssertNotNil(secondResult)
+        XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertEqual(viewModel.replyText, "")
+        XCTAssertNil(viewModel.sendErrorAlert)
+    }
+
+    func testSendReply_failureBeforeOptimisticPersistence_restoresSnapshotAndAlerts() async {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let attachment = makeDraftAttachment(in: fixture.context)
+        fixture.coordinator.sendErrorBeforePersistence = MockChatSendError.preflightFailed
+        // The raw field text, whitespace included, comes back unchanged.
+        viewModel.replyText = "  Retryable reply\n"
+        viewModel.composerState.attachments = [attachment]
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNil(result)
+        // Revert-check: deleting the `restoreUnsentReply` call from
+        // `sendReply`'s `catch` leaves the composer empty.
+        XCTAssertEqual(viewModel.replyText, "  Retryable reply\n")
+        XCTAssertEqual(viewModel.composerState.attachments, [attachment])
+        XCTAssertEqual(viewModel.replyingTo, fixture.replyTarget)
+        XCTAssertFalse(viewModel.composerState.isSending)
+        XCTAssertNotNil(viewModel.sendErrorAlert)
+    }
+
+    func testSendReply_rollbackAfterTypingDuringSend_mergesUnsentTextAndKeepsNewTarget() async {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let otherTarget = MessageBuilder()
+            .withId("other-target-\(UUID().uuidString)")
+            .withSubject("Other Subject")
+            .hoursAgo(3)
+            .inConversation(fixture.conversation)
+            .build(in: fixture.context)
+        let unsentAttachment = makeDraftAttachment(in: fixture.context)
+        let newAttachment = makeDraftAttachment(in: fixture.context)
+        coordinator.suspendsSend = true
+        // Thrown after persistence: the production coordinator throws there
+        // only after rolling the optimistic message back.
+        coordinator.sendError = MockChatSendError.preflightFailed
+        viewModel.replyText = "Unsent reply"
+        viewModel.composerState.attachments = [unsentAttachment]
         defer { coordinator.resumeSend() }
         var persistedOptimisticResult: OutboundMessageResult?
 
@@ -1586,60 +1774,36 @@ final class ChatViewModelTests: XCTestCase {
             }
         }
         await waitUntil { persistedOptimisticResult != nil }
-
-        XCTAssertEqual(
-            persistedOptimisticResult?.optimisticMessageID,
-            coordinator.sendResult?.optimisticMessageID
-        )
-        XCTAssertTrue(viewModel.composerState.isSending)
-        XCTAssertEqual(viewModel.replyText, "Retryable reply")
-        XCTAssertEqual(viewModel.replyingTo, replyTarget)
-        XCTAssertEqual(viewModel.composerState.attachments, [attachment])
+        XCTAssertEqual(viewModel.replyText, "")
+        viewModel.replyText = "Next reply"
+        viewModel.composerState.attachments = [newAttachment]
+        viewModel.setReplyingTo(otherTarget)
 
         coordinator.resumeSend()
         let result = await sendTask.value
 
         XCTAssertNil(result)
-        XCTAssertEqual(viewModel.replyText, "Retryable reply")
-        XCTAssertEqual(viewModel.replyingTo, replyTarget)
-        XCTAssertEqual(viewModel.composerState.attachments, [attachment])
-        XCTAssertFalse(viewModel.composerState.isSending)
+        // Revert-check: making `ChatReplyRestorePolicy.restoredText` return
+        // `unsentText` drops "Next reply".
+        XCTAssertEqual(viewModel.replyText, "Unsent reply\nNext reply")
+        XCTAssertEqual(viewModel.composerState.attachments, [unsentAttachment, newAttachment])
+        // Revert-check: forcing `targetIsUntouched` to true in
+        // `ChatViewModel.restoreUnsentReply` puts the unsent reply's target
+        // back over the one picked for the next reply.
+        XCTAssertEqual(viewModel.replyingTo, otherTarget)
         XCTAssertNotNil(viewModel.sendErrorAlert)
     }
 
-    func testSendReply_freezesReplyTargetAndRejectsDuplicateSendDuringPreflight() async {
-        let authSession = makeTestAuthSession(userEmail: "me@example.com")
-        let coordinator = MockChatOutboundMessageCoordinator()
+    func testSendReply_rollbackAfterAutomaticTargetMoveDuringPreflight_restoresOriginalDestination() async {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
         coordinator.suspendsSend = true
-        let tokenManager = MockTokenManager()
-        let deps = Dependencies(
-            authSession: authSession,
-            tokenManager: tokenManager,
-            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
-            outboundMessageCoordinator: coordinator
-        )
-        let context = deps.viewContext
-        let conversation = ConversationBuilder()
-            .withDisplayName("Reply Thread")
-            .visible()
-            .recentlyActive()
-            .build(in: context)
-        let capturedTarget = MessageBuilder()
-            .withId("captured-target")
-            .withSubject("Captured Subject")
-            .inConversation(conversation)
-            .build(in: context)
-        let laterTarget = MessageBuilder()
-            .withId("later-target")
-            .withSubject("Later Subject")
-            .inConversation(conversation)
-            .build(in: context)
-        let viewModel = ChatViewModel(
-            conversation: conversation,
-            chatDependencies: deps.makeChatDependencies()
-        )
-        viewModel.replyText = "Captured reply"
-        viewModel.replyingTo = capturedTarget
+        // Thrown after persistence: the production coordinator throws there
+        // only after rolling the optimistic message back (a pre-barrier
+        // cancellation, background expiry).
+        coordinator.sendError = MockChatSendError.preflightFailed
+        viewModel.replyText = "Reply to the first post"
         defer { coordinator.resumeSend() }
         var persistedOptimisticResult: OutboundMessageResult?
 
@@ -1649,36 +1813,349 @@ final class ChatViewModelTests: XCTestCase {
             }
         }
         await waitUntil { persistedOptimisticResult != nil }
+        XCTAssertEqual(viewModel.replyingTo, fixture.replyTarget)
 
-        XCTAssertTrue(viewModel.composerState.isSending)
-        XCTAssertEqual(viewModel.replyText, "Captured reply")
-        XCTAssertEqual(
-            persistedOptimisticResult?.optimisticMessageID,
-            coordinator.sendResult?.optimisticMessageID
+        // Released at persistence, the idle composer follows a newer message
+        // that syncs in while the reply is still in preflight.
+        let newerMessage = MessageBuilder()
+            .withId("newer-subject-\(UUID().uuidString)")
+            .withSubject("Different Subject")
+            .hoursAgo(1)
+            .inConversation(fixture.conversation)
+            .build(in: fixture.context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: newerMessage)
+        XCTAssertEqual(viewModel.replyingTo, newerMessage)
+
+        coordinator.resumeSend()
+        let result = await sendTask.value
+
+        XCTAssertNil(result)
+        XCTAssertEqual(viewModel.replyText, "Reply to the first post")
+        // The user changed nothing, so the text keeps the destination it was
+        // written for, not the one sync moved the idle composer to.
+        // Revert-check: dropping the `lastAutomaticReplyTarget` clause from
+        // `targetIsUntouched` in `ChatViewModel.restoreUnsentReply` reads the
+        // automatic move as a user change and leaves `newerMessage`.
+        XCTAssertEqual(viewModel.replyingTo, fixture.replyTarget)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.replyTarget)
+        XCTAssertNotNil(viewModel.sendErrorAlert)
+    }
+
+    func testSendReply_failureAfterChatWasLeftAndReopened_handsReplyToTheOpenComposer() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        let attachment = makeDraftAttachment(in: fixture.context)
+        coordinator.suspendsBeforePersistence = true
+        coordinator.sendErrorBeforePersistence = MockChatSendError.preflightFailed
+        viewModel.replyText = "Unsent while away"
+        viewModel.composerState.attachments = [attachment]
+        defer { coordinator.resumePersistence() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        // The user swipes back while the send waits (say, on the cleanup
+        // gate a sync holds) and opens the chat again at once.
+        viewModel.composerDidDisappear()
+        let reopened = fixture.reopenChat()
+        reopened.initializeReplyingTo(lastMessage: fixture.replyTarget)
+        XCTAssertEqual(reopened.replyText, "")
+
+        coordinator.resumePersistence()
+        let result = await sendTask.value
+
+        XCTAssertNil(result)
+        // Revert-check: restoring unconditionally in
+        // `ChatViewModel.returnUnsentReply` (dropping its
+        // `isComposerPresented` guard) puts the reply back in the off-screen
+        // composer: nothing here, and no alert anyone can see.
+        XCTAssertEqual(reopened.replyText, "Unsent while away")
+        XCTAssertEqual(reopened.composerState.attachments, [attachment])
+        XCTAssertEqual(reopened.replyingTo, fixture.replyTarget)
+        XCTAssertNotNil(reopened.sendErrorAlert)
+        XCTAssertEqual(viewModel.replyText, "")
+        XCTAssertNil(viewModel.sendErrorAlert)
+
+        await reopened.saveReplyDraft()
+        // The off-screen model's late save reads its empty composer.
+        // Revert-check: deleting the `composerDirectory.ownsDraft` guard from
+        // `saveReplyDraftWithoutCleanupInterleaving` removes the open chat's
+        // draft here.
+        await viewModel.saveReplyDraft()
+        let (draft, draftAttachments) = try XCTUnwrap(
+            draftStore.load(conversationID: fixture.conversation.id)
         )
-        viewModel.setReplyingTo(laterTarget)
-        viewModel.updateReplyingToIfNewSubject(lastMessage: laterTarget)
-        XCTAssertEqual(viewModel.replyingTo, capturedTarget)
-        let duplicateResult = await viewModel.sendReply()
-        XCTAssertNil(duplicateResult)
+        XCTAssertEqual(draft.text, "Unsent while away")
+        XCTAssertEqual(draftAttachments, [attachment])
+    }
+
+    func testSendReply_failureAfterChatWasLeftWithNoComposerOpen_mergesIntoStoredDraft() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        coordinator.suspendsBeforePersistence = true
+        coordinator.sendErrorBeforePersistence = MockChatSendError.preflightFailed
+        viewModel.replyText = "Unsent while away"
+        defer { coordinator.resumePersistence() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        // Left, reopened, a new draft typed and saved, left again: no
+        // composer is on screen when the first send fails.
+        viewModel.composerDidDisappear()
+        let reopened = fixture.reopenChat()
+        reopened.replyText = "Newer draft"
+        await reopened.saveReplyDraft()
+        reopened.composerDidDisappear()
+
+        coordinator.resumePersistence()
+        _ = await sendTask.value
+        let expectedText = "Unsent while away\nNewer draft"
+        await waitUntil {
+            (try? draftStore.load(conversationID: fixture.conversation.id))?.0.text == expectedText
+        }
+
+        // Revert-check: writing with `ChatReplyDraftStore.save` instead of
+        // `saveMergingUnsentReply` in
+        // `mergeUnsentRepliesIntoDraftWithoutCleanupInterleaving` replaces
+        // "Newer draft".
+        XCTAssertEqual(try draftStore.load(conversationID: fixture.conversation.id)?.0.text, expectedText)
+        XCTAssertEqual(viewModel.replyText, "")
+
+        // Neither superseded composer may write the slot again.
+        await viewModel.saveReplyDraft()
+        XCTAssertEqual(try draftStore.load(conversationID: fixture.conversation.id)?.0.text, expectedText)
+    }
+
+    func testSendReply_chatReopenedBeforeOptimisticPersistence_doesNotRestoreTheSentReplyAsDraft() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        let attachment = makeDraftAttachment(in: fixture.context)
+        coordinator.suspendsBeforePersistence = true
+        coordinator.persistsOptimisticMessage = {
+            // What the production optimistic transaction does to the slot.
+            try? draftStore.remove(conversationID: fixture.conversation.id)
+        }
+        // The debounced autosave stored the reply before the tap.
+        viewModel.replyText = "Sent while away"
+        viewModel.composerState.attachments = [attachment]
+        await viewModel.saveReplyDraft()
+        XCTAssertEqual(try draftStore.load(conversationID: fixture.conversation.id)?.0.text, "Sent while away")
+        defer { coordinator.resumePersistence() }
+        var persistedOptimisticResult: OutboundMessageResult?
+
+        let sendTask = Task {
+            await viewModel.sendReply { result in
+                persistedOptimisticResult = result
+            }
+        }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        // Swiped back and opened again while the send waits on the gate.
+        viewModel.composerDidDisappear()
+        let reopened = fixture.reopenChat()
+
+        // Revert-check: deleting the `hasUnpersistedSend` guard from
+        // `ChatViewModel.restoreReplyDraft` loads "Sent while away" and its
+        // attachment into the reopened composer, ready to be sent again.
+        XCTAssertEqual(reopened.replyText, "")
+        XCTAssertEqual(reopened.composerState.attachments, [])
+
+        coordinator.resumePersistence()
+        await waitUntil { persistedOptimisticResult != nil }
+        let result = await sendTask.value
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(reopened.replyText, "")
+        XCTAssertEqual(reopened.composerState.attachments, [])
+        await reopened.saveReplyDraft()
+        XCTAssertNil(try draftStore.load(conversationID: fixture.conversation.id))
+        XCTAssertNil(reopened.sendErrorAlert)
+    }
+
+    func testSendReply_failureAfterChatWasReopenedOverSavedDraft_handsReplyOverOnce() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        let attachment = makeDraftAttachment(in: fixture.context)
+        coordinator.suspendsBeforePersistence = true
+        coordinator.sendErrorBeforePersistence = MockChatSendError.preflightFailed
+        viewModel.replyText = "Unsent while away"
+        viewModel.composerState.attachments = [attachment]
+        await viewModel.saveReplyDraft()
+        defer { coordinator.resumePersistence() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        viewModel.composerDidDisappear()
+        let reopened = fixture.reopenChat()
+        reopened.initializeReplyingTo(lastMessage: fixture.replyTarget)
+
+        coordinator.resumePersistence()
+        let result = await sendTask.value
+
+        XCTAssertNil(result)
+        // Revert-check: deleting the `hasUnpersistedSend` guard from
+        // `ChatViewModel.restoreReplyDraft` loads the stored copy at reopen,
+        // and the hand-off appends the same reply: "Unsent while away\nUnsent
+        // while away".
+        XCTAssertEqual(reopened.replyText, "Unsent while away")
+        XCTAssertEqual(reopened.composerState.attachments, [attachment])
+        XCTAssertNotNil(reopened.sendErrorAlert)
+
+        await reopened.saveReplyDraft()
+        XCTAssertEqual(try draftStore.load(conversationID: fixture.conversation.id)?.0.text, "Unsent while away")
+    }
+
+    func testSendReply_textTypedAfterTapThenLeft_isSavedOncePersisted() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        coordinator.suspendsBeforePersistence = true
+        viewModel.replyText = "Sent reply"
+        defer { coordinator.resumePersistence() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        // The field stays editable while the send waits on the gate. The
+        // user starts the next reply and swipes back; the disappearance's
+        // save runs while `isSending` still blocks it.
+        viewModel.replyText = "Typed after the tap"
+        viewModel.composerDidDisappear()
+        await viewModel.waitForScheduledReplyDraftSave()
+        XCTAssertNil(try draftStore.load(conversationID: fixture.conversation.id))
+
+        coordinator.resumePersistence()
+        _ = await sendTask.value
+
+        // Revert-check: deleting `saveComposerLeftWhileSending()` from
+        // `sendReply`'s `onOptimisticMessagePersisted` closure leaves the
+        // text only in the off-screen view model, and it is never stored.
+        await waitUntil {
+            (try? draftStore.load(conversationID: fixture.conversation.id))?.0.text == "Typed after the tap"
+        }
+    }
+
+    func testSendReply_textTypedAfterTapThenLeftAndReopened_goesToTheOpenComposer() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        coordinator.suspendsBeforePersistence = true
+        viewModel.replyText = "Sent reply"
+        defer { coordinator.resumePersistence() }
+        var persistedOptimisticResult: OutboundMessageResult?
+
+        let sendTask = Task {
+            await viewModel.sendReply { result in
+                persistedOptimisticResult = result
+            }
+        }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        viewModel.replyText = "Typed after the tap"
+        viewModel.composerDidDisappear()
+        await viewModel.waitForScheduledReplyDraftSave()
+        let reopened = fixture.reopenChat()
+
+        coordinator.resumePersistence()
+        await waitUntil { persistedOptimisticResult != nil }
+        _ = await sendTask.value
+
+        // Revert-check: deleting the hand-off branch of
+        // `ChatViewModel.saveComposerLeftWhileSending` leaves the text in the
+        // superseded view model, whose saves no longer reach the draft.
+        XCTAssertEqual(reopened.replyText, "Typed after the tap")
+        // Nothing failed, so nothing is announced.
+        XCTAssertNil(reopened.sendErrorAlert)
+        XCTAssertEqual(viewModel.replyText, "")
+    }
+
+    func testSendReply_failureAfterTypingAndLeaving_mergesTypedTextAfterTheReplyOnce() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        coordinator.suspendsBeforePersistence = true
+        coordinator.sendErrorBeforePersistence = MockChatSendError.preflightFailed
+        // Saved before the tap, so the stored draft already holds the reply.
+        viewModel.replyText = "Unsent reply"
+        await viewModel.saveReplyDraft()
+        defer { coordinator.resumePersistence() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        viewModel.replyText = "Typed after the tap"
+        viewModel.composerDidDisappear()
+        await viewModel.waitForScheduledReplyDraftSave()
+
+        coordinator.resumePersistence()
+        _ = await sendTask.value
+
+        let expectedText = "Unsent reply\nTyped after the tap"
+        // Revert-check: dropping the `savesComposerWhenSendReleases` fold from
+        // `ChatViewModel.handOffUnsentReply` stores only "Unsent reply";
+        // folding the typed text into the snapshot instead of passing
+        // `typedAfterUnsent` to `saveMergingUnsentReply` defeats its
+        // idempotence check and stores the reply twice.
+        await waitUntil {
+            (try? draftStore.load(conversationID: fixture.conversation.id))?.0.text == expectedText
+        }
+        XCTAssertEqual(try draftStore.load(conversationID: fixture.conversation.id)?.0.text, expectedText)
+        // The off-screen composer gave its text away.
+        XCTAssertEqual(viewModel.replyText, "")
+    }
+
+    func testSendReply_autosaveAroundTap_neverPersistsSentText() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        coordinator.suspendsBeforePersistence = true
+        coordinator.suspendsSend = true
+        viewModel.replyText = "Sent text"
+        defer {
+            coordinator.resumePersistence()
+            coordinator.resumeSend()
+        }
+        var persistedOptimisticResult: OutboundMessageResult?
+
+        let sendTask = Task {
+            await viewModel.sendReply { result in
+                persistedOptimisticResult = result
+            }
+        }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        // A save that a keystroke scheduled just before the tap runs after it,
+        // reading live composer state.
+        await viewModel.saveReplyDraft()
+        XCTAssertNil(try draftStore.load(conversationID: fixture.conversation.id))
+
+        coordinator.resumePersistence()
+        await waitUntil { persistedOptimisticResult != nil }
+        await viewModel.saveReplyDraft()
+
+        // Revert-check: moving `sendReply`'s tap-time `replyText = ""` after
+        // the `send` await (while still releasing at persistence) persists
+        // "Sent text" as the chat's draft, ready to be sent twice.
+        XCTAssertNil(try draftStore.load(conversationID: fixture.conversation.id))
 
         coordinator.resumeSend()
         let result = await sendTask.value
         XCTAssertNotNil(result)
-        XCTAssertEqual(result?.optimisticMessageID, persistedOptimisticResult?.optimisticMessageID)
-        XCTAssertFalse(viewModel.composerState.isSending)
-        XCTAssertEqual(viewModel.replyText, "")
-        guard case .reply(let request)? = coordinator.lastRequest else {
-            return XCTFail("Expected reply request")
-        }
-        XCTAssertEqual(request.context.replyingToMessageObjectID, capturedTarget.objectID)
-        // Once the send has returned, the automatic target catches up with
-        // the newer subject the frozen preflight refused; no further
-        // collection change would deliver it.
-        // Revert-check: removing the `reconcileAutomaticReplyTarget` call
-        // from `ChatViewModel.sendReply`'s non-manual branch leaves
-        // `capturedTarget`.
-        XCTAssertEqual(viewModel.replyingTo, laterTarget)
+        await viewModel.saveReplyDraft()
+        XCTAssertNil(try draftStore.load(conversationID: fixture.conversation.id))
     }
 
     func testSendReply_drainedConversationPreservesTextAndAttachments() async {
@@ -2138,9 +2615,12 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(emptyPath.replyDraft)
         XCTAssertNotNil(finalized.replyDraft)
         XCTAssertEqual(first.composerState.attachments.count, 3, "Saving must not cancel active imports")
-        let reopened = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
-        XCTAssertEqual(reopened.replyText, "Keep this text while the import finishes")
-        XCTAssertEqual(reopened.composerState.attachments.map(\.objectID), [finalized.objectID])
+        // Probe the store rather than open a second chat: a second view model
+        // models reopening the chat, which takes over the draft and stops
+        // `first` writing it (`ChatReplyComposerDirectory`).
+        let reopened = try XCTUnwrap(ChatReplyDraftStore(context: context).load(conversationID: conversation.id))
+        XCTAssertEqual(reopened.0.text, "Keep this text while the import finishes")
+        XCTAssertEqual(reopened.1.map(\.objectID), [finalized.objectID])
 
         unfinished.localURL = "Attachments/\(UUID().uuidString).pdf"
         await first.saveReplyDraft()
@@ -2230,10 +2710,24 @@ final class ChatViewModelTests: XCTestCase {
 private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinating {
     private let coreDataStack: TestCoreDataStack
     private(set) var lastRequest: OutboundMessageRequest?
+    private(set) var requests: [OutboundMessageRequest] = []
+    /// Thrown after `onOptimisticMessagePersisted`: the production
+    /// coordinator throws there only after rolling the optimistic graph back.
     var sendError: Error?
+    /// Thrown before `onOptimisticMessagePersisted` (metadata, optimistic
+    /// creation or a refused reservation).
+    var sendErrorBeforePersistence: Error?
     var sendResult: OutboundMessageResult?
+    /// Suspends after `onOptimisticMessagePersisted`, until `resumeSend()`.
     var suspendsSend = false
-    private var sendContinuation: CheckedContinuation<Void, Never>?
+    /// Suspends before `onOptimisticMessagePersisted`, until
+    /// `resumePersistence()`.
+    var suspendsBeforePersistence = false
+    /// Runs where the production optimistic transaction removes the stored
+    /// `ChatReplyDraft`, just before `onOptimisticMessagePersisted`.
+    var persistsOptimisticMessage: (@MainActor () -> Void)?
+    private var sendContinuations: [CheckedContinuation<Void, Never>] = []
+    private var persistenceContinuations: [CheckedContinuation<Void, Never>] = []
 
     init() {
         let coreDataStack = TestCoreDataStack()
@@ -2261,12 +2755,22 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
     ) async throws -> OutboundMessageResult? {
         let request = try await requestBuilder()
         lastRequest = request
+        requests.append(request)
+        if suspendsBeforePersistence {
+            await withCheckedContinuation { continuation in
+                persistenceContinuations.append(continuation)
+            }
+        }
+        if let sendErrorBeforePersistence {
+            throw sendErrorBeforePersistence
+        }
         if let sendResult {
+            persistsOptimisticMessage?()
             onOptimisticMessagePersisted?(sendResult)
         }
         if suspendsSend {
             await withCheckedContinuation { continuation in
-                sendContinuation = continuation
+                sendContinuations.append(continuation)
             }
         }
         if let sendError {
@@ -2275,9 +2779,20 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
         return sendResult
     }
 
+    var suspendedBeforePersistenceCount: Int {
+        persistenceContinuations.count
+    }
+
+    func resumePersistence() {
+        let continuations = persistenceContinuations
+        persistenceContinuations.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+
     func resumeSend() {
-        sendContinuation?.resume()
-        sendContinuation = nil
+        let continuations = sendContinuations
+        sendContinuations.removeAll()
+        continuations.forEach { $0.resume() }
     }
 }
 

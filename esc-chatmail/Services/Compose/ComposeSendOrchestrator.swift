@@ -47,10 +47,10 @@ protocol ComposeSendServicing: AnyObject {
         optimisticMessageID: String,
         result: GmailSendService.SendResult
     ) throws -> Bool
-    @MainActor func rollbackOptimisticMessageBeforeTransmission(
+    @MainActor @discardableResult func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
-    )
+    ) -> PreTransmissionRollbackOutcome
     @MainActor func retainDefinitelyUnsentOptimisticMessage(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
@@ -146,6 +146,14 @@ private final class ComposeSendCancellationRelay: @unchecked Sendable {
         }
     }
 
+    /// Account teardown or OS expiration asked this send to stop. Its
+    /// pre-barrier failure can then surface as an arbitrary error (a token
+    /// refresh cancelled mid-request, say), and must still roll back rather
+    /// than leave a "Not sent" row in an account being torn down.
+    var stopWasRequested: Bool {
+        lock.withLock { cancellationRequested || backgroundTimeExpired }
+    }
+
     func workerFinished() {
         lock.withLock {
             cancelWorker = nil
@@ -214,6 +222,12 @@ struct ComposeSendOrchestrator {
     ///   - input: The send input data
     ///   - attachmentReferences: Attachment references for post-send state updates
     ///   - optimisticMessageID: ID of the pre-created optimistic message
+    ///   - preTransmissionFailureDisposition: What a non-cancellation send-path
+    ///     failure before the barrier does. Cancellation and account teardown
+    ///     roll back regardless.
+    ///   - sendOrderTurn: This send's place in its conversation's FIFO. It is
+    ///     awaited strictly before the transmission barrier and finished on
+    ///     every path.
     @MainActor
     @discardableResult
     func executeInBackground(
@@ -221,6 +235,8 @@ struct ComposeSendOrchestrator {
         attachmentReferences: [LocalAttachmentReference],
         optimisticMessageID: String,
         reconciliationHooks: OutboundMessageReconciliationHooks = .none,
+        preTransmissionFailureDisposition: PreTransmissionFailureDisposition = .rollBackToComposer,
+        sendOrderTurn: OutboundConversationSendSequencer.Turn? = nil,
         transmissionAdmission: (@MainActor @Sendable () throws -> Void)? = nil
     ) -> ComposeSendBackgroundOperation {
         // Capture services for background task
@@ -245,19 +261,20 @@ struct ComposeSendOrchestrator {
                         "Skipping Gmail send for already committed optimistic message \(optimisticMessageID)",
                         category: .message
                     )
+                    await sendOrderTurn?.finish()
                     await admission.succeed()
                 } else {
                     // Keep the optimistic graph durable throughout attachment and
                     // MIME preflight without claiming Gmail may have received it.
-                    // The caller still owns the source composer until the later
-                    // admission handshake succeeds.
+                    // A `.rollBackToComposer` caller still owns the source
+                    // composer until the later admission handshake succeeds.
                     try await MainActor.run {
                         try sendService.persistOptimisticMessageBeforeTransmission(
                             optimisticMessageID: optimisticMessageID
                         )
                     }
 
-                    let sendTask = Task.detached(priority: .userInitiated) {
+                    let transmit: @Sendable () async throws -> GmailSendService.SendResult = {
                         let result: GmailSendService.SendResult
 
                         let beforeTransmission: @Sendable () async throws -> Void = {
@@ -293,6 +310,10 @@ struct ComposeSendOrchestrator {
                             } else {
                                 originalMessage = nil
                             }
+                            // Strictly before the barrier: everything up to here
+                            // overlaps the previous send, and a cancelled wait is
+                            // a definite pre-barrier failure.
+                            try await sendOrderTurn?.waitUntilFront()
                             result = try await sendService.sendReply(
                                 to: replyMetadata.recipientEmails,
                                 fromEmail: replyMetadata.fromEmail,
@@ -310,6 +331,7 @@ struct ComposeSendOrchestrator {
                                 beforeTransmission: beforeTransmission
                             )
                         } else {
+                            try await sendOrderTurn?.waitUntilFront()
                             result = try await sendService.sendNew(
                                 to: input.recipientEmails,
                                 body: input.body,
@@ -325,6 +347,20 @@ struct ComposeSendOrchestrator {
                         }
 
                         return result
+                    }
+                    let sendTask = Task.detached(priority: .userInitiated) {
+                        // Gmail has answered (or this send failed without
+                        // reaching it): either way it is terminal, so the next
+                        // send in the conversation may transmit. Release before
+                        // local reconciliation and the optional sync.
+                        do {
+                            let result = try await transmit()
+                            await sendOrderTurn?.finish()
+                            return result
+                        } catch {
+                            await sendOrderTurn?.finish()
+                            throw error
+                        }
                     }
                     cancellationRelay.install(sendTask)
                     defer { cancellationRelay.workerFinished() }
@@ -404,9 +440,9 @@ struct ComposeSendOrchestrator {
                         attachmentReferences: attachmentReferences,
                         optimisticMessageID: optimisticMessageID,
                         reconciliationHooks: reconciliationHooks,
+                        admission: admission,
                         error: error
                     )
-                    await admission.fail(error)
                 }
             } catch is CancellationError {
                 if await transmissionBarrierState.isPersisted {
@@ -427,9 +463,9 @@ struct ComposeSendOrchestrator {
                         attachmentReferences: attachmentReferences,
                         optimisticMessageID: optimisticMessageID,
                         reconciliationHooks: reconciliationHooks,
+                        admission: admission,
                         error: CancellationError()
                     )
-                    await admission.fail(CancellationError())
                 }
             } catch {
                 if await transmissionBarrierState.isPersisted {
@@ -444,17 +480,37 @@ struct ComposeSendOrchestrator {
                         error: error
                     )
                     await admission.succeed()
-                } else {
-                    await handleDefiniteFailure(
+                } else if preTransmissionFailureDisposition == .retainAsNotSent,
+                          !cancellationRelay.stopWasRequested {
+                    // The chat reply composer released this content at optimistic
+                    // persistence and may hold the next reply. Nothing reached
+                    // Gmail, so keeping the row as definitely unsent is
+                    // duplicate-safe; resend is only the explicit Edit and resend.
+                    Log.info(
+                        "Retaining reply that failed before transmission as not sent",
+                        category: .message
+                    )
+                    await handleRetainedDefiniteFailure(
                         sendService: sendService,
                         attachmentReferences: attachmentReferences,
                         optimisticMessageID: optimisticMessageID,
                         reconciliationHooks: reconciliationHooks,
                         error: error
                     )
-                    await admission.fail(error)
+                    await admission.succeed()
+                } else {
+                    await handleDefiniteFailure(
+                        sendService: sendService,
+                        attachmentReferences: attachmentReferences,
+                        optimisticMessageID: optimisticMessageID,
+                        reconciliationHooks: reconciliationHooks,
+                        admission: admission,
+                        error: error
+                    )
                 }
             }
+            // Covers failures before the send worker existed; idempotent.
+            await sendOrderTurn?.finish()
             await backgroundLease.end()
         }
         return ComposeSendBackgroundOperation(
@@ -493,26 +549,47 @@ struct ComposeSendOrchestrator {
         }
     }
 
+    /// Rolls back a pre-barrier failure and resolves admission to match what
+    /// the rollback did. A rollback that had to retain the row as "Not sent"
+    /// (`PreTransmissionRollbackOutcome.retainedAsNotSent`) succeeds
+    /// admission: the bubble owns the content, so the caller must not also
+    /// get it back.
     private func handleDefiniteFailure(
         sendService: ComposeSendServicing,
         attachmentReferences: [LocalAttachmentReference],
         optimisticMessageID: String,
         reconciliationHooks: OutboundMessageReconciliationHooks,
+        admission: ComposeSendTransmissionAdmission,
         error: Error
     ) async {
-        await MainActor.run {
-            sendService.rollbackOptimisticMessageBeforeTransmission(
+        let outcome = await MainActor.run {
+            let outcome = sendService.rollbackOptimisticMessageBeforeTransmission(
                 byID: optimisticMessageID,
                 fallbackAttachmentReferences: attachmentReferences
             )
+            // A cancellation's description is not a reason the user can act
+            // on; the bubble's generic "not sent" text reads better.
+            if outcome == .retainedAsNotSent, !(error is CancellationError) {
+                sendService.recordSendFailureReason(
+                    optimisticMessageID: optimisticMessageID,
+                    reason: error.localizedDescription
+                )
+            }
             reconciliationHooks.onFailure?(
                 .init(
                     optimisticMessageID: optimisticMessageID,
                     errorDescription: error.localizedDescription
                 )
             )
+            return outcome
         }
         Log.error("Background send failed", category: .message, error: error)
+        switch outcome {
+        case .rolledBack:
+            await admission.fail(error)
+        case .retainedAsNotSent:
+            await admission.succeed()
+        }
     }
 
     private func handleRetainedDefiniteFailure(

@@ -47,6 +47,12 @@ struct ChatReplyBar: View {
         )
     }
 
+    private var allowsDraftMutation: Bool {
+        ChatReplyBarControlPolicy.allowsDraftMutation(isSending: isSending)
+    }
+
+    // No bar-wide `.disabled(isSending)`: see ChatReplyBarControlPolicy. Only
+    // the controls that mutate the draft's attachments or destination wait.
     var body: some View {
         VStack(spacing: 0) {
             switch header {
@@ -55,6 +61,7 @@ struct ChatReplyBar: View {
                     Text("Original reply target unavailable")
                     Spacer()
                     Button("Clear target") { unavailableReplyTargetURI = nil }
+                        .disabled(!allowsDraftMutation)
                 }
                 .font(.caption)
                 .padding(.horizontal, 16)
@@ -80,6 +87,7 @@ struct ChatReplyBar: View {
                     attachments: $attachments,
                     isProcessing: $isProcessingAttachments
                 )
+                .disabled(!allowsDraftMutation)
                 
                 textField
                 
@@ -89,7 +97,6 @@ struct ChatReplyBar: View {
             .padding(.vertical, 8)
             .background(Color(UIColor.systemBackground))
         }
-        .disabled(isSending)
     }
     
     @ViewBuilder
@@ -115,6 +122,7 @@ struct ChatReplyBar: View {
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
+            .disabled(!allowsDraftMutation)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
@@ -125,6 +133,7 @@ struct ChatReplyBar: View {
     private var textField: some View {
         PlaceholderTextField(text: $replyText, placeholder: "iMessage")
             .focused(focusBinding)
+            .disabled(!ChatReplyBarControlPolicy.isTextFieldEnabled(isSending: isSending))
     }
     
     @ViewBuilder
@@ -133,12 +142,17 @@ struct ChatReplyBar: View {
             DraftAttachmentThumbnail(attachment: attachment) {
                 removeAttachment(attachment)
             }
+            .disabled(!allowsDraftMutation)
         }
     }
     
     @ViewBuilder
     private var sendButton: some View {
-        SendButton(isEnabled: canSend, isSending: isSending) {
+        SendButton(
+            isEnabled: canSend,
+            isSending: isSending,
+            showsProgress: ChatReplyBarControlPolicy.sendButtonShowsProgress
+        ) {
             if canSend {
                 Task {
                     _ = await onSend()
@@ -148,6 +162,7 @@ struct ChatReplyBar: View {
     }
     
     private func removeAttachment(_ attachment: Attachment) {
+        guard allowsDraftMutation else { return }
         if let index = attachments.firstIndex(of: attachment) {
             let removed = attachments.remove(at: index)
             

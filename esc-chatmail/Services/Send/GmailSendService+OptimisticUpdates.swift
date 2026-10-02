@@ -287,16 +287,20 @@ extension GmailSendService {
         )
     }
 
-    /// Rolls back a send that failed before Gmail request admission. The source
-    /// composer is still intact, so retaining a second failed bubble would
-    /// duplicate the user's body and attachments. Detach/requeue the original
-    /// attachment objects before deleting the optimistic graph so the composer
-    /// can retry with the same durable references.
+    /// Rolls back a send that failed before Gmail request admission. Runs for
+    /// `.rollBackToComposer` requests (ComposeView), whose composer is still
+    /// intact, so retaining a second failed bubble would duplicate the user's
+    /// body and attachments, and for any pre-barrier cancellation, including
+    /// account teardown. A chat reply's send-path failure is retained as "Not
+    /// sent" instead (`PreTransmissionFailureDisposition`). Detach/requeue the
+    /// original attachment objects before deleting the optimistic graph so the
+    /// composer can retry with the same durable references.
     @MainActor
+    @discardableResult
     func rollbackOptimisticMessageBeforeTransmission(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
-    ) {
+    ) -> PreTransmissionRollbackOutcome {
         let fallbackAttachments = resolveAttachments(
             from: fallbackAttachmentReferences
         )
@@ -308,7 +312,7 @@ extension GmailSendService {
                 detachedFromMessageID: messageID
             )
             saveOptimisticFailureCleanup()
-            return
+            return .rolledBack
         }
 
         let cleanup = OptimisticFailureConversationCleanup(
@@ -332,7 +336,10 @@ extension GmailSendService {
            let data = fetchOptimisticSendMutationRecords(messageID: messageID).first?.replyEnvelopeData {
             do {
                 let envelope = try JSONDecoder().decode(StoredReplyEnvelope.self, from: data)
-                try ChatReplyDraftStore(context: viewContext).save(
+                // Merge, never replace: a chat reply's composer released at
+                // optimistic persistence, so the slot may already hold the
+                // user's next reply.
+                try ChatReplyDraftStore(context: viewContext).saveMergingUnsentReply(
                     .init(text: message.bodyTextValue ?? "", targetURI: nil, recoveredEnvelope: envelope),
                     attachments: messageAttachments, conversationID: conversation.id, persist: false
                 )
@@ -343,13 +350,14 @@ extension GmailSendService {
                     attachment.message = message
                 }
                 retainDefinitelyUnsentOptimisticMessage(byID: messageID, fallbackAttachmentReferences: fallbackAttachmentReferences)
-                return
+                return .retainedAsNotSent
             }
         }
         viewContext.delete(message)
         finalizeOptimisticFailureCleanup(cleanup, restoreRollupFields: true)
         deleteOptimisticSendMutationRecord(messageID: messageID)
         saveOptimisticFailureCleanup()
+        return .rolledBack
     }
 
     /// Retains the user-authored optimistic graph after Gmail has definitely
@@ -837,6 +845,8 @@ extension GmailSendService {
             return
         }
 
+        // Before the recompute, which re-derives archive state.
+        let archiveStateIsOptimisticOnly = cleanup.archiveStateIsOptimisticOnly()
         ConversationRollupUpdater().updateRollups(
             for: conversation,
             myEmail: authSession.userEmail ?? ""
@@ -844,8 +854,10 @@ extension GmailSendService {
 
         let hasSupersedingMessage = cleanup.hasRemainingMessageSupersedingOptimisticMessage(remainingMessages)
         cleanup.restorePreOptimisticConversationStateIfNeeded(
-            restoreRollupFields: restoreRollupFields && !hasSupersedingMessage,
-            restoreArchiveState: !hasSupersedingMessage
+            restoreRollupFields: restoreRollupFields
+                && !hasSupersedingMessage
+                && !Self.remainingMessagesDetermineRollup(remainingMessages),
+            restoreArchiveState: !hasSupersedingMessage && archiveStateIsOptimisticOnly
         )
     }
 
@@ -1277,6 +1289,8 @@ extension GmailSendService {
             return
         }
 
+        // Before the recompute, which re-derives archive state.
+        let archiveStateIsOptimisticOnly = snapshot.archiveStateIsOptimisticOnly(of: conversation)
         ConversationRollupUpdater().updateRollups(
             for: conversation,
             myEmail: authSession.userEmail ?? ""
@@ -1286,9 +1300,29 @@ extension GmailSendService {
         }
         snapshot.restoreConversationState(
             conversation,
-            restoreRollupFields: !hasSupersedingMessage,
-            restoreArchiveState: !hasSupersedingMessage
+            restoreRollupFields: !hasSupersedingMessage
+                && !Self.remainingMessagesDetermineRollup(remainingMessages),
+            restoreArchiveState: !hasSupersedingMessage && archiveStateIsOptimisticOnly
         )
+    }
+
+    /// Whether the rollup recompute that just ran derived `lastMessageDate`
+    /// and `snippet` from a remaining visible message.
+    ///
+    /// The pre-send snapshot used to overwrite that recompute whenever no
+    /// remaining message was newer than the optimistic one. A message that
+    /// sync persisted during a slow preflight carries Gmail's earlier
+    /// `internalDate`, so it never counted as newer: the conversation list
+    /// went back to the pre-send snippet and time, hiding the message that
+    /// had just arrived. The snapshot now only fills in when the recompute
+    /// had nothing to derive from (it leaves the optimistic values in place
+    /// when a saved draft keeps an otherwise empty conversation listed).
+    /// Archive state keeps its own superseding-message rule.
+    @MainActor
+    private static func remainingMessagesDetermineRollup<Messages: Sequence>(
+        _ remainingMessages: Messages
+    ) -> Bool where Messages.Element == Message {
+        ConversationRollupSnapshot.make(from: Set(remainingMessages)).lastMessageDate != nil
     }
 
     @MainActor
@@ -1509,6 +1543,22 @@ private struct OptimisticSendMutationSnapshot {
         record.remoteCommittedThreadId = remoteCommittedThreadId
     }
 
+    /// Whether the conversation's archive state is one the optimistic insert
+    /// can have left: unchanged from this pre-send snapshot, or reactivated
+    /// (`archivedAt = nil`, `hidden = false`, see
+    /// `findOrCreateOptimisticConversation`). Read it before the rollback's
+    /// rollup recompute, which re-derives archive state itself.
+    ///
+    /// Anything else was changed by someone else during preflight. The chat
+    /// composer releases at optimistic persistence, so the user can archive
+    /// the chat (its menu, or the list) before a later rollback runs, and
+    /// writing the pre-send state back unarchived it again. Their change wins.
+    @MainActor
+    func archiveStateIsOptimisticOnly(of conversation: Conversation) -> Bool {
+        (conversation.archivedAt == nil && !conversation.hidden) ||
+            (conversation.archivedAt == archivedAt && conversation.hidden == hidden)
+    }
+
     @MainActor
     func restoreConversationState(
         _ conversation: Conversation,
@@ -1587,6 +1637,13 @@ private struct OptimisticFailureConversationCleanup {
             message.objectID != optimisticMessageObjectID
                 && message.internalDate > optimisticMessageDate
         }
+    }
+
+    /// See `OptimisticSendMutationSnapshot.archiveStateIsOptimisticOnly`.
+    @MainActor
+    func archiveStateIsOptimisticOnly() -> Bool {
+        guard let conversation, let rollbackSnapshot else { return true }
+        return rollbackSnapshot.archiveStateIsOptimisticOnly(of: conversation)
     }
 
     @MainActor
