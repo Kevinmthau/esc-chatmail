@@ -109,7 +109,7 @@ enum ConnectionErrorDetector {
 
     /// Checks if an error proves the request never reached the server, making it safe
     /// to resend even a non-idempotent request. Only connection-establishment failures
-    /// (DNS, connect, TLS handshake) qualify; timeouts and dropped connections are
+    /// (no data path, DNS, connect, TLS handshake) qualify; timeouts and dropped connections are
     /// ambiguous because the request may have been delivered before the failure.
     static func isPreTransmissionError(_ error: Error) -> Bool {
         let nsError = error as NSError
@@ -121,6 +121,23 @@ enum ConnectionErrorDetector {
                  NSURLErrorDNSLookupFailed,
                  NSURLErrorCannotConnectToHost,
                  NSURLErrorSecureConnectionFailed:
+                return true
+            // The system refused to bring up a data path for the connection
+            // attempt, the same class as NSURLErrorNotConnectedToInternet:
+            // Apple documents -1018 as a connection that would have had to
+            // activate a data context while roaming with international
+            // roaming off, -1019 as a connection attempted during a phone
+            // call on a network without simultaneous voice and data
+            // (EDGE/GPRS), and -1020 as the cellular network disallowing the
+            // connection (cellular data off for the app or the device). Each
+            // is raised while *establishing* a connection, before any socket
+            // carries application bytes, so a non-idempotent send that fails
+            // with one never reached Gmail. Left out, the fail-fast send
+            // session surfaced them as "Delivery unknown" with no resend for
+            // a message that never left the device.
+            case NSURLErrorInternationalRoamingOff,  // -1018
+                 NSURLErrorCallIsActive,             // -1019
+                 NSURLErrorDataNotAllowed:           // -1020
                 return true
             default:
                 return false
@@ -145,6 +162,14 @@ enum ConnectionErrorDetector {
              .dnsLookupFailed,
              .cannotConnectToHost,
              .secureConnectionFailed:
+            return true
+        // No-data-path refusals (see `isPreTransmissionError`). Listed
+        // explicitly rather than left to the `default`, so they keep the
+        // same bounded pre-transmission retry as `.notConnectedToInternet`
+        // even if the default ever tightens.
+        case .internationalRoamingOff,
+             .callIsActive,
+             .dataNotAllowed:
             return true
         case .unsupportedURL:
             return false

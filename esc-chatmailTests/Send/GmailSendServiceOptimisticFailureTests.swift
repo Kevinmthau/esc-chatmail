@@ -483,14 +483,13 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
         let authSession = AuthSession()
         authSession.userEmail = "sender@example.com"
+        // The production retry strategy's backoff runs on a fake clock, so
+        // the bounded pre-transmission retries cost no wall time.
+        let retryClock = FakeSyncClock()
         let productionAPIClient = GmailAPIClient(
             tokenManager: MockTokenManager(),
-            retryStrategy: NetworkRetryStrategy(
-                maxRetries: 3,
-                initialDelay: 0.01,
-                maxDelay: 0.02
-            ),
-            session: StubURLProtocol.makeSession()
+            session: StubURLProtocol.makeSession(),
+            retryClock: retryClock
         )
         let productionSendService = GmailSendService(
             viewContext: viewContext,
@@ -537,9 +536,10 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
         XCTAssertEqual(
             StubURLProtocol.requestCount,
-            3,
+            NetworkConfig.maxRetries,
             "A never-transmitted send keeps its bounded pre-transmission retries"
         )
+        XCTAssertEqual(retryClock.sleeps.count, NetworkConfig.maxRetries - 1)
         XCTAssertEqual(failureIDs, [handle.optimisticMessageID])
         XCTAssertTrue(ambiguousIDs.isEmpty, "Nothing left the device; delivery is not unknown")
         let retained = try XCTUnwrap(
