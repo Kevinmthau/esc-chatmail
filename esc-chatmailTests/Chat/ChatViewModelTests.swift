@@ -740,6 +740,167 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.replyingTo)
     }
 
+    /// The sync echo of the user's own reply carries "Re: <subject>", which
+    /// the subject comparison read as a new subject: the target moved onto
+    /// the user's own message, and the other person's "Re:" reply then
+    /// matched that subject and never moved it back, so later replies quoted
+    /// the user's own words.
+    ///
+    /// Revert-check: reverting `ChatViewModel.reconcileAutomaticReplyTarget`
+    /// to compare `lastMessage` itself with no own-message handling (the
+    /// pre-fix code) retargets to the echo.
+    /// HONEST SCOPE: two layers refuse the echo here, so reverting either
+    /// alone still passes: `automaticReplyTarget(preferring:)` makes the
+    /// inbound message the candidate, and the `candidate.isFromMe` guard
+    /// refuses an own candidate while the target is inbound.
+    /// `testUpdateReplyingTo_newerInboundBehindOwnEcho_advancesToInboundMessage`
+    /// pins the first and
+    /// `testUpdateReplyingTo_inboundTargetHiddenFromCandidateFetch_neverYieldsToOwnEcho`
+    /// the second.
+    func testUpdateReplyingTo_ownReplyEchoArrives_keepsInboundTargetUntilInboundReply() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let original = MessageBuilder().withSubject("Hello")
+            .withSender(email: "alice@example.com").hoursAgo(2)
+            .inConversation(conversation).build(in: context)
+        let echo = makeSyncedOwnEcho(subject: "Re: Hello", hoursAgo: 1, in: conversation, context: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: original)
+
+        viewModel.updateReplyingToIfNewSubject(lastMessage: echo)
+        XCTAssertEqual(viewModel.replyingTo, original)
+
+        // Normalizing "Re:" prefixes instead would freeze the target here.
+        let inboundReply = MessageBuilder().withSubject("Re: Hello")
+            .withSender(email: "alice@example.com")
+            .inConversation(conversation).build(in: context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: inboundReply)
+        XCTAssertEqual(viewModel.replyingTo, inboundReply)
+    }
+
+    /// Revert-check: dropping the `isFromMe` preference from
+    /// `ChatViewModel.automaticReplyTarget(preferring:)` opens the chat
+    /// quoting the user's own newest message.
+    func testInitializeReplyingTo_newestRowIsOwnEcho_prefersNewestInboundMessage() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let inbound = MessageBuilder().withSubject("Hello")
+            .withSender(email: "alice@example.com").hoursAgo(2)
+            .inConversation(conversation).build(in: context)
+        let echo = makeSyncedOwnEcho(subject: "Re: Hello", hoursAgo: 1, in: conversation, context: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+
+        viewModel.initializeReplyingTo(lastMessage: echo)
+
+        XCTAssertEqual(viewModel.replyingTo, inbound)
+    }
+
+    /// In a conversation with no inbound target, the user's own messages are
+    /// the only possible targets and must keep advancing. A note-to-self is
+    /// the main case, but there is no note-to-self conversation type: the
+    /// rule keys on the absence of a valid inbound message, which is all this
+    /// fixture builds (it is a default one-to-one chat).
+    ///
+    /// Revert-check: making the own-message refusal in
+    /// `ChatViewModel.reconcileAutomaticReplyTarget` unconditional (refusing
+    /// every own candidate, not only when the current target is inbound)
+    /// leaves the target on the first note.
+    func testUpdateReplyingTo_noInboundTarget_advancesOntoNewerOwnMessage() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let firstNote = makeSyncedOwnEcho(subject: "Groceries", hoursAgo: 2, in: conversation, context: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: firstNote)
+        XCTAssertEqual(viewModel.replyingTo, firstNote)
+
+        let followUp = makeSyncedOwnEcho(subject: "Re: Groceries", hoursAgo: 1, in: conversation, context: context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: followUp)
+
+        XCTAssertEqual(viewModel.replyingTo, followUp)
+    }
+
+    /// In a chat the user started, the own fallback target can already carry
+    /// the "Re:" subject the other person's first reply repeats.
+    ///
+    /// Revert-check: removing the `currentReplyingTo.isFromMe` branch from
+    /// `ChatViewModel.reconcileAutomaticReplyTarget` leaves the target on the
+    /// user's own message.
+    func testUpdateReplyingTo_ownFallbackTarget_yieldsToFirstInboundReplyWithSameSubject() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        _ = makeSyncedOwnEcho(subject: "Lunch?", hoursAgo: 3, in: conversation, context: context)
+        let ownFollowUp = makeSyncedOwnEcho(subject: "Re: Lunch?", hoursAgo: 2, in: conversation, context: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: ownFollowUp)
+        XCTAssertEqual(viewModel.replyingTo, ownFollowUp)
+
+        let inboundReply = MessageBuilder().withSubject("Re: Lunch?")
+            .withSender(email: "alice@example.com").hoursAgo(1)
+            .inConversation(conversation).build(in: context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: inboundReply)
+
+        XCTAssertEqual(viewModel.replyingTo, inboundReply)
+    }
+
+    /// One sync can save the other person's new-subject message together
+    /// with an even newer echo of the user's own reply. The collection change
+    /// delivers only the echo as the newest row, and no later change delivers
+    /// the inbound message.
+    ///
+    /// Revert-check: making `ChatViewModel.reconcileAutomaticReplyTarget`
+    /// compare `lastMessage` itself instead of
+    /// `automaticReplyTarget(preferring:)`'s candidate refuses the echo and
+    /// leaves the target on "Hello".
+    func testUpdateReplyingTo_newerInboundBehindOwnEcho_advancesToInboundMessage() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let hello = MessageBuilder().withSubject("Hello")
+            .withSender(email: "alice@example.com").hoursAgo(3)
+            .inConversation(conversation).build(in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: hello)
+        XCTAssertEqual(viewModel.replyingTo, hello)
+
+        let dinner = MessageBuilder().withSubject("Dinner Friday?")
+            .withSender(email: "alice@example.com").hoursAgo(2)
+            .inConversation(conversation).build(in: context)
+        let echo = makeSyncedOwnEcho(subject: "Re: Hello", hoursAgo: 1, in: conversation, context: context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: echo)
+
+        XCTAssertEqual(viewModel.replyingTo, dinner)
+    }
+
+    /// A valid inbound target proves the conversation has one, even when the
+    /// candidate fetch cannot see it (here it is trashed, so the chat-visible
+    /// predicate excludes it). The user's own echo must still not take over.
+    ///
+    /// Revert-check: removing the `guard currentReplyingTo.isFromMe` in
+    /// `ChatViewModel.reconcileAutomaticReplyTarget`'s `candidate.isFromMe`
+    /// branch moves the target onto the echo ("Re: Hello" differs from
+    /// "Hello").
+    func testUpdateReplyingTo_inboundTargetHiddenFromCandidateFetch_neverYieldsToOwnEcho() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let hello = MessageBuilder().withSubject("Hello")
+            .withSender(email: "alice@example.com").hoursAgo(2)
+            .inConversation(conversation).build(in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: hello)
+        XCTAssertEqual(viewModel.replyingTo, hello)
+
+        hello.addToLabels(LabelBuilder().trash().build(in: context))
+        let echo = makeSyncedOwnEcho(subject: "Re: Hello", hoursAgo: 1, in: conversation, context: context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: echo)
+
+        XCTAssertEqual(viewModel.replyingTo, hello)
+    }
+
     func testBackgroundReadLeavesLaterUnreadCountDurableForBlueDot() async throws {
         let stack = TestCoreDataStack()
         let messageActionsStack = MainQueueMessageActionsCoreDataStack(wrapping: stack)
@@ -1507,7 +1668,17 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(result?.optimisticMessageID, persistedOptimisticResult?.optimisticMessageID)
         XCTAssertFalse(viewModel.composerState.isSending)
         XCTAssertEqual(viewModel.replyText, "")
-        XCTAssertEqual(viewModel.replyingTo, capturedTarget)
+        guard case .reply(let request)? = coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, capturedTarget.objectID)
+        // Once the send has returned, the automatic target catches up with
+        // the newer subject the frozen preflight refused; no further
+        // collection change would deliver it.
+        // Revert-check: removing the `reconcileAutomaticReplyTarget` call
+        // from `ChatViewModel.sendReply`'s non-manual branch leaves
+        // `capturedTarget`.
+        XCTAssertEqual(viewModel.replyingTo, laterTarget)
     }
 
     func testSendReply_drainedConversationPreservesTextAndAttachments() async {
@@ -1710,6 +1881,221 @@ final class ChatViewModelTests: XCTestCase {
         reopened.discardReplyDraft()
     }
 
+    /// A draft target that still exists but moved to another chat used to be
+    /// restored as a normal "Replying to:" quote. Every send then failed with
+    /// "reopen the conversation", and reopening restored it again.
+    ///
+    /// Revert-check: dropping the `isValidReplyTarget` filter from
+    /// `ChatViewModel.restoreReplyDraft` restores the moved message as the
+    /// target and leaves `unavailableReplyTargetURI` nil.
+    func testRestoredDraftTargetMovedToAnotherConversation_showsUnavailableTargetAndBlocksSend() async throws {
+        let coordinator = MockChatOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com"),
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let otherConversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let target = MessageBuilder().withSubject("Moving soon")
+            .inConversation(conversation).build(in: context)
+        let first = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        first.replyText = "Draft for a message that moves"
+        first.replyingTo = target
+        await first.saveReplyDraft()
+        let targetURI = target.objectID.uriRepresentation()
+        target.conversation = otherConversation
+        try context.save()
+
+        let reopened = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+
+        XCTAssertEqual(reopened.replyText, "Draft for a message that moves")
+        XCTAssertEqual(reopened.composerState.unavailableReplyTargetURI, targetURI)
+        XCTAssertNil(reopened.replyingTo)
+        XCTAssertNil(reopened.composerState.replyAnchor)
+        let result = await reopened.sendReply()
+        XCTAssertNil(result)
+        XCTAssertNil(coordinator.lastRequest)
+        XCTAssertNotNil(reopened.sendErrorAlert)
+        reopened.discardReplyDraft()
+    }
+
+    /// A context-menu Reply is one-shot: once its send succeeds, the composer
+    /// returns to the automatic target instead of pinning every later reply
+    /// in the session to the selected message.
+    ///
+    /// Revert-check: removing the `replaceSentManualReplyTarget()` call from
+    /// `ChatViewModel.sendReply` (no re-evaluation after a manual send) keeps
+    /// the selected message after the send.
+    func testSendReply_manualTargetSendSucceeds_returnsToAutomaticTarget() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Lunch?", newerSubject: "Dinner?")
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.older)
+        viewModel.replyText = "Noon works"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.older.objectID)
+        XCTAssertEqual(viewModel.replyingTo, fixture.newer)
+
+        let latest = MessageBuilder().withSubject("Brunch?")
+            .withSender(email: "alice@example.com")
+            .inConversation(fixture.conversation).build(in: fixture.context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: latest)
+        XCTAssertEqual(viewModel.replyingTo, latest)
+    }
+
+    /// In a Gmail thread the older message the user picked and the newest
+    /// one share "Re: X". Re-evaluating through the subject comparison
+    /// refused to move, so the selection silently became the automatic
+    /// target for the rest of the session.
+    ///
+    /// Revert-check: sending a manual selection through
+    /// `reconcileAutomaticReplyTarget` (replacing the
+    /// `replaceSentManualReplyTarget()` call in `ChatViewModel.sendReply`)
+    /// leaves the target on the older message.
+    func testSendReply_manualTargetSharesNewestSubject_returnsToNewestTarget() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Re: Plans", newerSubject: "Re: Plans")
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.older)
+        viewModel.replyText = "Count me in"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.older.objectID)
+        XCTAssertEqual(viewModel.replyingTo, fixture.newer)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.newer)
+    }
+
+    /// Long-pressing the newest message picks the same message the automatic
+    /// rule would. Once sent, that selection must not keep refusing later
+    /// arrivals as a still-manual target.
+    ///
+    /// Revert-check: removing `manuallySelectedReplyTargetID = nil` from
+    /// `ChatViewModel.sendReply` keeps the target on `newer` through the
+    /// later new subject.
+    func testSendReply_manualSelectionOfNewestMessage_laterArrivalsStillAdvance() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Lunch?", newerSubject: "Dinner?")
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.newer)
+        viewModel.replyText = "Seven works"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(viewModel.replyingTo, fixture.newer)
+        let latest = MessageBuilder().withSubject("Brunch?")
+            .withSender(email: "alice@example.com")
+            .inConversation(fixture.conversation).build(in: fixture.context)
+        viewModel.updateReplyingToIfNewSubject(lastMessage: latest)
+        XCTAssertEqual(viewModel.replyingTo, latest)
+    }
+
+    /// Dismissing the quote keeps the selection as the hidden destination.
+    /// After the one-shot send it must not keep supplying the thread (and, in
+    /// a list chat, the audience) of every later unquoted reply.
+    ///
+    /// Revert-check: sending a manual selection through
+    /// `reconcileAutomaticReplyTarget` (replacing the
+    /// `replaceSentManualReplyTarget()` call in `ChatViewModel.sendReply`)
+    /// leaves `replyAnchor` on the older message. Removing
+    /// `if quoteWasDismissed { replyingTo = nil }` from
+    /// `ChatViewModel.replaceSentManualReplyTarget` brings the dismissed
+    /// quote back.
+    func testSendReply_manualTargetWithDismissedQuote_movesHiddenDestinationAndKeepsQuoteDismissed() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Lunch?", newerSubject: "Dinner?")
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.older)
+        viewModel.replyingTo = nil
+        viewModel.replyText = "Noon works"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNotNil(result)
+        guard case .reply(let request)? = fixture.coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.replyingToMessageObjectID, fixture.older.objectID)
+        XCTAssertFalse(request.context.includesQuotedMessage)
+        XCTAssertNil(viewModel.replyingTo)
+        XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.newer)
+    }
+
+    /// A failed send keeps the draft, and the user's selection still owns its
+    /// destination.
+    ///
+    /// HONEST SCOPE: before this change the selection was never cleared, so
+    /// reverting it does not fail this test. It fails if the
+    /// `manuallySelectedReplyTargetID = nil` in `ChatViewModel.sendReply`
+    /// moves ahead of the send's `do` or into its `catch`.
+    func testSendReply_manualTargetSendFails_keepsSelectedTarget() async throws {
+        let fixture = try makeManualReplyFixture(olderSubject: "Lunch?", newerSubject: "Dinner?")
+        fixture.coordinator.sendError = MockChatSendError.preflightFailed
+        let viewModel = fixture.viewModel
+        viewModel.setReplyingTo(fixture.older)
+        viewModel.replyText = "Noon works"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNil(result)
+        XCTAssertEqual(viewModel.replyText, "Noon works")
+        XCTAssertEqual(viewModel.replyingTo, fixture.older)
+        // Even with the composer emptied, the selection is not automatic.
+        viewModel.replyText = ""
+        viewModel.updateReplyingToIfNewSubject(lastMessage: fixture.newer)
+        XCTAssertEqual(viewModel.replyingTo, fixture.older)
+        viewModel.discardReplyDraft()
+    }
+
+    /// Two inbound messages in a one-to-one chat opened on `newer`, the
+    /// automatic target. Tests make their own context-menu selection.
+    private func makeManualReplyFixture(
+        olderSubject: String,
+        newerSubject: String
+    ) throws -> (
+        coordinator: MockChatOutboundMessageCoordinator,
+        context: NSManagedObjectContext,
+        conversation: Conversation,
+        older: Message,
+        newer: Message,
+        viewModel: ChatViewModel
+    ) {
+        let coordinator = MockChatOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com"),
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let older = MessageBuilder().withSubject(olderSubject)
+            .withSender(email: "alice@example.com").hoursAgo(2)
+            .inConversation(conversation).build(in: context)
+        let newer = MessageBuilder().withSubject(newerSubject)
+            .withSender(email: "alice@example.com").hoursAgo(1)
+            .inConversation(conversation).build(in: context)
+        // Persisted rows, as in the app: `sendReply` stabilizes a temporary
+        // anchor ID, which would no longer match the selection's ID.
+        try context.obtainPermanentIDs(for: [conversation, older, newer])
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: deps.makeChatDependencies())
+        viewModel.initializeReplyingTo(lastMessage: newer)
+        XCTAssertEqual(viewModel.replyingTo, newer)
+        return (coordinator, context, conversation, older, newer, viewModel)
+    }
+
     func testUnreadableDraftCannotBeOverwrittenByAutosaveOrSend() async throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
@@ -1760,6 +2146,24 @@ final class ChatViewModelTests: XCTestCase {
         await first.saveReplyDraft()
         let saved = try XCTUnwrap(ChatReplyDraftStore(context: context).load(conversationID: conversation.id))
         XCTAssertEqual(Set(saved.1.map(\.objectID)), Set([unfinished.objectID, finalized.objectID]))
+    }
+
+    /// The user's own message as sync persists it: its Gmail id differs from
+    /// the optimistic id its Message-ID encodes, so unlike a row awaiting its
+    /// echo it resolves `.none` and is a valid reply target.
+    private func makeSyncedOwnEcho(
+        subject: String,
+        hoursAgo: Int,
+        in conversation: Conversation,
+        context: NSManagedObjectContext
+    ) -> Message {
+        let echo = MessageBuilder().withSubject(subject)
+            .withSender(email: "me@example.com").fromMe().hoursAgo(hoursAgo)
+            .inConversation(conversation).build(in: context)
+        echo.messageId = MimeBuilder.messageId(forOptimisticMessageID: UUID().uuidString)
+        XCTAssertNil(OutboundSendDeliveryState.localOptimisticMessageID(for: echo))
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: echo), .none)
+        return echo
     }
 
     private func makeListReplyFixture() throws -> (

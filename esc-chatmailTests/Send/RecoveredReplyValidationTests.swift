@@ -73,8 +73,10 @@ final class RecoveredReplyValidationTests: XCTestCase {
         context.delete(conversation)
         try context.save()
         XCTAssertThrowsError(try builder.validateRecoveredReply(metadata(), context: anchor)) { error in
+            // Revert-check: throwing `replyTargetUnavailable` again from
+            // `OutboundReplyContextBuilder.validateRecoveredReply` fails this.
             guard let sendError = error as? GmailSendService.SendError,
-                  case .replyTargetUnavailable = sendError else {
+                  case .replyConversationUnavailable = sendError else {
                 return XCTFail("Expected unavailable conversation, got \(error)")
             }
         }
@@ -86,8 +88,9 @@ final class RecoveredReplyValidationTests: XCTestCase {
         conversation.lastMessageDate = nil
         XCTAssertTrue(conversation.isRetainedDrainedShell)
         XCTAssertThrowsError(try builder.validateRecoveredReply(metadata(), context: replyContext)) { error in
+            // Revert-check: as in the deleted-conversation test above.
             guard let sendError = error as? GmailSendService.SendError,
-                  case .replyTargetUnavailable = sendError else {
+                  case .replyConversationUnavailable = sendError else {
                 return XCTFail("Expected unavailable conversation, got \(error)")
             }
         }

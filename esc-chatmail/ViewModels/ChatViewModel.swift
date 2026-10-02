@@ -352,8 +352,8 @@ final class ChatViewModel: ObservableObject {
               composerState.recoveredReplyEnvelope == nil,
               composerState.unavailableReplyTargetURI == nil,
               let lastMessage else { return }
-        if isValidReplyTarget(lastMessage) {
-            replyingTo = lastMessage
+        if let target = automaticReplyTarget(preferring: lastMessage) {
+            replyingTo = target
             return
         }
         // The newest row can be one of the user's own sends that is not a
@@ -363,15 +363,54 @@ final class ChatViewModel: ObservableObject {
         replyingTo = newestValidReplyTarget()
     }
 
+    /// `lastMessage` when it is a valid automatic target, except that the
+    /// user's own message yields to the other side's newest valid one.
+    ///
+    /// An own target quoted the user's previous reply back at the other
+    /// person and set In-Reply-To to it. Own messages remain targets only in
+    /// a conversation without a valid inbound target: a note-to-self, or a
+    /// chat the user started that has no reply yet.
+    private func automaticReplyTarget(preferring lastMessage: Message) -> Message? {
+        guard isValidReplyTarget(lastMessage) else { return nil }
+        guard lastMessage.isFromMe else { return lastMessage }
+        return newestValidInboundReplyTarget() ?? lastMessage
+    }
+
+    /// Newest visible message that is a valid automatic reply target,
+    /// preferring the other side's messages over the user's own (see
+    /// `automaticReplyTarget(preferring:)`).
+    private func newestValidReplyTarget() -> Message? {
+        newestValidInboundReplyTarget() ?? newestValidVisibleReplyTarget()
+    }
+
     /// Newest visible message that is a valid reply target, looking past the
     /// few newest rows that can be the user's own unfinished sends.
-    private func newestValidReplyTarget() -> Message? {
+    private func newestValidVisibleReplyTarget() -> Message? {
         let request = NSFetchRequest<Message>(entityName: "Message")
         request.sortDescriptors = [
             NSSortDescriptor(key: "internalDate", ascending: false),
             NSSortDescriptor(key: "id", ascending: false)
         ]
         request.predicate = MessagePredicates.visibleInChat(conversation: conversation)
+        request.fetchLimit = 20
+        request.includesPendingChanges = true
+        let candidates = (try? viewContext.fetch(request)) ?? []
+        return candidates.first { isValidReplyTarget($0) }
+    }
+
+    /// Newest visible message from someone other than the user that is a
+    /// valid reply target. `nil` means the conversation has no inbound target,
+    /// which is what lets the user's own messages become automatic targets.
+    private func newestValidInboundReplyTarget() -> Message? {
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "internalDate", ascending: false),
+            NSSortDescriptor(key: "id", ascending: false)
+        ]
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            MessagePredicates.visibleInChat(conversation: conversation),
+            NSPredicate(format: "isFromMe == NO")
+        ])
         request.fetchLimit = 20
         request.includesPendingChanges = true
         let candidates = (try? viewContext.fetch(request)) ?? []
@@ -388,9 +427,18 @@ final class ChatViewModel: ObservableObject {
     /// open. For an idle automatic target, use the replacement even when it has
     /// the same subject. Active drafts retain their target for validation. List chats also
     /// advance across Gmail threads whose subjects happen to match.
+    ///
+    /// An idle automatic target never advances onto the user's own message
+    /// while the other side has a valid target, and an own target (chosen only
+    /// because no inbound target existed) yields to the first inbound one.
     func updateReplyingToIfNewSubject(lastMessage: Message?) {
         guard !composerState.isSending else { return }
+        reconcileAutomaticReplyTarget(lastMessage: lastMessage)
+    }
 
+    /// The body of `updateReplyingToIfNewSubject` without its in-flight-send
+    /// freeze, so `sendReply` can re-evaluate once its send has returned.
+    private func reconcileAutomaticReplyTarget(lastMessage: Message?) {
         // If user cleared replyingTo (tapped X), don't auto-update
         guard let currentReplyingTo = replyingTo else { return }
 
@@ -400,24 +448,51 @@ final class ChatViewModel: ObservableObject {
               manuallySelectedReplyTargetID != currentReplyingTo.objectID else { return }
 
         guard isValidReplyTarget(currentReplyingTo) else {
-            composerState.replaceReplyTarget(lastMessage.flatMap { isValidReplyTarget($0) ? $0 : nil })
+            composerState.replaceReplyTarget(lastMessage.flatMap { automaticReplyTarget(preferring: $0) })
             return
         }
 
-        guard let lastMessage, isValidReplyTarget(lastMessage) else { return }
+        // The sync echo of the user's own reply carries "Re: <subject>", so
+        // the subject comparison below read it as a new subject and moved the
+        // target onto it. The other person's next "Re:" reply then matched
+        // that subject and never moved it back: later replies quoted the
+        // user's own message and set In-Reply-To to it. Do not fix this by
+        // normalizing "Re:" prefixes; that would also freeze the target when
+        // the other person replies "Re: X".
+        //
+        // Compare against the automatic candidate, not the newest row itself.
+        // One sync can save a newer inbound message together with an even
+        // newer own echo. Refusing on the echo alone never adopted the inbound
+        // message, and no later collection change delivers it.
+        guard let lastMessage,
+              let candidate = automaticReplyTarget(preferring: lastMessage) else { return }
+
+        if candidate.isFromMe {
+            // No inbound target exists (a note-to-self, or an unanswered chat
+            // the user started): own messages advance like any other. A valid
+            // inbound target that the candidate fetch missed still never
+            // yields to the user's own message.
+            guard currentReplyingTo.isFromMe else { return }
+        } else if currentReplyingTo.isFromMe {
+            // The own target was only a fallback for a conversation with no
+            // inbound target. Follow the other person once they write, even
+            // when their reply repeats the own target's "Re:" subject.
+            replyingTo = candidate
+            return
+        }
 
         // List conversations can combine multiple Gmail threads that happen to
         // share a subject. Follow the newest thread so reply metadata and quoted
         // content do not stay anchored to an older list post.
         let currentSubject = currentReplyingTo.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let newSubject = lastMessage.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let newSubject = candidate.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let listThreadChanged =
             conversation.conversationType == .list &&
-            !lastMessage.gmThreadId.isEmpty &&
-            currentReplyingTo.gmThreadId != lastMessage.gmThreadId
+            !candidate.gmThreadId.isEmpty &&
+            currentReplyingTo.gmThreadId != candidate.gmThreadId
 
         if currentSubject != newSubject || listThreadChanged {
-            replyingTo = lastMessage
+            replyingTo = candidate
         }
     }
 
@@ -494,7 +569,7 @@ final class ChatViewModel: ObservableObject {
                 category: .message
             )
             sendErrorAlert = ChatSendErrorAlert(
-                message: "This conversation moved while you were replying. Your draft and attachments are still here."
+                message: GmailSendService.SendError.replyConversationUnavailable.localizedDescription
             )
             return nil
         }
@@ -539,7 +614,45 @@ final class ChatViewModel: ObservableObject {
         // target is no longer available locally.
         replyText = ""
         composerState.attachments = []
+        // A context-menu Reply is one-shot, like an iMessage inline reply.
+        // Kept selected, it silently governed every later reply in the
+        // session (a list reply went to the old post's thread and audience).
+        // This send's request was built before admission, so neither line
+        // can change what was sent. Re-evaluate once here: a newer message
+        // that arrived while the send froze the target fires no further
+        // collection change. A failed send keeps its selection.
+        let sentManualSelection = manuallySelectedReplyTargetID != nil
+        manuallySelectedReplyTargetID = nil
+        if sentManualSelection {
+            replaceSentManualReplyTarget()
+        } else {
+            reconcileAutomaticReplyTarget(lastMessage: newestValidReplyTarget())
+        }
         return result
+    }
+
+    /// Hands the composer back to the automatic target after a context-menu
+    /// Reply was sent.
+    ///
+    /// The subject comparison in `reconcileAutomaticReplyTarget` cannot do
+    /// this: in a Gmail thread the older message the user picked and the
+    /// newest one both read "Re: X", so it refused to move and the selection
+    /// stayed as the automatic target for the rest of the session.
+    private func replaceSentManualReplyTarget() {
+        // A draft typed while the send was in flight owns its destination,
+        // as in `reconcileAutomaticReplyTarget`.
+        guard !composerState.hasDraftContent,
+              let automaticTarget = newestValidReplyTarget() else {
+            reconcileAutomaticReplyTarget(lastMessage: newestValidReplyTarget())
+            return
+        }
+        // Dismissing the quote kept the selection as the hidden destination
+        // (`replyAnchor`), so later unquoted replies silently took its thread
+        // and, in a list chat, its audience. Move the destination as well,
+        // and keep the quote dismissed.
+        let quoteWasDismissed = replyingTo == nil
+        composerState.replaceReplyTarget(automaticTarget)
+        if quoteWasDismissed { replyingTo = nil }
     }
 
     // MARK: - Durable reply drafts and failed-send recovery
@@ -622,7 +735,13 @@ final class ChatViewModel: ObservableObject {
             composerState.recoveredReplyEnvelope = snapshot.recoveredEnvelope
             if let uri = snapshot.targetURI,
                let objectID = viewContext.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: uri) {
-                composerState.replaceReplyTarget(resolveMessage(with: objectID))
+                // A target that still exists but moved to another chat (List-Id
+                // repair, a merge) looked restored, yet every send failed with
+                // "reopen", and reopening restored it again. Route it to the
+                // unavailable state, which shows "Clear target" and blocks send.
+                composerState.replaceReplyTarget(
+                    resolveMessage(with: objectID).flatMap { isValidReplyTarget($0) ? $0 : nil }
+                )
                 if composerState.replyAnchor == nil { composerState.unavailableReplyTargetURI = uri }
                 if snapshot.includesQuotedMessage == false { replyingTo = nil }
             } else if let uri = snapshot.targetURI {

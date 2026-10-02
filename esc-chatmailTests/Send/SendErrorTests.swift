@@ -41,6 +41,25 @@ final class SendErrorTests: XCTestCase {
         let error = GmailSendService.SendError.replyTargetUnavailable
         XCTAssertNotNil(error.errorDescription)
         XCTAssertTrue(error.errorDescription!.lowercased().contains("selected"))
+        // Revert-check: restoring "Reopen the conversation and try again."
+        // fails this; reopening could not fix a moved target.
+        XCTAssertFalse(error.errorDescription!.lowercased().contains("reopen"))
+    }
+
+    /// When the chat itself moved or was removed, every message in it is
+    /// unusable, so the selected-message advice would send the user around in
+    /// circles.
+    ///
+    /// Revert-check: pointing `replyConversationUnavailable`'s description
+    /// back at `replyTargetUnavailable`'s long-press copy fails this.
+    func testSendError_replyConversationUnavailable_describesTheMovedChatNotTheSelection() {
+        let description = GmailSendService.SendError.replyConversationUnavailable.errorDescription
+        XCTAssertEqual(
+            description,
+            "This conversation moved while you were replying. Your draft and attachments are still here."
+        )
+        XCTAssertFalse(description!.lowercased().contains("long-press"))
+        XCTAssertNotEqual(description, GmailSendService.SendError.replyTargetUnavailable.errorDescription)
     }
 
     // MARK: - Error Equality Tests
@@ -62,7 +81,8 @@ final class SendErrorTests: XCTestCase {
             .authenticationFailed,
             .optimisticCreationFailed,
             .conversationNotFound,
-            .replyTargetUnavailable
+            .replyTargetUnavailable,
+            .replyConversationUnavailable
         ]
 
         for error in errors {

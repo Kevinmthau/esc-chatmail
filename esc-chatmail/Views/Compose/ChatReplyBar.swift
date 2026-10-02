@@ -33,9 +33,24 @@ struct ChatReplyBar: View {
         return hasContent && !isSending && !isProcessingAttachments
     }
     
+    private var header: ReplyIndicatorPolicy.Header {
+        ReplyIndicatorPolicy.header(
+            isReplyTargetUnavailable: unavailableReplyTargetURI != nil,
+            recoveredRecipients: recoveredReplyEnvelope?.recipients,
+            replyTarget: replyingTo.map { message in
+                ReplyIndicatorPolicy.ReplyTarget(
+                    subject: message.subject,
+                    cleanedSnippet: message.cleanedSnippet,
+                    snippet: message.snippet
+                )
+            }
+        )
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            if unavailableReplyTargetURI != nil {
+            switch header {
+            case .unavailableTarget:
                 HStack {
                     Text("Original reply target unavailable")
                     Spacer()
@@ -44,16 +59,16 @@ struct ChatReplyBar: View {
                 .font(.caption)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
-            } else if let recoveredReplyEnvelope {
-                Text("Replying to: \(recoveredReplyEnvelope.recipients.joined(separator: ", "))")
+            case .recoveredEnvelope(let label):
+                Text(label)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 6)
-            } else if let replyingTo = replyingTo,
-               let subject = replyingTo.subject,
-               !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                replyingToIndicator(message: replyingTo)
+            case .replyingTo(let label):
+                replyingToIndicator(label: label)
+            case .none:
+                EmptyView()
             }
             
             if !attachments.isEmpty {
@@ -78,13 +93,13 @@ struct ChatReplyBar: View {
     }
     
     @ViewBuilder
-    private func replyingToIndicator(message: Message) -> some View {
+    private func replyingToIndicator(label: String) -> some View {
         HStack {
             Image(systemName: "arrow.turn.up.left")
                 .font(.caption)
                 .foregroundColor(.secondary)
             
-            Text("Replying to: \(message.subject ?? message.snippet ?? "")")
+            Text(label)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .lineLimit(1)

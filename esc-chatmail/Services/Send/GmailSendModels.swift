@@ -122,7 +122,17 @@ extension GmailSendService {
         case optimisticCreationFailed
         case conversationNotFound
         case noRecipients
+        /// The selected message cannot anchor the reply: it moved to another
+        /// conversation, was deleted, has no Gmail thread, or is a send that
+        /// is not confirmed yet. Choosing another message fixes it. Contrast
+        /// `replyConversationUnavailable`.
         case replyTargetUnavailable
+        /// The chat the reply is anchored to was deleted, or drained because
+        /// sync moved its messages to another conversation, so no message in
+        /// it can anchor the reply. Contrast `replyTargetUnavailable` (only
+        /// the selected message is unusable) and `conversationNotFound` (the
+        /// anchor could not be fetched at all).
+        case replyConversationUnavailable
         case sendAsAliasUnavailable(String)
         case ambiguousDelivery(String)
 
@@ -141,7 +151,18 @@ extension GmailSendService {
             case .noRecipients:
                 return "This message has no recipients. Your draft and attachments are still here."
             case .replyTargetUnavailable:
-                return "The message you selected moved or is no longer available. Reopen the conversation and try again."
+                // Only chat replies raise this, before transmission admission,
+                // so the composer still holds the draft. The old advice,
+                // "Reopen the conversation", could not help: draft restore
+                // brought the same moved target back (it now only offers
+                // "Clear target"). Choosing another message fixes it in place.
+                // When the chat itself moved, no message in it can help; that
+                // is `replyConversationUnavailable`.
+                return "The message you selected moved or is no longer available. Your draft is still here. Long-press another message and choose Reply to send it."
+            case .replyConversationUnavailable:
+                // Also the copy of `ChatViewModel.sendReply`'s own drained
+                // check, which reads it from here so the two cannot drift.
+                return "This conversation moved while you were replying. Your draft and attachments are still here."
             case .sendAsAliasUnavailable(let address):
                 return "This message was sent to \(address), but Gmail is not configured to send from that address. Add it in Gmail Settings -> Accounts -> Send mail as."
             case .ambiguousDelivery(let message):
