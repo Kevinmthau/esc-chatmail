@@ -179,8 +179,8 @@ final class ConversationLaunchRepairCoordinator {
     /// send defers its conversation indefinitely, and the backfill must not
     /// wait on it. While such a send is retained, the pass's main scan is
     /// already complete and each sync-completion re-run only re-checks the
-    /// deferred rows (`ChatPreviewRepair.Checkpoint`), so it no longer
-    /// re-derives the mailbox under the gate optimistic sends wait on.
+    /// deferred conversations (`ChatPreviewRepair.Checkpoint`), so it no
+    /// longer re-derives the mailbox under the gate optimistic sends wait on.
     func repairPersistedChatPreviews() {
         let pendingPasses = chatPreviewPasses().filter {
             !storage.migrationFlags.bool(forKey: $0.migrationKey)
@@ -206,16 +206,23 @@ final class ConversationLaunchRepairCoordinator {
             storage.migrationFlags.string(forKey: pass.checkpointKey)
         )
         // In-run cursor over the deferred list. Deliberately not persisted:
-        // each run (launch or sync completion) re-checks every deferred row
-        // once. Still-pending rows do not count against a retry batch's
-        // limit, so while nothing has cleared that check is one short hold.
+        // each run (launch or sync completion) re-checks every deferred
+        // conversation once. Still-pending conversations cost no fetch and do
+        // not count against a retry batch's limit, so while nothing has
+        // cleared that check is one short hold. A run interrupted inside a
+        // cleared conversation restarts that conversation next run; its
+        // already re-derived rows then derive to the same preview and change
+        // nothing.
         //
         // The checkpoint, like the completion flag, is not account-scoped and
         // survives sign-out. A replacement account inherits it harmlessly:
-        // the previous account's deferred IDs match no row and drop on the
-        // first retry, and the new account's rows are ingested with the
-        // current derivation. Account teardown therefore does not clear it.
-        var retryCursor: String?
+        // the previous account's deferred conversation IDs match no row, so
+        // each is retried through its participant hash (waiting out a pending
+        // send on a same-hash conversation, like any other), which at most
+        // re-derives the new account's same-participant rows under the
+        // current derivation they were ingested with, and then drops.
+        // Account teardown therefore does not clear it.
+        var retryCursor: ChatPreviewRepair.RetryCursor?
         while !Task.isCancelled {
             // Never wait for sync while holding a lease: account teardown
             // waits for leases to drain before replacing the store.
@@ -240,18 +247,22 @@ final class ConversationLaunchRepairCoordinator {
                 checkpoint = batchCheckpoint.advanced(by: batch)
                 isComplete = checkpoint.isComplete
                 switch batch.phase {
-                case .mainScan:
-                    // A drained scan with deferred rows left falls through to
-                    // one retry sweep this run (a send may have cleared while
-                    // the scan ran); a legacy restart continues the scan.
+                case .mainScan, .legacyDeferredMigration:
+                    // A drained scan with deferred conversations left falls
+                    // through to one retry sweep this run (a send may have
+                    // cleared while the scan ran); a legacy restart continues
+                    // the scan, and a migrated legacy list continues with
+                    // whichever phase the checkpoint is in.
                     isFinished = isComplete
                 case .deferredRetry:
-                    retryCursor = batch.lastMessageID
+                    retryCursor = batch.retryCursor
                     isFinished = isComplete || batch.didDrain
                 }
-                // A retry sweep over still-pending rows leaves the checkpoint
-                // unchanged; skip rewriting the whole deferred list then, since
-                // it repeats on every sync completion while a send is retained.
+                // A retry sweep over still-pending conversations leaves the
+                // checkpoint unchanged; skip the write then, since it repeats
+                // on every sync completion while a send is retained. A retry
+                // batch that is still inside a cleared conversation also leaves
+                // it unchanged: only a finished conversation leaves the list.
                 if checkpoint != batchCheckpoint {
                     storage.migrationFlags.setString(checkpoint.encoded, forKey: pass.checkpointKey)
                 }
@@ -273,7 +284,7 @@ final class ConversationLaunchRepairCoordinator {
         repair: ChatPreviewRepair,
         lease: SyncRun,
         checkpoint: ChatPreviewRepair.Checkpoint,
-        retryAfter retryCursor: String?
+        retryAfter retryCursor: ChatPreviewRepair.RetryCursor?
     ) async -> ChatPreviewRepair.Batch? {
         guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease) else { return nil }
         let context = storage.makeBackgroundContext()

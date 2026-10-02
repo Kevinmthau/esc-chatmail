@@ -5,7 +5,12 @@ import Foundation
 /// caller owns the account lease, pending-send serialization, save, and durable
 /// cursor checkpoint. Messages in conversations with a pending
 /// `OutboundSendMutationRecord` are deferred, never rewritten; once the main
-/// scan drains, only those deferred rows are retried.
+/// scan drains, only those deferred conversations are retried.
+///
+/// Split across:
+/// - `ChatPreviewRepair.swift` - passes, batches, and preview derivation
+/// - `ChatPreviewRepair+Checkpoint.swift` - the durable checkpoint and its
+///   deferred-conversation list, including legacy checkpoint decoding
 struct ChatPreviewRepair {
     enum Pass: Sendable {
         /// Re-derives received previews from local HTML after a derivation
@@ -23,148 +28,71 @@ struct ChatPreviewRepair {
         case blankPreviewBackfill
     }
 
+    /// The deferred-retry sweep's position within one run. Deliberately never
+    /// persisted (see `ConversationLaunchRepairCoordinator.runChatPreviewPass`).
+    struct RetryCursor: Sendable, Equatable {
+        /// `DeferredConversation.sortKey` of the conversation the sweep is in,
+        /// or has just passed.
+        var conversationKey: String
+        /// The last row re-derived in that conversation, or nil once the
+        /// sweep is done with it (finished, still pending, or gone).
+        var afterMessageID: String?
+    }
+
     struct Batch: Sendable {
         enum Phase: Sendable {
             /// One ID-ordered slice of the full scan.
             case mainScan
-            /// One ID-ordered slice of the persisted deferred list.
+            /// One slice of the deferred-conversation sweep.
             case deferredRetry
+            /// Maps a checkpoint's legacy per-message deferred IDs to their
+            /// conversations; derives nothing.
+            case legacyDeferredMigration
         }
 
         var phase: Phase = .mainScan
-        /// Main scan: the scan cursor. Deferred retry: the last deferred ID
-        /// this batch examined, which is the caller's in-run retry cursor.
+        /// Main scan only: the scan cursor.
         var lastMessageID: String?
         var changedMessageIDs: Set<String> = []
         /// Main scan: no rows remain after the cursor. Deferred retry: this
-        /// batch examined the last deferred ID.
+        /// batch is done with the last deferred conversation.
         var didDrain = false
-        /// Rows skipped because their conversation still has a pending
-        /// `OutboundSendMutationRecord`: newly deferred by a main-scan batch,
-        /// or still deferred after a retry batch.
-        var deferredMessageIDs: [String] = []
-        /// Deferred retry only: the deferred IDs this batch examined. Each one
-        /// leaves the deferred list unless it is in `deferredMessageIDs` again.
-        var retriedMessageIDs: [String] = []
-    }
-
-    /// One serialized checkpoint keeps the scan cursor and the deferred rows
-    /// together if the process exits between batches.
-    ///
-    /// Deferred rows are remembered by message ID once the main scan has
-    /// passed them, and the scan is marked complete when it drains. Earlier
-    /// builds remembered only the first deferred ID and restarted the whole
-    /// scan from it whenever a pass drained; a retained failed or
-    /// delivery-unknown send can live indefinitely, so those builds re-derived
-    /// every later row on every sync completion, holding the cleanup-sensitive
-    /// gate that optimistic sends wait on.
-    struct Checkpoint: Codable, Sendable, Equatable {
-        var afterMessageID: String?
-        /// Legacy: written only by builds that predate `deferredMessageIDs`.
-        /// A checkpoint decoded with it set restarts the scan from it once, at
-        /// drain, to learn which rows that build skipped; new scans never set it.
-        var firstDeferredMessageID: String?
-        /// Lower bound for the scan; set only by a legacy restart.
-        var resumeAtMessageID: String?
-        /// Sorted, de-duplicated IDs of rows the main scan skipped for a
-        /// pending send and has not yet re-derived.
-        var deferredMessageIDs: [String] = []
-        var isMainScanComplete = false
-
-        init(
-            afterMessageID: String? = nil,
-            firstDeferredMessageID: String? = nil,
-            resumeAtMessageID: String? = nil,
-            deferredMessageIDs: [String] = [],
-            isMainScanComplete: Bool = false
-        ) {
-            self.afterMessageID = afterMessageID
-            self.firstDeferredMessageID = firstDeferredMessageID
-            self.resumeAtMessageID = resumeAtMessageID
-            self.deferredMessageIDs = deferredMessageIDs
-            self.isMainScanComplete = isMainScanComplete
-        }
-
-        /// Tolerates the pre-`deferredMessageIDs` encoding: every key is
-        /// optional, so an old checkpoint decodes with an empty deferred list
-        /// and an incomplete main scan instead of failing and restarting the
-        /// pass from scratch.
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            afterMessageID = try container.decodeIfPresent(String.self, forKey: .afterMessageID)
-            firstDeferredMessageID = try container.decodeIfPresent(String.self, forKey: .firstDeferredMessageID)
-            resumeAtMessageID = try container.decodeIfPresent(String.self, forKey: .resumeAtMessageID)
-            deferredMessageIDs = try container.decodeIfPresent([String].self, forKey: .deferredMessageIDs) ?? []
-            isMainScanComplete = try container.decodeIfPresent(Bool.self, forKey: .isMainScanComplete) ?? false
-        }
-
-        static func decode(_ value: String?) -> Self {
-            value.flatMap { $0.data(using: .utf8) }
-                .flatMap { try? JSONDecoder().decode(Self.self, from: $0) } ?? Self()
-        }
-
-        var encoded: String? {
-            (try? JSONEncoder().encode(self)).flatMap { String(data: $0, encoding: .utf8) }
-        }
-
-        /// The pass may latch its completion flag: the scan drained and every
-        /// deferred row has since been re-derived (or no longer exists).
-        var isComplete: Bool {
-            isMainScanComplete && deferredMessageIDs.isEmpty
-        }
-
-        /// The checkpoint to persist after `batch` saved successfully.
-        func advanced(by batch: Batch) -> Self {
-            var next = self
-            switch batch.phase {
-            case .mainScan:
-                next.afterMessageID = batch.lastMessageID
-                next.deferredMessageIDs = Self.normalized(deferredMessageIDs + batch.deferredMessageIDs)
-                guard batch.didDrain else { return next }
-                if let legacyBoundary = firstDeferredMessageID {
-                    // A pre-upgrade scan skipped rows from this ID on without
-                    // recording which. Rescan that range once; this scan
-                    // records what it skips, so the restart cannot repeat.
-                    next = Self(
-                        resumeAtMessageID: legacyBoundary,
-                        deferredMessageIDs: next.deferredMessageIDs
-                    )
-                } else {
-                    next.afterMessageID = nil
-                    next.resumeAtMessageID = nil
-                    next.isMainScanComplete = true
-                }
-            case .deferredRetry:
-                let retried = Set(batch.retriedMessageIDs)
-                next.deferredMessageIDs = Self.normalized(
-                    deferredMessageIDs.filter { !retried.contains($0) } + batch.deferredMessageIDs
-                )
-            }
-            return next
-        }
-
-        private static func normalized(_ messageIDs: [String]) -> [String] {
-            Array(Set(messageIDs)).sorted()
-        }
+        /// Main scan: conversations whose rows this batch skipped for a
+        /// pending `OutboundSendMutationRecord`. Legacy migration: the current
+        /// conversations of the legacy deferred rows.
+        var deferredConversations: [DeferredConversation] = []
+        /// Deferred retry only: conversations this batch finished, whose rows
+        /// are all re-derived (or that have no rows left to find). Each leaves
+        /// the deferred list; still-pending conversations are never listed.
+        var retriedConversationIDs: [UUID] = []
+        /// Deferred retry only: where the next retry batch of this run resumes.
+        var retryCursor: RetryCursor?
     }
 
     let htmlContentHandler: HTMLContentHandler
     var pass: Pass = .receivedHTMLRederivation
 
-    /// The next batch for `checkpoint`: a main-scan slice until the scan
-    /// completes, then a slice of the deferred list after `retryAfter` (the
-    /// caller's in-run retry cursor, never persisted, so every run re-checks
-    /// the whole deferred list once).
+    /// The next batch for `checkpoint`: a legacy-list migration first if the
+    /// checkpoint still carries per-message deferred IDs, then a main-scan
+    /// slice until the scan completes, then a slice of the deferred sweep
+    /// after `retryCursor` (the caller's in-run retry cursor, never persisted,
+    /// so every run re-checks the whole deferred list once).
     func prepareNextBatch(
         in context: NSManagedObjectContext,
         checkpoint: Checkpoint,
-        retryAfter retryCursor: String?,
+        retryAfter retryCursor: RetryCursor?,
         limit: Int = 100
     ) async throws -> Batch {
+        if !checkpoint.legacyDeferredMessageIDs.isEmpty {
+            return try await prepareLegacyDeferredMigrationBatch(
+                in: context,
+                legacyDeferredMessageIDs: checkpoint.legacyDeferredMessageIDs
+            )
+        }
         if checkpoint.isMainScanComplete {
             return try await prepareDeferredRetryBatch(
                 in: context,
-                deferredMessageIDs: checkpoint.deferredMessageIDs,
+                deferredConversations: checkpoint.deferredConversations,
                 after: retryCursor,
                 limit: limit
             )
@@ -177,77 +105,153 @@ struct ChatPreviewRepair {
         )
     }
 
-    /// Re-derives deferred rows whose conversation no longer has a pending
-    /// `OutboundSendMutationRecord`. Rows still pending stay deferred without
-    /// a disk read; rows that no longer exist or no longer match the pass
-    /// leave the list. The pending set is read inside this `perform`, which
-    /// the caller runs under the cleanup-sensitive gate, so a send that lands
-    /// first is seen and one that lands after waits for this batch to save.
-    ///
-    /// `limit` bounds the rows this batch derives, not the rows it examines.
-    /// A retained failed or delivery-unknown send can defer a whole long
-    /// conversation indefinitely, and every sync completion re-runs this
-    /// sweep; counting still-pending rows against `limit` turned that into
-    /// one gate hold and one checkpoint rewrite per `limit` deferred rows on
-    /// every sync, none of which changed anything. Still-pending rows cost
-    /// only an ID-chunked fetch (`lookupChunkSize` IDs per `IN` predicate),
-    /// so a sweep that finds nothing to derive is a single short hold.
-    func prepareDeferredRetryBatch(
+    /// Converts the per-message deferred list an earlier build persisted into
+    /// deferred conversations, so the checkpoint stops carrying one ID per
+    /// row. Each legacy row is located by ID and its current conversation is
+    /// deferred, which over-covers (the whole conversation is retried, and
+    /// re-deriving an already-current row changes nothing) but never drops a
+    /// row that still needs deriving. Rows that no longer exist or no longer
+    /// match the pass leave the list, exactly as the old per-row retry dropped
+    /// them. A row with no conversation is dropped too: the legacy scan
+    /// deferred only rows of a pending conversation, and with no conversation
+    /// there is nothing a retry could find it by.
+    func prepareLegacyDeferredMigrationBatch(
         in context: NSManagedObjectContext,
-        deferredMessageIDs: [String],
-        after retryCursor: String?,
-        limit: Int = 100,
+        legacyDeferredMessageIDs: [String],
         lookupChunkSize: Int = 500
     ) async throws -> Batch {
-        let remaining = deferredMessageIDs.sorted().filter { id in retryCursor.map { id > $0 } ?? true }
-        guard !remaining.isEmpty else {
-            return Batch(phase: .deferredRetry, lastMessageID: retryCursor, didDrain: true)
-        }
-        let derivationLimit = max(1, limit)
+        let ids = Array(Set(legacyDeferredMessageIDs)).sorted()
         let chunkSize = max(1, lookupChunkSize)
         return try await context.perform {
-            try Task.checkCancellation()
-            let pendingConversationIDs = try Self.pendingConversationIDs(in: context)
-            var batch = Batch(phase: .deferredRetry, lastMessageID: retryCursor)
-            var derivedCount = 0
-            var chunkStart = remaining.startIndex
-            while chunkStart < remaining.endIndex, derivedCount < derivationLimit {
+            var batch = Batch(phase: .legacyDeferredMigration)
+            var seen = Set<UUID>()
+            var chunkStart = ids.startIndex
+            while chunkStart < ids.endIndex {
                 try Task.checkCancellation()
-                let chunk = Array(remaining[chunkStart..<min(chunkStart + chunkSize, remaining.endIndex)])
+                let chunk = Array(ids[chunkStart..<min(chunkStart + chunkSize, ids.endIndex)])
                 let request = Message.fetchRequest()
                 request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
                     Self.basePredicate(for: pass),
                     NSPredicate(format: "id IN %@", chunk as NSArray)
                 ])
                 request.relationshipKeyPathsForPrefetching = ["conversation"]
-                // Sorted here rather than by the store, so the stop point
-                // below and the `<=` filter agree on one ordering.
-                let messages = try context.fetch(request).sorted { $0.id < $1.id }
-                // The last ID this chunk examined. Stopping at the derivation
-                // limit examines the chunk only through the row that hit it;
-                // later IDs stay untouched for the next batch.
-                var examinedThrough = chunk[chunk.count - 1]
-                for message in messages {
-                    try Task.checkCancellation()
-                    if let conversationID = message.conversation?.id,
-                       pendingConversationIDs.contains(conversationID) {
-                        batch.deferredMessageIDs.append(message.id)
-                        continue
-                    }
-                    applyDerivedPreview(to: message, recordingChangeIn: &batch)
-                    derivedCount += 1
-                    if derivedCount >= derivationLimit {
-                        examinedThrough = message.id
-                        break
-                    }
+                for message in try context.fetch(request) {
+                    guard let conversation = message.conversation,
+                          seen.insert(conversation.id).inserted else { continue }
+                    batch.deferredConversations.append(DeferredConversation(conversation))
                 }
-                // IDs the fetch did not return no longer exist or no longer
-                // match the pass; listing them as retried drops them.
-                batch.retriedMessageIDs.append(contentsOf: chunk.filter { $0 <= examinedThrough })
-                batch.lastMessageID = examinedThrough
                 chunkStart += chunk.count
             }
-            batch.didDrain = batch.lastMessageID == remaining.last
+            return batch
+        }
+    }
+
+    /// Re-derives the rows of deferred conversations that no longer have a
+    /// pending `OutboundSendMutationRecord`. A still-pending conversation
+    /// stays deferred without a fetch, let alone a disk read. The pending set
+    /// is read inside this `perform`, which the caller runs under the
+    /// cleanup-sensitive gate, so a send that lands first is seen and one that
+    /// lands after waits for this batch to save.
+    ///
+    /// Deferral is per conversation, not per row, so the persisted list is
+    /// bounded by the conversations that had a retained send when the scan
+    /// reached them rather than by their row counts. The retry therefore
+    /// re-derives the conversation's rows as they are now, which also covers
+    /// rows that arrived after the scan (re-deriving a current row changes
+    /// nothing). A deferred conversation can stop existing only after its
+    /// record cleared, since both duplicate-merge passes skip pending
+    /// conversations; a merge moves its rows into a survivor with the same
+    /// participant hash, so a gone conversation is retried through every
+    /// conversation with its recorded hash, unless one of those is pending.
+    /// Rows sync re-homes out of a deferred conversation get a freshly
+    /// processed preview in that same save.
+    ///
+    /// HONEST SCOPE: two moves are not followed. The one-shot participant-set
+    /// split migration (`DataCleanupService+Migration`) can move rows of a
+    /// surviving deferred conversation into a conversation with a different
+    /// hash, and those rows keep their previous derivation until they are next
+    /// ingested. A blank-preview row that sync re-homes with no preview at all
+    /// stays blank, which the bubble loader's compatibility path still renders.
+    /// The per-row list this replaced followed both, at the cost of growing
+    /// with every deferred row.
+    ///
+    /// `limit` bounds the rows this batch derives, not the conversations it
+    /// examines: a retained failed or delivery-unknown send can defer a
+    /// conversation indefinitely, and every sync completion re-runs this
+    /// sweep, so a sweep that finds nothing to derive is a single short hold.
+    func prepareDeferredRetryBatch(
+        in context: NSManagedObjectContext,
+        deferredConversations: [DeferredConversation],
+        after retryCursor: RetryCursor?,
+        limit: Int = 100
+    ) async throws -> Batch {
+        let remaining = deferredConversations
+            .sorted { $0.sortKey < $1.sortKey }
+            .filter { entry in
+                guard let retryCursor else { return true }
+                return entry.sortKey > retryCursor.conversationKey ||
+                    (entry.sortKey == retryCursor.conversationKey && retryCursor.afterMessageID != nil)
+            }
+        guard let lastKey = remaining.last?.sortKey else {
+            return Batch(phase: .deferredRetry, didDrain: true, retryCursor: retryCursor)
+        }
+        let derivationLimit = max(1, limit)
+        return try await context.perform {
+            try Task.checkCancellation()
+            let pendingConversationIDs = try Self.pendingConversationIDs(in: context)
+            var batch = Batch(phase: .deferredRetry, retryCursor: retryCursor)
+            var derivedCount = 0
+            for entry in remaining {
+                guard derivedCount < derivationLimit else { break }
+                try Task.checkCancellation()
+                let resumeAfter = retryCursor?.conversationKey == entry.sortKey ? retryCursor?.afterMessageID : nil
+                let scope = try Self.retryScope(
+                    for: entry,
+                    pendingConversationIDs: pendingConversationIDs,
+                    in: context
+                )
+                let rowScope: NSPredicate
+                switch scope {
+                case .pending:
+                    // Stays deferred; later conversations are still examined.
+                    batch.retryCursor = RetryCursor(conversationKey: entry.sortKey)
+                    continue
+                case .gone:
+                    batch.retriedConversationIDs.append(entry.id)
+                    batch.retryCursor = RetryCursor(conversationKey: entry.sortKey)
+                    continue
+                case .rows(let predicate):
+                    rowScope = predicate
+                }
+                var predicates = [Self.basePredicate(for: pass), rowScope]
+                if let resumeAfter {
+                    predicates.append(NSPredicate(format: "id > %@", resumeAfter))
+                }
+                let budget = derivationLimit - derivedCount
+                let request = Message.fetchRequest()
+                request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
+                request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
+                request.fetchLimit = budget
+                request.fetchBatchSize = budget
+                let messages = try context.fetch(request)
+                for message in messages {
+                    try Task.checkCancellation()
+                    applyDerivedPreview(to: message, recordingChangeIn: &batch)
+                }
+                derivedCount += messages.count
+                if messages.count < budget {
+                    batch.retriedConversationIDs.append(entry.id)
+                    batch.retryCursor = RetryCursor(conversationKey: entry.sortKey)
+                } else {
+                    // The budget ran out inside this conversation; the next
+                    // batch resumes after the last row derived here.
+                    batch.retryCursor = RetryCursor(
+                        conversationKey: entry.sortKey,
+                        afterMessageID: messages.last?.id
+                    )
+                }
+            }
+            batch.didDrain = batch.retryCursor == RetryCursor(conversationKey: lastKey)
             return batch
         }
     }
@@ -276,14 +280,17 @@ struct ChatPreviewRepair {
             request.relationshipKeyPathsForPrefetching = ["conversation"]
             let messages = try context.fetch(request)
             var batch = Batch(lastMessageID: messageID, didDrain: messages.isEmpty)
+            var deferredIDs = Set<UUID>()
             for message in messages {
                 try Task.checkCancellation()
-                if let conversationID = message.conversation?.id,
-                   pendingConversationIDs.contains(conversationID) {
+                if let conversation = message.conversation,
+                   pendingConversationIDs.contains(conversation.id) {
                     // Retained failed sends can live indefinitely. Remember the
-                    // row for a targeted retry without starving later
+                    // conversation for a targeted retry without starving later
                     // unrelated messages or rescanning past it.
-                    batch.deferredMessageIDs.append(message.id)
+                    if deferredIDs.insert(conversation.id).inserted {
+                        batch.deferredConversations.append(DeferredConversation(conversation))
+                    }
                     batch.lastMessageID = message.id
                     continue
                 }
@@ -292,6 +299,39 @@ struct ChatPreviewRepair {
             }
             return batch
         }
+    }
+
+    private enum RetryScope {
+        /// The conversation (or, once gone, a conversation sharing its hash)
+        /// still has a pending send: leave the entry deferred.
+        case pending
+        /// Nothing left to find: the entry leaves the list.
+        case gone
+        /// The rows to re-derive.
+        case rows(NSPredicate)
+    }
+
+    private static func retryScope(
+        for entry: DeferredConversation,
+        pendingConversationIDs: Set<UUID>,
+        in context: NSManagedObjectContext
+    ) throws -> RetryScope {
+        // A record can outlive its conversation, so pending is checked first.
+        guard !pendingConversationIDs.contains(entry.id) else { return .pending }
+        let existing = Conversation.fetchRequest()
+        existing.predicate = NSPredicate(format: "id == %@", entry.id as CVarArg)
+        if try context.count(for: existing) > 0 {
+            return .rows(NSPredicate(format: "conversation.id == %@", entry.id as CVarArg))
+        }
+        guard let participantHash = entry.participantHash else { return .gone }
+        let survivors = NSFetchRequest<NSDictionary>(entityName: "Conversation")
+        survivors.resultType = .dictionaryResultType
+        survivors.propertiesToFetch = ["id"]
+        survivors.predicate = NSPredicate(format: "participantHash == %@", participantHash)
+        let survivorIDs = try context.fetch(survivors).compactMap { $0["id"] as? UUID }
+        guard !survivorIDs.isEmpty else { return .gone }
+        guard pendingConversationIDs.isDisjoint(with: survivorIDs) else { return .pending }
+        return .rows(NSPredicate(format: "conversation.participantHash == %@", participantHash))
     }
 
     private static func pendingConversationIDs(in context: NSManagedObjectContext) throws -> Set<UUID> {
