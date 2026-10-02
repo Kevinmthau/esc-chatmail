@@ -125,6 +125,14 @@ final class ConversationLaunchRepairCoordinator {
     static let blankChatPreviewBackfillMigrationKey = "chatPreviewBlankBackfill.v1"
     static let blankChatPreviewBackfillCheckpointKey = blankChatPreviewBackfillMigrationKey + ".checkpoint"
     private static let chatPreviewRepairTaskKey = "repairPersistedChatPreviews"
+    /// Rows per cleanup-sensitive hold. Each re-derivation row reads an HTML
+    /// file and runs the preview derivation while the gate is held, and an
+    /// optimistic send queued behind that hold waits for the whole batch at
+    /// this pass's background priority (the gate's continuation does not
+    /// escalate it). 100-row batches could hold it for seconds on a large,
+    /// throttled store; the per-batch lease, sync-idle check, and save are
+    /// cheap next to the derivation. Unmeasured: tune with a trace if needed.
+    static let chatPreviewRepairBatchSize = 25
 
     /// One entry per persisted-preview pass, run in order under a single
     /// account-work request. Each pass owns its own completion flag and cursor.
@@ -169,7 +177,10 @@ final class ConversationLaunchRepairCoordinator {
     /// resume without re-reading every earlier HTML file. No model migration.
     /// A pass that stops early does not block the next one: a retained failed
     /// send defers its conversation indefinitely, and the backfill must not
-    /// wait on it.
+    /// wait on it. While such a send is retained, the pass's main scan is
+    /// already complete and each sync-completion re-run only re-checks the
+    /// deferred rows (`ChatPreviewRepair.Checkpoint`), so it no longer
+    /// re-derives the mailbox under the gate optimistic sends wait on.
     func repairPersistedChatPreviews() {
         let pendingPasses = chatPreviewPasses().filter {
             !storage.migrationFlags.bool(forKey: $0.migrationKey)
@@ -194,6 +205,17 @@ final class ConversationLaunchRepairCoordinator {
         var checkpoint = ChatPreviewRepair.Checkpoint.decode(
             storage.migrationFlags.string(forKey: pass.checkpointKey)
         )
+        // In-run cursor over the deferred list. Deliberately not persisted:
+        // each run (launch or sync completion) re-checks every deferred row
+        // once. Still-pending rows do not count against a retry batch's
+        // limit, so while nothing has cleared that check is one short hold.
+        //
+        // The checkpoint, like the completion flag, is not account-scoped and
+        // survives sign-out. A replacement account inherits it harmlessly:
+        // the previous account's deferred IDs match no row and drop on the
+        // first retry, and the new account's rows are ingested with the
+        // current derivation. Account teardown therefore does not clear it.
+        var retryCursor: String?
         while !Task.isCancelled {
             // Never wait for sync while holding a lease: account teardown
             // waits for leases to drain before replacing the store.
@@ -203,29 +225,43 @@ final class ConversationLaunchRepairCoordinator {
                 return .stopped
             }
             let batchCheckpoint = checkpoint
+            let batchRetryCursor = retryCursor
             let batch = await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
                 await self.prepareAndSaveChatPreviewBatch(
                     repair: pass.repair,
                     lease: lease,
-                    checkpoint: batchCheckpoint
+                    checkpoint: batchCheckpoint,
+                    retryAfter: batchRetryCursor
                 )
             }
             var isComplete = false
+            var isFinished = true
             if let batch {
-                checkpoint.afterMessageID = batch.lastMessageID
-                checkpoint.firstDeferredMessageID = checkpoint.firstDeferredMessageID ?? batch.firstDeferredMessageID
-                isComplete = batch.didDrain && checkpoint.firstDeferredMessageID == nil
-                if batch.didDrain, let deferred = checkpoint.firstDeferredMessageID {
-                    checkpoint = ChatPreviewRepair.Checkpoint(resumeAtMessageID: deferred)
+                checkpoint = batchCheckpoint.advanced(by: batch)
+                isComplete = checkpoint.isComplete
+                switch batch.phase {
+                case .mainScan:
+                    // A drained scan with deferred rows left falls through to
+                    // one retry sweep this run (a send may have cleared while
+                    // the scan ran); a legacy restart continues the scan.
+                    isFinished = isComplete
+                case .deferredRetry:
+                    retryCursor = batch.lastMessageID
+                    isFinished = isComplete || batch.didDrain
                 }
-                storage.migrationFlags.setString(checkpoint.encoded, forKey: pass.checkpointKey)
+                // A retry sweep over still-pending rows leaves the checkpoint
+                // unchanged; skip rewriting the whole deferred list then, since
+                // it repeats on every sync completion while a send is retained.
+                if checkpoint != batchCheckpoint {
+                    storage.migrationFlags.setString(checkpoint.encoded, forKey: pass.checkpointKey)
+                }
                 if isComplete {
                     storage.migrationFlags.set(true, forKey: pass.migrationKey)
                     storage.migrationFlags.setString(nil, forKey: pass.checkpointKey)
                 }
             }
             await accountWorkCoordinator.endRun(lease)
-            guard let batch, !batch.didDrain else {
+            guard batch != nil, !isFinished else {
                 return isComplete ? .completed : .incomplete
             }
             await Task.yield()
@@ -235,16 +271,19 @@ final class ConversationLaunchRepairCoordinator {
 
     private func prepareAndSaveChatPreviewBatch(
         repair: ChatPreviewRepair,
-        lease: SyncRun, checkpoint: ChatPreviewRepair.Checkpoint
+        lease: SyncRun,
+        checkpoint: ChatPreviewRepair.Checkpoint,
+        retryAfter retryCursor: String?
     ) async -> ChatPreviewRepair.Batch? {
         guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease) else { return nil }
         let context = storage.makeBackgroundContext()
         context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
         do {
-            let batch = try await repair.prepareBatch(
+            let batch = try await repair.prepareNextBatch(
                 in: context,
-                after: checkpoint.afterMessageID,
-                startingAt: checkpoint.resumeAtMessageID
+                checkpoint: checkpoint,
+                retryAfter: retryCursor,
+                limit: Self.chatPreviewRepairBatchSize
             )
             guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease),
                   storage.saveIfNeeded(context) else {
