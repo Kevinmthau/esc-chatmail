@@ -993,7 +993,9 @@ final class ComposeSendOrchestratorTests: XCTestCase {
             optimisticMessageID: "path-returns",
             preTransmissionFailureDisposition: .retainAsNotSent
         )
-        await waitUntil { pathMonitor.suspendedWaiterCount == 1 }
+        // The gate's path wait and deadline are sibling task-group children
+        // with no ordering between them: wait for both before asserting.
+        await waitUntil { pathMonitor.suspendedWaiterCount == 1 && clock.sleeps.count == 1 }
 
         // Revert-check: deleting the `OutboundConnectivityGate.waitForUsablePath`
         // call from `ComposeSendOrchestrator.executeInBackground`'s `transmit`
@@ -1144,6 +1146,117 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         }
     }
 
+    func testExecuteInBackground_backgroundExpiryWhileWaitingForPath_chatReplyRetainsAsNotSent() async throws {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        var failureIDs: [String] = []
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks,
+            networkPathMonitor: pathMonitor,
+            // The deadline never fires: UIKit's allowance runs out first.
+            connectivityWaitClock: ParkedSyncClock()
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "path-expired-reply",
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: { failure in failureIDs.append(failure.optimisticMessageID) }
+            ),
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+        await waitUntil { pathMonitor.suspendedWaiterCount == 1 }
+
+        // The user sent offline and locked the phone.
+        // Revert-check: dropping the `backgroundTimeExpiredWithoutTeardown`
+        // branch from the `catch is CancellationError` of
+        // `ComposeSendOrchestrator.executeInBackground` rolls the reply back
+        // (its bubble vanishes into the draft) and fails admission here.
+        backgroundTasks.expire()
+        XCTAssertEqual(backgroundTasks.endedIdentifiers.count, 1, "Return UIKit's time immediately")
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 0, "Preflight never started")
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertTrue(snapshot.recordAmbiguousRemoteSendCalls.isEmpty)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+        // A cancellation has no reason the user can act on.
+        XCTAssertNil(snapshot.failureReasons["path-expired-reply"])
+        XCTAssertEqual(failureIDs, ["path-expired-reply"])
+        XCTAssertEqual(pathMonitor.suspendedWaiterCount, 0)
+    }
+
+    func testExecuteInBackground_backgroundExpiryWhileWaitingForPath_composeRollsBackToComposer() async {
+        let sendService = MockComposeSendService()
+        let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks,
+            networkPathMonitor: pathMonitor,
+            connectivityWaitClock: ParkedSyncClock()
+        ).executeInBackground(input: makeInput(), attachmentReferences: [], optimisticMessageID: "path-expired-compose")
+        await waitUntil { pathMonitor.suspendedWaiterCount == 1 }
+
+        // ComposeView still owns its content until admission, so expiry hands
+        // it back exactly as the deadline would.
+        backgroundTasks.expire()
+        do {
+            try await operation.waitForTransmissionAdmission()
+            XCTFail("An expired compose must hand its content back to the composer")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 1)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 0)
+    }
+
+    func testExecuteInBackground_backgroundExpiryThenPreflightError_chatReplyRetainsAsNotSent() async throws {
+        let sendService = MockComposeSendService()
+        // An ordinary error, as a token refresh cancelled mid-request can
+        // surface, rather than `CancellationError`.
+        sendService.sendNewPreflightError = GmailSendService.SendError.apiError("Refresh interrupted")
+        let backgroundTasks = MockOutboundBackgroundTaskManager()
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer(),
+            backgroundTaskManager: backgroundTasks
+        ).executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "expired-preflight-reply",
+            preTransmissionFailureDisposition: .retainAsNotSent
+        )
+
+        // MainActor has not yielded to the worker yet: it is installed
+        // already expired.
+        // Revert-check: making the generic pre-barrier retain branch of
+        // `ComposeSendOrchestrator.executeInBackground` also refuse on
+        // `backgroundTimeExpired` (the retired `stopWasRequested`) rolls the
+        // reply back and fails admission here.
+        backgroundTasks.expire()
+        try await operation.waitForTransmissionAdmission()
+        await operation.task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.remoteTransmissionCalls, 0)
+        XCTAssertTrue(snapshot.recordRemoteSendAdmissionCalls.isEmpty)
+        XCTAssertEqual(snapshot.retainDefinitelyUnsentCalls, 1)
+        XCTAssertEqual(snapshot.rollbackBeforeTransmissionCalls, 0)
+    }
+
     func testExecuteInBackground_queuedSendsWaitForPathConcurrentlyThenTransmitInOrder() async throws {
         let sendService = MockComposeSendService()
         let pathMonitor = OutboundNetworkPathMonitor(manualPathSatisfied: false)
@@ -1179,7 +1292,8 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         // Revert-check: moving the `OutboundConnectivityGate.waitForUsablePath`
         // call after `sendOrderTurn?.waitUntilFront()` parks the second send
         // in the sequencer instead, and only one path waiter ever appears.
-        await waitUntil { pathMonitor.suspendedWaiterCount == 2 }
+        // Both sends' deadline children too: they race their path waits.
+        await waitUntil { pathMonitor.suspendedWaiterCount == 2 && clock.sleeps.count == 2 }
         XCTAssertEqual(sequencer.suspendedTurnCount, 0)
         XCTAssertEqual(clock.sleeps.count, 2)
         XCTAssertEqual(sendService.snapshot.remoteTransmissionCalls, 0)

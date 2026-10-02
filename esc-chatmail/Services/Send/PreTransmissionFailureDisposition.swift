@@ -5,10 +5,15 @@ import Foundation
 ///
 /// Nothing reached Gmail in either case, so neither is a duplicate-send
 /// hazard; the difference is who owns the user's content afterwards.
-/// Account teardown (`closeAdmission` / `cancelAndAwaitAll`), background-time
-/// expiry and any pre-barrier cancellation always roll back, whatever the
-/// request asked for: destructive cleanup follows a teardown, and a retained
-/// "Not sent" row would be left behind in an account being wiped.
+/// Account teardown (`closeAdmission` / `cancelAndAwaitAll`) and any
+/// pre-barrier cancellation without a recorded cause always roll back,
+/// whatever the request asked for: destructive cleanup follows a teardown,
+/// and a retained "Not sent" row would be left behind in an account being
+/// wiped. Background-time expiry before the barrier is not a teardown and
+/// follows the request's disposition: an offline reply parked in
+/// `OutboundConnectivityGate` when the phone is locked keeps its "Not sent"
+/// bubble rather than vanishing into the draft
+/// (`ComposeSendCancellationRelay.teardownRequested`).
 enum PreTransmissionFailureDisposition: Equatable, Sendable {
     /// Delete the optimistic graph and hand the body and attachments back to
     /// the source composer, which still owns them until transmission

@@ -34,11 +34,33 @@ final class OutboundNetworkPathMonitor: OutboundNetworkPathMonitoring, @unchecke
         let monitor = NWPathMonitor()
         self.monitor = monitor
         monitor.pathUpdateHandler = { [weak self] path in
-            self?.pathDidChange(isSatisfied: path.status == .satisfied)
+            self?.pathDidChange(isSatisfied: Self.isUsable(path.status))
         }
         monitor.start(
             queue: DispatchQueue(label: "com.esc-chatmail.OutboundNetworkPathMonitor", qos: .userInitiated)
         )
+    }
+
+    /// Whether a path status lets a send go ahead. Only `.unsatisfied` is
+    /// known-unsatisfied: `.requiresConnection` (an idle VPN On Demand tunnel,
+    /// a cellular context brought up on demand) is activated *by* a connection
+    /// attempt, and nothing in the gate makes one — treating it as offline
+    /// parked every send for the full `sendConnectivityWaitTimeout` and then
+    /// failed it without ever trying, where the request itself would have
+    /// brought the path up. A `.requiresConnection` path that turns out to be
+    /// genuinely offline still fails fast: the send session's own
+    /// pre-transmission `NSURLErrorNotConnectedToInternet` covers it.
+    static func isUsable(_ status: NWPath.Status) -> Bool {
+        switch status {
+        case .unsatisfied:
+            return false
+        case .satisfied, .requiresConnection:
+            return true
+        @unknown default:
+            // An unknown future status is not "known unsatisfied" — same
+            // stance as a path not yet reported.
+            return true
+        }
     }
 
     /// Testable initializer: no system monitor; `pathDidChange(isSatisfied:)`

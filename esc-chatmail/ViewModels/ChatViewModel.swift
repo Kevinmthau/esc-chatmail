@@ -815,7 +815,11 @@ final class ChatViewModel: ObservableObject {
             )
         } catch {
             Log.error("Failed to prepare reply send", category: .message, error: error)
-            returnUnsentReply(snapshot, notice: .notSent(error.localizedDescription), unpersistedSend: unpersistedSend)
+            returnUnsentReply(
+                snapshot,
+                notice: .notSent(ChatReplyRestorePolicy.unsentReplyAlertMessage(for: error)),
+                unpersistedSend: unpersistedSend
+            )
             return nil
         }
         guard let result else {
@@ -1009,7 +1013,7 @@ final class ChatViewModel: ObservableObject {
         if case .notSent(let alertMessage) = notice {
             sendErrorAlert = ChatSendErrorAlert(
                 title: "Reply Not Sent",
-                message: alertMessage ?? "Your reply was not sent. It is back in the reply field."
+                message: alertMessage ?? ChatReplyRestorePolicy.genericUnsentReplyMessage
             )
         }
         scheduleReplyDraftSave()

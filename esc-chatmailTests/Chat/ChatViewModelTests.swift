@@ -1747,6 +1747,27 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNotNil(viewModel.sendErrorAlert)
     }
 
+    func testSendReply_cancellationBeforeOptimisticPersistence_alertsGenericMessageNotRawError() async {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        // Account teardown cancels a send before admission.
+        fixture.coordinator.sendErrorBeforePersistence = CancellationError()
+        viewModel.replyText = "Cancelled reply"
+
+        let result = await viewModel.sendReply()
+
+        XCTAssertNil(result)
+        XCTAssertEqual(viewModel.replyText, "Cancelled reply")
+        // Revert-check: passing `error.localizedDescription` from
+        // `sendReply`'s `catch` instead of
+        // `ChatReplyRestorePolicy.unsentReplyAlertMessage(for:)` alerts
+        // CancellationError's raw "(Swift.CancellationError error 1.)" text.
+        XCTAssertEqual(
+            viewModel.sendErrorAlert?.message,
+            ChatReplyRestorePolicy.genericUnsentReplyMessage
+        )
+    }
+
     func testSendReply_rollbackAfterTypingDuringSend_mergesUnsentTextAndKeepsNewTarget() async {
         let fixture = makeComposerSendFixture()
         let viewModel = fixture.viewModel

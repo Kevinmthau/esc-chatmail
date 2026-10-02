@@ -6,6 +6,19 @@ import Foundation
 /// failure comes back the user may have started the next message. Neither
 /// piece of text may be dropped: the composer is the only owner of both.
 enum ChatReplyRestorePolicy {
+    /// Shown when a reply comes back without a reason the user can act on.
+    static let genericUnsentReplyMessage = "Your reply was not sent. It is back in the reply field."
+
+    /// The alert text for a reply handed back to its composer after `error`.
+    ///
+    /// A cancellation (account teardown, or a pre-barrier stop with no
+    /// recorded cause) has no actionable description: its `localizedDescription`
+    /// is the raw "The operation couldn't be completed.
+    /// (Swift.CancellationError error 1.)".
+    static func unsentReplyAlertMessage(for error: Error) -> String {
+        error is CancellationError ? genericUnsentReplyMessage : error.localizedDescription
+    }
+
     /// The unsent text, followed by anything typed since the tap.
     static func restoredText(unsentText: String, typedSinceSend: String) -> String {
         guard !typedSinceSend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

@@ -16,8 +16,10 @@ import Foundation
 /// the request's `PreTransmissionFailureDisposition` decides the outcome (chat
 /// replies retain as "Not sent"; compose and forward roll back to their
 /// composer). Cancellation (account teardown, background expiry) throws
-/// `CancellationError` at once and rolls back like any pre-barrier
-/// cancellation. The wait is never repeated after the barrier.
+/// `CancellationError` at once; teardown rolls back like any pre-barrier
+/// cancellation, while background expiry follows the request's disposition
+/// (`ComposeSendCancellationRelay.teardownRequested`). The wait is never
+/// repeated after the barrier.
 enum OutboundConnectivityGate {
     static func waitForUsablePath(
         monitor: any OutboundNetworkPathMonitoring,
