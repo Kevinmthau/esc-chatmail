@@ -127,11 +127,34 @@ struct ChatMessagesView: View {
                         bottomContentInset: transcriptBottomInset,
                         scrollProxy: proxy
                     )
-                    .opacity(shouldHideMessages ? 0 : 1)
+                    // Hidden under an opaque cover, not `.opacity(0)`, so the
+                    // transcript is drawn throughout its hidden anchor pass
+                    // and revealing it only removes the cover. "The chat opens
+                    // blank until I scroll" persisted after #270 corrected
+                    // every measured way of revealing it scrolled past its
+                    // end, which leaves a reveal whose geometry reads correct
+                    // while nothing is drawn: a subtree faded in from opacity
+                    // 0 that does not repaint until a scroll. Not reproduced;
+                    // with the cover there is nothing left to repaint. An
+                    // overlay, so it never takes part in the layout the
+                    // anchor pass measures. Touches pass through it: a drag
+                    // during the hidden pass must still reach the scroll
+                    // view's gesture below, which reveals the rows and
+                    // cancels further forced anchoring, the reader's way out
+                    // of a pass that is taking long. Taps and long presses
+                    // are kept off the unseen bubbles by the rows themselves
+                    // (`allowsHitTesting` on the lazy stack).
+                    .overlay {
+                        if shouldHideMessages {
+                            Color(UIColor.systemBackground)
+                                .ignoresSafeArea()
+                                .allowsHitTesting(false)
+                        }
+                    }
                     .accessibilityHidden(shouldHideMessages)
-                    // Keep the scroll gesture available while loaded rows are
-                    // waiting for their initial anchor. Taking control reveals
-                    // the rows and cancels further forced anchoring.
+                    // Rows exist to touch only once the window has loaded;
+                    // the scroll gesture stays available through the hidden
+                    // anchor pass (see the cover above).
                     .allowsHitTesting(initialLoadPhase == .loaded)
 
                     if shouldHideMessages {
@@ -189,6 +212,7 @@ struct ChatMessagesView: View {
                 ChatViewPerformanceSignposts.contentReady(
                     conversationID: conversation.id.uuidString
                 )
+                logRevealedScrollPosition()
             }
             .onReceive(scrollState.insertedVisibleMessageEvents) { event in
                 coordinator.handleInsertedVisibleMessageEvent(
@@ -352,6 +376,12 @@ struct ChatMessagesView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { isTextFieldFocused.wrappedValue = false }
+            // Bubbles under the cover must not take a tap (opening the
+            // reader) or a long press (lifting a context-menu preview) the
+            // reader cannot see. Scrolling is the scroll view's own gesture
+            // and keeps working, so a drag during the hidden pass still
+            // reveals (see the cover in `body`).
+            .allowsHitTesting(coordinator.isReadyToShow)
         }
         // Anchor roles: `ChatTranscriptScrollAnchorPolicy`. The content end
         // is pinned while the transcript is hidden, so the window lands on
@@ -771,6 +801,29 @@ struct ChatMessagesView: View {
             isChatActiveAndUncovered: isChatActiveAndUncovered,
             isShowingLatestWindow: scrollState.isShowingLatestWindow,
             isBottomAnchorVisible: isVisible
+        )
+    }
+
+    /// Logs where UIKit has the transcript scrolled at the reveal next to where
+    /// the anchor geometry puts its end. On iOS 26+ `contentOffsetY` comes
+    /// from the scroll view itself (`ChatTranscriptOffsetShifter`), so in a
+    /// blank open whose coordinator geometry reads correct, comparing
+    /// `scrollOffsetY + anchorMaxY` with a good open's shows whether the two
+    /// disagree. Below iOS 26 the offset is never tracked and reads 0.
+    ///
+    /// A `Log.diagnostic`, so it reaches only a Debug build launched from
+    /// Xcode with ESC_LOG_DIAGNOSTICS=chat-view, never the field log the
+    /// coordinator's always-on warnings write: it fires on every open, and
+    /// nothing at the reveal tells a blank open from a good one.
+    private func logRevealedScrollPosition() {
+        let tracking = transcriptShiftTracking
+        let anchorMaxY = tracking.bottomAnchorMaxY.map { String(format: "%.1f", $0) } ?? "nil"
+        let viewportHeight = tracking.viewportHeight.map { String(format: "%.1f", $0) } ?? "nil"
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "ChatView revealed rows=\(scrollState.visibleMessages.count) scrollOffsetY=\(String(format: "%.1f", tracking.contentOffsetY)) offsetTracked=\(ChatTranscriptOffsetShifter.isSupported) anchorMaxY=\(anchorMaxY) viewportHeight=\(viewportHeight)",
+            category: .ui
         )
     }
 
