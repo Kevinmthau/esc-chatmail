@@ -601,12 +601,17 @@ struct ChatMessagesView: View {
         return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
     }
 
+    /// Whether the transcript is on screen: the initial window has loaded and
+    /// the coordinator's hidden anchor pass has finished.
+    private var isTranscriptRevealed: Bool {
+        scrollState.initialLoadPhase == .loaded && coordinator.isReadyToShow
+    }
+
     /// Whether the transcript can be scrolled by inset shifts right now.
     private var isTranscriptOffsetShiftAvailable: Bool {
         ChatBottomInsetPolicy.isOffsetShiftAvailable(
             supportsOffsetShift: ChatTranscriptOffsetShifter.isSupported,
-            isTranscriptRevealed: scrollState.initialLoadPhase == .loaded &&
-                coordinator.isReadyToShow
+            isTranscriptRevealed: isTranscriptRevealed
         )
     }
 
@@ -633,7 +638,11 @@ struct ChatMessagesView: View {
         proxy: ScrollViewProxy
     ) {
         let newInset = newComponents.inset
-        switch ChatBottomInsetPolicy.spacerTransition(from: oldComponents, to: newComponents) {
+        switch ChatBottomInsetPolicy.spacerTransition(
+            from: oldComponents,
+            to: newComponents,
+            isTranscriptRevealed: isTranscriptRevealed
+        ) {
         case .immediate:
             var transaction = Transaction()
             transaction.disablesAnimations = true

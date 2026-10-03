@@ -83,14 +83,14 @@ final class ChatBottomInsetPolicyTests: XCTestCase {
     /// which clamps the compensating shift to the mid-animation content size.
     func testSpacerTransition_keyboardShow_appliesImmediately() {
         XCTAssertEqual(
-            ChatBottomInsetPolicy.spacerTransition(from: keyboardHidden, to: keyboardShown),
+            ChatBottomInsetPolicy.spacerTransition(from: keyboardHidden, to: keyboardShown, isTranscriptRevealed: true),
             .immediate
         )
     }
 
     func testSpacerTransition_replyBarGrowth_appliesImmediately() {
         XCTAssertEqual(
-            ChatBottomInsetPolicy.spacerTransition(from: keyboardShown, to: withReplyingToRow),
+            ChatBottomInsetPolicy.spacerTransition(from: keyboardShown, to: withReplyingToRow, isTranscriptRevealed: true),
             .immediate
         )
     }
@@ -101,7 +101,7 @@ final class ChatBottomInsetPolicyTests: XCTestCase {
     /// shrink in step with the composer.
     func testSpacerTransition_keyboardHide_replaysKeyboardAnimation() {
         XCTAssertEqual(
-            ChatBottomInsetPolicy.spacerTransition(from: keyboardShown, to: keyboardHidden),
+            ChatBottomInsetPolicy.spacerTransition(from: keyboardShown, to: keyboardHidden, isTranscriptRevealed: true),
             .keyboardAnimation
         )
     }
@@ -110,14 +110,14 @@ final class ChatBottomInsetPolicyTests: XCTestCase {
         let hiddenWithTallerBar = Components(replyBarHeight: replyBarHeight + 30, keyboardOffset: 0)
 
         XCTAssertEqual(
-            ChatBottomInsetPolicy.spacerTransition(from: keyboardShown, to: hiddenWithTallerBar),
+            ChatBottomInsetPolicy.spacerTransition(from: keyboardShown, to: hiddenWithTallerBar, isTranscriptRevealed: true),
             .keyboardAnimation
         )
     }
 
     func testSpacerTransition_replyBarShrink_inheritsTransaction() {
         XCTAssertEqual(
-            ChatBottomInsetPolicy.spacerTransition(from: withReplyingToRow, to: keyboardShown),
+            ChatBottomInsetPolicy.spacerTransition(from: withReplyingToRow, to: keyboardShown, isTranscriptRevealed: true),
             .inherited
         )
     }
@@ -126,8 +126,66 @@ final class ChatBottomInsetPolicyTests: XCTestCase {
         let jittered = Components(replyBarHeight: replyBarHeight + 0.3, keyboardOffset: keyboardOffset)
 
         XCTAssertEqual(
-            ChatBottomInsetPolicy.spacerTransition(from: keyboardShown, to: jittered),
+            ChatBottomInsetPolicy.spacerTransition(from: keyboardShown, to: jittered, isTranscriptRevealed: true),
             .inherited
+        )
+    }
+
+    /// A chat pushed from the conversation list while the search keyboard is
+    /// up: the hide lands while the transcript is still hidden, and an
+    /// animated spacer shrink there put the hidden-pass scroll-to-bottom
+    /// inside the animation, parking the reveal past the content end.
+    ///
+    /// Revert-check: removing `guard isTranscriptRevealed else { return
+    /// .immediate }` from `ChatBottomInsetPolicy.spacerTransition` makes this
+    /// hide replay the keyboard animation again.
+    func testSpacerTransition_keyboardHideWhileTranscriptHidden_appliesImmediately() {
+        XCTAssertEqual(
+            ChatBottomInsetPolicy.spacerTransition(
+                from: keyboardShown,
+                to: keyboardHidden,
+                isTranscriptRevealed: false
+            ),
+            .immediate
+        )
+    }
+
+    /// Revert-check: removing `guard isTranscriptRevealed else { return
+    /// .immediate }` from `ChatBottomInsetPolicy.spacerTransition` makes the
+    /// hidden shrink inherit the transaction like the revealed one, which
+    /// the second assertion pins as the contrast.
+    func testSpacerTransition_replyBarShrinkWhileTranscriptHidden_appliesImmediately() {
+        XCTAssertEqual(
+            ChatBottomInsetPolicy.spacerTransition(
+                from: withReplyingToRow,
+                to: keyboardShown,
+                isTranscriptRevealed: false
+            ),
+            .immediate
+        )
+        XCTAssertEqual(
+            ChatBottomInsetPolicy.spacerTransition(
+                from: withReplyingToRow,
+                to: keyboardShown,
+                isTranscriptRevealed: true
+            ),
+            .inherited
+        )
+    }
+
+    /// Revert-check: fails only if the hidden branch of
+    /// `ChatBottomInsetPolicy.spacerTransition` stops returning `.immediate`
+    /// (HONEST SCOPE: removing the `guard isTranscriptRevealed` alone does
+    /// not fail it, because growth is `.immediate` after the reveal as well;
+    /// it pins that the hidden branch covers growth, not only shrinks).
+    func testSpacerTransition_growthWhileTranscriptHidden_appliesImmediately() {
+        XCTAssertEqual(
+            ChatBottomInsetPolicy.spacerTransition(
+                from: keyboardHidden,
+                to: keyboardShown,
+                isTranscriptRevealed: false
+            ),
+            .immediate
         )
     }
 
