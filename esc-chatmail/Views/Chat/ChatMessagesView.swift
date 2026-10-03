@@ -137,19 +137,23 @@ struct ChatMessagesView: View {
                     // 0 that does not repaint until a scroll. Not reproduced;
                     // with the cover there is nothing left to repaint. An
                     // overlay, so it never takes part in the layout the
-                    // anchor pass measures.
+                    // anchor pass measures. It takes touches, as the
+                    // transcript at opacity 0 effectively did (neither SwiftUI
+                    // nor UIKit hit-tests a fully transparent view): passing
+                    // them through let a tap open, or a long press lift, a
+                    // bubble the reader could not see.
                     .overlay {
                         if shouldHideMessages {
                             Color(UIColor.systemBackground)
                                 .ignoresSafeArea()
-                                .allowsHitTesting(false)
                         }
                     }
                     .accessibilityHidden(shouldHideMessages)
-                    // Keep the scroll gesture available while loaded rows are
-                    // waiting for their initial anchor (the cover passes
-                    // touches through). Taking control reveals the rows and
-                    // cancels further forced anchoring.
+                    // Rows exist to touch only once the window has loaded.
+                    // While they wait for their initial anchor the cover
+                    // takes every touch, so a drag cannot take the scroll
+                    // over before the reveal; the coordinator's time limit
+                    // and its watchdog bound that wait instead.
                     .allowsHitTesting(initialLoadPhase == .loaded)
 
                     if shouldHideMessages {
@@ -793,6 +797,11 @@ struct ChatMessagesView: View {
     /// blank open whose coordinator geometry reads correct, comparing
     /// `scrollOffsetY + anchorMaxY` with a good open's shows whether the two
     /// disagree. Below iOS 26 the offset is never tracked and reads 0.
+    ///
+    /// A `Log.diagnostic`, so it reaches only a Debug build launched from
+    /// Xcode with ESC_LOG_DIAGNOSTICS=chat-view, never the field log the
+    /// coordinator's always-on warnings write: it fires on every open, and
+    /// nothing at the reveal tells a blank open from a good one.
     private func logRevealedScrollPosition() {
         let tracking = transcriptShiftTracking
         let anchorMaxY = tracking.bottomAnchorMaxY.map { String(format: "%.1f", $0) } ?? "nil"

@@ -7682,9 +7682,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     /// The pass's time limit is otherwise evaluated only by a geometry
-    /// report. If none arrives (a dropped SwiftUI delivery), the transcript
-    /// must still be revealed at the limit instead of waiting behind the
-    /// spinner for the reader's first touch.
+    /// report. If none arrives (a dropped SwiftUI delivery), the watchdog
+    /// must still reveal the transcript once the limit has passed, instead of
+    /// leaving it behind the spinner's cover, which takes every touch.
     ///
     /// Revert-check: removing the `armInitialRevealWatchdog` call from
     /// `ChatMessagesCoordinator.performInitialScroll` leaves the transcript

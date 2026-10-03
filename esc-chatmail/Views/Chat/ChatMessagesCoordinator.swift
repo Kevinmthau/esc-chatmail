@@ -113,6 +113,12 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// beat (`UIConfig.initialScrollDelay`), so a park still standing then is
     /// one the correction did not, or could not, fix.
     private static let postRevealAuditDelay: TimeInterval = 1.0
+    /// How long past the reveal time limit the watchdog waits before it
+    /// reveals a still-pending pass itself. A working geometry signal
+    /// evaluates the deadline within a re-probe or two of it (each takes
+    /// `UIConfig.initialScrollDelay`), so the grace leaves the deadline to
+    /// that signal and the watchdog acts only when it has gone quiet.
+    private static let initialRevealWatchdogGrace: TimeInterval = 1.0
 
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
@@ -178,8 +184,13 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// Wall-clock deadline for the pending initial-anchor pass; armed by
     /// `performInitialScroll`, cleared on completion. Consulted only while
     /// `initialRevealState` is `.pending`: by every offscreen geometry report,
-    /// and by the pass's watchdog when no report arrives at all.
+    /// and by the pass's watchdog when no report has revealed the pass
+    /// within `initialRevealWatchdogGrace` of it.
     private var initialAnchorRevealDeadline: TimeInterval?
+    /// When `handleBottomAnchorGeometryUpdate` last ran, for the watchdog's
+    /// log line: it tells a geometry signal that went quiet from one that
+    /// kept reporting without revealing.
+    private var lastBottomAnchorGeometryReportAt: TimeInterval?
     /// Whether any geometry update has carried a laid-out bottom-anchor frame
     /// this reveal pass. Until then, "anchor offscreen" only means "the lazy
     /// trailing anchor has not been realized", so it must not consume the
@@ -222,14 +233,17 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var consecutivePastContentEndCorrections = 0
     /// The shortest tracked content height at which a past-end correction
     /// fired during the current parked stretch. A parked report with shorter
-    /// content than every corrected one is the lazy stack re-measuring rows
-    /// the corrections themselves realized (real heights under the estimates
-    /// each scroll was planned with), which moves the content end up past a
-    /// landing that was right when made. That is progress, not the stuck
-    /// signal `maximumConsecutivePastContentEndCorrections` exists for, so it
-    /// restarts the count. Tracked as the minimum rather than the latest
-    /// height so content oscillating between two heights cannot restart it
-    /// forever: each restart needs a new low.
+    /// content than every corrected one restarts the count of
+    /// `maximumConsecutivePastContentEndCorrections`: the content changed
+    /// under the correction, so it is not the stuck signal the bound exists
+    /// for. The suspected case (not observed on device) is the lazy stack
+    /// re-measuring rows a correction realized, with real heights under the
+    /// estimates its scroll was planned with, which moves the content end up
+    /// past a landing that was right when made. Any other new low (a spacer
+    /// or bubble shrinking) restarts it too, which is harmless. Tracked as the
+    /// minimum rather than the latest height so content oscillating between
+    /// two heights cannot restart it forever: each restart needs a new low,
+    /// and `frame(minHeight:)` floors the content at the viewport height.
     private var smallestContentHeightCorrectedPastEnd: CGFloat?
     /// The correction bound was reached and logged for the current parked
     /// stretch; logged once, since every later geometry report re-reaches it.
@@ -562,6 +576,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         let previousContentMinY = trackedContentMinY
         let previousContentHeight = trackedContentHeight
         let previousViewportHeight = trackedViewportHeight
+        lastBottomAnchorGeometryReportAt = now()
         if hasBottomAnchorGeometry {
             hasObservedBottomAnchorGeometry = true
         }
@@ -1837,26 +1852,29 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
-    /// Reveals a pass still pending at its time limit even if no geometry
-    /// report arrives to evaluate the deadline.
+    /// Reveals a pass still pending `initialRevealWatchdogGrace` after its
+    /// time limit, when no geometry report has evaluated the deadline.
     ///
     /// The deadline is otherwise read only inside
     /// `handleBottomAnchorGeometryUpdate`, which the view calls from geometry
     /// and `initialAnchorGeometryCheckID` changes. Every pending phase keeps
-    /// those coming (each re-probe task ends in a check-ID bump), so this
-    /// fires only if SwiftUI drops a delivery. Nothing in this repo is known
-    /// to cause that, but without the watchdog the transcript would then stay
-    /// hidden behind the spinner until the reader's first touch. One shot:
-    /// waking before the deadline (`now()` and the sleep's clock can
-    /// disagree) leaves the deadline to the next geometry report, rather than
-    /// re-sleeping in a loop a test's immediate sleep would spin.
+    /// those coming (each re-probe task ends in a check-ID bump), so a pass
+    /// still pending after the grace means the reports stopped, as when
+    /// SwiftUI drops a delivery. Nothing in this repo is known to cause that,
+    /// but without the watchdog the transcript would then stay hidden behind
+    /// the spinner, which takes every touch. One shot: waking before the
+    /// deadline (`now()` and the sleep's clock can disagree) leaves the
+    /// deadline to the next geometry report, rather than re-sleeping in a
+    /// loop a test's immediate sleep would spin.
     private func armInitialRevealWatchdog(
         deadline: TimeInterval,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        let timeLimitNanoseconds = UInt64(Self.initialAnchorRevealTimeLimit * 1_000_000_000)
+        let waitNanoseconds = UInt64(
+            (Self.initialAnchorRevealTimeLimit + Self.initialRevealWatchdogGrace) * 1_000_000_000
+        )
         taskManager.run(TaskKey.initialRevealWatchdog) { [weak self, watchdogSleep] in
-            await watchdogSleep(timeLimitNanoseconds)
+            await watchdogSleep(waitNanoseconds)
             guard !Task.isCancelled,
                   let self,
                   case .pending = self.initialRevealState,
@@ -1865,10 +1883,13 @@ final class ChatMessagesCoordinator: ObservableObject {
                   self.now() >= deadline else {
                 return
             }
+            let lastReport = self.lastBottomAnchorGeometryReportAt.map {
+                String(format: "%.2fs ago", self.now() - $0)
+            } ?? "never"
             self.completeInitialReveal(
                 wasVisiblyConfirmed: false,
                 armsBottomFollowAfterFallback: self.hasObservedBottomAnchorGeometry,
-                fallbackReason: "time limit reached without a geometry update"
+                fallbackReason: "time limit passed with no geometry report revealing it (watchdog; last report \(lastReport))"
             )
             // The geometry handler's deferred check never ran for this reveal.
             self.updatePastContentEndCorrection(scrollAction: scrollAction)
@@ -2077,11 +2098,11 @@ final class ChatMessagesCoordinator: ObservableObject {
             return
         }
         // A correction lands on the content end, and the next report reads
-        // in range and resets the count. When the landing realizes rows that
-        // turn out shorter than estimated, the same layout pass moves the end
-        // up again and that report already reads parked, so without this the
-        // count ran out while each correction was still making progress
-        // (`smallestContentHeightCorrectedPastEnd`).
+        // in range and resets the count. If the landing realizes rows shorter
+        // than estimated (suspected, not observed), the same layout pass
+        // moves the end up again and that report already reads parked; the
+        // count alone would then run out while each correction still made
+        // progress (`smallestContentHeightCorrectedPastEnd`).
         if let smallestCorrectedHeight = smallestContentHeightCorrectedPastEnd,
            let trackedContentHeight,
            trackedContentHeight < smallestCorrectedHeight - Self.geometryChangeTolerance {
@@ -2209,9 +2230,12 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// changes no state.
     ///
     /// Together with the reveal and correction warnings, it splits the next
-    /// device report of a blank open: no warning at all means the geometry
-    /// read as correct while nothing showed (a rendering problem, not a
-    /// scroll position one); a warning names the scroll position problem.
+    /// device report of a blank open: a warning names a scroll position
+    /// problem. No warning at all means the last geometry the coordinator
+    /// received read as correct while nothing showed, which points at
+    /// drawing rather than position, unless geometry deliveries stopped
+    /// (then the tracked values are stale; the watchdog's line says when the
+    /// last report came).
     private func schedulePostRevealAudit() {
         let delay = Self.postRevealAuditDelay
         taskManager.run(TaskKey.postRevealAudit) { [weak self, watchdogSleep] in
