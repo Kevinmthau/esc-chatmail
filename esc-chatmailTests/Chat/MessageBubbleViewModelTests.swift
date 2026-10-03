@@ -550,6 +550,7 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 isFromMe: true,
                 isNewsletter: false,
                 isLikelyCalendarInvite: false,
+                senderEmail: nil,
                 chatPreviewText: nil,
                 hasDisplayableAttachments: false
             )

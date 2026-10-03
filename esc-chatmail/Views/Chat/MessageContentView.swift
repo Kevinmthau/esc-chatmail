@@ -64,13 +64,17 @@ struct MessageContentView: View {
             isFromMe: message.isFromMe,
             isNewsletter: message.isNewsletter,
             isLikelyCalendarInvite: message.isLikelyCalendarInvite,
+            senderEmail: message.effectiveSenderEmail,
             chatPreviewText: message.chatPreviewText,
             hasDisplayableAttachments: hasDisplayableAttachments
         ) {
             // Avoid flashing raw/partial HTML-derived text while async content detection is still
-            // running. The user's own rows with a stored preview are exempt: their text is final,
-            // and the pill flickered on every reply's echo remount (see the policy). So are their
-            // attachments-only rows, whose pill vanished into nothing once the load finished.
+            // running. Rows whose stored preview is their final text are exempt (see the policy):
+            // the user's own rows, whose pill flickered on every reply's echo remount, and
+            // incoming rows that cannot route to a preview card on stored inputs alone, whose
+            // pill → bubble swap reset the hidden initial-anchor pass on every chat open. So are
+            // the user's attachments-only rows, whose pill vanished into nothing once the load
+            // finished.
             loadingPlaceholder
         } else {
             if let text = resolvedVisibleText, !text.isEmpty {

@@ -282,6 +282,7 @@ final class MessageDisplayPolicyTests: XCTestCase {
         isFromMe: Bool = true,
         isNewsletter: Bool = false,
         isLikelyCalendarInvite: Bool = false,
+        senderEmail: String? = nil,
         chatPreviewText: String? = "On my way, see you at 6",
         hasDisplayableAttachments: Bool = false
     ) -> Bool {
@@ -292,6 +293,7 @@ final class MessageDisplayPolicyTests: XCTestCase {
             isFromMe: isFromMe,
             isNewsletter: isNewsletter,
             isLikelyCalendarInvite: isLikelyCalendarInvite,
+            senderEmail: senderEmail,
             chatPreviewText: chatPreviewText,
             hasDisplayableAttachments: hasDisplayableAttachments
         )
@@ -311,10 +313,73 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertFalse(showsTextLoadingPlaceholder())
     }
 
-    /// The comment in `MessageContentView.textContent` still holds for incoming mail: until
-    /// content detection finishes, its only text is raw/partial HTML-derived text.
+    /// The comment in `MessageContentView.textContent` still holds for incoming mail with no
+    /// stored preview: until content detection finishes, its only text is raw/partial
+    /// HTML-derived text.
     func testShowsTextLoadingPlaceholder_incomingHTMLBeforeLoad_showsPlaceholder() {
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: nil))
+    }
+
+    /// An incoming row's stored preview is the text the load will publish verbatim, and the
+    /// loader's only other output for it is the rich-content verdict. Each pill → bubble swap
+    /// reset the hidden initial-anchor pass, so every chat of incoming HTML bubbles opened late.
+    /// Displayed attachments and a non-transactional sender change nothing.
+    ///
+    /// Revert-check: deleting the `rendersStoredIncomingPreview` branch in
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` (back to "incoming HTML source and not
+    /// loaded → pill") fails this test.
+    ///
+    /// HONEST SCOPE: this pins the decision. That `MessageContentView.textContent` renders the
+    /// stored text when it holds, and passes `effectiveSenderEmail`, is view wiring; there is no
+    /// UI test target to cover it.
+    func testShowsTextLoadingPlaceholder_incomingHTMLWithStoredPreviewBeforeLoad_rendersText() {
+        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false))
+        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, senderEmail: "alice@example.com"))
+        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, hasDisplayableAttachments: true))
+    }
+
+    /// Newsletter and calendar-invite rows can route to a preview card on stored inputs alone, so
+    /// their stored preview is not their final rendering: the card would replace it.
+    ///
+    /// Revert-check: dropping `!isNewsletter` or `!isLikelyCalendarInvite` from
+    /// `rendersStoredIncomingPreview` in `MessageDisplayPolicy.showsTextLoadingPlaceholder` fails
+    /// the matching assertion.
+    func testShowsTextLoadingPlaceholder_incomingNewsletterOrInviteWithStoredPreview_showsPlaceholder() {
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, isNewsletter: true))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, isLikelyCalendarInvite: true))
+    }
+
+    /// `shouldShowHTMLPreview` routes a trusted transactional sender to a preview card without
+    /// waiting for rich-content classification, so its stored preview is not its final rendering
+    /// either. The sender is matched on its parsed domain, as the preview routing does.
+    ///
+    /// Revert-check: dropping `!isTrustedTransactionalSender(senderEmail)` from
+    /// `rendersStoredIncomingPreview` in `MessageDisplayPolicy.showsTextLoadingPlaceholder` fails
+    /// this test.
+    func testShowsTextLoadingPlaceholder_incomingTrustedTransactionalSenderWithStoredPreview_showsPlaceholder() {
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, senderEmail: "noreply@members.ebay.com"))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, senderEmail: "ship-confirm@amazon.com"))
+        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, senderEmail: "x@members.ebay.com.evil.example"))
+    }
+
+    /// Forwarded rows wait for the structured forward summary whatever text they store.
+    ///
+    /// Revert-check: moving the `if isForwardedEmail { return true }` early return in
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` below the incoming-row branch, or
+    /// deleting it, fails this test.
+    func testShowsTextLoadingPlaceholder_incomingForwardedWithStoredPreview_showsPlaceholder() {
+        XCTAssertTrue(showsTextLoadingPlaceholder(isForwardedEmail: true, isFromMe: false))
+        XCTAssertTrue(showsTextLoadingPlaceholder(hasHTMLSource: false, isForwardedEmail: true, isFromMe: false))
+    }
+
+    /// A blank stored preview is no stored preview: the row has no final text to show yet.
+    ///
+    /// Revert-check: testing `chatPreviewText != nil` instead of
+    /// `MessagePreviewText.nonEmpty(chatPreviewText) != nil` in the incoming-row branch of
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` fails this test.
+    func testShowsTextLoadingPlaceholder_incomingWithBlankStoredPreview_showsPlaceholder() {
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: ""))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: " \n\t "))
     }
 
     func testShowsTextLoadingPlaceholder_ownHTMLWithoutStoredPreview_showsPlaceholder() {
@@ -337,12 +402,15 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertFalse(showsTextLoadingPlaceholder(chatPreviewText: " \n\t ", hasDisplayableAttachments: true))
     }
 
-    /// Only the user's own text-routed rows are exempt. Incoming mail still waits for content
-    /// detection, and forwarded, newsletter and invite rows can still route elsewhere, whatever
-    /// attachments they carry.
+    /// Only the user's own text-routed rows get the attachments exemption. Incoming mail without a
+    /// stored preview still waits for content detection, and forwarded, newsletter and invite rows
+    /// can still route elsewhere, whatever attachments they carry.
     func testShowsTextLoadingPlaceholder_attachmentsOnIncomingForwardedNewsletterOrInvite_showsPlaceholder() {
         XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: nil, hasDisplayableAttachments: true))
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, hasDisplayableAttachments: true))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, isNewsletter: true, hasDisplayableAttachments: true))
+        XCTAssertTrue(
+            showsTextLoadingPlaceholder(isFromMe: false, isLikelyCalendarInvite: true, hasDisplayableAttachments: true)
+        )
         XCTAssertTrue(
             showsTextLoadingPlaceholder(isForwardedEmail: true, chatPreviewText: nil, hasDisplayableAttachments: true)
         )
@@ -362,8 +430,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
     }
 
     func testShowsTextLoadingPlaceholder_withoutHTMLSourceOrOnceLoaded_rendersText() {
-        XCTAssertFalse(showsTextLoadingPlaceholder(hasHTMLSource: false, isFromMe: false))
-        XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isFromMe: false))
+        XCTAssertFalse(showsTextLoadingPlaceholder(hasHTMLSource: false, isFromMe: false, chatPreviewText: nil))
+        XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isFromMe: false, chatPreviewText: nil))
         XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isForwardedEmail: true))
     }
 
