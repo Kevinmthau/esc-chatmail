@@ -7635,7 +7635,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     /// must not run out at the bound meant for a stuck signal.
     ///
     /// Revert-check: removing the shrink reset (the `if` comparing
-    /// `trackedContentHeight` with `smallestContentHeightCorrectedPastEnd`) in
+    /// `trackedContentHeight` with `smallestParkedContentHeight`) in
     /// `ChatMessagesCoordinator.updatePastContentEndCorrection` leaves the
     /// third report at the bound and this test times out.
     func testPastContentEndCorrection_reparkedWithShrinkingContent_correctsPastBound() async throws {
@@ -7652,31 +7652,56 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     /// Content that keeps reading parked while it alternates between two
-    /// heights is a stuck signal, not progress: only a new low restarts the
-    /// count, so the bound still ends the corrections.
+    /// heights is a stuck signal, not progress: only a height below every
+    /// height the parked stretch has seen restarts the count, so the bound
+    /// still ends the corrections. Paced so that each swing reports its low
+    /// and the re-estimated height back before the quiet beat fires: the
+    /// correction then only ever fires at the higher height, and the low is
+    /// never a corrected height. Recording lows only at correction time let
+    /// that low read as new on every swing.
     ///
-    /// Revert-check: recording the latest corrected height instead of the
-    /// smallest (`smallestContentHeightCorrectedPastEnd = trackedContentHeight`
-    /// in `ChatMessagesCoordinator.updatePastContentEndCorrection`) restarts
-    /// the count on every swing back down and the inverted expectation fails.
+    /// Revert-check: dropping the `smallestParkedContentHeight =
+    /// trackedContentHeight` assignment from the restart branch of
+    /// `ChatMessagesCoordinator.updatePastContentEndCorrection` restarts the
+    /// count on every swing back down and the inverted expectation fails.
     func testPastContentEndCorrection_parkedContentAlternatingHeights_staysBounded() async throws {
-        let (coordinator, rows) = try makeParkedTestCoordinator()
+        let correctionGate = PermitGate()
+        var gatesCorrectionSleeps = false
+        let (coordinator, rows) = try makeParkedTestCoordinator(
+            sleep: { nanoseconds in
+                guard gatesCorrectionSleeps,
+                      nanoseconds == UInt64(UIConfig.initialScrollDelay * 1_000_000_000) else {
+                    return
+                }
+                await correctionGate.consume()
+            }
+        )
         await revealAtContentEnd(coordinator, rows: rows)
+        gatesCorrectionSleeps = true
         var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
         let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { steps.append($0) }
 
-        // 1000: first correction. 990: a new low restarts the count. 1000:
-        // second correction of the restarted count.
-        for (expectedCount, contentHeight) in [(1, CGFloat(1000)), (2, 990), (3, 1000)] {
-            reportParkedGeometry(coordinator, contentHeight: contentHeight, scrollAction: recordStep)
+        // Swing 1 corrects at 1000 with no low recorded yet. Swing 2's 990 is
+        // below it and restarts the count, recording 990; its correction fires
+        // at 1000 again. Swing 3's 990 is no longer below the recorded low, so
+        // its correction is the second of the restarted count: the bound.
+        for expectedCount in 1...3 {
+            reportParkedGeometry(coordinator, contentHeight: 1000, scrollAction: recordStep)
+            reportParkedGeometry(coordinator, contentHeight: 990, scrollAction: recordStep)
+            reportParkedGeometry(coordinator, contentHeight: 1000, scrollAction: recordStep)
+            await correctionGate.grant()
             await waitUntil { steps.count == expectedCount }
         }
+        XCTAssertEqual(steps, Array(repeating: Self.pastContentEndCorrectionStep, count: 3))
 
         let fourthCorrection = expectation(description: "990 is no new low")
         fourthCorrection.isInverted = true
-        reportParkedGeometry(coordinator, contentHeight: 990) { _ in
+        let failOnScroll: ChatMessagesCoordinator.BottomAnchorAction = { _ in
             fourthCorrection.fulfill()
         }
+        reportParkedGeometry(coordinator, contentHeight: 990, scrollAction: failOnScroll)
+        reportParkedGeometry(coordinator, contentHeight: 1000, scrollAction: failOnScroll)
+        await correctionGate.grant()
         await fulfillment(of: [fourthCorrection], timeout: 0.15)
         XCTAssertEqual(steps.count, 3)
     }
@@ -7691,10 +7716,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     /// hidden and this test times out.
     func testInitialRevealWatchdog_noGeometryReportByTimeLimit_revealsTranscript() async throws {
         let watchdogGate = ParkedSleepGate()
+        let watchdogWaits = WatchdogWaitRecorder()
         var currentTime: TimeInterval = 1_000
         let (coordinator, rows) = try makeParkedTestCoordinator(
             now: { currentTime },
-            watchdogSleep: { _ in
+            watchdogSleep: { nanoseconds in
+                await watchdogWaits.record(nanoseconds)
                 while await !watchdogGate.isReleased(), !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 10_000_000)
                 }
@@ -7710,6 +7737,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         await watchdogGate.release()
 
         await waitUntil { coordinator.isReadyToShow }
+        // The 3s time limit plus the 1s grace, in one sleep (a watchdog armed
+        // with the grace dropped, or in seconds, would reveal here just the
+        // same); the clock is already past the limit when it returns, so
+        // nothing re-arms.
+        let waits = await watchdogWaits.nanoseconds
+        XCTAssertEqual(waits, [4_000_000_000])
     }
 
     /// A watchdog that wakes before the time limit leaves the pass to the
@@ -7737,14 +7770,42 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isReadyToShow)
     }
 
+    /// A watchdog whose sleep returns before the deadline on the
+    /// coordinator's clock (`systemUptime` stops while the device sleeps; the
+    /// sleep's clock need not) re-arms once for the time left instead of
+    /// giving up, so a pass with no geometry reports still reveals.
+    ///
+    /// Revert-check: removing the re-arm (the `remaining > 0` sleep) from
+    /// `ChatMessagesCoordinator.armInitialRevealWatchdog` leaves the
+    /// transcript hidden and this test times out.
+    func testInitialRevealWatchdog_wakesEarly_reArmsForRemainingTimeThenReveals() async throws {
+        let watchdogWaits = WatchdogWaitRecorder()
+        var currentTime: TimeInterval = 1_000
+        let (coordinator, rows) = try makeParkedTestCoordinator(
+            now: { currentTime },
+            watchdogSleep: { nanoseconds in
+                await watchdogWaits.record(nanoseconds)
+                // The 4s sleep returns 0.5s short of the 3s deadline on the
+                // coordinator's clock; the re-armed sleep returns past it.
+                let returnedSleeps = await watchdogWaits.nanoseconds.count
+                currentTime = returnedSleeps == 1 ? 1_002.5 : 1_003.2
+            }
+        )
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("Without geometry nothing may scroll")
+        }
+
+        await waitUntil { coordinator.isReadyToShow }
+        let waits = await watchdogWaits.nanoseconds
+        XCTAssertEqual(waits, [4_000_000_000, 500_000_000])
+    }
+
     private func makeParkedTestCoordinator(
         sleep: @escaping ChatMessagesCoordinator.Sleep = { _ in },
         now: @escaping ChatMessagesCoordinator.Now = {
             ProcessInfo.processInfo.systemUptime
         },
-        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = { nanoseconds in
-            try? await Task.sleep(nanoseconds: nanoseconds)
-        }
+        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = ChatMessagesCoordinator.systemSleep
     ) throws -> (ChatMessagesCoordinator, [ChatMessageRowModel]) {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
@@ -7866,9 +7927,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         isMessagePublished: @escaping ChatMessagesCoordinator.MessagePublicationCheck = {
             _ in false
         },
-        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = { nanoseconds in
-            try? await Task.sleep(nanoseconds: nanoseconds)
-        }
+        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = ChatMessagesCoordinator.systemSleep
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
             loadLatestWindowIfNeeded: { _ in },
@@ -8044,6 +8103,36 @@ private actor ParkedSleepGate {
 
     func release() { released = true }
     func isReleased() -> Bool { released }
+}
+
+/// Releases gated sleeps one at a time: each `grant` lets exactly one live
+/// sleep return. A sleep whose task was cancelled meanwhile (the coordinator
+/// re-arms its correction on every geometry report, cancelling the previous
+/// task) returns without taking the permit, so the permit reaches the live
+/// one.
+private actor PermitGate {
+    private var granted = 0
+    private var consumed = 0
+
+    func grant() { granted += 1 }
+
+    func consume() async {
+        while true {
+            if Task.isCancelled { return }
+            if consumed < granted {
+                consumed += 1
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+}
+
+/// Records the durations the watchdog asked to sleep for.
+private actor WatchdogWaitRecorder {
+    private(set) var nanoseconds: [UInt64] = []
+
+    func record(_ value: UInt64) { nanoseconds.append(value) }
 }
 
 /// Test convenience restoring the defaulted geometry flag: production callers

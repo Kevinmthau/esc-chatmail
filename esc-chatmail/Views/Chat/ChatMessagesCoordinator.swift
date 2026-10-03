@@ -120,6 +120,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// that signal and the watchdog acts only when it has gone quiet.
     private static let initialRevealWatchdogGrace: TimeInterval = 1.0
 
+    /// `Task.sleep`, the default for `sleep` and `watchdogSleep`.
+    static let systemSleep: Sleep = { nanoseconds in
+        try? await Task.sleep(nanoseconds: nanoseconds)
+    }
+
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
         let animated: Bool
@@ -189,7 +194,9 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var initialAnchorRevealDeadline: TimeInterval?
     /// When `handleBottomAnchorGeometryUpdate` last ran, for the watchdog's
     /// log line: it tells a geometry signal that went quiet from one that
-    /// kept reporting without revealing.
+    /// kept reporting without revealing. Cleared when a pass starts and on
+    /// disappear, so the line never cites a report from an earlier pass or
+    /// appearance as this pass's last one.
     private var lastBottomAnchorGeometryReportAt: TimeInterval?
     /// Whether any geometry update has carried a laid-out bottom-anchor frame
     /// this reveal pass. Until then, "anchor offscreen" only means "the lazy
@@ -231,20 +238,24 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// scroll phases (iOS 26+); below that the drag flag stands alone.
     private var isTrackedScrollPhaseUserDriven = false
     private var consecutivePastContentEndCorrections = 0
-    /// The shortest tracked content height at which a past-end correction
-    /// fired during the current parked stretch. A parked report with shorter
-    /// content than every corrected one restarts the count of
-    /// `maximumConsecutivePastContentEndCorrections`: the content changed
-    /// under the correction, so it is not the stuck signal the bound exists
-    /// for. The suspected case (not observed on device) is the lazy stack
-    /// re-measuring rows a correction realized, with real heights under the
-    /// estimates its scroll was planned with, which moves the content end up
-    /// past a landing that was right when made. Any other new low (a spacer
-    /// or bubble shrinking) restarts it too, which is harmless. Tracked as the
-    /// minimum rather than the latest height so content oscillating between
-    /// two heights cannot restart it forever: each restart needs a new low,
-    /// and `frame(minHeight:)` floors the content at the viewport height.
-    private var smallestContentHeightCorrectedPastEnd: CGFloat?
+    /// The shortest tracked content height seen parked during the current
+    /// parked stretch: lowered when a correction fires and whenever a parked
+    /// report restarts the count. A parked report with content shorter than
+    /// this restarts the count of `maximumConsecutivePastContentEndCorrections`:
+    /// the content changed under the correction, so it is not the stuck
+    /// signal the bound exists for. The suspected case (not observed on
+    /// device) is the lazy stack re-measuring rows a correction realized,
+    /// with real heights under the estimates its scroll was planned with,
+    /// which moves the content end up past a landing that was right when
+    /// made. Any other new low (a spacer or bubble shrinking) restarts it
+    /// too, which is harmless. The restart itself records the new low: a low
+    /// that only ever shows up between corrections (reported, then
+    /// re-estimated back up before the quiet beat fires) would otherwise read
+    /// as new on every swing and restart the count forever. Each restart
+    /// therefore needs a height below every height this stretch has seen,
+    /// and `frame(minHeight:)` floors the content at the viewport height, so
+    /// restarts are finite.
+    private var smallestParkedContentHeight: CGFloat?
     /// The correction bound was reached and logged for the current parked
     /// stretch; logged once, since every later geometry report re-reaches it.
     private var didLogPastContentEndCorrectionBound = false
@@ -279,13 +290,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
         initialPresentationAnchor: InitialPresentationAnchor,
-        sleep: @escaping Sleep = { nanoseconds in
-            try? await Task.sleep(nanoseconds: nanoseconds)
-        },
+        sleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep,
         now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
-        watchdogSleep: @escaping Sleep = { nanoseconds in
-            try? await Task.sleep(nanoseconds: nanoseconds)
-        }
+        watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep
     ) {
         self.loadLatestWindowIfNeeded = { knownTotalCount in
             await scrollState.loadLatestWindowIfNeeded(knownTotalCount: knownTotalCount)
@@ -345,9 +352,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
         ensureVisibleMessage: @escaping MessageVisibilityEnsurer = { _ in true },
         isMessagePublished: @escaping MessagePublicationCheck = { _ in false },
-        watchdogSleep: @escaping Sleep = { nanoseconds in
-            try? await Task.sleep(nanoseconds: nanoseconds)
-        }
+        watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep
     ) {
         self.loadLatestWindowIfNeeded = loadLatestWindowIfNeeded
         self.ensureVisibleMessage = ensureVisibleMessage
@@ -433,8 +438,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         isTrackedUserScrollInteractionActive = false
         isTrackedScrollPhaseUserDriven = false
         consecutivePastContentEndCorrections = 0
-        smallestContentHeightCorrectedPastEnd = nil
+        smallestParkedContentHeight = nil
         didLogPastContentEndCorrectionBound = false
+        lastBottomAnchorGeometryReportAt = nil
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
         pendingAutoReadLayoutOrder.removeAll()
@@ -1835,6 +1841,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         let revealDeadline = now() + Self.initialAnchorRevealTimeLimit
         initialAnchorRevealDeadline = revealDeadline
         hasObservedBottomAnchorGeometry = false
+        lastBottomAnchorGeometryReportAt = nil
         didObserveGrowthDuringInitialRecheck = false
         didObserveParkedPastEndDuringInitialPass = false
         initialAnchorGeometryCheckID = UUID()
@@ -1862,10 +1869,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// still pending after the grace means the reports stopped, as when
     /// SwiftUI drops a delivery. Nothing in this repo is known to cause that,
     /// but without the watchdog the transcript would then stay hidden behind
-    /// the spinner, which takes every touch. One shot: waking before the
-    /// deadline (`now()` and the sleep's clock can disagree) leaves the
-    /// deadline to the next geometry report, rather than re-sleeping in a
-    /// loop a test's immediate sleep would spin.
+    /// the spinner until the reader drags it out. Waking before the deadline
+    /// (`now()` is `systemUptime`, which stops while the device sleeps; the
+    /// sleep's clock need not) re-arms once for the time left, then leaves
+    /// anything still short to the next geometry report rather than
+    /// re-sleeping in a loop a test's immediate sleep would spin.
     private func armInitialRevealWatchdog(
         deadline: TimeInterval,
         scrollAction: @escaping BottomAnchorAction
@@ -1875,8 +1883,12 @@ final class ChatMessagesCoordinator: ObservableObject {
         )
         taskManager.run(TaskKey.initialRevealWatchdog) { [weak self, watchdogSleep] in
             await watchdogSleep(waitNanoseconds)
+            guard !Task.isCancelled, let self else { return }
+            let remaining = deadline - self.now()
+            if remaining > 0 {
+                await watchdogSleep(UInt64(remaining * 1_000_000_000))
+            }
             guard !Task.isCancelled,
-                  let self,
                   case .pending = self.initialRevealState,
                   // A restarted pass armed its own deadline and watchdog.
                   self.initialAnchorRevealDeadline == deadline,
@@ -2088,7 +2100,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private func updatePastContentEndCorrection(scrollAction: @escaping BottomAnchorAction) {
         guard isTrackedContentParkedPastEnd else {
             consecutivePastContentEndCorrections = 0
-            smallestContentHeightCorrectedPastEnd = nil
+            smallestParkedContentHeight = nil
             didLogPastContentEndCorrectionBound = false
             taskManager.cancel(TaskKey.pastContentEndCorrection)
             return
@@ -2102,12 +2114,16 @@ final class ChatMessagesCoordinator: ObservableObject {
         // than estimated (suspected, not observed), the same layout pass
         // moves the end up again and that report already reads parked; the
         // count alone would then run out while each correction still made
-        // progress (`smallestContentHeightCorrectedPastEnd`).
-        if let smallestCorrectedHeight = smallestContentHeightCorrectedPastEnd,
+        // progress (`smallestParkedContentHeight`).
+        if let smallestParkedContentHeight,
            let trackedContentHeight,
-           trackedContentHeight < smallestCorrectedHeight - Self.geometryChangeTolerance {
+           trackedContentHeight < smallestParkedContentHeight - Self.geometryChangeTolerance {
             consecutivePastContentEndCorrections = 0
             didLogPastContentEndCorrectionBound = false
+            // The restart records the low itself; see
+            // `smallestParkedContentHeight` for why a low the correction
+            // never fires at must not stay "new".
+            self.smallestParkedContentHeight = trackedContentHeight
         }
         guard consecutivePastContentEndCorrections <
                 Self.maximumConsecutivePastContentEndCorrections else {
@@ -2135,8 +2151,8 @@ final class ChatMessagesCoordinator: ObservableObject {
             }
             self.consecutivePastContentEndCorrections += 1
             if let trackedContentHeight = self.trackedContentHeight {
-                self.smallestContentHeightCorrectedPastEnd = min(
-                    self.smallestContentHeightCorrectedPastEnd ?? trackedContentHeight,
+                self.smallestParkedContentHeight = min(
+                    self.smallestParkedContentHeight ?? trackedContentHeight,
                     trackedContentHeight
                 )
             }
@@ -2224,10 +2240,14 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     /// Looks at the transcript once more `postRevealAuditDelay` after an
     /// automatic reveal and logs a warning if it still sits parked past its
-    /// content end (`isTrackedContentParkedPastEnd`), with the correction's
-    /// state. By then the past-end correction should have landed it, so the
-    /// line means the correction was blocked or used up. Diagnostics only: it
-    /// changes no state.
+    /// content end (`isTrackedContentParkedPastEnd`) while the correction
+    /// could have run, with the correction's state. By then the past-end
+    /// correction should have landed it, so the line means it was used up or
+    /// its scroll did not land. A park the correction is deliberately holding
+    /// for (a finger or user-driven scroll phase on the transcript, or a
+    /// compensated shift still settling) is expected and logged at info only,
+    /// so a reader rubber-banding the end does not write the warning the
+    /// blank-open report is read by. Diagnostics only: it changes no state.
     ///
     /// Together with the reveal and correction warnings, it splits the next
     /// device report of a blank open: a warning names a scroll position
@@ -2247,10 +2267,12 @@ final class ChatMessagesCoordinator: ObservableObject {
                   self.isTrackedContentParkedPastEnd else {
                 return
             }
-            Log.warning(
-                "ChatView still parked past content end \(delay)s after reveal; corrections=\(self.consecutivePastContentEndCorrections) takeover=\(self.isUserScrollTakeoverActive) fingerDown=\(self.isTrackedUserScrollInteractionActive) scrollPhaseUserDriven=\(self.isTrackedScrollPhaseUserDriven) shiftHold=\(self.isHoldingForCompensatedShift); \(self.trackedGeometryDescription)",
-                category: .ui
-            )
+            let message = "ChatView still parked past content end \(delay)s after reveal; corrections=\(self.consecutivePastContentEndCorrections) takeover=\(self.isUserScrollTakeoverActive) fingerDown=\(self.isTrackedUserScrollInteractionActive) scrollPhaseUserDriven=\(self.isTrackedScrollPhaseUserDriven) shiftHold=\(self.isHoldingForCompensatedShift); \(self.trackedGeometryDescription)"
+            if self.canCorrectPastContentEnd && !self.isHoldingForCompensatedShift {
+                Log.warning(message, category: .ui)
+            } else {
+                Log.info(message, category: .ui)
+            }
         }
     }
 

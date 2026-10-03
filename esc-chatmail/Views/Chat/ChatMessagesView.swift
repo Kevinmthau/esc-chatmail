@@ -137,23 +137,24 @@ struct ChatMessagesView: View {
                     // 0 that does not repaint until a scroll. Not reproduced;
                     // with the cover there is nothing left to repaint. An
                     // overlay, so it never takes part in the layout the
-                    // anchor pass measures. It takes touches, as the
-                    // transcript at opacity 0 effectively did (neither SwiftUI
-                    // nor UIKit hit-tests a fully transparent view): passing
-                    // them through let a tap open, or a long press lift, a
-                    // bubble the reader could not see.
+                    // anchor pass measures. Touches pass through it: a drag
+                    // during the hidden pass must still reach the scroll
+                    // view's gesture below, which reveals the rows and
+                    // cancels further forced anchoring, the reader's way out
+                    // of a pass that is taking long. Taps and long presses
+                    // are kept off the unseen bubbles by the rows themselves
+                    // (`allowsHitTesting` on the lazy stack).
                     .overlay {
                         if shouldHideMessages {
                             Color(UIColor.systemBackground)
                                 .ignoresSafeArea()
+                                .allowsHitTesting(false)
                         }
                     }
                     .accessibilityHidden(shouldHideMessages)
-                    // Rows exist to touch only once the window has loaded.
-                    // While they wait for their initial anchor the cover
-                    // takes every touch, so a drag cannot take the scroll
-                    // over before the reveal; the coordinator's time limit
-                    // and its watchdog bound that wait instead.
+                    // Rows exist to touch only once the window has loaded;
+                    // the scroll gesture stays available through the hidden
+                    // anchor pass (see the cover above).
                     .allowsHitTesting(initialLoadPhase == .loaded)
 
                     if shouldHideMessages {
@@ -375,6 +376,12 @@ struct ChatMessagesView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { isTextFieldFocused.wrappedValue = false }
+            // Bubbles under the cover must not take a tap (opening the
+            // reader) or a long press (lifting a context-menu preview) the
+            // reader cannot see. Scrolling is the scroll view's own gesture
+            // and keeps working, so a drag during the hidden pass still
+            // reveals (see the cover in `body`).
+            .allowsHitTesting(coordinator.isReadyToShow)
         }
         .defaultScrollAnchor(.top)
         .modifier(
