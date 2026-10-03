@@ -353,7 +353,13 @@ struct ChatMessagesView: View {
             .contentShape(Rectangle())
             .onTapGesture { isTextFieldFocused.wrappedValue = false }
         }
-        .defaultScrollAnchor(.top)
+        // Anchor roles: `ChatTranscriptScrollAnchorPolicy`. The content end
+        // is pinned while the transcript is hidden, so the window lands on
+        // its newest rows and bubble growth cannot push the bottom anchor
+        // off the viewport during the hidden anchor pass.
+        .modifier(
+            ChatTranscriptScrollAnchors(isTranscriptRevealed: coordinator.isReadyToShow)
+        )
         .modifier(
             ChatTranscriptOffsetShifter(
                 request: transcriptOffsetShiftRequest,
@@ -962,6 +968,35 @@ private struct ChatReplyComposerOverlay: View {
                     }
             }
         )
+    }
+}
+
+/// Applies `ChatTranscriptScrollAnchorPolicy` per `ScrollAnchorRole` on
+/// iOS 18 and later, and the single `.top` anchor the transcript always used
+/// below that.
+private struct ChatTranscriptScrollAnchors: ViewModifier {
+    let isTranscriptRevealed: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                .defaultScrollAnchor(
+                    ChatTranscriptScrollAnchorPolicy.initialOffset,
+                    for: .initialOffset
+                )
+                .defaultScrollAnchor(
+                    ChatTranscriptScrollAnchorPolicy.sizeChanges(
+                        isTranscriptRevealed: isTranscriptRevealed
+                    ),
+                    for: .sizeChanges
+                )
+                .defaultScrollAnchor(
+                    ChatTranscriptScrollAnchorPolicy.alignment,
+                    for: .alignment
+                )
+        } else {
+            content.defaultScrollAnchor(.top)
+        }
     }
 }
 
