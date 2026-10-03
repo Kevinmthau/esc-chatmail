@@ -383,7 +383,13 @@ struct ChatMessagesView: View {
             // reveals (see the cover in `body`).
             .allowsHitTesting(coordinator.isReadyToShow)
         }
-        .defaultScrollAnchor(.top)
+        // Anchor roles: `ChatTranscriptScrollAnchorPolicy`. The content end
+        // is pinned while the transcript is hidden, so the window lands on
+        // its newest rows and bubble growth cannot push the bottom anchor
+        // off the viewport during the hidden anchor pass.
+        .modifier(
+            ChatTranscriptScrollAnchors(isTranscriptRevealed: isTranscriptRevealed)
+        )
         .modifier(
             ChatTranscriptOffsetShifter(
                 request: transcriptOffsetShiftRequest,
@@ -631,12 +637,21 @@ struct ChatMessagesView: View {
         return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
     }
 
+    /// The initial window has loaded and the coordinator has revealed it. The
+    /// one definition of "revealed" for the scroll anchors
+    /// (`ChatTranscriptScrollAnchors`) and the inset shift
+    /// (`isTranscriptOffsetShiftAvailable`): `ChatBottomInsetPolicy` assumes
+    /// the `.top` size-change anchor `ChatTranscriptScrollAnchorPolicy`
+    /// returns for a revealed transcript, so the two must read the same state.
+    private var isTranscriptRevealed: Bool {
+        scrollState.initialLoadPhase == .loaded && coordinator.isReadyToShow
+    }
+
     /// Whether the transcript can be scrolled by inset shifts right now.
     private var isTranscriptOffsetShiftAvailable: Bool {
         ChatBottomInsetPolicy.isOffsetShiftAvailable(
             supportsOffsetShift: ChatTranscriptOffsetShifter.isSupported,
-            isTranscriptRevealed: scrollState.initialLoadPhase == .loaded &&
-                coordinator.isReadyToShow
+            isTranscriptRevealed: isTranscriptRevealed
         )
     }
 
@@ -1015,6 +1030,35 @@ private struct ChatReplyComposerOverlay: View {
                     }
             }
         )
+    }
+}
+
+/// Applies `ChatTranscriptScrollAnchorPolicy` per `ScrollAnchorRole` on
+/// iOS 18 and later, and the single `.top` anchor the transcript always used
+/// below that.
+private struct ChatTranscriptScrollAnchors: ViewModifier {
+    let isTranscriptRevealed: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                .defaultScrollAnchor(
+                    ChatTranscriptScrollAnchorPolicy.initialOffset,
+                    for: .initialOffset
+                )
+                .defaultScrollAnchor(
+                    ChatTranscriptScrollAnchorPolicy.sizeChanges(
+                        isTranscriptRevealed: isTranscriptRevealed
+                    ),
+                    for: .sizeChanges
+                )
+                .defaultScrollAnchor(
+                    ChatTranscriptScrollAnchorPolicy.alignment,
+                    for: .alignment
+                )
+        } else {
+            content.defaultScrollAnchor(.top)
+        }
     }
 }
 

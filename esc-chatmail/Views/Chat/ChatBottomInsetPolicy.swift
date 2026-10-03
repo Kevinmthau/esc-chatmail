@@ -7,8 +7,10 @@ import Foundation
 /// them; `ChatTranscriptOffsetShifter` performs the scroll.
 ///
 /// Why this exists ("replies show up under the keyboard"): the inset is a
-/// trailing spacer inside the lazy transcript, under a `.top` scroll anchor, so
-/// growing it only adds space *below* the viewport. The content offset does not
+/// trailing spacer inside the lazy transcript, under the `.top` size-change
+/// anchor a revealed transcript has (`ChatTranscriptScrollAnchorPolicy`; the
+/// shift exists only once revealed, `isOffsetShiftAvailable`), so growing it
+/// only adds space *below* the viewport. The content offset does not
 /// move, while the composer rises with the keyboard (or grows by a "Replying
 /// to" row, wrapped draft lines, or an attachment strip) and covers the bottom
 /// `growth` points of whatever the reader was looking at. The coordinator's

@@ -37,10 +37,13 @@ struct ChatTranscriptOffsetShifter: ViewModifier {
     /// and scroll updates, and publishing those would invalidate the whole
     /// chat body on every scroll frame.
     final class Tracking {
-        /// Offset in content coordinates (0 = content top). Starts at the
-        /// top: `onScrollGeometryChange` reports changes only, and a
-        /// transcript that never scrolled (shorter than the viewport) is
-        /// still at its `.top` default anchor.
+        /// Offset in content coordinates (0 = content top). Starts at 0:
+        /// `onScrollGeometryChange` reports changes only, and a transcript
+        /// that never scrolled is at 0 under either initial anchor
+        /// (`ChatTranscriptScrollAnchorPolicy`): content shorter than the
+        /// viewport is floored to the viewport height (`frame(minHeight:)` in
+        /// `ChatMessagesView`), so its top and its end coincide, and growth
+        /// past the viewport that moves the offset is reported.
         var contentOffsetY: CGFloat = 0
         /// Bottom edge of the trailing 1pt anchor in scroll-frame coordinates;
         /// nil while the lazy stack has not realized it.
