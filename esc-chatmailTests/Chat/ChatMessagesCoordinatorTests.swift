@@ -1,5 +1,6 @@
 import XCTest
 import CoreData
+import Combine
 @testable import esc_chatmail
 
 /// Every fixture, save, and assertion goes through the suite's `viewContext`, a
@@ -7628,10 +7629,121 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         await waitUntil { steps.contains(Self.pastContentEndCorrectionStep) }
     }
 
+    /// Each correction realizes rows whose real heights come in under the
+    /// lazy stack's estimates, so the report right after it already reads
+    /// parked again, with shorter content. Corrections making that progress
+    /// must not run out at the bound meant for a stuck signal.
+    ///
+    /// Revert-check: removing the shrink reset (the `if` comparing
+    /// `trackedContentHeight` with `smallestContentHeightCorrectedPastEnd`) in
+    /// `ChatMessagesCoordinator.updatePastContentEndCorrection` leaves the
+    /// third report at the bound and this test times out.
+    func testPastContentEndCorrection_reparkedWithShrinkingContent_correctsPastBound() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { steps.append($0) }
+
+        for (expectedCount, contentHeight) in [(1, CGFloat(1000)), (2, 900), (3, 800)] {
+            reportParkedGeometry(coordinator, contentHeight: contentHeight, scrollAction: recordStep)
+            await waitUntil { steps.count == expectedCount }
+        }
+        XCTAssertEqual(steps, Array(repeating: Self.pastContentEndCorrectionStep, count: 3))
+    }
+
+    /// Content that keeps reading parked while it alternates between two
+    /// heights is a stuck signal, not progress: only a new low restarts the
+    /// count, so the bound still ends the corrections.
+    ///
+    /// Revert-check: recording the latest corrected height instead of the
+    /// smallest (`smallestContentHeightCorrectedPastEnd = trackedContentHeight`
+    /// in `ChatMessagesCoordinator.updatePastContentEndCorrection`) restarts
+    /// the count on every swing back down and the inverted expectation fails.
+    func testPastContentEndCorrection_parkedContentAlternatingHeights_staysBounded() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        var steps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        let recordStep: ChatMessagesCoordinator.BottomAnchorAction = { steps.append($0) }
+
+        // 1000: first correction. 990: a new low restarts the count. 1000:
+        // second correction of the restarted count.
+        for (expectedCount, contentHeight) in [(1, CGFloat(1000)), (2, 990), (3, 1000)] {
+            reportParkedGeometry(coordinator, contentHeight: contentHeight, scrollAction: recordStep)
+            await waitUntil { steps.count == expectedCount }
+        }
+
+        let fourthCorrection = expectation(description: "990 is no new low")
+        fourthCorrection.isInverted = true
+        reportParkedGeometry(coordinator, contentHeight: 990) { _ in
+            fourthCorrection.fulfill()
+        }
+        await fulfillment(of: [fourthCorrection], timeout: 0.15)
+        XCTAssertEqual(steps.count, 3)
+    }
+
+    /// The pass's time limit is otherwise evaluated only by a geometry
+    /// report. If none arrives (a dropped SwiftUI delivery), the transcript
+    /// must still be revealed at the limit instead of waiting behind the
+    /// spinner for the reader's first touch.
+    ///
+    /// Revert-check: removing the `armInitialRevealWatchdog` call from
+    /// `ChatMessagesCoordinator.performInitialScroll` leaves the transcript
+    /// hidden and this test times out.
+    func testInitialRevealWatchdog_noGeometryReportByTimeLimit_revealsTranscript() async throws {
+        let watchdogGate = ParkedSleepGate()
+        var currentTime: TimeInterval = 1_000
+        let (coordinator, rows) = try makeParkedTestCoordinator(
+            now: { currentTime },
+            watchdogSleep: { _ in
+                while await !watchdogGate.isReleased(), !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            }
+        )
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("Without geometry nothing may scroll")
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        // No geometry report follows the appear.
+        currentTime = 1_003.5
+        await watchdogGate.release()
+
+        await waitUntil { coordinator.isReadyToShow }
+    }
+
+    /// A watchdog that wakes before the time limit leaves the pass to the
+    /// geometry reports.
+    ///
+    /// Revert-check: dropping the `self.now() >= deadline` guard from
+    /// `ChatMessagesCoordinator.armInitialRevealWatchdog` reveals as soon as
+    /// the watchdog wakes and the inverted expectation fails.
+    func testInitialRevealWatchdog_wakesBeforeTimeLimit_keepsTranscriptHidden() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator(
+            now: { 1_000 },
+            watchdogSleep: { _ in }
+        )
+        let revealed = expectation(description: "No reveal before the time limit")
+        revealed.isInverted = true
+        let cancellable = coordinator.$isReadyToShow.sink { isReady in
+            if isReady { revealed.fulfill() }
+        }
+        defer { cancellable.cancel() }
+
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("Without geometry nothing may scroll")
+        }
+        await fulfillment(of: [revealed], timeout: 0.15)
+        XCTAssertFalse(coordinator.isReadyToShow)
+    }
+
     private func makeParkedTestCoordinator(
         sleep: @escaping ChatMessagesCoordinator.Sleep = { _ in },
         now: @escaping ChatMessagesCoordinator.Now = {
             ProcessInfo.processInfo.systemUptime
+        },
+        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = { nanoseconds in
+            try? await Task.sleep(nanoseconds: nanoseconds)
         }
     ) throws -> (ChatMessagesCoordinator, [ChatMessageRowModel]) {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
@@ -7642,7 +7754,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             markConversationAsReadIfNeeded: {},
             markUnreadInboxMessagesAsReadIfNeeded: { _ in },
             sleep: sleep,
-            now: now
+            now: now,
+            watchdogSleep: watchdogSleep
         )
         return (coordinator, messages.map { ChatMessageRowModelMapper.map($0) })
     }
@@ -7699,6 +7812,23 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    /// A parked report (content end at y 50, the 1pt anchor still visible
+    /// near the viewport top) with the given content height, for the tests
+    /// whose transcript re-measures between reports.
+    private func reportParkedGeometry(
+        _ coordinator: ChatMessagesCoordinator,
+        contentHeight: CGFloat,
+        scrollAction: @escaping ChatMessagesCoordinator.BottomAnchorAction
+    ) {
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: 50 - contentHeight,
+            contentHeight: contentHeight,
+            viewportHeight: Self.parkedTestViewportHeight,
+            scrollAction: scrollAction
+        )
+    }
+
     private func makeConversationWithMessages(
         senderEmails: [String]
     ) throws -> (Conversation, [Message]) {
@@ -7735,6 +7865,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         },
         isMessagePublished: @escaping ChatMessagesCoordinator.MessagePublicationCheck = {
             _ in false
+        },
+        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = { nanoseconds in
+            try? await Task.sleep(nanoseconds: nanoseconds)
         }
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
@@ -7752,7 +7885,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             sleep: sleep,
             now: now,
             ensureVisibleMessage: ensureVisibleMessage,
-            isMessagePublished: isMessagePublished
+            isMessagePublished: isMessagePublished,
+            watchdogSleep: watchdogSleep
         )
     }
 
