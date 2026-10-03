@@ -388,7 +388,7 @@ struct ChatMessagesView: View {
         // its newest rows and bubble growth cannot push the bottom anchor
         // off the viewport during the hidden anchor pass.
         .modifier(
-            ChatTranscriptScrollAnchors(isTranscriptRevealed: coordinator.isReadyToShow)
+            ChatTranscriptScrollAnchors(isTranscriptRevealed: isTranscriptRevealed)
         )
         .modifier(
             ChatTranscriptOffsetShifter(
@@ -637,12 +637,21 @@ struct ChatMessagesView: View {
         return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
     }
 
+    /// The initial window has loaded and the coordinator has revealed it. The
+    /// one definition of "revealed" for the scroll anchors
+    /// (`ChatTranscriptScrollAnchors`) and the inset shift
+    /// (`isTranscriptOffsetShiftAvailable`): `ChatBottomInsetPolicy` assumes
+    /// the `.top` size-change anchor `ChatTranscriptScrollAnchorPolicy`
+    /// returns for a revealed transcript, so the two must read the same state.
+    private var isTranscriptRevealed: Bool {
+        scrollState.initialLoadPhase == .loaded && coordinator.isReadyToShow
+    }
+
     /// Whether the transcript can be scrolled by inset shifts right now.
     private var isTranscriptOffsetShiftAvailable: Bool {
         ChatBottomInsetPolicy.isOffsetShiftAvailable(
             supportsOffsetShift: ChatTranscriptOffsetShifter.isSupported,
-            isTranscriptRevealed: scrollState.initialLoadPhase == .loaded &&
-                coordinator.isReadyToShow
+            isTranscriptRevealed: isTranscriptRevealed
         )
     }
 

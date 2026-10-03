@@ -2,6 +2,12 @@ import SwiftUI
 import XCTest
 @testable import esc_chatmail
 
+/// HONEST SCOPE: these pin the policy's decisions only. The view wiring that
+/// applies them (`ChatTranscriptScrollAnchors` in `ChatMessagesView`, keyed on
+/// `isTranscriptRevealed`) is SwiftUI modifier state with no unit-test seam, so
+/// dropping that modifier, or passing `isTranscriptRevealed: true`
+/// unconditionally, keeps this suite green while the slow open returns. That
+/// half is owned by the simulator or device check the change asks for.
 final class ChatTranscriptScrollAnchorPolicyTests: XCTestCase {
     /// Revert-check: returning `.top` for a hidden transcript from
     /// `ChatTranscriptScrollAnchorPolicy.sizeChanges(isTranscriptRevealed:)`
@@ -25,8 +31,18 @@ final class ChatTranscriptScrollAnchorPolicyTests: XCTestCase {
         )
     }
 
-    func testInitialOffsetAndAlignment_startAtEndAndAlignTop() {
+    /// Revert-check: a `.top` `ChatTranscriptScrollAnchorPolicy.initialOffset`
+    /// lands a window that is already published on the scroll view's first
+    /// layout at its oldest rows.
+    func testInitialOffset_firstLayout_startsAtContentEnd() {
         XCTAssertEqual(ChatTranscriptScrollAnchorPolicy.initialOffset, .bottom)
+    }
+
+    /// Revert-check: `ChatTranscriptScrollAnchorPolicy.alignment` is inert
+    /// while `ChatMessagesView` floors the content at the viewport height;
+    /// pinned to `.top`, the single anchor the transcript used before the
+    /// roles were split, so a change to it is deliberate, not incidental.
+    func testAlignment_contentShorterThanViewport_keepsTop() {
         XCTAssertEqual(ChatTranscriptScrollAnchorPolicy.alignment, .top)
     }
 }

@@ -23,12 +23,19 @@ import SwiftUI
 /// the top again: `ChatBottomInsetPolicy` relies on inset growth adding space
 /// below the viewport without moving the offset, and the coordinator's
 /// post-reveal bottom follow reads growth as the anchor moving offscreen.
+///
+/// Assumes the transcript is presented at its end
+/// (`ChatMessagesCoordinator.InitialPresentationAnchor.bottom`, the only value
+/// `ChatMessagesSession` passes): a `.top` presentation reveals without an
+/// anchor pass and would disagree with the content-end pinning below.
 enum ChatTranscriptScrollAnchorPolicy {
     /// Where the scroll view starts before any size change: at its end. The
     /// first layout usually carries no rows yet (the window is still loading),
-    /// so `sizeChanges(isTranscriptRevealed:)` does most of the work; this
-    /// keeps a window that is already published on first layout at its end
-    /// as well.
+    /// so `sizeChanges(isTranscriptRevealed:)` does the work; this keeps a
+    /// window that is already published on first layout at its end as well.
+    /// Not a fallback on its own: without the hidden-transcript `.bottom`
+    /// size-change anchor, a window published after the first layout lands
+    /// at its oldest rows again.
     static let initialOffset: UnitPoint = .bottom
 
     /// Content shorter than the viewport is floored to the viewport height
@@ -39,9 +46,12 @@ enum ChatTranscriptScrollAnchorPolicy {
 
     /// The anchor kept in place when the content size changes.
     ///
-    /// - Parameter isTranscriptRevealed: `ChatMessagesCoordinator.isReadyToShow`,
-    ///   false during the hidden anchor pass (first open and the
-    ///   empty-to-loaded restart alike).
+    /// - Parameter isTranscriptRevealed: `ChatMessagesView.isTranscriptRevealed`
+    ///   (the initial window has loaded and
+    ///   `ChatMessagesCoordinator.isReadyToShow`), false during the hidden
+    ///   anchor pass (first open and the empty-to-loaded restart alike). The
+    ///   view passes the same value to `ChatBottomInsetPolicy`'s shift
+    ///   availability, so the `.top` premise above and the shift agree.
     static func sizeChanges(isTranscriptRevealed: Bool) -> UnitPoint {
         isTranscriptRevealed ? .top : .bottom
     }
