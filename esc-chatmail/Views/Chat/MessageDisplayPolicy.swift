@@ -77,8 +77,24 @@ enum MessageDisplayPolicy {
     /// Whether a bubble routed to text (not the HTML preview card) shows the "Loading..." pill
     /// instead of its text while the async content load is still running.
     ///
-    /// Incoming HTML keeps the pill: until content detection finishes, the only text on hand is
-    /// raw/partial HTML-derived text that the load may replace or route to a preview card.
+    /// Incoming HTML with no stored `chatPreviewText` keeps the pill: until content detection
+    /// finishes, the only text on hand is raw/partial HTML-derived text that the load may replace
+    /// or route to a preview card.
+    ///
+    /// Incoming rows with a stored `chatPreviewText` render it at once unless they can route to a
+    /// preview card on inputs known before the load. The stored preview is the final text: the
+    /// loader publishes it verbatim as `fullTextContent` and `resolvedVisibleText` prefers it
+    /// anyway, so the load can only confirm it. The pill bought nothing there and cost every chat
+    /// open: each pill → bubble swap grows the content, which resets the hidden initial-anchor
+    /// pass in `ChatMessagesCoordinator` (its retry budget restarts on growth), so a chat of
+    /// incoming HTML bubbles revealed only once every visible load had settled. The one thing the
+    /// load can still change is routing: rich-content classification (`hasRichHTMLContent`, the
+    /// only async input of `shouldShowHTMLPreview`) may upgrade the row to a preview card, and
+    /// that text → card swap for rich non-newsletter HTML (receipts, notifications) is accepted;
+    /// the text shown until then was never partial. Rows that `shouldShowHTMLPreview` can route
+    /// to a card on the inputs it has synchronously — forwarded (returned above), newsletter,
+    /// calendar invite, trusted transactional sender — keep the pill, because their text would
+    /// be replaced by a card rather than confirmed.
     ///
     /// The user's own non-forwarded rows with a stored `chatPreviewText` skip it. Their final
     /// text is already known: the loader publishes the stored preview as `fullTextContent`,
@@ -109,6 +125,7 @@ enum MessageDisplayPolicy {
         isFromMe: Bool,
         isNewsletter: Bool,
         isLikelyCalendarInvite: Bool,
+        senderEmail: String?,
         chatPreviewText: String?,
         hasDisplayableAttachments: Bool
     ) -> Bool {
@@ -116,7 +133,16 @@ enum MessageDisplayPolicy {
         if isForwardedEmail { return true }
         guard hasHTMLSource else { return false }
 
-        let isOwnTextBubble = isFromMe && !isNewsletter && !isLikelyCalendarInvite
+        if !isFromMe {
+            let rendersStoredIncomingPreview =
+                MessagePreviewText.nonEmpty(chatPreviewText) != nil &&
+                !isNewsletter &&
+                !isLikelyCalendarInvite &&
+                !isTrustedTransactionalSender(senderEmail)
+            return !rendersStoredIncomingPreview
+        }
+
+        let isOwnTextBubble = !isNewsletter && !isLikelyCalendarInvite
         guard isOwnTextBubble else { return true }
         let rendersStoredOwnPreview = MessagePreviewText.nonEmpty(chatPreviewText) != nil
         return !rendersStoredOwnPreview && !hasDisplayableAttachments
