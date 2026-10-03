@@ -120,8 +120,12 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// that signal and the watchdog acts only when it has gone quiet.
     private static let initialRevealWatchdogGrace: TimeInterval = 1.0
 
-    /// `Task.sleep`, the default for `sleep` and `watchdogSleep`.
-    static let systemSleep: Sleep = { nanoseconds in
+    /// `Task.sleep`, the default for `sleep` and `watchdogSleep`. A
+    /// `nonisolated` function rather than a stored closure: the initializers'
+    /// default-argument expressions evaluate outside the main actor, where a
+    /// main-actor-isolated static property cannot be referenced (a compile
+    /// error under this project's language mode, not a warning).
+    nonisolated static func systemSleep(_ nanoseconds: UInt64) async {
         try? await Task.sleep(nanoseconds: nanoseconds)
     }
 

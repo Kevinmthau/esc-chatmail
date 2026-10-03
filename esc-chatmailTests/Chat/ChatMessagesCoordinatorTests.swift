@@ -7740,9 +7740,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         // The 3s time limit plus the 1s grace, in one sleep (a watchdog armed
         // with the grace dropped, or in seconds, would reveal here just the
         // same); the clock is already past the limit when it returns, so
-        // nothing re-arms.
+        // nothing re-arms. The trailing 1s is the post-reveal audit, which
+        // the reveal schedules on the same `watchdogSleep`; it is awaited so
+        // the sequence is read after it has been recorded, not raced.
+        await watchdogWaits.waitForRecordedCount(2)
         let waits = await watchdogWaits.nanoseconds
-        XCTAssertEqual(waits, [4_000_000_000])
+        XCTAssertEqual(waits, [4_000_000_000, 1_000_000_000])
     }
 
     /// A watchdog that wakes before the time limit leaves the pass to the
@@ -7796,8 +7799,12 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         await waitUntil { coordinator.isReadyToShow }
+        // The trailing 1s is the post-reveal audit, scheduled by the reveal on
+        // the same `watchdogSleep` (its call leaves the clock past the deadline
+        // too, which changes nothing after the reveal).
+        await watchdogWaits.waitForRecordedCount(3)
         let waits = await watchdogWaits.nanoseconds
-        XCTAssertEqual(waits, [4_000_000_000, 500_000_000])
+        XCTAssertEqual(waits, [4_000_000_000, 500_000_000, 1_000_000_000])
     }
 
     private func makeParkedTestCoordinator(
@@ -8133,6 +8140,17 @@ private actor WatchdogWaitRecorder {
     private(set) var nanoseconds: [UInt64] = []
 
     func record(_ value: UInt64) { nanoseconds.append(value) }
+
+    /// Waits, bounded by wall clock, until `count` durations have been
+    /// recorded, so a test reads the sequence after the task recording the
+    /// last one has run rather than racing it. Sleeping suspends the actor,
+    /// so `record` calls land meanwhile.
+    func waitForRecordedCount(_ count: Int, timeout: TimeInterval = 2.0) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while nanoseconds.count < count, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
 }
 
 /// Test convenience restoring the defaulted geometry flag: production callers
