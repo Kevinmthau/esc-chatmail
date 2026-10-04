@@ -639,10 +639,11 @@ struct ChatMessagesView: View {
 
     /// The initial window has loaded and the coordinator has revealed it. The
     /// one definition of "revealed" for the scroll anchors
-    /// (`ChatTranscriptScrollAnchors`) and the inset shift
-    /// (`isTranscriptOffsetShiftAvailable`): `ChatBottomInsetPolicy` assumes
-    /// the `.top` size-change anchor `ChatTranscriptScrollAnchorPolicy`
-    /// returns for a revealed transcript, so the two must read the same state.
+    /// (`ChatTranscriptScrollAnchors`), the inset shift
+    /// (`isTranscriptOffsetShiftAvailable`) and the spacer transition
+    /// (`ChatBottomInsetPolicy.spacerTransition`): `ChatBottomInsetPolicy`
+    /// assumes the `.top` size-change anchor `ChatTranscriptScrollAnchorPolicy`
+    /// returns for a revealed transcript, so they must all read the same state.
     private var isTranscriptRevealed: Bool {
         scrollState.initialLoadPhase == .loaded && coordinator.isReadyToShow
     }
@@ -678,7 +679,11 @@ struct ChatMessagesView: View {
         proxy: ScrollViewProxy
     ) {
         let newInset = newComponents.inset
-        switch ChatBottomInsetPolicy.spacerTransition(from: oldComponents, to: newComponents) {
+        switch ChatBottomInsetPolicy.spacerTransition(
+            from: oldComponents,
+            to: newComponents,
+            isTranscriptRevealed: isTranscriptRevealed
+        ) {
         case .immediate:
             var transaction = Transaction()
             transaction.disablesAnimations = true

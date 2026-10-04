@@ -153,10 +153,32 @@ enum ChatBottomInsetPolicy {
     /// geometry reports an unanimated jump.
     static let shiftSettleSlack: TimeInterval = 0.1
 
+    /// How the trailing spacer takes the change from `oldComponents` to
+    /// `newComponents`.
+    ///
+    /// While the transcript is still hidden behind its initial anchor pass
+    /// (`isTranscriptRevealed` false) every change applies without animation,
+    /// shrinks included. The case that needed it: a chat pushed from the
+    /// conversation list while the list's search keyboard is up. The row tap
+    /// drops search focus and pushes in the same handler, `KeyboardResponder`
+    /// publishes the hide inside a 0.25s `withAnimation`, and when the chat's
+    /// first body ran before that landed, the spacer started at keyboard
+    /// height and then shrank animated. A fast initial window load put the
+    /// coordinator's hidden-pass `scrollTo(bottomID, anchor: .bottom)` inside
+    /// that animation. A scroll issued while the content size animates is
+    /// clamped to the mid-animation size and never re-targeted, and the scroll
+    /// view does not clamp a past-end offset at rest (the past-end parking
+    /// note in `ChatMessagesCoordinator`), so the transcript could be
+    /// revealed parked past its content end: a blank transcript until the
+    /// first touch. Nothing of the spacer is on screen while hidden, so the
+    /// dropped animation costs nothing. Once revealed, the choices below
+    /// apply.
     static func spacerTransition(
         from oldComponents: Components,
-        to newComponents: Components
+        to newComponents: Components,
+        isTranscriptRevealed: Bool
     ) -> SpacerTransition {
+        guard isTranscriptRevealed else { return .immediate }
         let change = newComponents.inset - oldComponents.inset
         if change > changeTolerance {
             return .immediate
