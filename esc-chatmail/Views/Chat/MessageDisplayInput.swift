@@ -5,7 +5,9 @@ struct MessageDisplayInput {
     let hasHTMLSource: Bool
     let isForwardedEmail: Bool
     let isNewsletter: Bool
-    let hasRichHTMLContent: Bool
+    /// The verdict the bubble's async content load publishes; false until it has.
+    /// `private(set)` only so `withRichHTMLContent(_:)` can copy the value.
+    private(set) var hasRichHTMLContent: Bool
     let isFromMe: Bool
     let isOneToOneConversation: Bool
     let subject: String?
@@ -32,5 +34,17 @@ struct MessageDisplayInput {
         self.subject = subject
         self.senderEmail = senderEmail
         self.isLikelyCalendarInvite = isLikelyCalendarInvite
+    }
+
+    /// This row with the content load's rich-content verdict replaced, for asking the routing
+    /// what a load could still decide (`MessageDisplayPolicy.loadCanRouteToHTMLPreview`).
+    ///
+    /// A copy of the value, not a second initializer call: `isLikelyCalendarInvite` is a
+    /// defaulted parameter, so a rebuilt input that dropped a field would still compile. Not
+    /// mirrored by the web port, which has no loading placeholder.
+    func withRichHTMLContent(_ hasRichHTMLContent: Bool) -> MessageDisplayInput {
+        var copy = self
+        copy.hasRichHTMLContent = hasRichHTMLContent
+        return copy
     }
 }

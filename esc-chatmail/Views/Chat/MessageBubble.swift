@@ -83,7 +83,15 @@ struct MessageBubble: View {
             return false
         }
 
-        return MessageDisplayPolicy.shouldShowHTMLPreview(.init(
+        return MessageDisplayPolicy.shouldShowHTMLPreview(displayInput)
+    }
+
+    /// The row as the routing sees it. One value feeds both the routing above and the content
+    /// view's loading-placeholder decision (`MessageDisplayPolicy.showsTextLoadingPlaceholder`),
+    /// which asks the routing what a load could still decide: built separately, the two
+    /// argument lists could drift, and there is no UI test target to notice.
+    private var displayInput: MessageDisplayInput {
+        MessageDisplayInput(
             hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
@@ -93,7 +101,7 @@ struct MessageBubble: View {
             subject: message.subject,
             senderEmail: message.effectiveSenderEmail,
             isLikelyCalendarInvite: message.isLikelyCalendarInvite
-        ))
+        )
     }
 
     private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {
@@ -144,7 +152,14 @@ struct MessageBubble: View {
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
         self.onSendRecoveryAction = onSendRecoveryAction
-        self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(loader: messageBubbleLoader))
+        // Seeded with the row's hint so the body passes before the load starts route as the
+        // mid-load state does (see the view model's initializer). `StateObject` evaluates this
+        // once per mount: when Gmail's echo replaces an optimistic reply the view model is kept,
+        // and the echo's hint reaches it through `loadIfNeeded` instead.
+        self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(
+            loader: messageBubbleLoader,
+            initialHasHTMLSource: message.hasHTMLSource
+        ))
     }
 
     var body: some View {
@@ -190,7 +205,7 @@ struct MessageBubble: View {
                     message: message,
                     style: style,
                     showHTMLPreview: showHTMLPreview,
-                    hasHTMLSource: htmlAnalysis.hasHTMLSource,
+                    displayInput: displayInput,
                     fullTextContent: viewModel.fullTextContent,
                     fallbackPreviewText: message.fallbackPreviewText,
                     sharedDocumentLinks: viewModel.sharedDocumentLinks,

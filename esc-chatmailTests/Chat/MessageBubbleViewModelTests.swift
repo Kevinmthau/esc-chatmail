@@ -3,6 +3,63 @@ import XCTest
 
 @MainActor
 final class MessageBubbleViewModelTests: XCTestCase {
+    // MARK: - Initial state
+
+    /// The bubble's first body pass runs before its `.task` has started the load, and reads the
+    /// view model as it was created. Created with the row's HTML-source hint, a fresh view model
+    /// publishes what `loadIfNeeded`'s prologue publishes for that row, so the first pass sees
+    /// the state every pass sees until the load lands. The seed is the hint and nothing else: no
+    /// load has run, so the calendar-invite verdict and the inline content IDs are still unknown.
+    ///
+    /// The parked load carries no prefetched sender name, as in the transcript, where
+    /// `ChatMessagesView` passes none.
+    ///
+    /// Revert-check: seeding `htmlAnalysis` with `.empty` in `MessageBubbleViewModel.init`
+    /// (ignoring `initialHasHTMLSource`) fails the first assertion and the comparison with the
+    /// parked load.
+    func testInit_withHTMLSourceHint_publishesWhatTheLoadProloguePublishes() async {
+        let loader = GatedMessageBubbleLoader(senderResults: [], contentResults: [], gatedCallIndex: 1)
+        let viewModel = MessageBubbleViewModel(loader: loader, initialHasHTMLSource: true)
+
+        XCTAssertEqual(viewModel.htmlAnalysis, .placeholder(hasHTMLSource: true))
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        let senderCallCount = await loader.senderCallCount()
+        let contentCallCount = await loader.contentCallCount()
+        XCTAssertEqual(senderCallCount, 0, "creating the view model must not start a load")
+        XCTAssertEqual(contentCallCount, 0, "creating the view model must not start a load")
+        let stateBeforeLoad = publishedState(of: viewModel)
+
+        let load = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(hasHTMLSource: true, prefetchedSenderName: nil)
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertEqual(publishedState(of: viewModel), stateBeforeLoad)
+
+        await loader.release()
+        await load.value
+        XCTAssertTrue(viewModel.hasLoadedContent)
+    }
+
+    /// Without a hint (a row with no HTML source, and every caller that passes none) a fresh view
+    /// model starts as `.empty`, as it did before the seed existed.
+    ///
+    /// Revert-check: seeding `htmlAnalysis` with `.placeholder(hasHTMLSource: true)` whatever the
+    /// hint, or defaulting `initialHasHTMLSource` to true, in `MessageBubbleViewModel.init` fails
+    /// this test.
+    func testInit_withoutHTMLSourceHint_startsEmpty() {
+        let loader = MockMessageBubbleLoader(senderResults: [], contentResults: [])
+
+        XCTAssertEqual(MessageBubbleViewModel(loader: loader).htmlAnalysis, .empty)
+        XCTAssertEqual(
+            MessageBubbleViewModel(loader: loader, initialHasHTMLSource: false).htmlAnalysis,
+            .empty
+        )
+    }
+
     func testLoadIfNeeded_appliesSenderAndContentState() async {
         let expectedLink = SharedDocumentLink(
             id: "google-doc",
@@ -545,12 +602,16 @@ final class MessageBubbleViewModelTests: XCTestCase {
         func showsLoadingPlaceholder() -> Bool {
             MessageDisplayPolicy.showsTextLoadingPlaceholder(
                 hasLoadedContent: viewModel.hasLoadedContent,
-                hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
-                isForwardedEmail: false,
-                isFromMe: true,
-                isNewsletter: false,
-                isLikelyCalendarInvite: false,
-                senderEmail: nil,
+                routing: MessageDisplayInput(
+                    hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
+                    isForwardedEmail: false,
+                    isNewsletter: false,
+                    hasRichHTMLContent: viewModel.hasRichHTMLContent,
+                    isFromMe: true,
+                    isOneToOneConversation: true,
+                    subject: nil,
+                    senderEmail: nil
+                ),
                 chatPreviewText: nil,
                 hasDisplayableAttachments: false
             )
@@ -591,6 +652,94 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
         XCTAssertNil(viewModel.fullTextContent)
         XCTAssertFalse(showsLoadingPlaceholder())
+    }
+
+    /// An incoming row with a stored preview, sampled the way the views sample it
+    /// (`MessageBubble.showHTMLPreview`, then `MessageContentView.textContent`) on a fresh mount's
+    /// first pass, before anything has started the load; while its first load is parked; and
+    /// again once it lands with a "rich" verdict. A row with a new subject is never a text bubble
+    /// before that verdict routes it to the preview card; a reply, which no verdict routes to a
+    /// card, is its stored text throughout.
+    ///
+    /// Revert-check: replacing `!loadCanRouteToHTMLPreview(routing)` in
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` with the flag list it superseded
+    /// (`!routing.isNewsletter && !routing.isLikelyCalendarInvite &&
+    /// !isTrustedTransactionalSender(routing.senderEmail)`) renders the new-subject row as text
+    /// before and during the load: the first-pass and mid-flight
+    /// `presentation(subject: "Your receipt")` assertions read `.storedText` instead of
+    /// `.loadingPlaceholder`. Seeding `htmlAnalysis` with `.empty` in
+    /// `MessageBubbleViewModel.init` (ignoring `initialHasHTMLSource`) does the same to the
+    /// first-pass assertion alone.
+    ///
+    /// HONEST SCOPE: `presentation` mirrors the two view decisions for a non-forwarded row from
+    /// the view model's real published state. The views' own composition is not covered (there is
+    /// no UI test target). That includes `MessageBubble.init` creating the view model with
+    /// `message.hasHTMLSource`: the first-pass sample holds for a view model seeded by hand here.
+    func testLoadIfNeeded_incomingStoredPreviewRow_neverRendersTextTheLoadRoutesToCard() async {
+        enum Presentation: Equatable {
+            case previewCard
+            case loadingPlaceholder
+            case storedText
+        }
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [
+                MessageBubbleContentResult(
+                    fullTextContent: "Stored preview",
+                    hasRichHTMLContent: true,
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .placeholder(hasHTMLSource: true)
+                )
+            ],
+            gatedCallIndex: 1
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader, initialHasHTMLSource: true)
+        func presentation(subject: String) -> Presentation {
+            let routing = MessageDisplayInput(
+                hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
+                isForwardedEmail: false,
+                isNewsletter: false,
+                hasRichHTMLContent: viewModel.hasRichHTMLContent,
+                isFromMe: false,
+                isOneToOneConversation: true,
+                subject: subject,
+                senderEmail: "alice@example.com"
+            )
+            if MessageDisplayPolicy.shouldShowHTMLPreview(routing) {
+                return .previewCard
+            }
+            return MessageDisplayPolicy.showsTextLoadingPlaceholder(
+                hasLoadedContent: viewModel.hasLoadedContent,
+                routing: routing,
+                chatPreviewText: "Stored preview",
+                hasDisplayableAttachments: false
+            ) ? .loadingPlaceholder : .storedText
+        }
+
+        // The first body pass: nothing has started the load yet.
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(presentation(subject: "Your receipt"), .loadingPlaceholder)
+        XCTAssertEqual(presentation(subject: "Re: Dinner"), .storedText)
+
+        let load = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(hasHTMLSource: true, includesSenderRequest: false)
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(presentation(subject: "Your receipt"), .loadingPlaceholder)
+        XCTAssertEqual(presentation(subject: "Re: Dinner"), .storedText)
+
+        await loader.release()
+        await load.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(presentation(subject: "Your receipt"), .previewCard)
+        XCTAssertEqual(presentation(subject: "Re: Dinner"), .storedText)
     }
 
     /// The early-return branch records the requested signature even when it skips loading, so a
@@ -723,19 +872,47 @@ final class MessageBubbleViewModelTests: XCTestCase {
         )
     }
 
+    /// Everything a bubble's body reads from its view model.
+    private struct PublishedState: Equatable {
+        let senderName: String?
+        let senderAvatarURL: String?
+        let senderImageData: Data?
+        let hasRichHTMLContent: Bool
+        let fullTextContent: String?
+        let hasLoadedContent: Bool
+        let sharedDocumentLinks: [SharedDocumentLink]
+        let forwardedDisplayContent: ForwardedMessageDisplayContent?
+        let htmlAnalysis: MessageBubbleHTMLAnalysis
+    }
+
+    private func publishedState(of viewModel: MessageBubbleViewModel) -> PublishedState {
+        PublishedState(
+            senderName: viewModel.senderName,
+            senderAvatarURL: viewModel.senderAvatarURL,
+            senderImageData: viewModel.senderImageData,
+            hasRichHTMLContent: viewModel.hasRichHTMLContent,
+            fullTextContent: viewModel.fullTextContent,
+            hasLoadedContent: viewModel.hasLoadedContent,
+            sharedDocumentLinks: viewModel.sharedDocumentLinks,
+            forwardedDisplayContent: viewModel.forwardedDisplayContent,
+            htmlAnalysis: viewModel.htmlAnalysis
+        )
+    }
+
     private func makeContext(
         messageID: String = "msg-1",
         displayIdentityKey: String? = nil,
         signature: String = "sig-1",
         senderEmail: String = "alice@example.com",
         hasHTMLSource: Bool = false,
+        prefetchedSenderName: String? = "Prefetched Name",
         includesSenderRequest: Bool = true
     ) -> MessageBubbleLoadContext {
         MessageBubbleLoadContext(
             messageID: messageID,
             displayIdentityKey: displayIdentityKey,
             contentSignature: signature,
-            prefetchedSenderName: "Prefetched Name",
+            prefetchedSenderName: prefetchedSenderName,
             senderRequest: includesSenderRequest ? MessageBubbleSenderRequest(
                 email: senderEmail,
                 personDisplayName: nil,
