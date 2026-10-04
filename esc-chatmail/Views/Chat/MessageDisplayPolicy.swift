@@ -146,12 +146,19 @@ enum MessageDisplayPolicy {
     /// matched nothing the view asks about). And it rendered text on rows a rich verdict routes
     /// to a card.
     ///
-    /// Two paths this does not close, both older than the rule. A row with no HTML-source hint
+    /// One path this does not close, older than the rule. A row with no HTML-source hint
     /// renders its text at once (the guard below) and can still become a card when the load
     /// finds HTML embedded in its body text; applying the rule there would put the pill on every
-    /// plain-text message with a new subject. And a fresh mount's first pass runs before the
-    /// load has published the row's hint (`MessageBubbleViewModel.htmlAnalysis` starts `.empty`),
-    /// so it takes that same path.
+    /// plain-text message with a new subject.
+    ///
+    /// A fresh mount used to take that same path for every row until its load began: the
+    /// bubble's body runs before the load has published anything, and
+    /// `MessageBubbleViewModel.htmlAnalysis` started `.empty`, so an HTML row laid out its text
+    /// first and swapped to the pill or the card once the load's prologue published the hint
+    /// (on a chat open, inside the hidden initial-anchor pass). The view model is now created
+    /// with the row's hint (`MessageBubbleViewModel.init(loader:initialHasHTMLSource:)`, the
+    /// value the prologue publishes), so those passes are asked about the same row as every
+    /// later pre-load pass.
     ///
     /// The user's own non-forwarded rows with a stored `chatPreviewText` skip it. Their final
     /// text is already known: the loader publishes the stored preview as `fullTextContent`,

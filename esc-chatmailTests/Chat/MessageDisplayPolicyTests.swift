@@ -707,7 +707,7 @@ final class MessageDisplayPolicyTests: XCTestCase {
     /// A row with no HTML source that is not forwarded never shows the pill, and no loaded row
     /// does. That holds for an incoming row with a new subject too, which the routing probe says a
     /// load could card. The load can still card such a row from HTML embedded in its body text
-    /// (the policy's "two paths this does not close"), but waiting on that would put the pill on
+    /// (the policy's "one path this does not close"), but waiting on that would put the pill on
     /// every plain-text message that starts a thread. Forwarded rows are the exception, pinned
     /// above.
     ///
@@ -722,6 +722,101 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertFalse(showsTextLoadingPlaceholder(hasHTMLSource: false, isFromMe: false, subject: "Lunch?"))
         XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isForwardedEmail: true))
         XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isFromMe: false, subject: "Lunch?"))
+    }
+
+    // MARK: - Pre-publish state (a fresh mount's first pass)
+
+    private enum PrePublishPresentation: Equatable {
+        case previewCard
+        case loadingPlaceholder
+        case text
+    }
+
+    /// What a non-forwarded row presents on a fresh mount's first body pass: the two view
+    /// decisions (`MessageBubble.showHTMLPreview`, then `MessageContentView.textContent`) taken
+    /// from a view model created the way `MessageBubble.init` creates it, before any load has
+    /// run. The defaults describe an incoming HTML row with a stored preview.
+    @MainActor
+    private func prePublishPresentation(
+        hasHTMLSource: Bool = true,
+        isFromMe: Bool = false,
+        isLikelyCalendarInvite: Bool = false,
+        subject: String?,
+        chatPreviewText: String? = "Stored preview"
+    ) -> PrePublishPresentation {
+        let viewModel = MessageBubbleViewModel(
+            loader: MockMessageBubbleLoader(senderResults: [], contentResults: []),
+            initialHasHTMLSource: hasHTMLSource
+        )
+        let routing = MessageDisplayInput(
+            hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: viewModel.hasRichHTMLContent,
+            isFromMe: isFromMe,
+            isOneToOneConversation: true,
+            subject: subject,
+            senderEmail: "alice@example.com",
+            isLikelyCalendarInvite: isLikelyCalendarInvite
+        )
+        if MessageDisplayPolicy.shouldShowHTMLPreview(routing) {
+            return .previewCard
+        }
+        return MessageDisplayPolicy.showsTextLoadingPlaceholder(
+            hasLoadedContent: viewModel.hasLoadedContent,
+            routing: routing,
+            chatPreviewText: chatPreviewText,
+            hasDisplayableAttachments: false
+        ) ? .loadingPlaceholder : .text
+    }
+
+    /// A fresh mount's first body pass runs before the bubble's load has published anything. The
+    /// view model is created with the row's HTML-source hint, so that pass presents an HTML row
+    /// as every later pre-load pass does: the pill where the load still decides the text or the
+    /// routing, the card where the routing needs no verdict. Unseeded, every pass before the load
+    /// began was asked about a row with no HTML source and laid out text for each of these (text
+    /// → pill or card); on a chat open, inside the hidden initial-anchor pass.
+    ///
+    /// The invite cards on that pass while the load has yet to say whether the calendar card is
+    /// supported, so its subject line shows above the card until then, as it does mid-load.
+    ///
+    /// Revert-check: seeding `htmlAnalysis` with `.empty` in `MessageBubbleViewModel.init`
+    /// (ignoring `initialHasHTMLSource`) turns every assertion here into `.text`.
+    ///
+    /// HONEST SCOPE: `prePublishPresentation` mirrors the two view decisions and seeds the view
+    /// model by hand. That `MessageBubble.init` passes `message.hasHTMLSource` is view wiring;
+    /// there is no UI test target to cover it.
+    @MainActor
+    func testPrePublishState_htmlRowTheLoadStillDecides_isPillOrCardNotText() {
+        XCTAssertEqual(prePublishPresentation(subject: "Your receipt"), .loadingPlaceholder)
+        XCTAssertEqual(prePublishPresentation(subject: "Re: Dinner", chatPreviewText: nil), .loadingPlaceholder)
+        XCTAssertEqual(
+            prePublishPresentation(isFromMe: true, subject: "Re: Dinner", chatPreviewText: nil),
+            .loadingPlaceholder
+        )
+        XCTAssertEqual(
+            prePublishPresentation(isLikelyCalendarInvite: true, subject: "Invitation: Lunch"),
+            .previewCard
+        )
+    }
+
+    /// The rows a first pass still renders as text. A reply's or an own row's stored preview is
+    /// its final text, HTML source or not. A row with no HTML-source hint is seeded as such and
+    /// takes the policy's one unclosed path, new subject and invite flag included: the seed is
+    /// the row's own hint, never a guess that a row has HTML.
+    ///
+    /// Revert-check: seeding `htmlAnalysis` with `.placeholder(hasHTMLSource: true)` whatever the
+    /// hint in `MessageBubbleViewModel.init` fails the last two assertions (the pill, and the
+    /// card).
+    @MainActor
+    func testPrePublishState_finalStoredTextOrNoHTMLSourceHint_isText() {
+        XCTAssertEqual(prePublishPresentation(subject: "Re: Dinner"), .text)
+        XCTAssertEqual(prePublishPresentation(isFromMe: true, subject: "Re: Dinner"), .text)
+        XCTAssertEqual(prePublishPresentation(hasHTMLSource: false, subject: "Lunch?"), .text)
+        XCTAssertEqual(
+            prePublishPresentation(hasHTMLSource: false, isLikelyCalendarInvite: true, subject: "Invitation: Lunch"),
+            .text
+        )
     }
 
     func testIsTrustedTransactionalSender_rejectsSpoofedDomains() {
