@@ -545,12 +545,16 @@ final class MessageBubbleViewModelTests: XCTestCase {
         func showsLoadingPlaceholder() -> Bool {
             MessageDisplayPolicy.showsTextLoadingPlaceholder(
                 hasLoadedContent: viewModel.hasLoadedContent,
-                hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
-                isForwardedEmail: false,
-                isFromMe: true,
-                isNewsletter: false,
-                isLikelyCalendarInvite: false,
-                senderEmail: nil,
+                routing: MessageDisplayInput(
+                    hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
+                    isForwardedEmail: false,
+                    isNewsletter: false,
+                    hasRichHTMLContent: viewModel.hasRichHTMLContent,
+                    isFromMe: true,
+                    isOneToOneConversation: true,
+                    subject: nil,
+                    senderEmail: nil
+                ),
                 chatPreviewText: nil,
                 hasDisplayableAttachments: false
             )
@@ -591,6 +595,85 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
         XCTAssertNil(viewModel.fullTextContent)
         XCTAssertFalse(showsLoadingPlaceholder())
+    }
+
+    /// An incoming row with a stored preview, sampled the way the views sample it
+    /// (`MessageBubble.showHTMLPreview`, then `MessageContentView.textContent`) while its first
+    /// load is parked and again once it lands with a "rich" verdict. A row with a new subject is
+    /// never a text bubble before that verdict routes it to the preview card; a reply, which no
+    /// verdict routes to a card, is its stored text throughout.
+    ///
+    /// Revert-check: replacing `!loadCanRouteToHTMLPreview(routing)` in
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` with the flag list it superseded
+    /// (`!routing.isNewsletter && !routing.isLikelyCalendarInvite &&
+    /// !isTrustedTransactionalSender(routing.senderEmail)`) renders the new-subject row as text
+    /// mid-load: the mid-flight `presentation(subject: "Your receipt")` assertion reads
+    /// `.storedText` instead of `.loadingPlaceholder`.
+    ///
+    /// HONEST SCOPE: `presentation` mirrors the two view decisions for a non-forwarded row from
+    /// the view model's real published state. The views' own composition is not covered (there is
+    /// no UI test target), nor is a fresh mount's first pass, which runs before `loadIfNeeded` has
+    /// published the row's HTML-source hint.
+    func testLoadIfNeeded_incomingStoredPreviewRow_neverRendersTextTheLoadRoutesToCard() async {
+        enum Presentation: Equatable {
+            case previewCard
+            case loadingPlaceholder
+            case storedText
+        }
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [
+                MessageBubbleContentResult(
+                    fullTextContent: "Stored preview",
+                    hasRichHTMLContent: true,
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .placeholder(hasHTMLSource: true)
+                )
+            ],
+            gatedCallIndex: 1
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+        func presentation(subject: String) -> Presentation {
+            let routing = MessageDisplayInput(
+                hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
+                isForwardedEmail: false,
+                isNewsletter: false,
+                hasRichHTMLContent: viewModel.hasRichHTMLContent,
+                isFromMe: false,
+                isOneToOneConversation: true,
+                subject: subject,
+                senderEmail: "alice@example.com"
+            )
+            if MessageDisplayPolicy.shouldShowHTMLPreview(routing) {
+                return .previewCard
+            }
+            return MessageDisplayPolicy.showsTextLoadingPlaceholder(
+                hasLoadedContent: viewModel.hasLoadedContent,
+                routing: routing,
+                chatPreviewText: "Stored preview",
+                hasDisplayableAttachments: false
+            ) ? .loadingPlaceholder : .storedText
+        }
+
+        let load = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(hasHTMLSource: true, includesSenderRequest: false)
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(presentation(subject: "Your receipt"), .loadingPlaceholder)
+        XCTAssertEqual(presentation(subject: "Re: Dinner"), .storedText)
+
+        await loader.release()
+        await load.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(presentation(subject: "Your receipt"), .previewCard)
+        XCTAssertEqual(presentation(subject: "Re: Dinner"), .storedText)
     }
 
     /// The early-return branch records the requested signature even when it skips loading, so a

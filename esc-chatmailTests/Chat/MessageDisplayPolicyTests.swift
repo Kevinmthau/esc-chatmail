@@ -275,6 +275,9 @@ final class MessageDisplayPolicyTests: XCTestCase {
 
     // MARK: - Text loading placeholder
 
+    /// The defaults describe the user's own reply echo before its load. `subject` defaults to nil,
+    /// which is not a reply subject, so every incoming test states the subject its outcome
+    /// depends on.
     private func showsTextLoadingPlaceholder(
         hasLoadedContent: Bool = false,
         hasHTMLSource: Bool = true,
@@ -282,22 +285,32 @@ final class MessageDisplayPolicyTests: XCTestCase {
         isFromMe: Bool = true,
         isNewsletter: Bool = false,
         isLikelyCalendarInvite: Bool = false,
+        isOneToOneConversation: Bool = true,
+        subject: String? = nil,
         senderEmail: String? = nil,
         chatPreviewText: String? = "On my way, see you at 6",
         hasDisplayableAttachments: Bool = false
     ) -> Bool {
         MessageDisplayPolicy.showsTextLoadingPlaceholder(
             hasLoadedContent: hasLoadedContent,
-            hasHTMLSource: hasHTMLSource,
-            isForwardedEmail: isForwardedEmail,
-            isFromMe: isFromMe,
-            isNewsletter: isNewsletter,
-            isLikelyCalendarInvite: isLikelyCalendarInvite,
-            senderEmail: senderEmail,
+            routing: MessageDisplayInput(
+                hasHTMLSource: hasHTMLSource,
+                isForwardedEmail: isForwardedEmail,
+                isNewsletter: isNewsletter,
+                hasRichHTMLContent: false,
+                isFromMe: isFromMe,
+                isOneToOneConversation: isOneToOneConversation,
+                subject: subject,
+                senderEmail: senderEmail,
+                isLikelyCalendarInvite: isLikelyCalendarInvite
+            ),
             chatPreviewText: chatPreviewText,
             hasDisplayableAttachments: hasDisplayableAttachments
         )
     }
+
+    private static let placeholderSubjects: [String?] = [nil, "", "Lunch?", "Re: Lunch?", "  RE: lunch"]
+    private static let placeholderSenders: [String?] = [nil, "alice@example.com", "noreply@members.ebay.com"]
 
     /// Sync replaces an optimistic reply with Gmail's echo, a new object ID, so the bubble
     /// remounts with a fresh view model whose content has not loaded, and the echo always has an
@@ -315,71 +328,327 @@ final class MessageDisplayPolicyTests: XCTestCase {
 
     /// The comment in `MessageContentView.textContent` still holds for incoming mail with no
     /// stored preview: until content detection finishes, its only text is raw/partial
-    /// HTML-derived text.
+    /// HTML-derived text. That is so even for a reply, which no load outcome routes to a card.
     func testShowsTextLoadingPlaceholder_incomingHTMLBeforeLoad_showsPlaceholder() {
         XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: nil))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, subject: "Re: Dinner", chatPreviewText: nil))
     }
 
-    /// An incoming row's stored preview is the text the load will publish verbatim, and the
-    /// loader's only other output for it is the rich-content verdict. Each pill → bubble swap
-    /// reset the hidden initial-anchor pass, so every chat of incoming HTML bubbles opened late.
-    /// Displayed attachments and a non-transactional sender change nothing.
+    /// A reply from an ordinary sender stays a text bubble whatever the load's rich-content
+    /// verdict, so its stored preview is the text the load will publish verbatim and it renders
+    /// now. Conversation kind, sender and displayed attachments change nothing.
     ///
     /// Revert-check: deleting the `rendersStoredIncomingPreview` branch in
     /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` (back to "incoming HTML source and not
     /// loaded → pill") fails this test.
     ///
-    /// HONEST SCOPE: this pins the decision. That `MessageContentView.textContent` renders the
-    /// stored text when it holds, and passes `effectiveSenderEmail`, is view wiring; there is no
-    /// UI test target to cover it.
-    func testShowsTextLoadingPlaceholder_incomingHTMLWithStoredPreviewBeforeLoad_rendersText() {
-        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false))
-        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, senderEmail: "alice@example.com"))
-        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, hasDisplayableAttachments: true))
+    /// HONEST SCOPE: this pins the decision. That `MessageBubble` hands `MessageContentView` the
+    /// `MessageDisplayInput` it routed on, and that `textContent` renders the stored text when
+    /// the decision holds, is view wiring; there is no UI test target to cover it.
+    func testShowsTextLoadingPlaceholder_incomingReplyWithStoredPreviewBeforeLoad_rendersText() {
+        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, subject: "Re: Dinner"))
+        XCTAssertFalse(
+            showsTextLoadingPlaceholder(isFromMe: false, isOneToOneConversation: false, subject: "Re: Dinner")
+        )
+        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, subject: "  RE: dinner"))
+        XCTAssertFalse(
+            showsTextLoadingPlaceholder(isFromMe: false, subject: "Re: Dinner", senderEmail: "alice@example.com")
+        )
+        XCTAssertFalse(
+            showsTextLoadingPlaceholder(isFromMe: false, subject: "Re: Dinner", hasDisplayableAttachments: true)
+        )
     }
 
-    /// Newsletter and calendar-invite rows can route to a preview card on stored inputs alone, so
-    /// their stored preview is not their final rendering: the card would replace it.
+    /// A row whose subject is not a reply routes to the preview card when the load's verdict is
+    /// "rich" (a receipt, a notification), so its stored preview is not yet known to be its final
+    /// rendering. Rendering it showed the stored text and then swapped it for the card.
     ///
-    /// Revert-check: dropping `!isNewsletter` or `!isLikelyCalendarInvite` from
+    /// Revert-check: replacing `!loadCanRouteToHTMLPreview(routing)` in
+    /// `rendersStoredIncomingPreview` with the flag list it superseded
+    /// (`!routing.isNewsletter && !routing.isLikelyCalendarInvite &&
+    /// !isTrustedTransactionalSender(routing.senderEmail)`), or dropping the term, fails this test.
+    func testShowsTextLoadingPlaceholder_incomingStoredPreviewTheLoadCanRouteToCard_showsPlaceholder() {
+        for subject in [nil, "", "Your receipt"] as [String?] {
+            for isOneToOneConversation in [true, false] {
+                XCTAssertTrue(
+                    showsTextLoadingPlaceholder(
+                        isFromMe: false,
+                        isOneToOneConversation: isOneToOneConversation,
+                        subject: subject
+                    ),
+                    "subject=\(subject ?? "nil") oneToOne=\(isOneToOneConversation)"
+                )
+                XCTAssertTrue(
+                    MessageDisplayPolicy.shouldShowHTMLPreview(.init(
+                        hasHTMLSource: true,
+                        isForwardedEmail: false,
+                        isNewsletter: false,
+                        hasRichHTMLContent: true,
+                        isFromMe: false,
+                        isOneToOneConversation: isOneToOneConversation,
+                        subject: subject,
+                        senderEmail: nil
+                    )),
+                    "the rich outcome routes this row to a card"
+                )
+            }
+        }
+        XCTAssertTrue(
+            showsTextLoadingPlaceholder(isFromMe: false, subject: "Your receipt", hasDisplayableAttachments: true)
+        )
+    }
+
+    /// A newsletter or calendar-invite flag does not by itself make a card: for a sender that is
+    /// not a trusted transactional one, the routing keeps every reply in a one-to-one
+    /// conversation, and every reply not flagged as a newsletter in a group one, as a text bubble
+    /// for either verdict. Those are the only flagged rows the content view asks about (the
+    /// routing cards the rest, and every incoming trusted sender, before the load), and their
+    /// stored preview is their final text.
+    ///
+    /// Revert-check: adding `!routing.isNewsletter` or `!routing.isLikelyCalendarInvite` back to
     /// `rendersStoredIncomingPreview` in `MessageDisplayPolicy.showsTextLoadingPlaceholder` fails
-    /// the matching assertion.
-    func testShowsTextLoadingPlaceholder_incomingNewsletterOrInviteWithStoredPreview_showsPlaceholder() {
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, isNewsletter: true))
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, isLikelyCalendarInvite: true))
+    /// the matching assertions.
+    func testShowsTextLoadingPlaceholder_incomingNewsletterOrInviteReplyThatStaysText_rendersText() {
+        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, isNewsletter: true, subject: "Re: Dinner"))
+        XCTAssertFalse(
+            showsTextLoadingPlaceholder(isFromMe: false, isLikelyCalendarInvite: true, subject: "Re: Dinner")
+        )
+        XCTAssertFalse(
+            showsTextLoadingPlaceholder(
+                isFromMe: false,
+                isLikelyCalendarInvite: true,
+                isOneToOneConversation: false,
+                subject: "Re: Dinner"
+            )
+        )
+        XCTAssertFalse(
+            showsTextLoadingPlaceholder(
+                isFromMe: false,
+                isNewsletter: true,
+                isLikelyCalendarInvite: true,
+                subject: "Re: Dinner"
+            )
+        )
     }
 
-    /// `shouldShowHTMLPreview` routes a trusted transactional sender to a preview card without
-    /// waiting for rich-content classification, so its stored preview is not its final rendering
-    /// either. The sender is matched on its parsed domain, as the preview routing does.
+    /// The whole rule for an incoming HTML row with a stored preview, both directions at once:
+    /// the pill shows exactly when the routing sends the row to a card for some rich-content
+    /// verdict. The oracle builds each outcome with the full initializer, so it does not share
+    /// `MessageDisplayInput.withRichHTMLContent` with the code under test. Trusted senders are
+    /// included although the content view never asks about them (the routing cards them before
+    /// the load): a direct call must still never answer "text" for one.
     ///
-    /// Revert-check: dropping `!isTrustedTransactionalSender(senderEmail)` from
-    /// `rendersStoredIncomingPreview` in `MessageDisplayPolicy.showsTextLoadingPlaceholder` fails
-    /// this test.
-    func testShowsTextLoadingPlaceholder_incomingTrustedTransactionalSenderWithStoredPreview_showsPlaceholder() {
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, senderEmail: "noreply@members.ebay.com"))
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, senderEmail: "ship-confirm@amazon.com"))
-        XCTAssertFalse(showsTextLoadingPlaceholder(isFromMe: false, senderEmail: "x@members.ebay.com.evil.example"))
+    /// Revert-check: the superseded flag list in `rendersStoredIncomingPreview` fails in both
+    /// directions (text for a new-subject row the rich outcome cards; the pill for a one-to-one
+    /// newsletter or invite reply no outcome cards). Narrowing
+    /// `MessageDisplayPolicy.loadCanRouteToHTMLPreview` to `shouldShowHTMLPreview(input)` fails
+    /// the first direction.
+    ///
+    /// HONEST SCOPE: the oracle shares the premise that the verdict is the only routing input a
+    /// load decides for these rows. `testLoadCanRouteToHTMLPreview_boundsEveryLoadOutcome` pins
+    /// the other load-fed input.
+    func testShowsTextLoadingPlaceholder_incomingStoredPreview_showsPlaceholderExactlyWhenSomeVerdictRoutesToCard() {
+        var textRows = 0
+        var placeholderRows = 0
+        for isNewsletter in [false, true] {
+            for isLikelyCalendarInvite in [false, true] {
+                for isOneToOneConversation in [false, true] {
+                    for subject in Self.placeholderSubjects {
+                        for senderEmail in Self.placeholderSenders {
+                            let someVerdictRoutesToCard = [false, true].contains { verdict in
+                                MessageDisplayPolicy.shouldShowHTMLPreview(.init(
+                                    hasHTMLSource: true,
+                                    isForwardedEmail: false,
+                                    isNewsletter: isNewsletter,
+                                    hasRichHTMLContent: verdict,
+                                    isFromMe: false,
+                                    isOneToOneConversation: isOneToOneConversation,
+                                    subject: subject,
+                                    senderEmail: senderEmail,
+                                    isLikelyCalendarInvite: isLikelyCalendarInvite
+                                ))
+                            }
+                            let showsPlaceholder = showsTextLoadingPlaceholder(
+                                isFromMe: false,
+                                isNewsletter: isNewsletter,
+                                isLikelyCalendarInvite: isLikelyCalendarInvite,
+                                isOneToOneConversation: isOneToOneConversation,
+                                subject: subject,
+                                senderEmail: senderEmail
+                            )
+                            XCTAssertEqual(
+                                showsPlaceholder,
+                                someVerdictRoutesToCard,
+                                "newsletter=\(isNewsletter) invite=\(isLikelyCalendarInvite) "
+                                    + "oneToOne=\(isOneToOneConversation) subject=\(subject ?? "nil") "
+                                    + "sender=\(senderEmail ?? "nil")"
+                            )
+                            if showsPlaceholder {
+                                placeholderRows += 1
+                            } else {
+                                textRows += 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertGreaterThan(textRows, 0, "no row rendered text: the comparison above proved nothing")
+        XCTAssertGreaterThan(placeholderRows, 0, "no row kept the pill: the comparison above proved nothing")
     }
 
-    /// Forwarded rows wait for the structured forward summary whatever text they store.
+    /// `loadCanRouteToHTMLPreview` is an upper bound on everything a load can do to the routing.
+    /// The row is asked about as it stands before the load (no rich verdict); the load can then
+    /// publish either verdict and either HTML-source value, and whenever the routing cards any of
+    /// those four outcomes the probe must already have said so. Forwarded and own rows are
+    /// included: the probe is a standalone function.
     ///
-    /// Revert-check: moving the `if isForwardedEmail { return true }` early return in
-    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` below the incoming-row branch, or
-    /// deleting it, fails this test.
+    /// Revert-check: narrowing `MessageDisplayPolicy.loadCanRouteToHTMLPreview` to
+    /// `shouldShowHTMLPreview(input)` (only the verdict the row carries) fails this test. So does
+    /// a routing change that lets an HTML source card a row a rich verdict does not, which would
+    /// mean the probe must enumerate that input too.
+    func testLoadCanRouteToHTMLPreview_boundsEveryLoadOutcome() {
+        var outcomesTheLoadAloneRoutesToCard = 0
+        for hasHTMLSourceBeforeLoad in [false, true] {
+            for isForwardedEmail in [false, true] {
+                for isNewsletter in [false, true] {
+                    for isFromMe in [false, true] {
+                        for isOneToOneConversation in [false, true] {
+                            for isLikelyCalendarInvite in [false, true] {
+                                for subject in Self.placeholderSubjects + ["Fwd: Lunch?"] {
+                                    for senderEmail in Self.placeholderSenders {
+                                        func input(hasHTMLSource: Bool, hasRichHTMLContent: Bool) -> MessageDisplayInput {
+                                            MessageDisplayInput(
+                                                hasHTMLSource: hasHTMLSource,
+                                                isForwardedEmail: isForwardedEmail,
+                                                isNewsletter: isNewsletter,
+                                                hasRichHTMLContent: hasRichHTMLContent,
+                                                isFromMe: isFromMe,
+                                                isOneToOneConversation: isOneToOneConversation,
+                                                subject: subject,
+                                                senderEmail: senderEmail,
+                                                isLikelyCalendarInvite: isLikelyCalendarInvite
+                                            )
+                                        }
+                                        let beforeLoad = input(
+                                            hasHTMLSource: hasHTMLSourceBeforeLoad,
+                                            hasRichHTMLContent: false
+                                        )
+                                        let routesToCardBeforeLoad = MessageDisplayPolicy.shouldShowHTMLPreview(beforeLoad)
+                                        let loadCanRouteToCard = MessageDisplayPolicy.loadCanRouteToHTMLPreview(beforeLoad)
+                                        for hasHTMLSource in [false, true] {
+                                            for hasRichHTMLContent in [false, true] {
+                                                let outcome = input(
+                                                    hasHTMLSource: hasHTMLSource,
+                                                    hasRichHTMLContent: hasRichHTMLContent
+                                                )
+                                                guard MessageDisplayPolicy.shouldShowHTMLPreview(outcome) else { continue }
+                                                if !routesToCardBeforeLoad {
+                                                    outcomesTheLoadAloneRoutesToCard += 1
+                                                }
+                                                XCTAssertTrue(
+                                                    loadCanRouteToCard,
+                                                    "htmlBefore=\(hasHTMLSourceBeforeLoad) forwarded=\(isForwardedEmail) "
+                                                        + "newsletter=\(isNewsletter) fromMe=\(isFromMe) "
+                                                        + "oneToOne=\(isOneToOneConversation) invite=\(isLikelyCalendarInvite) "
+                                                        + "subject=\(subject ?? "nil") sender=\(senderEmail ?? "nil") "
+                                                        + "outcome html=\(hasHTMLSource) rich=\(hasRichHTMLContent)"
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertGreaterThan(
+            outcomesTheLoadAloneRoutesToCard,
+            0,
+            "no outcome differed from the row before its load: the bound above proved nothing"
+        )
+    }
+
+    /// The copy replaces the verdict and nothing else. `isLikelyCalendarInvite` is a defaulted
+    /// initializer parameter, so a copy rebuilt through the initializer could drop it and still
+    /// compile.
+    ///
+    /// Revert-check: rebuilding the copy in `MessageDisplayInput.withRichHTMLContent` through the
+    /// initializer without `isLikelyCalendarInvite` fails the invite assertions.
+    func testWithRichHTMLContent_replacesOnlyTheVerdict() {
+        let input = MessageDisplayInput(
+            hasHTMLSource: true,
+            isForwardedEmail: true,
+            isNewsletter: true,
+            hasRichHTMLContent: false,
+            isFromMe: true,
+            isOneToOneConversation: true,
+            subject: "Re: Dinner",
+            senderEmail: "alice@example.com",
+            isLikelyCalendarInvite: true
+        )
+        for verdict in [true, false] {
+            let copy = input.withRichHTMLContent(verdict)
+            XCTAssertEqual(copy.hasRichHTMLContent, verdict)
+            XCTAssertTrue(copy.hasHTMLSource)
+            XCTAssertTrue(copy.isForwardedEmail)
+            XCTAssertTrue(copy.isNewsletter)
+            XCTAssertTrue(copy.isFromMe)
+            XCTAssertTrue(copy.isOneToOneConversation)
+            XCTAssertEqual(copy.subject, "Re: Dinner")
+            XCTAssertEqual(copy.senderEmail, "alice@example.com")
+            XCTAssertTrue(copy.isLikelyCalendarInvite)
+        }
+    }
+
+    /// Own rows must not consult the routing probe. It is true for an own row with a new subject
+    /// in a group conversation, because the routing alone would card that row on a rich verdict;
+    /// but the loader never returns that verdict for an own row with a stored preview, so the row
+    /// ends as its stored text and renders it now.
+    ///
+    /// Revert-check: gating `rendersStoredOwnPreview` on `!loadCanRouteToHTMLPreview(routing)`, or
+    /// hoisting that check above the `isFromMe` split in
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder`, fails the first assertion.
+    func testShowsTextLoadingPlaceholder_ownStoredPreviewInGroupConversation_ignoresRoutingProbe() {
+        XCTAssertFalse(showsTextLoadingPlaceholder(isOneToOneConversation: false, subject: "Agenda"))
+        XCTAssertTrue(
+            MessageDisplayPolicy.loadCanRouteToHTMLPreview(.init(
+                hasHTMLSource: true,
+                isForwardedEmail: false,
+                isNewsletter: false,
+                hasRichHTMLContent: false,
+                isFromMe: true,
+                isOneToOneConversation: false,
+                subject: "Agenda",
+                senderEmail: nil
+            )),
+            "the probe says a load could card this row, which is why own rows must not ask it"
+        )
+    }
+
+    /// Forwarded rows wait for the structured forward summary whatever text they store, HTML
+    /// source or not.
+    ///
+    /// Revert-check: deleting the `if routing.isForwardedEmail { return true }` early return in
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder`, or moving it below the HTML-source
+    /// guard, fails the second assertion. (The first also holds through the routing probe, which
+    /// cards an incoming forward.)
     func testShowsTextLoadingPlaceholder_incomingForwardedWithStoredPreview_showsPlaceholder() {
         XCTAssertTrue(showsTextLoadingPlaceholder(isForwardedEmail: true, isFromMe: false))
         XCTAssertTrue(showsTextLoadingPlaceholder(hasHTMLSource: false, isForwardedEmail: true, isFromMe: false))
     }
 
-    /// A blank stored preview is no stored preview: the row has no final text to show yet.
+    /// A blank stored preview is no stored preview: the row has no final text to show yet. Pinned
+    /// on a reply, the row class that would otherwise render its stored text.
     ///
     /// Revert-check: testing `chatPreviewText != nil` instead of
     /// `MessagePreviewText.nonEmpty(chatPreviewText) != nil` in the incoming-row branch of
     /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` fails this test.
     func testShowsTextLoadingPlaceholder_incomingWithBlankStoredPreview_showsPlaceholder() {
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: ""))
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: " \n\t "))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, subject: "Re: Dinner", chatPreviewText: ""))
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, subject: "Re: Dinner", chatPreviewText: " \n\t "))
     }
 
     func testShowsTextLoadingPlaceholder_ownHTMLWithoutStoredPreview_showsPlaceholder() {
@@ -403,14 +672,20 @@ final class MessageDisplayPolicyTests: XCTestCase {
     }
 
     /// Only the user's own text-routed rows get the attachments exemption. Incoming mail without a
-    /// stored preview still waits for content detection, and forwarded, newsletter and invite rows
-    /// can still route elsewhere, whatever attachments they carry.
+    /// stored preview still waits for content detection, reply or not; an incoming row the load
+    /// can still route to a card waits whatever it stores; and forwarded, newsletter and invite
+    /// rows of the user's own can still route elsewhere, whatever attachments they carry.
     func testShowsTextLoadingPlaceholder_attachmentsOnIncomingForwardedNewsletterOrInvite_showsPlaceholder() {
         XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, chatPreviewText: nil, hasDisplayableAttachments: true))
-        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, isNewsletter: true, hasDisplayableAttachments: true))
         XCTAssertTrue(
-            showsTextLoadingPlaceholder(isFromMe: false, isLikelyCalendarInvite: true, hasDisplayableAttachments: true)
+            showsTextLoadingPlaceholder(
+                isFromMe: false,
+                subject: "Re: Dinner",
+                chatPreviewText: nil,
+                hasDisplayableAttachments: true
+            )
         )
+        XCTAssertTrue(showsTextLoadingPlaceholder(isFromMe: false, subject: "Photos", hasDisplayableAttachments: true))
         XCTAssertTrue(
             showsTextLoadingPlaceholder(isForwardedEmail: true, chatPreviewText: nil, hasDisplayableAttachments: true)
         )
@@ -429,10 +704,24 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertTrue(showsTextLoadingPlaceholder(isLikelyCalendarInvite: true))
     }
 
+    /// A row with no HTML source that is not forwarded never shows the pill, and no loaded row
+    /// does. That holds for an incoming row with a new subject too, which the routing probe says a
+    /// load could card. The load can still card such a row from HTML embedded in its body text
+    /// (the policy's "two paths this does not close"), but waiting on that would put the pill on
+    /// every plain-text message that starts a thread. Forwarded rows are the exception, pinned
+    /// above.
+    ///
+    /// Revert-check: moving the `guard routing.hasHTMLSource` in
+    /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` below the incoming-row branch fails the
+    /// first and third assertions; moving the `guard !hasLoadedContent` below the incoming-row
+    /// branch fails the second, fourth and fifth (the fourth as soon as it sits below the
+    /// forwarded early return).
     func testShowsTextLoadingPlaceholder_withoutHTMLSourceOrOnceLoaded_rendersText() {
         XCTAssertFalse(showsTextLoadingPlaceholder(hasHTMLSource: false, isFromMe: false, chatPreviewText: nil))
         XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isFromMe: false, chatPreviewText: nil))
+        XCTAssertFalse(showsTextLoadingPlaceholder(hasHTMLSource: false, isFromMe: false, subject: "Lunch?"))
         XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isForwardedEmail: true))
+        XCTAssertFalse(showsTextLoadingPlaceholder(hasLoadedContent: true, isFromMe: false, subject: "Lunch?"))
     }
 
     func testIsTrustedTransactionalSender_rejectsSpoofedDomains() {

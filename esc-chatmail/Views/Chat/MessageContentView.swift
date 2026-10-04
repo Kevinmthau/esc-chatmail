@@ -6,7 +6,8 @@ struct MessageContentView: View {
     let message: ChatMessageRowModel
     let style: MessageBubbleStyle
     let showHTMLPreview: Bool
-    let hasHTMLSource: Bool
+    /// The routing input `showHTMLPreview` was decided on (`MessageBubble.displayInput`).
+    let displayInput: MessageDisplayInput
     let fullTextContent: String?
     let fallbackPreviewText: String?
     let sharedDocumentLinks: [SharedDocumentLink]
@@ -59,22 +60,18 @@ struct MessageContentView: View {
             forwardedTextContent(for: forwardedDisplay)
         } else if MessageDisplayPolicy.showsTextLoadingPlaceholder(
             hasLoadedContent: hasLoadedContent,
-            hasHTMLSource: hasHTMLSource,
-            isForwardedEmail: message.isForwardedEmail,
-            isFromMe: message.isFromMe,
-            isNewsletter: message.isNewsletter,
-            isLikelyCalendarInvite: message.isLikelyCalendarInvite,
-            senderEmail: message.effectiveSenderEmail,
+            routing: displayInput,
             chatPreviewText: message.chatPreviewText,
             hasDisplayableAttachments: hasDisplayableAttachments
         ) {
             // Avoid flashing raw/partial HTML-derived text while async content detection is still
             // running. Rows whose stored preview is their final text are exempt (see the policy):
             // the user's own rows, whose pill flickered on every reply's echo remount, and
-            // incoming rows that cannot route to a preview card on stored inputs alone, whose
-            // pill → bubble swap reset the hidden initial-anchor pass on every chat open. So are
-            // the user's attachments-only rows, whose pill vanished into nothing once the load
-            // finished.
+            // incoming rows that no outcome of the load can route to a preview card, whose pill
+            // → bubble swap grew the transcript on every fresh mount. So are the user's
+            // attachments-only rows, whose pill vanished into nothing once the load finished. An
+            // incoming row the load can still route to a card keeps the pill whatever it stores:
+            // its text would be shown and then replaced by the card.
             loadingPlaceholder
         } else {
             if let text = resolvedVisibleText, !text.isEmpty {
