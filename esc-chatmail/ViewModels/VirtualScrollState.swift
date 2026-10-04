@@ -207,8 +207,10 @@ final class VirtualScrollState: ObservableObject {
     private var followsLatestInsertions = true
     var followIntentRevision: UInt = 0
     /// While the coordinator's initial bottom-anchor pass is still positioning
-    /// the hidden transcript, row `onAppear` events describe the top-anchored
-    /// pre-reveal layout, not user scrolling. Honoring them moved
+    /// the hidden transcript, row `onAppear` events describe the hidden
+    /// pre-reveal layout, not user scrolling: top-anchored on iOS 17, pinned
+    /// to the content end from iOS 18 (`ChatTranscriptScrollAnchorPolicy`),
+    /// and never user intent at either end. Honoring them moved
     /// `scrollPosition` off the parked window head (the ±2 movement guard in
     /// `markIndexVisible` only covers head..head+2, while `bufferSize` and
     /// `preloadThreshold` reach further), which requested uncovered older
@@ -297,8 +299,8 @@ final class VirtualScrollState: ObservableObject {
     /// Notifies the scroll state that a message at the given index is now visible.
     /// Called from onAppear for each message in the LazyVStack.
     func markIndexVisible(_ index: Int) {
-        // Pre-reveal onAppear reflects the hidden top-anchored layout, not
-        // user intent; see `isInitialAnchorHoldActive`.
+        // Pre-reveal onAppear reflects the hidden layout, not user intent;
+        // see `isInitialAnchorHoldActive`.
         guard !isInitialAnchorHoldActive else { return }
         if isProgrammaticScrollHoldActive {
             heldVisibleIndex = index

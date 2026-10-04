@@ -25,6 +25,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         static let compensatedShiftSettle = "compensatedShiftSettle"
         static let scrollTakeoverRelease = "scrollTakeoverRelease"
         static let pastContentEndCorrection = "pastContentEndCorrection"
+        static let initialRevealWatchdog = "initialRevealWatchdog"
+        static let postRevealAudit = "postRevealAudit"
     }
 
     private enum InitialRevealState: Equatable {
@@ -106,6 +108,26 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// reports it back in range. Bounds a geometry signal that keeps reading
     /// as parked, which would otherwise scroll on every quiet beat.
     private static let maximumConsecutivePastContentEndCorrections = 2
+    /// How long after an automatic reveal `schedulePostRevealAudit` looks
+    /// at the transcript once more. Well past the past-end correction's quiet
+    /// beat (`UIConfig.initialScrollDelay`), so a park still standing then is
+    /// one the correction did not, or could not, fix.
+    private static let postRevealAuditDelay: TimeInterval = 1.0
+    /// How long past the reveal time limit the watchdog waits before it
+    /// reveals a still-pending pass itself. A working geometry signal
+    /// evaluates the deadline within a re-probe or two of it (each takes
+    /// `UIConfig.initialScrollDelay`), so the grace leaves the deadline to
+    /// that signal and the watchdog acts only when it has gone quiet.
+    private static let initialRevealWatchdogGrace: TimeInterval = 1.0
+
+    /// `Task.sleep`, the default for `sleep` and `watchdogSleep`. A
+    /// `nonisolated` function rather than a stored closure: the initializers'
+    /// default-argument expressions evaluate outside the main actor, where a
+    /// main-actor-isolated static property cannot be referenced (a compile
+    /// error under this project's language mode, not a warning).
+    nonisolated static func systemSleep(_ nanoseconds: UInt64) async {
+        try? await Task.sleep(nanoseconds: nanoseconds)
+    }
 
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
@@ -159,14 +181,27 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let invalidateContactsCache: AsyncAction
     private let clearPersonCache: AsyncAction
     private let sleep: Sleep
+    /// Sleeps for the reveal watchdog and the post-reveal audit, the two
+    /// long timers. Kept apart from `sleep`, which paces the short re-probes:
+    /// tests script those through `sleep` call by call, and a long timer
+    /// sharing it would consume and reorder their calls.
+    private let watchdogSleep: Sleep
     private let now: Now
     private let initialPresentationAnchor: InitialPresentationAnchor
     private let taskManager = ViewModelTaskManager()
     private var initialRevealState: InitialRevealState = .waitingForRows
     /// Wall-clock deadline for the pending initial-anchor pass; armed by
     /// `performInitialScroll`, cleared on completion. Consulted only while
-    /// `initialRevealState` is `.pending`.
+    /// `initialRevealState` is `.pending`: by every offscreen geometry report,
+    /// and by the pass's watchdog when no report has revealed the pass
+    /// within `initialRevealWatchdogGrace` of it.
     private var initialAnchorRevealDeadline: TimeInterval?
+    /// When `handleBottomAnchorGeometryUpdate` last ran, for the watchdog's
+    /// log line: it tells a geometry signal that went quiet from one that
+    /// kept reporting without revealing. Cleared when a pass starts and on
+    /// disappear, so the line never cites a report from an earlier pass or
+    /// appearance as this pass's last one.
+    private var lastBottomAnchorGeometryReportAt: TimeInterval?
     /// Whether any geometry update has carried a laid-out bottom-anchor frame
     /// this reveal pass. Until then, "anchor offscreen" only means "the lazy
     /// trailing anchor has not been realized", so it must not consume the
@@ -207,6 +242,27 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// scroll phases (iOS 26+); below that the drag flag stands alone.
     private var isTrackedScrollPhaseUserDriven = false
     private var consecutivePastContentEndCorrections = 0
+    /// The shortest tracked content height seen parked during the current
+    /// parked stretch: lowered when a correction fires and whenever a parked
+    /// report restarts the count. A parked report with content shorter than
+    /// this restarts the count of `maximumConsecutivePastContentEndCorrections`:
+    /// the content changed under the correction, so it is not the stuck
+    /// signal the bound exists for. The suspected case (not observed on
+    /// device) is the lazy stack re-measuring rows a correction realized,
+    /// with real heights under the estimates its scroll was planned with,
+    /// which moves the content end up past a landing that was right when
+    /// made. Any other new low (a spacer or bubble shrinking) restarts it
+    /// too, which is harmless. The restart itself records the new low: a low
+    /// that only ever shows up between corrections (reported, then
+    /// re-estimated back up before the quiet beat fires) would otherwise read
+    /// as new on every swing and restart the count forever. Each restart
+    /// therefore needs a height below every height this stretch has seen,
+    /// and `frame(minHeight:)` floors the content at the viewport height, so
+    /// restarts are finite.
+    private var smallestParkedContentHeight: CGFloat?
+    /// The correction bound was reached and logged for the current parked
+    /// stretch; logged once, since every later geometry report re-reaches it.
+    private var didLogPastContentEndCorrectionBound = false
     private var postRevealBottomFollowState: PostRevealBottomFollowState = .inactive
     private var compensatedShiftHold: CompensatedShiftHold?
     private var hasCapturedInitialUnreadSnapshot = false
@@ -238,10 +294,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
         initialPresentationAnchor: InitialPresentationAnchor,
-        sleep: @escaping Sleep = { nanoseconds in
-            try? await Task.sleep(nanoseconds: nanoseconds)
-        },
-        now: @escaping Now = { ProcessInfo.processInfo.systemUptime }
+        sleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep,
+        now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
+        watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep
     ) {
         self.loadLatestWindowIfNeeded = { knownTotalCount in
             await scrollState.loadLatestWindowIfNeeded(knownTotalCount: knownTotalCount)
@@ -279,6 +334,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.invalidateContactsCache = chatDependencies.contacts.invalidateContactsCache
         self.clearPersonCache = chatDependencies.contacts.clearPersonCache
         self.sleep = sleep
+        self.watchdogSleep = watchdogSleep
         self.now = now
         self.initialPresentationAnchor = initialPresentationAnchor
     }
@@ -299,7 +355,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         sleep: @escaping Sleep,
         now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
         ensureVisibleMessage: @escaping MessageVisibilityEnsurer = { _ in true },
-        isMessagePublished: @escaping MessagePublicationCheck = { _ in false }
+        isMessagePublished: @escaping MessagePublicationCheck = { _ in false },
+        watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep
     ) {
         self.loadLatestWindowIfNeeded = loadLatestWindowIfNeeded
         self.ensureVisibleMessage = ensureVisibleMessage
@@ -315,6 +372,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.invalidateContactsCache = invalidateContactsCache
         self.clearPersonCache = clearPersonCache
         self.sleep = sleep
+        self.watchdogSleep = watchdogSleep
         self.now = now
         self.initialPresentationAnchor = initialPresentationAnchor
     }
@@ -384,6 +442,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         isTrackedUserScrollInteractionActive = false
         isTrackedScrollPhaseUserDriven = false
         consecutivePastContentEndCorrections = 0
+        smallestParkedContentHeight = nil
+        didLogPastContentEndCorrectionBound = false
+        lastBottomAnchorGeometryReportAt = nil
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
         pendingAutoReadLayoutOrder.removeAll()
@@ -525,6 +586,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         let previousContentMinY = trackedContentMinY
         let previousContentHeight = trackedContentHeight
         let previousViewportHeight = trackedViewportHeight
+        lastBottomAnchorGeometryReportAt = now()
         if hasBottomAnchorGeometry {
             hasObservedBottomAnchorGeometry = true
         }
@@ -1017,6 +1079,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         taskManager.cancel(TaskKey.latestWindow)
         taskManager.cancel(TaskKey.postRevealGeometryCheck)
         taskManager.cancel(TaskKey.pastContentEndCorrection)
+        taskManager.cancel(TaskKey.initialRevealWatchdog)
 
         guard case .pending = initialRevealState else {
             if wasFollowingPostRevealBottom {
@@ -1753,12 +1816,17 @@ final class ChatMessagesCoordinator: ObservableObject {
             return
         }
 
-        performInitialScroll(messageCount: anchorMessageCount, reason: reason)
+        performInitialScroll(
+            messageCount: anchorMessageCount,
+            reason: reason,
+            scrollAction: scrollAction
+        )
     }
 
     private func performInitialScroll(
         messageCount: Int,
-        reason: String
+        reason: String,
+        scrollAction: @escaping BottomAnchorAction
     ) {
         guard !hasStartedInitialAnchor else {
             Log.diagnostic(
@@ -1774,8 +1842,10 @@ final class ChatMessagesCoordinator: ObservableObject {
             scrollAttempts: 0,
             phase: .awaitingGeometry
         )
-        initialAnchorRevealDeadline = now() + Self.initialAnchorRevealTimeLimit
+        let revealDeadline = now() + Self.initialAnchorRevealTimeLimit
+        initialAnchorRevealDeadline = revealDeadline
         hasObservedBottomAnchorGeometry = false
+        lastBottomAnchorGeometryReportAt = nil
         didObserveGrowthDuringInitialRecheck = false
         didObserveParkedPastEndDuringInitialPass = false
         initialAnchorGeometryCheckID = UUID()
@@ -1785,10 +1855,60 @@ final class ChatMessagesCoordinator: ObservableObject {
             "ChatView initial anchor awaiting layout reason=\(reason) messages=\(messageCount)",
             category: .ui
         )
+        armInitialRevealWatchdog(deadline: revealDeadline, scrollAction: scrollAction)
         if messageCount > 1 {
             taskManager.run(TaskKey.initialBottomAnchor) { [loadLatestWindowIfNeeded] in
                 await loadLatestWindowIfNeeded(nil)
             }
+        }
+    }
+
+    /// Reveals a pass still pending `initialRevealWatchdogGrace` after its
+    /// time limit, when no geometry report has evaluated the deadline.
+    ///
+    /// The deadline is otherwise read only inside
+    /// `handleBottomAnchorGeometryUpdate`, which the view calls from geometry
+    /// and `initialAnchorGeometryCheckID` changes. Every pending phase keeps
+    /// those coming (each re-probe task ends in a check-ID bump), so a pass
+    /// still pending after the grace means the reports stopped, as when
+    /// SwiftUI drops a delivery. Nothing in this repo is known to cause that,
+    /// but without the watchdog the transcript would then stay hidden behind
+    /// the spinner until the reader drags it out. Waking before the deadline
+    /// (`now()` is `systemUptime`, which stops while the device sleeps; the
+    /// sleep's clock need not) re-arms once for the time left, then leaves
+    /// anything still short to the next geometry report rather than
+    /// re-sleeping in a loop a test's immediate sleep would spin.
+    private func armInitialRevealWatchdog(
+        deadline: TimeInterval,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        let waitNanoseconds = UInt64(
+            (Self.initialAnchorRevealTimeLimit + Self.initialRevealWatchdogGrace) * 1_000_000_000
+        )
+        taskManager.run(TaskKey.initialRevealWatchdog) { [weak self, watchdogSleep] in
+            await watchdogSleep(waitNanoseconds)
+            guard !Task.isCancelled, let self else { return }
+            let remaining = deadline - self.now()
+            if remaining > 0 {
+                await watchdogSleep(UInt64(remaining * 1_000_000_000))
+            }
+            guard !Task.isCancelled,
+                  case .pending = self.initialRevealState,
+                  // A restarted pass armed its own deadline and watchdog.
+                  self.initialAnchorRevealDeadline == deadline,
+                  self.now() >= deadline else {
+                return
+            }
+            let lastReport = self.lastBottomAnchorGeometryReportAt.map {
+                String(format: "%.2fs ago", self.now() - $0)
+            } ?? "never"
+            self.completeInitialReveal(
+                wasVisiblyConfirmed: false,
+                armsBottomFollowAfterFallback: self.hasObservedBottomAnchorGeometry,
+                fallbackReason: "time limit passed with no geometry report revealing it (watchdog; last report \(lastReport))"
+            )
+            // The geometry handler's deferred check never ran for this reveal.
+            self.updatePastContentEndCorrection(scrollAction: scrollAction)
         }
     }
 
@@ -1984,6 +2104,8 @@ final class ChatMessagesCoordinator: ObservableObject {
     private func updatePastContentEndCorrection(scrollAction: @escaping BottomAnchorAction) {
         guard isTrackedContentParkedPastEnd else {
             consecutivePastContentEndCorrections = 0
+            smallestParkedContentHeight = nil
+            didLogPastContentEndCorrectionBound = false
             taskManager.cancel(TaskKey.pastContentEndCorrection)
             return
         }
@@ -1991,10 +2113,35 @@ final class ChatMessagesCoordinator: ObservableObject {
             taskManager.cancel(TaskKey.pastContentEndCorrection)
             return
         }
+        // A correction lands on the content end, and the next report reads
+        // in range and resets the count. If the landing realizes rows shorter
+        // than estimated (suspected, not observed), the same layout pass
+        // moves the end up again and that report already reads parked; the
+        // count alone would then run out while each correction still made
+        // progress (`smallestParkedContentHeight`).
+        if let smallestParkedContentHeight,
+           let trackedContentHeight,
+           trackedContentHeight < smallestParkedContentHeight - Self.geometryChangeTolerance {
+            consecutivePastContentEndCorrections = 0
+            didLogPastContentEndCorrectionBound = false
+            // The restart records the low itself; see
+            // `smallestParkedContentHeight` for why a low the correction
+            // never fires at must not stay "new".
+            self.smallestParkedContentHeight = trackedContentHeight
+        }
         guard consecutivePastContentEndCorrections <
                 Self.maximumConsecutivePastContentEndCorrections else {
+            if !didLogPastContentEndCorrectionBound {
+                didLogPastContentEndCorrectionBound = true
+                // Always logged; see `completeInitialReveal`.
+                Log.warning(
+                    "ChatView parked past content end; correction bound reached; \(trackedGeometryDescription)",
+                    category: .ui
+                )
+            }
             return
         }
+        let maximumCorrections = Self.maximumConsecutivePastContentEndCorrections
         taskManager.run(TaskKey.pastContentEndCorrection) { [weak self, sleep] in
             await sleep(UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
             guard !Task.isCancelled,
@@ -2007,10 +2154,15 @@ final class ChatMessagesCoordinator: ObservableObject {
                 return
             }
             self.consecutivePastContentEndCorrections += 1
-            Log.diagnostic(
-                .chatView,
-                level: .warning,
-                "ChatView parked past content end; \(self.trackedGeometryDescription)",
+            if let trackedContentHeight = self.trackedContentHeight {
+                self.smallestParkedContentHeight = min(
+                    self.smallestParkedContentHeight ?? trackedContentHeight,
+                    trackedContentHeight
+                )
+            }
+            // Always logged; see `completeInitialReveal`.
+            Log.warning(
+                "ChatView parked past content end; correcting (\(self.consecutivePastContentEndCorrections) of \(maximumCorrections)); \(self.trackedGeometryDescription)",
                 category: .ui
             )
             scrollAction(
@@ -2065,22 +2217,67 @@ final class ChatMessagesCoordinator: ObservableObject {
         didObserveGrowthDuringInitialRecheck = false
         didObserveGrowthDuringPostRevealCheck = false
         didObserveParkedPastEndDuringInitialPass = false
+        taskManager.cancel(TaskKey.initialRevealWatchdog)
         isReadyToShow = true
-        let logMessage: String
         if wasVisiblyConfirmed {
-            logMessage = "ChatView initial anchor remained visible through stabilization"
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView initial anchor remained visible through stabilization; \(trackedGeometryDescription)",
+                category: .ui
+            )
         } else {
             let reason = fallbackReason ?? "fallback"
-            logMessage = armsBottomFollowAfterFallback
+            let logMessage = armsBottomFollowAfterFallback
                 ? "ChatView initial anchor \(reason); revealing with bottom follow"
                 : "ChatView initial anchor \(reason); revealing fallback"
+            // Always logged, not `Log.diagnostic`: the chat-view diagnostics
+            // exist only in Debug builds launched from Xcode with
+            // ESC_LOG_DIAGNOSTICS set, and the intermittent "chat opens blank
+            // until I scroll" report never reproduced under them. A warning
+            // persists in the device log, so the next blank open can be read
+            // back afterwards. Geometry only; no message content.
+            Log.warning("\(logMessage); \(trackedGeometryDescription)", category: .ui)
         }
-        Log.diagnostic(
-            .chatView,
-            level: wasVisiblyConfirmed ? .info : .warning,
-            "\(logMessage); \(trackedGeometryDescription)",
-            category: .ui
-        )
+        schedulePostRevealAudit()
+    }
+
+    /// Looks at the transcript once more `postRevealAuditDelay` after an
+    /// automatic reveal and logs a warning if it still sits parked past its
+    /// content end (`isTrackedContentParkedPastEnd`) while the correction
+    /// could have run, with the correction's state. By then the past-end
+    /// correction should have landed it, so the line means it was used up or
+    /// its scroll did not land. A park the correction is deliberately holding
+    /// for (a finger or user-driven scroll phase on the transcript, or a
+    /// compensated shift still settling) is expected and logged at info only,
+    /// so a reader rubber-banding the end does not write the warning the
+    /// blank-open report is read by. Diagnostics only: it changes no state.
+    ///
+    /// Together with the reveal and correction warnings, it splits the next
+    /// device report of a blank open: a warning names a scroll position
+    /// problem. No warning at all means the last geometry the coordinator
+    /// received read as correct while nothing showed, which points at
+    /// drawing rather than position, unless geometry deliveries stopped
+    /// (then the tracked values are stale; the watchdog's line says when the
+    /// last report came).
+    private func schedulePostRevealAudit() {
+        let delay = Self.postRevealAuditDelay
+        taskManager.run(TaskKey.postRevealAudit) { [weak self, watchdogSleep] in
+            await watchdogSleep(UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled,
+                  let self,
+                  case .ready = self.initialRevealState,
+                  self.isVisible,
+                  self.isTrackedContentParkedPastEnd else {
+                return
+            }
+            let message = "ChatView still parked past content end \(delay)s after reveal; corrections=\(self.consecutivePastContentEndCorrections) takeover=\(self.isUserScrollTakeoverActive) fingerDown=\(self.isTrackedUserScrollInteractionActive) scrollPhaseUserDriven=\(self.isTrackedScrollPhaseUserDriven) shiftHold=\(self.isHoldingForCompensatedShift); \(self.trackedGeometryDescription)"
+            if self.canCorrectPastContentEnd && !self.isHoldingForCompensatedShift {
+                Log.warning(message, category: .ui)
+            } else {
+                Log.info(message, category: .ui)
+            }
+        }
     }
 
     private func requestLatestWindowIfNeeded(knownTotalCount: Int?) {
