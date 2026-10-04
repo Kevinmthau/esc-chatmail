@@ -105,9 +105,11 @@ struct MessageBubble: View {
     }
 
     /// The verdict `displayInput` routes on and whether a load can still change it: the
-    /// load's once published, before that the verdict stored on the row. Substituted here
-    /// rather than seeded into the view model so it also covers the row's first pass, which
-    /// runs before `loadIfNeeded` has touched the view model.
+    /// load's once published, before that the verdict stored on the row. Resolved from the
+    /// row on every pass rather than seeded into the view model the way the HTML-source hint
+    /// is (`MessageBubbleViewModel.init`): a seed is taken once per mount, and a verdict can
+    /// be stamped while the bubble is mounted (the launch backfill, the refresher), which
+    /// has to reach a row still waiting on its load.
     private var resolvedRichVerdict: MessageDisplayPolicy.ResolvedRichVerdict {
         MessageDisplayPolicy.resolvedRichVerdict(
             hasLoadedContent: viewModel.hasLoadedContent,
@@ -164,7 +166,14 @@ struct MessageBubble: View {
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
         self.onSendRecoveryAction = onSendRecoveryAction
-        self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(loader: messageBubbleLoader))
+        // Seeded with the row's hint so the body passes before the load starts route as the
+        // mid-load state does (see the view model's initializer). `StateObject` evaluates this
+        // once per mount: when Gmail's echo replaces an optimistic reply the view model is kept,
+        // and the echo's hint reaches it through `loadIfNeeded` instead.
+        self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(
+            loader: messageBubbleLoader,
+            initialHasHTMLSource: message.hasHTMLSource
+        ))
     }
 
     var body: some View {

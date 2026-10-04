@@ -35,7 +35,7 @@ cd web && corepack pnpm test:e2e
 ## Layout
 
 - `esc-chatmail/` is the app target; `Services/` holds nearly all logic, with Sync, Send, Caching, HTMLContent/HTMLSanitization, EmailDOM (SwiftSoup) and Chat the dense areas.
-- Entity classes: `Services/CoreData/ManagedObjects.swift` (`@objc` class decls) + `Services/Models/<Entity>+Extensions.swift` (`@NSManaged` props, helpers). Adding an attribute means editing the versioned `.xcdatamodel` **and** the `+Extensions` file.
+- Entity classes: `Services/CoreData/ManagedObjects.swift` (`@objc` class decls) + `Services/Models/<Entity>+Extensions.swift` (`@NSManaged` props, helpers). Exceptions, whose `@NSManaged` props are declared in `ManagedObjects.swift` itself: `ChatReplyDraft` and `OutboundSendMutationRecord` (neither has a `+Extensions` file) and `Attachment.replyDraft`. Adding an attribute means editing the versioned `.xcdatamodel` **and** the file holding that entity's `@NSManaged` props.
 - `esc-chatmail/Models/` holds the versioned schema (`esc-chatmail/Models/CoreData/ESCChatmail.xcdatamodeld`, current version `ESCChatmail 5.xcdatamodel`; a schema change is a new version directory plus the `.xccurrentversion` bump, never an edit to a shipped version, whose hashes on-device stores carry) plus a legacy grab-bag of value types; entity *class* code is not there.
 - Test directories broadly track `Services/` subsystem names but are not a strict mirror; shared fakes live in `esc-chatmailTests/TestSupport/` (`Mocks/`, `Builders/`, `TestCoreDataStack.swift`, `FakeSyncClock.swift`).
 - App and unit-test targets use filesystem-synchronized groups: new `.swift` files are picked up automatically. Never hand-edit `project.pbxproj`.

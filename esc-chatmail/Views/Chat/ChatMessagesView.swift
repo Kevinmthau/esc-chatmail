@@ -55,8 +55,11 @@ struct ChatMessagesView: View {
     /// Height of the transcript's trailing spacer. Follows
     /// `ChatBottomInsetPolicy.Components.inset` through
     /// `handleBottomInsetChange` rather than being computed in `body`, so
-    /// growth can be applied without the keyboard's animation (see
-    /// `ChatBottomInsetPolicy.SpacerTransition`).
+    /// growth, and every change while the transcript is hidden, can be
+    /// applied without the keyboard's animation (see
+    /// `ChatBottomInsetPolicy.SpacerTransition` and `spacerTransition`). Only
+    /// the spacer reads it: the initial-load overlays pad by the inset `body`
+    /// computes live, which that policy's hidden branch relies on.
     @State private var transcriptBottomInset: CGFloat = 1
     @State private var transcriptOffsetShiftRequest: ChatTranscriptOffsetShifter.Request?
     @State private var transcriptShiftTracking = ChatTranscriptOffsetShifter.Tracking()
@@ -386,9 +389,18 @@ struct ChatMessagesView: View {
         // Anchor roles: `ChatTranscriptScrollAnchorPolicy`. The content end
         // is pinned while the transcript is hidden, so the window lands on
         // its newest rows and bubble growth cannot push the bottom anchor
-        // off the viewport during the hidden anchor pass.
+        // off the viewport during the hidden anchor pass. Keyed on the
+        // coordinator's reveal alone, not `isTranscriptRevealed`: the two
+        // differ only while a revealed transcript has no rows (`.empty`,
+        // `.failed`, or `.loading` after an empty reveal), where the
+        // transcript always kept its `.top` size-change anchor. Pinning the
+        // end there instead parked a chat emptied while open past its
+        // content end once the composer and keyboard outgrew the viewport,
+        // and left it scrolled away from the top when a screenful of rows
+        // came back (measured in a replica of this scroll structure on the
+        // iOS 27.0 simulator, not in the app).
         .modifier(
-            ChatTranscriptScrollAnchors(isTranscriptRevealed: isTranscriptRevealed)
+            ChatTranscriptScrollAnchors(isTranscriptRevealed: coordinator.isReadyToShow)
         )
         .modifier(
             ChatTranscriptOffsetShifter(
@@ -638,12 +650,14 @@ struct ChatMessagesView: View {
     }
 
     /// The initial window has loaded and the coordinator has revealed it. The
-    /// one definition of "revealed" for the scroll anchors
-    /// (`ChatTranscriptScrollAnchors`), the inset shift
+    /// one definition of "revealed" for the inset shift
     /// (`isTranscriptOffsetShiftAvailable`) and the spacer transition
-    /// (`ChatBottomInsetPolicy.spacerTransition`): `ChatBottomInsetPolicy`
-    /// assumes the `.top` size-change anchor `ChatTranscriptScrollAnchorPolicy`
-    /// returns for a revealed transcript, so they must all read the same state.
+    /// (`ChatBottomInsetPolicy.spacerTransition`). The scroll anchors
+    /// (`ChatTranscriptScrollAnchors`) read `coordinator.isReadyToShow` alone
+    /// (see the modifier's call site for why), which this implies: whenever a
+    /// shift is available the transcript has the `.top` size-change anchor
+    /// `ChatBottomInsetPolicy` assumes. Passing this to the anchors as well
+    /// is not needed for that premise and changes the row-less states.
     private var isTranscriptRevealed: Bool {
         scrollState.initialLoadPhase == .loaded && coordinator.isReadyToShow
     }

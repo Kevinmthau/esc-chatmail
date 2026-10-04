@@ -58,15 +58,20 @@ enum ChatBottomInsetPolicy {
         /// re-targeted (simulator probe: the keyboard-show scroll-to-bottom
         /// landed ~19pt short at the bottom, and offset shifts wobbled by
         /// ±20pt). Growth itself is invisible under the `.top` anchor, so
-        /// dropping its animation costs nothing on screen.
+        /// dropping its animation costs nothing on screen. That describes a
+        /// revealed transcript: while it is hidden every change, shrinks
+        /// included, takes this case (see `spacerTransition`).
         case immediate
         /// Replay the keyboard's own animation (the curve and duration
         /// `KeyboardResponder` publishes the composer's offset with), so the
         /// spacer, and at the bottom the content the scroll view clamps
         /// with it, shrinks in lockstep with the composer on keyboard hide.
+        /// Revealed transcript only: a keyboard hide while it is hidden is
+        /// `.immediate` (see `spacerTransition`).
         case keyboardAnimation
         /// Keep whatever transaction delivered the change (reply-bar shrink),
-        /// as the spacer did when it was computed in `body`.
+        /// as the spacer did when it was computed in `body`. Revealed
+        /// transcript only, like `.keyboardAnimation`.
         case inherited
     }
 
@@ -156,23 +161,53 @@ enum ChatBottomInsetPolicy {
     /// How the trailing spacer takes the change from `oldComponents` to
     /// `newComponents`.
     ///
-    /// While the transcript is still hidden behind its initial anchor pass
-    /// (`isTranscriptRevealed` false) every change applies without animation,
-    /// shrinks included. The case that needed it: a chat pushed from the
-    /// conversation list while the list's search keyboard is up. The row tap
-    /// drops search focus and pushes in the same handler, `KeyboardResponder`
-    /// publishes the hide inside a 0.25s `withAnimation`, and when the chat's
-    /// first body ran before that landed, the spacer started at keyboard
-    /// height and then shrank animated. A fast initial window load put the
-    /// coordinator's hidden-pass `scrollTo(bottomID, anchor: .bottom)` inside
-    /// that animation. A scroll issued while the content size animates is
-    /// clamped to the mid-animation size and never re-targeted, and the scroll
-    /// view does not clamp a past-end offset at rest (the past-end parking
-    /// note in `ChatMessagesCoordinator`), so the transcript could be
-    /// revealed parked past its content end: a blank transcript until the
-    /// first touch. Nothing of the spacer is on screen while hidden, so the
-    /// dropped animation costs nothing. Once revealed, the choices below
-    /// apply.
+    /// While the transcript is not revealed (`isTranscriptRevealed` false, as
+    /// `ChatMessagesView.isTranscriptRevealed` defines it: the whole
+    /// `.loading`, `.empty` and `.failed` phases, and a loaded window still
+    /// hidden behind its initial anchor pass) every change applies without
+    /// animation, shrinks included.
+    ///
+    /// The case it was added for is a suspected mechanism for "the chat opens
+    /// blank until I scroll", reasoned from source and not reproduced: a chat
+    /// pushed from the conversation list while the list's search keyboard is
+    /// up. The row tap drops search focus and pushes in the same handler, and
+    /// `KeyboardResponder` publishes the hide inside a `withAnimation` (the
+    /// notification's duration, at least 0.25s). If the chat's first body
+    /// runs before that lands, the spacer starts at keyboard height and then
+    /// shrinks animated, and a fast initial window load can put a hidden-pass
+    /// `scrollTo(bottomID, anchor: .bottom)` from the coordinator inside that
+    /// animation. A scroll issued while the content size animates is clamped
+    /// to the mid-animation size and never re-targeted (measured for growth:
+    /// the probe on `SpacerTransition.immediate`), and the scroll view does
+    /// not clamp a past-end offset at rest (`isTrackedContentParkedPastEnd`
+    /// in `ChatMessagesCoordinator`), so the transcript could be revealed
+    /// parked past its content end: a blank transcript until the first
+    /// touch. What was measured does not show it: the ordinary content
+    /// shrinks tried in the simulator all clamped (same note), and a revealed
+    /// keyboard hide at the bottom is clamped in lockstep with the spacer
+    /// (`SpacerTransition.keyboardAnimation`).
+    ///
+    /// Which hidden pass that scroll belongs to: below iOS 18 the hidden
+    /// transcript keeps the `.top` size-change anchor and the pass has to
+    /// scroll to find the bottom. On iOS 18 and later it is pinned to its
+    /// content end
+    /// (`ChatTranscriptScrollAnchorPolicy.sizeChanges(isTranscriptRevealed:)`
+    /// returns `.bottom`) and the pass scrolls only when the bottom anchor
+    /// reads offscreen or parked past the end, so there this removes one
+    /// producer of a mid-animation scroll rather than being the only defence.
+    /// One reason holds whichever anchor the hidden pass had: a shrink
+    /// animation still in flight at the reveal would finish under the `.top`
+    /// size-change anchor every revealed transcript has (the one the reveal
+    /// switches to on iOS 18 and later).
+    ///
+    /// Nothing of the spacer is on screen in any of those states, so the
+    /// dropped animation costs nothing. That depends on how
+    /// `ChatMessagesView.body` draws them: the opaque cover hides the rows,
+    /// and the placeholder, empty and failed overlays above it pad by the
+    /// inset `body` computes live (`bottomContentInset`), not by the
+    /// `transcriptBottomInset` state the spacer reads. Pointed at that state
+    /// they would jump with the keyboard instead of following it. Once
+    /// revealed, the choices below apply.
     static func spacerTransition(
         from oldComponents: Components,
         to newComponents: Components,

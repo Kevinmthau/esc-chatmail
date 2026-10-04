@@ -10,7 +10,7 @@ final class MessageBubbleViewModel: ObservableObject {
     @Published private(set) var hasLoadedContent = false
     @Published private(set) var sharedDocumentLinks: [SharedDocumentLink] = []
     @Published private(set) var forwardedDisplayContent: ForwardedMessageDisplayContent?
-    @Published private(set) var htmlAnalysis: MessageBubbleHTMLAnalysis = .empty
+    @Published private(set) var htmlAnalysis: MessageBubbleHTMLAnalysis
 
     private let loader: any MessageBubbleLoading
     private var loadingMessageID: String?
@@ -24,8 +24,18 @@ final class MessageBubbleViewModel: ObservableObject {
     /// signature, and the next `loadIfNeeded` must retry rather than short-circuit on stale content.
     private var appliedContentSignature: String?
 
-    init(loader: any MessageBubbleLoading) {
+    /// - Parameter initialHasHTMLSource: the row's HTML-source hint
+    ///   (`ChatMessageRowModel.hasHTMLSource`), the same value `loadIfNeeded` publishes in its
+    ///   synchronous prologue. The bubble's body runs before its `.task` has started that load,
+    ///   and routes on `htmlAnalysis` (`MessageBubble.displayInput`): unseeded, every HTML row
+    ///   was laid out as a row with no HTML source until then (its text), and swapped to the
+    ///   "Loading..." pill or the preview card once the prologue ran; on a chat open, inside the
+    ///   hidden initial-anchor pass (`ChatMessagesCoordinator`). Seeded, a fresh mount starts in
+    ///   the mid-load state. Only a fresh view model takes the seed: an in-place refresh (Gmail's
+    ///   echo replacing an optimistic reply) keeps this instance and what it has published.
+    init(loader: any MessageBubbleLoading, initialHasHTMLSource: Bool = false) {
         self.loader = loader
+        self.htmlAnalysis = .placeholder(hasHTMLSource: initialHasHTMLSource)
     }
 
     convenience init(deps: Dependencies) {

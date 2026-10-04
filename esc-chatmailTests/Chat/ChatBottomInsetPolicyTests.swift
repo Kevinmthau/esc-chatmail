@@ -16,7 +16,12 @@ import XCTest
 /// (`ChatTranscriptOffsetShifter`) have no unit seam, because there is no UI
 /// test target. They were exercised in the real `ChatView` on the iOS 26.5
 /// simulator with XCUITest-driven drags, taps and typing against a seeded
-/// conversation (a temporary harness, not checked in).
+/// conversation (a temporary harness, not checked in). The hidden-transcript
+/// wiring added later (the `isTranscriptRevealed` argument
+/// `handleBottomInsetChange` passes to
+/// `ChatBottomInsetPolicy.spacerTransition`) is neither pinned by a test nor
+/// was it exercised in those simulator runs: passing `true` at that call site
+/// reverts the hidden-transcript fix with this suite green.
 final class ChatBottomInsetPolicyTests: XCTestCase {
     private typealias Components = ChatBottomInsetPolicy.Components
 
@@ -132,13 +137,20 @@ final class ChatBottomInsetPolicyTests: XCTestCase {
     }
 
     /// A chat pushed from the conversation list while the search keyboard is
-    /// up: the hide lands while the transcript is still hidden, and an
-    /// animated spacer shrink there put the hidden-pass scroll-to-bottom
-    /// inside the animation, parking the reveal past the content end.
+    /// up: the hide lands while the transcript is still hidden. An animated
+    /// spacer shrink there is the suspected mechanism (reasoned from source,
+    /// not reproduced) for a reveal parked past the content end: a
+    /// hidden-pass scroll-to-bottom issued inside the animation. See
+    /// `ChatBottomInsetPolicy.spacerTransition`.
     ///
     /// Revert-check: removing `guard isTranscriptRevealed else { return
     /// .immediate }` from `ChatBottomInsetPolicy.spacerTransition` makes this
     /// hide replay the keyboard animation again.
+    ///
+    /// HONEST SCOPE: the policy only. Nothing pins the call site
+    /// (`ChatMessagesView.handleBottomInsetChange` passing
+    /// `isTranscriptRevealed`), and it was not exercised on the simulator:
+    /// passing `true` there reverts the fix with this suite green.
     func testSpacerTransition_keyboardHideWhileTranscriptHidden_appliesImmediately() {
         XCTAssertEqual(
             ChatBottomInsetPolicy.spacerTransition(
@@ -173,11 +185,11 @@ final class ChatBottomInsetPolicyTests: XCTestCase {
         )
     }
 
-    /// Revert-check: fails only if the hidden branch of
-    /// `ChatBottomInsetPolicy.spacerTransition` stops returning `.immediate`
-    /// (HONEST SCOPE: removing the `guard isTranscriptRevealed` alone does
-    /// not fail it, because growth is `.immediate` after the reveal as well;
-    /// it pins that the hidden branch covers growth, not only shrinks).
+    /// Revert-check: fails only if `ChatBottomInsetPolicy.spacerTransition`
+    /// stops returning `.immediate` for growth while hidden (HONEST SCOPE:
+    /// removing the `guard isTranscriptRevealed`, or narrowing it to shrinks,
+    /// does not fail it, because growth is `.immediate` after the reveal as
+    /// well; it pins that hidden growth is immediate).
     func testSpacerTransition_growthWhileTranscriptHidden_appliesImmediately() {
         XCTAssertEqual(
             ChatBottomInsetPolicy.spacerTransition(
