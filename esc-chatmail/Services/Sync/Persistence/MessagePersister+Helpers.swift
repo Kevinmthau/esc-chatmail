@@ -4,6 +4,50 @@ import CoreData
 // MARK: - Helper Methods
 
 extension MessagePersister {
+    /// Stamps `message`'s rich-content verdict from the state this call leaves
+    /// stored, in the same context save as the row itself, so a row is never
+    /// committed with a verdict that describes other inputs. Call it only once
+    /// `isFromMe`, `bodyText`, `snippet` and `bodyStorageURI` are final.
+    ///
+    /// The verdict is `RichContentVerdictResolver`'s, the same rule the bubble
+    /// loader evaluates, over the same stored inputs. Evaluating anything else
+    /// here (the untrimmed part, the incoming fields before preservation) is how
+    /// a stored verdict and the load come to disagree, and a disagreement shows
+    /// as a text bubble swapping to a card after mount.
+    ///
+    /// - Parameters:
+    ///   - savedHTML: the string this call's `saveHTML` wrote successfully, or
+    ///     nil when it saved nothing (no incoming HTML, or a failed write). Only
+    ///     a successful save vouches for the in-hand string; otherwise whatever
+    ///     file is already stored is read back through the handler.
+    ///   - prerun: the classifier's answer from the preparation phase, reused
+    ///     only for the exact string it was computed on. With none, or a
+    ///     different string, the classifier runs here, on the sync context's
+    ///     queue in the sequential persistence phase. In production that is
+    ///     the rare re-stamp from disk: a failed save, or a refetch that
+    ///     brought no HTML for a row that has a stored file.
+    nonisolated func stampRichContentVerdict(
+        on message: Message,
+        savedHTML: String?,
+        prerun: RichContentPrerun?,
+        htmlContentHandler: HTMLContentHandler
+    ) {
+        // An evaluation that could not read the stored state stamps unknown,
+        // not the previous value: this call changed the inputs, so a verdict
+        // kept from before them would be rendered as known.
+        message.storedRichContentVerdict = RichContentVerdictResolver.verdict(
+            for: message.richContentVerdictInputs,
+            storedHTML: savedHTML.map { .justSaved($0) } ?? .readThroughHandler,
+            handler: htmlContentHandler,
+            classify: { html in
+                if let prerun, prerun.html == html {
+                    return prerun.isRich
+                }
+                return RichContentClassifier.hasGenuineRichContentAfterCleanup(html)
+            }
+        )
+    }
+
     func remoteCommittedSendMutationResolutions(
         for remoteMessageIDs: Set<String>,
         sentMessageIDsByRemoteID: [String: String],

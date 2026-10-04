@@ -38,10 +38,15 @@ final class SyncDurabilityV3MigrationTests: XCTestCase {
     /// The bundled v2 model must stay in the app bundle: lightweight migration
     /// finds its source model by matching store metadata against every bundled
     /// version, and a rollback build must also retain v3's files or downgraded
-    /// stores hit the missing-source wipe.
+    /// stores hit the missing-source wipe. The same holds for every later
+    /// version: v4 is the migration source for each store upgrading to v5, so
+    /// deleting a superseded `.xcdatamodel` strands the stores still on it.
     func testAllModelVersionsRemainBundled() throws {
         let momd = try modelDirectory()
-        for version in ["ESCChatmail", "ESCChatmail 2", "ESCChatmail 3"] {
+        let versions = [
+            "ESCChatmail", "ESCChatmail 2", "ESCChatmail 3", "ESCChatmail 4", "ESCChatmail 5"
+        ]
+        for version in versions {
             let url = momd.appendingPathComponent(version).appendingPathExtension("mom")
             XCTAssertTrue(
                 FileManager.default.fileExists(atPath: url.path),

@@ -95,12 +95,24 @@ struct MessageBubble: View {
             hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
-            hasRichHTMLContent: viewModel.hasRichHTMLContent,
+            hasRichHTMLContent: resolvedRichVerdict.hasRichHTMLContent,
             isFromMe: message.isFromMe,
             isOneToOneConversation: isEffectivelyOneToOneConversation,
             subject: message.subject,
             senderEmail: message.effectiveSenderEmail,
             isLikelyCalendarInvite: message.isLikelyCalendarInvite
+        )
+    }
+
+    /// The verdict `displayInput` routes on and whether a load can still change it: the
+    /// load's once published, before that the verdict stored on the row. Substituted here
+    /// rather than seeded into the view model so it also covers the row's first pass, which
+    /// runs before `loadIfNeeded` has touched the view model.
+    private var resolvedRichVerdict: MessageDisplayPolicy.ResolvedRichVerdict {
+        MessageDisplayPolicy.resolvedRichVerdict(
+            hasLoadedContent: viewModel.hasLoadedContent,
+            loadedHasRichHTMLContent: viewModel.hasRichHTMLContent,
+            knownStoredVerdict: message.knownRichContentVerdict
         )
     }
 
@@ -199,6 +211,7 @@ struct MessageBubble: View {
                     style: style,
                     showHTMLPreview: showHTMLPreview,
                     displayInput: displayInput,
+                    richVerdictIsKnown: resolvedRichVerdict.isKnown,
                     fullTextContent: viewModel.fullTextContent,
                     fallbackPreviewText: message.fallbackPreviewText,
                     sharedDocumentLinks: viewModel.sharedDocumentLinks,

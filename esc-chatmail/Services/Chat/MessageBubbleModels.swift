@@ -116,6 +116,26 @@ struct MessageBubbleContentRequest: Sendable {
     let isLikelyCalendarInvite: Bool
     let effectiveSenderEmail: String?
     let attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
+    /// The row's persisted verdict as stored (`Message.storedRichContentVerdict`), not gated
+    /// the way `ChatMessageRowModel.knownRichContentVerdict` is. The loader recomputes the
+    /// verdict from stored state and compares, asking for a refresh when the two disagree
+    /// (`MessageBubbleLoader.loadContent`). It publishes this value only when its own
+    /// evaluation is undetermined (an HTML file that exists but cannot be read). Keep it out
+    /// of `MessageBubbleLoadSignatureComponents` and the HTML-analysis cache key: every
+    /// verdict write (sync, the launch backfill, the refresher) would otherwise restart the
+    /// row's load, and each restart that disagreed would schedule another refresh.
+    let storedRichContentVerdict: RichContentVerdict
+
+    /// The stored state `RichContentVerdictResolver` reads for this row.
+    var richContentVerdictInputs: RichContentVerdictInputs {
+        RichContentVerdictInputs(
+            messageID: messageID,
+            isFromMe: isFromMe,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            snippet: snippet
+        )
+    }
 
     init(
         messageID: String,
@@ -132,7 +152,8 @@ struct MessageBubbleContentRequest: Sendable {
         isForwardedEmail: Bool,
         isLikelyCalendarInvite: Bool,
         effectiveSenderEmail: String?,
-        attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
+        attachmentSnapshots: [MessageBubbleAttachmentSnapshot],
+        storedRichContentVerdict: RichContentVerdict = .unknown
     ) {
         self.messageID = messageID
         self.bodyText = bodyText
@@ -149,6 +170,7 @@ struct MessageBubbleContentRequest: Sendable {
         self.isLikelyCalendarInvite = isLikelyCalendarInvite
         self.effectiveSenderEmail = effectiveSenderEmail
         self.attachmentSnapshots = attachmentSnapshots
+        self.storedRichContentVerdict = storedRichContentVerdict
     }
 }
 

@@ -1186,6 +1186,30 @@ struct ProcessedMessage: Sendable {
     var attachmentInfo: [AttachmentInfo] = []
     var inlineCIDPrefetchContentIDs: Set<String> = []
     var inlineCIDPrefetchAttachmentIDs: Set<String> = []
+    /// The rich-content classifier's answer for `storedHTML`, pre-computed in the
+    /// concurrent preparation phase (`MessagePersister.richContentPrerun`). Purely
+    /// an optimisation: nil means "not pre-computed", never "not rich", and the
+    /// persister then classifies for itself. Stub processors and hand-built
+    /// values leave it nil.
+    var richContentPrerun: RichContentPrerun?
+}
+
+/// The rich-content classifier's answer for one exact HTML string. It carries
+/// the string so the answer can only be reused for that string
+/// (`MessagePersister.stampRichContentVerdict`).
+struct RichContentPrerun: Sendable, Equatable {
+    let html: String
+    let isRich: Bool
+}
+
+extension ProcessedMessage {
+    /// The HTML persistence writes for this message: the canonical content's
+    /// trimmed HTML, else the raw part. Both persister paths save exactly this
+    /// string and the pre-run classifies exactly this string; the raw part alone
+    /// differs from it by surrounding whitespace for nearly every message.
+    var storedHTML: String? {
+        canonicalContent?.html ?? htmlBody
+    }
 }
 
 extension ProcessedMessage {

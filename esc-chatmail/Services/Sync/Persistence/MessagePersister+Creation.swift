@@ -44,7 +44,8 @@ extension MessagePersister {
         in context: NSManagedObjectContext
     ) async throws {
         let saveHTML = self.saveHTML
-        let canonicalHTML = processedMessage.canonicalContent?.html ?? processedMessage.htmlBody
+        let htmlContentHandler = self.htmlContentHandler
+        let canonicalHTML = processedMessage.storedHTML
         let savedBodyStorageURI = canonicalHTML.flatMap {
             saveHTML($0, processedMessage.id)?.absoluteString
         }
@@ -154,6 +155,16 @@ extension MessagePersister {
             if let savedBodyStorageURI {
                 message.bodyStorageURI = savedBodyStorageURI
             }
+            // After the last verdict input (isFromMe, bodyText, snippet,
+            // bodyStorageURI) is final. A failed save does not prove no HTML
+            // is stored (an earlier attempt can have left a file), so only a
+            // successful one vouches for the in-hand string.
+            self.stampRichContentVerdict(
+                on: message,
+                savedHTML: savedBodyStorageURI == nil ? nil : canonicalHTML,
+                prerun: processedMessage.richContentPrerun,
+                htmlContentHandler: htmlContentHandler
+            )
 
             for attachmentInfo in processedMessage.attachmentInfo {
                 self.createAttachment(attachmentInfo, for: message, in: context)
