@@ -46,15 +46,16 @@ enum ChatTranscriptScrollAnchorPolicy {
 
     /// The anchor kept in place when the content size changes.
     ///
-    /// - Parameter isTranscriptRevealed: `ChatMessagesView.isTranscriptRevealed`
-    ///   (the initial window has loaded and
-    ///   `ChatMessagesCoordinator.isReadyToShow`), false during the hidden
-    ///   anchor pass (first open and the empty-to-loaded restart alike). The
-    ///   view passes the same value to `ChatBottomInsetPolicy`'s shift
+    /// - Parameter isTranscriptRevealed: `ChatMessagesCoordinator.isReadyToShow`,
+    ///   false during the hidden anchor pass (first open and the
+    ///   empty-to-loaded restart alike). `ChatBottomInsetPolicy`'s shift
     ///   availability and spacer transition
-    ///   (`ChatBottomInsetPolicy.spacerTransition`), so the `.top` premise
-    ///   above, the shift, and the spacer's unanimated changes while hidden
-    ///   agree.
+    ///   (`ChatBottomInsetPolicy.spacerTransition`) read the narrower
+    ///   `ChatMessagesView.isTranscriptRevealed` (the initial window has
+    ///   loaded as well), so a shift is only ever planned under the `.top`
+    ///   anchor returned here. The two differ only while a revealed
+    ///   transcript has no rows, where the spacer changes unanimated under
+    ///   the `.top` anchor.
     static func sizeChanges(isTranscriptRevealed: Bool) -> UnitPoint {
         isTranscriptRevealed ? .top : .bottom
     }
