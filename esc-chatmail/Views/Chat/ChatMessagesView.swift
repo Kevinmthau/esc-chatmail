@@ -55,8 +55,11 @@ struct ChatMessagesView: View {
     /// Height of the transcript's trailing spacer. Follows
     /// `ChatBottomInsetPolicy.Components.inset` through
     /// `handleBottomInsetChange` rather than being computed in `body`, so
-    /// growth can be applied without the keyboard's animation (see
-    /// `ChatBottomInsetPolicy.SpacerTransition`).
+    /// growth, and every change while the transcript is hidden, can be
+    /// applied without the keyboard's animation (see
+    /// `ChatBottomInsetPolicy.SpacerTransition` and `spacerTransition`). Only
+    /// the spacer reads it: the initial-load overlays pad by the inset `body`
+    /// computes live, which that policy's hidden branch relies on.
     @State private var transcriptBottomInset: CGFloat = 1
     @State private var transcriptOffsetShiftRequest: ChatTranscriptOffsetShifter.Request?
     @State private var transcriptShiftTracking = ChatTranscriptOffsetShifter.Tracking()

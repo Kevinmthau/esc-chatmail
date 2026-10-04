@@ -51,7 +51,10 @@ enum ChatTranscriptScrollAnchorPolicy {
     ///   `ChatMessagesCoordinator.isReadyToShow`), false during the hidden
     ///   anchor pass (first open and the empty-to-loaded restart alike). The
     ///   view passes the same value to `ChatBottomInsetPolicy`'s shift
-    ///   availability, so the `.top` premise above and the shift agree.
+    ///   availability and spacer transition
+    ///   (`ChatBottomInsetPolicy.spacerTransition`), so the `.top` premise
+    ///   above, the shift, and the spacer's unanimated changes while hidden
+    ///   agree.
     static func sizeChanges(isTranscriptRevealed: Bool) -> UnitPoint {
         isTranscriptRevealed ? .top : .bottom
     }
