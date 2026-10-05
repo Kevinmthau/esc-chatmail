@@ -125,6 +125,20 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
             .build(in: viewContext)
         try viewContext.save()
 
+        // runLaunchRepairsIfNeeded() and every .syncCompleted also start the
+        // rich-content verdict backfill, which waits for sync before each
+        // batch until it latches. Latch it up front so that pass adds no
+        // sync waits to the count below: otherwise the assertion would also
+        // depend on it having taken its wait before the count is sampled and
+        // latched (against the shared handler and coordinator this fixture
+        // defaults to) before the notification. The list-title repair and
+        // the chat-preview passes still share this waiter, as they did
+        // before the backfill existed.
+        migrationFlags.set(
+            true,
+            forKey: ConversationLaunchRepairCoordinator.richContentVerdictBackfillMigrationKey
+        )
+
         let coordinator = makeCoordinator()
         coordinator.runLaunchRepairsIfNeeded()
 

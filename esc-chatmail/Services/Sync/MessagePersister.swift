@@ -453,11 +453,42 @@ actor MessagePersister {
             return .bodyFetchFailed(id: gmailMessage.id)
         }
 
-        guard let processedMessage else {
+        guard var processedMessage else {
             return .unprocessable(id: gmailMessage.id)
         }
 
+        processedMessage.richContentPrerun = Self.richContentPrerun(for: processedMessage)
         return .processed(processedMessage)
+    }
+
+    /// Runs the rich-content classifier here, in the concurrent preparation
+    /// phase, on the exact string persistence will save, so stamping the
+    /// verdict (`stampRichContentVerdict`) does not run a DOM cleanup in the
+    /// strictly sequential persistence phase.
+    ///
+    /// Here rather than inside `MessageProcessor.processGmailMessage`: this
+    /// sees `storedHTML`, the trimmed string the persister saves, where the
+    /// processor's preview derivation sees the untrimmed part, and a result
+    /// keyed to the wrong string is silently never reused. It also covers stub
+    /// processors. The cost is a second cleanup of the HTML that preview
+    /// derivation already cleaned; sharing that pass would move preview
+    /// derivation onto the trimmed string, which the golden corpus pins.
+    ///
+    /// Skipped when the answer cannot matter: own rows are never rich, and a
+    /// body that reads like a newsletter's fallback text decides the verdict
+    /// without the classifier once the HTML is stored.
+    nonisolated static func richContentPrerun(for processedMessage: ProcessedMessage) -> RichContentPrerun? {
+        guard !processedMessage.headers.isFromMe,
+              let html = processedMessage.storedHTML,
+              !NewsletterFallbackText.looksLikeFallbackText(
+                  processedMessage.plainTextBody ?? processedMessage.snippet
+              ) else {
+            return nil
+        }
+        return RichContentPrerun(
+            html: html,
+            isRich: RichContentClassifier.hasGenuineRichContentAfterCleanup(html)
+        )
     }
 
     /// Prepares messages concurrently with bounded parallelism, preserving input order.

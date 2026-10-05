@@ -59,6 +59,32 @@ enum SharedDocumentLinkExtractor {
         try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     }()
 
+    /// Whether any of these texts mentions a host `extract` accepts, without running the data
+    /// detector. `googleWorkspaceKind` accepts only `docs.google.com` and `drive.google.com`,
+    /// compared lowercased, so a text that never spells `google.com` has no literally spelled
+    /// link. True does not mean a link exists.
+    ///
+    /// Not a strict superset of `extract`. Foundation also resolves a percent-encoded host
+    /// (`docs.%67oogle.com`) and compatibility or ignorable characters in one (full-width
+    /// letters, a soft hyphen) to `docs.google.com`, and those spellings are missed here.
+    /// Normalising for them would cost a second pass over every non-ASCII body, which is most
+    /// mail, for a spelling ordinary links never use.
+    ///
+    /// Searched through `NSString` on purpose: this runs on the main actor for every received
+    /// row of every window re-map, over the whole plain-text body. The Swift
+    /// `String.range(of:options:)` overload costs about as much per byte as the data detector
+    /// itself on the contiguous-UTF-8 strings Core Data hands back for ASCII text (measured
+    /// around 70 ns/byte against 3 ns/byte this way). Do not simplify it back.
+    /// Keep the needle in step with `googleWorkspaceKind` if it ever accepts another host.
+    static func mayContainLinks(in textCandidates: [String?]) -> Bool {
+        textCandidates.contains { text in
+            guard let text else { return false }
+            return (text as NSString)
+                .range(of: "google.com", options: [.caseInsensitive, .literal])
+                .location != NSNotFound
+        }
+    }
+
     static func extract(from textCandidates: [String], maxCount: Int = 4) -> [SharedDocumentLink] {
         guard maxCount > 0, let detector = linkDetector else {
             return []

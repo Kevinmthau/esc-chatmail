@@ -123,6 +123,15 @@ extension Message {
     @NSManaged public var replyFromAddress: String?
     /// Raw RFC Reply-To header. A single header may contain a mailbox list.
     @NSManaged public var replyTo: String?
+    /// Raw persisted rich-content verdict (`RichContentVerdict.storedValue`);
+    /// read and write it through `storedRichContentVerdict`. Optional in the
+    /// model, so a row can hold NULL, which this scalar reads as 0 but a
+    /// `richContentVerdict == 0` predicate does not match on SQLite. The v4
+    /// to v5 migration wrote the default 0 into existing rows on the runtime
+    /// it was tested on (`RichContentVerdictV5MigrationTests`), but that is
+    /// Core Data's choice, not this model's. Never filter on it without the
+    /// `== nil` disjunct.
+    @NSManaged public var richContentVerdict: Int16
     @NSManaged public var localModifiedAt: Date?
     @NSManaged public var conversation: Conversation?
     @NSManaged public var labels: Set<Label>?
@@ -142,6 +151,31 @@ extension Message {
     /// True when the message has local HTML content available via storage URI or message-id file.
     var hasHTMLSource: Bool {
         bodyStorageURI != nil || HTMLContentHandler.shared.htmlFileExists(for: id)
+    }
+
+    /// The verdict `RichContentVerdictResolver` last gave this row's stored
+    /// state, under the current epoch. The setter leaves the attribute alone
+    /// when the encoded value is unchanged, so re-stamping a row does not mark
+    /// it dirty and cannot conflict with a fresher writer over nothing.
+    var storedRichContentVerdict: RichContentVerdict {
+        get { RichContentVerdict(storedValue: richContentVerdict) }
+        set {
+            let storedValue = newValue.storedValue()
+            if richContentVerdict != storedValue {
+                richContentVerdict = storedValue
+            }
+        }
+    }
+
+    /// This row's stored state as the rich-content verdict reads it.
+    var richContentVerdictInputs: RichContentVerdictInputs {
+        RichContentVerdictInputs(
+            messageID: id,
+            isFromMe: isFromMe,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            snippet: snippet
+        )
     }
 
     /// Array of attachments for convenient iteration
