@@ -407,6 +407,7 @@ struct ChatPreviewRepair {
         }
         // Missing files and empty derivations preserve the existing
         // preview; a later source recovery re-enters the ingest path.
+
 #if DEBUG
         didDeriveRow?(message.id)
 #endif

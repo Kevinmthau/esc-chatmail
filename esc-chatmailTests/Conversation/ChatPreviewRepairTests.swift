@@ -1102,6 +1102,44 @@ final class ChatPreviewRepairTests: XCTestCase {
         })
     }
 
+    // Revert-check: `performThrowingCleanupSensitiveMutation` in
+    // `ConversationLaunchRepairCoordinator.runChatPreviewPass`. The
+    // non-throwing `performCleanupSensitiveMutation` runs the batch in an
+    // unstructured task that `cancel()` never reaches: the cancellation
+    // handler in `ChatPreviewRepair.performBatch` does not fire and
+    // `Task.isCancelled` stays false in `prepareAndSaveChatPreviewBatch`, so
+    // the batch derives "002" and "003", saves all three rows, and persists
+    // its checkpoint.
+    // HONEST SCOPE: the `catch is CancellationError` in
+    // `prepareAndSaveChatPreviewBatch` is not pinned. Without it the generic
+    // catch rolls back the same way and differs only by logging an error,
+    // which no test here can observe.
+    func testCoordinatorCancel_landsMidBatch_stopsDerivingAndSavesNothing() async throws {
+        let rows = try ["001", "002", "003"].map { try message($0) }
+        try viewContext.save()
+        let probe = MidBatchProbe()
+        let repair = coordinator()
+        repair.chatPreviewRepairDidDeriveRow = { probe.didDeriveRow($0) }
+
+        repair.repairPersistedChatPreviews()
+        // `cancel()` drops the worker from the coordinator's task manager, so
+        // the join handle is taken first: this task reads the worker on its
+        // first main-actor turn, which the wait below yields to before any
+        // row can be derived.
+        let worker = Task { await repair.waitForChatPreviewRepairCompletion() }
+        await waitUntil { probe.derivedMessageIDs.count == 1 }
+        repair.cancel()
+        probe.resumeBatch()
+        await worker.value
+
+        XCTAssertEqual(probe.derivedMessageIDs, ["001"])
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(rows.map(\.chatPreviewText), ["Old preview", "Old preview", "Old preview"])
+        XCTAssertNil(flags.string(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey))
+        XCTAssertFalse(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
+        withExtendedLifetime(repair) {}
+    }
+
     private func makeRepair(parkingOn probe: MidBatchProbe) -> ChatPreviewRepair {
         var repair = ChatPreviewRepair(htmlContentHandler: handler)
         repair.didDeriveRow = { probe.didDeriveRow($0) }
