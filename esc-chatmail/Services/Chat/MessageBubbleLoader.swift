@@ -139,7 +139,10 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
         return MessageBubbleContentResult(
             fullTextContent: fullTextContent,
             hasRichHTMLContent: loadedContent.hasRichContent,
-            sharedDocumentLinks: extractSharedDocumentLinks(
+            // The shared definition, not a local one: for a non-forwarded row with a stored
+            // preview these three inputs are stored fields, and the row already mounted with
+            // the links computed from them (`SharedDocumentLinkExtractor.storedRowLinks`).
+            sharedDocumentLinks: SharedDocumentLinkExtractor.bubbleLinks(
                 preferredText: fullTextContent,
                 bodyText: sharedDocumentLinkBodyText,
                 snippet: sharedDocumentLinkSnippet
@@ -200,17 +203,5 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
             return nil
         }
         return text
-    }
-
-    private func extractSharedDocumentLinks(
-        preferredText: String?,
-        bodyText: String?,
-        snippet: String?
-    ) -> [SharedDocumentLink] {
-        let candidates = [preferredText, bodyText, snippet]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        return SharedDocumentLinkExtractor.extract(from: candidates, maxCount: 4)
     }
 }

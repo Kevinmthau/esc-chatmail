@@ -92,8 +92,7 @@ enum MessageDisplayPolicy {
     ///
     /// - Parameter knownStoredVerdict: `ChatMessageRowModel.knownRichContentVerdict`, already
     ///   nil for rows whose load does not publish the stored rule's answer (own, forwarded,
-    ///   and blank-preview rows), for rows never stamped under the current epoch, and for
-    ///   rows whose stored text may carry a shared-document link.
+    ///   and blank-preview rows) and for rows never stamped under the current epoch.
     ///
     /// The value and its known-ness come from this one function on purpose. Built separately
     /// (a flag from the row, a value from the view model) the flag could say "known" while
@@ -186,13 +185,10 @@ enum MessageDisplayPolicy {
     /// known rich row that routes to a card never reaches this decision (the bubble shows the
     /// card), and any other known row ends as a text bubble.
     ///
-    /// One thing the load still adds to such a row is its shared-document links
-    /// (`MessageBubbleLoader.extractSharedDocumentLinks`): the bubble strips their URLs from
-    /// the text and appends a card for each once they publish. Rows that have always rendered
-    /// before their load (replies, own rows) have always shown that change. So that a stored
-    /// verdict does not spread it to every incoming row, a row whose stored text mentions a
-    /// host such a link can have is not reported as known
-    /// (`ChatMessageRowModelMapper.knownRichContentVerdict`) and keeps the pill.
+    /// The stored text is those rows' final rendering in its shared-document links too. The
+    /// links the load publishes are known at mount (`sharedDocumentLinks`), so the bubble
+    /// already has their URLs stripped from its text and their cards below it. The same holds
+    /// for the own rows below.
     ///
     /// A row the load can still route to a card keeps the pill, whatever text it stores. That
     /// takes an unknown verdict: a row never stamped under the current verdict epoch (the
@@ -278,6 +274,34 @@ enum MessageDisplayPolicy {
         guard isOwnTextBubble else { return true }
         let rendersStoredOwnPreview = MessagePreviewText.nonEmpty(chatPreviewText) != nil
         return !rendersStoredOwnPreview && !hasDisplayableAttachments
+    }
+
+    /// The shared-document links a bubble renders: the load's once it has published, before
+    /// that the ones the row carries (`ChatMessageRowModel.storedSharedDocumentLinks`).
+    ///
+    /// The links decide two things in the bubble: their URLs are stripped from its text
+    /// (`MessageContentView.resolvedVisibleText`) and a card is appended for each. They used to
+    /// come from the load alone, so every row that renders before its load (the rows
+    /// `showsTextLoadingPlaceholder` exempts, and every row with no HTML source) showed the raw
+    /// URL and then swapped to text plus a card, growing the transcript after mount. For the
+    /// rows whose stored fields decide the links, the row's are what the load will publish
+    /// (one definition, `SharedDocumentLinkExtractor.bubbleLinks`), so nothing changes when it
+    /// does.
+    ///
+    /// The load's replace the row's rather than the row's being used throughout: a row whose
+    /// stored fields do not decide its links carries none (a blank stored preview, a forward),
+    /// and neither does one whose link the row's cheap check misses
+    /// (`SharedDocumentLinkExtractor.mayContainLinks`). Those gain their cards when the load
+    /// publishes, as every row did.
+    ///
+    /// During an in-place refresh `hasLoadedContent` stays true, so the previous load's links
+    /// stay up with the rest of its content until the new result replaces them together.
+    static func sharedDocumentLinks(
+        hasLoadedContent: Bool,
+        loaded: [SharedDocumentLink],
+        stored: [SharedDocumentLink]
+    ) -> [SharedDocumentLink] {
+        hasLoadedContent ? loaded : stored
     }
 
     static func isTrustedTransactionalSender(_ senderEmail: String?) -> Bool {

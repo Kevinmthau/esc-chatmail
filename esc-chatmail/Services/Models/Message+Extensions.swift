@@ -12,6 +12,17 @@ private final class CalendarInviteLikelihoodEntry {
     }
 }
 
+/// NSCache entry for the memoized stored shared-document links.
+private final class StoredSharedDocumentLinksEntry {
+    let fingerprint: Int
+    let value: [SharedDocumentLink]
+
+    init(fingerprint: Int, value: [SharedDocumentLink]) {
+        self.fingerprint = fingerprint
+        self.value = value
+    }
+}
+
 enum MessagePreviewText {
     static func nonEmpty(_ text: String?) -> String? {
         guard let text else { return nil }
@@ -262,6 +273,62 @@ extension Message {
 
         return hasInviteSubjectPrefix && hasCalendarStructure && hasDateSignal
     }
+
+    /// The shared-document links this row's bubble load will publish, from stored fields
+    /// alone (`SharedDocumentLinkExtractor.storedRowLinks`, which says where they decide
+    /// them), so the row model can carry them and the bubble mount in its final form.
+    ///
+    /// Memoized like `isLikelyCalendarInvite`, and for the same reason: this runs once per
+    /// row-model mapping on the main actor, and the extraction is a data-detector pass over
+    /// the whole plain-text body. The cheap gate runs ahead of the memo, so a row that
+    /// cannot carry a link (nearly every row) pays one substring search and never hashes
+    /// its body. Keyed by objectID and invalidated by a fingerprint of the three inputs.
+    ///
+    /// Not fenced by the account boundary, and it does not need to be: an entry is returned
+    /// only to the object ID it was stored under, and only while that row's three texts hash
+    /// to the fingerprint it was computed from, so it is the value recomputing would give.
+    var storedSharedDocumentLinks: [SharedDocumentLink] {
+        let chatPreviewText = chatPreviewText
+        let bodyText = bodyText
+        let snippet = snippet
+        let isForwardedEmail = isForwardedEmail
+        guard SharedDocumentLinkExtractor.storedRowMayCarryLinks(
+            chatPreviewText: chatPreviewText,
+            bodyText: bodyText,
+            snippet: snippet,
+            isForwardedEmail: isForwardedEmail
+        ) else {
+            return []
+        }
+
+        var hasher = Hasher()
+        hasher.combine(chatPreviewText)
+        hasher.combine(bodyText)
+        hasher.combine(snippet)
+        let fingerprint = hasher.finalize()
+        if let cached = Self.storedSharedDocumentLinksCache.object(forKey: objectID),
+           cached.fingerprint == fingerprint {
+            return cached.value
+        }
+
+        let value = SharedDocumentLinkExtractor.storedRowLinks(
+            chatPreviewText: chatPreviewText,
+            bodyText: bodyText,
+            snippet: snippet,
+            isForwardedEmail: isForwardedEmail
+        )
+        Self.storedSharedDocumentLinksCache.setObject(
+            StoredSharedDocumentLinksEntry(fingerprint: fingerprint, value: value),
+            forKey: objectID
+        )
+        return value
+    }
+
+    private static let storedSharedDocumentLinksCache: NSCache<NSManagedObjectID, StoredSharedDocumentLinksEntry> = {
+        let cache = NSCache<NSManagedObjectID, StoredSharedDocumentLinksEntry>()
+        cache.countLimit = 512
+        return cache
+    }()
 
     /// Attachments suitable for display in the chat UI, filtered against a
     /// precomputed HTML analysis (the live render path builds the analysis via

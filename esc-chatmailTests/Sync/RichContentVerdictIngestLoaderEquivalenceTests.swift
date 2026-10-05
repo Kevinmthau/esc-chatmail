@@ -167,19 +167,10 @@ final class RichContentVerdictIngestLoaderEquivalenceTests: XCTestCase {
             }
 
             let published = await loadAndAssertEquivalence(persisted, harness: harness, label)
-            // A row whose stored text may carry a shared-document link is still
-            // compared stored against published above, but reports no known
-            // verdict at mount (`ChatMessageRowModelMapper.knownRichContentVerdict`).
-            // No corpus case mentions such a host today; without this a future
-            // one would fail here although nothing disagrees.
-            let mayCarryLink = SharedDocumentLinkExtractor.mayContainLinks(
-                in: [persisted.row.chatPreviewText, persisted.row.bodyText, persisted.row.snippet]
-            )
-            let expectedKnown: Bool? = mayCarryLink ? nil : published
             XCTAssertEqual(
                 persisted.row.knownRichContentVerdict,
-                expectedKnown,
-                "\(label): the verdict the bubble routes on at mount differs from the one its load publishes (mayCarrySharedDocumentLink=\(mayCarryLink))"
+                published,
+                "\(label): the verdict the bubble routes on at mount differs from the one its load publishes"
             )
             if let expectedIsRich = fixture.expectedIsRich {
                 XCTAssertEqual(

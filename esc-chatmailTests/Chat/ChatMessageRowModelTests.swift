@@ -219,6 +219,142 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertEqual(row.fallbackPreviewText, "Here are the two PDFs.")
     }
 
+    // MARK: - Stored shared-document links
+
+    /// A row whose stored fields decide its shared-document links carries them, so its bubble
+    /// mounts with the links' URLs stripped and their cards shown instead of rendering the raw
+    /// URL until the load publishes. Own rows and incoming rows alike; the link may sit in any
+    /// of the three fields the load searches.
+    ///
+    /// Revert-check: mapping `storedSharedDocumentLinks: []` in `ChatMessageRowModelMapper.map`
+    /// fails every assertion but the last; returning `[]` from
+    /// `Message.storedSharedDocumentLinks` does the same.
+    func testMap_storedPreviewRow_carriesTheSharedDocumentLinksItsLoadPublishes() throws {
+        let incoming = MessageBuilder()
+            .withId("row-model-links-incoming-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("See the plan\n\nhttps://docs.google.com/spreadsheets/d/rowsheet1/edit")
+            .withSnippet("See the plan")
+            .build(in: viewContext)
+        incoming.chatPreviewText = "See the plan https://docs.google.com/document/d/rowdoc1/edit"
+        let own = MessageBuilder()
+            .withId("row-model-links-own-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("Sharing the deck")
+            .withSnippet("Sharing the deck https://DOCS.GOOGLE.COM/presentation/d/rowdeck1/edit")
+            .fromMe()
+            .build(in: viewContext)
+        own.chatPreviewText = "Sharing the deck"
+        let plain = MessageBuilder()
+            .withId("row-model-links-plain-\(UUID().uuidString)")
+            .build(in: viewContext)
+        plain.chatPreviewText = "Lunch tomorrow?"
+        try viewContext.obtainPermanentIDs(for: [incoming, own, plain])
+        try viewContext.save()
+
+        let incomingRow = ChatMessageRowModelMapper.map(incoming)
+        let ownRow = ChatMessageRowModelMapper.map(own)
+
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks.map(\.id),
+            ["googleDoc|rowdoc1", "googleSheet|rowsheet1"]
+        )
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks.first?.url.absoluteString,
+            "https://docs.google.com/document/d/rowdoc1/edit"
+        )
+        XCTAssertEqual(ownRow.storedSharedDocumentLinks.map(\.id), ["googleSlides|rowdeck1"])
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks,
+            SharedDocumentLinkExtractor.storedRowLinks(
+                chatPreviewText: incomingRow.chatPreviewText,
+                bodyText: incomingRow.bodyText,
+                snippet: incomingRow.snippet,
+                isForwardedEmail: incomingRow.isForwardedEmail
+            )
+        )
+        XCTAssertTrue(ChatMessageRowModelMapper.map(plain).storedSharedDocumentLinks.isEmpty)
+    }
+
+    /// A forward, and a row with no stored preview, carry no links whatever their stored text
+    /// holds: their loads search other text (`SharedDocumentLinkExtractor.storedRowMayCarryLinks`),
+    /// so links computed from stored fields would not be the load's.
+    ///
+    /// Revert-check: `Message.storedSharedDocumentLinks` calling
+    /// `SharedDocumentLinkExtractor.bubbleLinks` without the `storedRowMayCarryLinks` guard
+    /// fails both assertions.
+    func testMap_forwardedOrBlankPreviewRow_carriesNoSharedDocumentLinks() throws {
+        let linkText = "Plan: https://docs.google.com/document/d/rowdoc2/edit"
+        let forwarded = MessageBuilder()
+            .withId("row-model-links-forwarded-\(UUID().uuidString)")
+            .withSubject("Fwd: Plan")
+            .withBody(linkText)
+            .withSnippet(linkText)
+            .build(in: viewContext)
+        forwarded.chatPreviewText = linkText
+        let blankPreview = MessageBuilder()
+            .withId("row-model-links-blank-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody(linkText)
+            .withSnippet(linkText)
+            .build(in: viewContext)
+        blankPreview.chatPreviewText = " \n "
+        try viewContext.obtainPermanentIDs(for: [forwarded, blankPreview])
+        try viewContext.save()
+
+        XCTAssertTrue(ChatMessageRowModelMapper.map(forwarded).storedSharedDocumentLinks.isEmpty)
+        XCTAssertTrue(ChatMessageRowModelMapper.map(blankPreview).storedSharedDocumentLinks.isEmpty)
+    }
+
+    /// The links are memoized per message (`Message.storedSharedDocumentLinks`), and a re-map
+    /// after any of their inputs changed must not serve the earlier answer: the bubble would
+    /// strip a URL its text no longer holds, or keep a card for a link that is gone, until its
+    /// load published.
+    ///
+    /// Revert-check: each step changes one input. Dropping `hasher.combine(chatPreviewText)`,
+    /// `hasher.combine(bodyText)` or `hasher.combine(snippet)` from the fingerprint in
+    /// `Message.storedSharedDocumentLinks` fails the step that changes that field, and moving
+    /// the `storedRowMayCarryLinks` guard behind the memo lookup fails the forwarded step.
+    ///
+    /// HONEST SCOPE: pins that the memo is never stale, not that it saves anything. Nothing
+    /// here can observe that a re-map with unchanged inputs skipped the data-detector pass;
+    /// with the memo removed every assertion still passes.
+    func testMap_storedSharedDocumentLinks_followEveryInputChangeOnTheSameMessage() throws {
+        let message = MessageBuilder()
+            .withId("row-model-links-memo-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("Plain body")
+            .withSnippet("Plain snippet")
+            .build(in: viewContext)
+        message.chatPreviewText = "First https://docs.google.com/document/d/memo1/edit"
+        try viewContext.obtainPermanentIDs(for: [message])
+        try viewContext.save()
+        func mappedLinkIDs() -> [String] {
+            ChatMessageRowModelMapper.map(message).storedSharedDocumentLinks.map(\.id)
+        }
+
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo1"])
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo1"], "A re-map with unchanged inputs")
+
+        message.chatPreviewText = "Second https://docs.google.com/document/d/memo2/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2"])
+
+        message.bodyText = "Body https://docs.google.com/spreadsheets/d/memo3/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2", "googleSheet|memo3"])
+
+        message.snippet = "Snippet https://docs.google.com/presentation/d/memo4/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2", "googleSheet|memo3", "googleSlides|memo4"])
+
+        message.subject = "Fwd: Plan"
+        XCTAssertEqual(mappedLinkIDs(), [], "A forward's stored fields do not decide its links")
+
+        message.subject = "Re: Plan"
+        message.chatPreviewText = "No link any more"
+        message.bodyText = "Plain body"
+        message.snippet = "Plain snippet"
+        XCTAssertEqual(mappedLinkIDs(), [])
+    }
+
     func testMap_preservesOutgoingForwardedAffordances() throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -590,8 +726,6 @@ final class ChatMessageRowModelTests: XCTestCase {
                     ChatMessageRowModelMapper.knownRichContentVerdict(
                         stored: stored,
                         chatPreviewText: preview,
-                        bodyText: nil,
-                        snippet: nil,
                         isFromMe: false,
                         isForwardedEmail: false
                     ),
@@ -612,8 +746,6 @@ final class ChatMessageRowModelTests: XCTestCase {
                 ChatMessageRowModelMapper.knownRichContentVerdict(
                     stored: stored,
                     chatPreviewText: "Stored preview",
-                    bodyText: nil,
-                    snippet: nil,
                     isFromMe: true,
                     isForwardedEmail: false
                 ),
@@ -633,8 +765,6 @@ final class ChatMessageRowModelTests: XCTestCase {
                 ChatMessageRowModelMapper.knownRichContentVerdict(
                     stored: stored,
                     chatPreviewText: "Stored preview",
-                    bodyText: nil,
-                    snippet: nil,
                     isFromMe: false,
                     isForwardedEmail: true
                 ),
@@ -654,8 +784,6 @@ final class ChatMessageRowModelTests: XCTestCase {
             ChatMessageRowModelMapper.knownRichContentVerdict(
                 stored: .unknown,
                 chatPreviewText: "Stored preview",
-                bodyText: nil,
-                snippet: nil,
                 isFromMe: false,
                 isForwardedEmail: false
             )
@@ -669,8 +797,6 @@ final class ChatMessageRowModelTests: XCTestCase {
             ChatMessageRowModelMapper.knownRichContentVerdict(
                 stored: .notRich,
                 chatPreviewText: "Stored preview",
-                bodyText: nil,
-                snippet: nil,
                 isFromMe: false,
                 isForwardedEmail: false
             ),
@@ -680,8 +806,6 @@ final class ChatMessageRowModelTests: XCTestCase {
             ChatMessageRowModelMapper.knownRichContentVerdict(
                 stored: .rich,
                 chatPreviewText: "Stored preview",
-                bodyText: nil,
-                snippet: nil,
                 isFromMe: false,
                 isForwardedEmail: false
             ),
@@ -689,82 +813,53 @@ final class ChatMessageRowModelTests: XCTestCase {
         )
     }
 
-    /// The load extracts shared-document links from the stored preview, body and snippet,
-    /// then strips their URLs from the bubble text and appends a card for each. A row
-    /// rendered from a known verdict would show the raw URL and then swap, where it used to
-    /// wait behind the pill, so a row whose stored text could carry such a link is reported
-    /// as unknown.
+    /// A received row whose stored text carries a shared-document link routes on its stored
+    /// verdict like any other, and carries the links its load will publish. It used to be
+    /// reported as unknown (a `SharedDocumentLinkExtractor.mayContainLinks` guard) so that it
+    /// waited behind the pill instead of rendering the raw URL and then swapping to text plus
+    /// a card. With the links on the row there is no swap left to hide, and the pill only
+    /// delayed a rendering that was already known.
     ///
-    /// Revert-check: the `SharedDocumentLinkExtractor.mayContainLinks` guard in
-    /// `ChatMessageRowModelMapper.knownRichContentVerdict`, and each of the three fields it
-    /// is handed (the link can sit in the body alone, behind anchor text in the preview).
-    func testKnownRichContentVerdict_storedTextMayCarrySharedDocumentLink_isNil() {
+    /// Revert-check: restoring a `!SharedDocumentLinkExtractor.mayContainLinks(in:)` guard to
+    /// `ChatMessageRowModelMapper.knownRichContentVerdict` (over the preview alone, or over
+    /// all three fields again) fails the verdict assertion for the carriers it sees. Mapping
+    /// `storedSharedDocumentLinks: []` in `ChatMessageRowModelMapper.map` fails the link
+    /// assertion: the known verdict without the links is the swap the old guard prevented.
+    func testMap_receivedRowCarryingSharedDocumentLink_hasKnownVerdictAndItsLinks() throws {
         let link = "https://docs.google.com/document/d/abc123/edit"
-        let carriers: [(preview: String, body: String?, snippet: String?)] = [
-            ("Here is the doc \(link)", nil, nil),
-            ("Here is the doc", "Plan: \(link)", nil),
-            ("Here is the doc", nil, "Plan: \(link)"),
-            ("Folder https://DRIVE.GOOGLE.COM/drive/folders/xyz", nil, nil)
+        let carriers: [(name: String, preview: String, body: String, snippet: String, expectedIDs: [String])] = [
+            ("preview", "Here is the doc \(link)", "Plain body", "Plain snippet", ["googleDoc|abc123"]),
+            ("body", "Here is the doc", "Plan: \(link)", "Plain snippet", ["googleDoc|abc123"]),
+            ("snippet", "Here is the doc", "Plain body", "Plan: \(link)", ["googleDoc|abc123"]),
+            (
+                "upper-case host",
+                "Folder https://DRIVE.GOOGLE.COM/drive/folders/xyz",
+                "Plain body",
+                "Plain snippet",
+                ["googleDriveFolder|xyz"]
+            )
         ]
         for carrier in carriers {
             for stored in [RichContentVerdict.notRich, .rich] {
-                XCTAssertNil(
-                    ChatMessageRowModelMapper.knownRichContentVerdict(
-                        stored: stored,
-                        chatPreviewText: carrier.preview,
-                        bodyText: carrier.body,
-                        snippet: carrier.snippet,
-                        isFromMe: false,
-                        isForwardedEmail: false
-                    ),
-                    "carrier \(carrier), stored \(stored)"
+                let message = MessageBuilder()
+                    .withId("verdict-link-\(UUID().uuidString)")
+                    .withSubject("Re: Plan")
+                    .withBody(carrier.body)
+                    .withSnippet(carrier.snippet)
+                    .build(in: viewContext)
+                message.chatPreviewText = carrier.preview
+                message.storedRichContentVerdict = stored
+
+                let row = ChatMessageRowModelMapper.map(message)
+
+                XCTAssertEqual(row.knownRichContentVerdict, stored.isRich, "\(carrier.name), stored \(stored)")
+                XCTAssertEqual(
+                    row.storedSharedDocumentLinks.map(\.id),
+                    carrier.expectedIDs,
+                    "\(carrier.name), stored \(stored)"
                 )
             }
         }
-
-        XCTAssertEqual(
-            ChatMessageRowModelMapper.knownRichContentVerdict(
-                stored: .rich,
-                chatPreviewText: "See https://example.com/document/d/abc123/edit",
-                bodyText: "Nothing from Workspace here",
-                snippet: "Nothing here either",
-                isFromMe: false,
-                isForwardedEmail: false
-            ),
-            true,
-            "A link to any other host is not a shared-document link and must not cost the row its verdict"
-        )
-    }
-
-    /// The gate's check must cover every literally spelled link the extractor accepts, or a
-    /// row keeps its known verdict and then gains a document card after mount.
-    ///
-    /// Revert-check: the needle in `SharedDocumentLinkExtractor.mayContainLinks`. Narrowing
-    /// it to one host, or making it case-sensitive, fails here.
-    ///
-    /// HONEST SCOPE: literal ASCII spellings only. Foundation also resolves a
-    /// percent-encoded or compatibility-mapped host to `docs.google.com`, and the check
-    /// deliberately does not normalise for those (see its doc comment); such a text is a
-    /// link the extractor finds and this check misses.
-    func testMayContainLinks_isTrueForLiterallySpelledWorkspaceHosts() {
-        let texts = [
-            "https://docs.google.com/spreadsheets/d/sheet1/edit",
-            "https://docs.google.com/document/d/doc1/edit",
-            "https://docs.google.com/presentation/d/deck1/edit",
-            "https://docs.google.com/file/d/file1/view",
-            "https://drive.google.com/drive/folders/folder1",
-            "https://drive.google.com/file/d/file2/view",
-            "https://drive.google.com/open?id=file3",
-            "https://DOCS.GOOGLE.COM/document/d/doc2/edit"
-        ]
-        for text in texts {
-            XCTAssertFalse(
-                SharedDocumentLinkExtractor.extract(from: [text]).isEmpty,
-                "Fixture must be a link the extractor accepts: \(text)"
-            )
-            XCTAssertTrue(SharedDocumentLinkExtractor.mayContainLinks(in: [nil, text]), text)
-        }
-        XCTAssertFalse(SharedDocumentLinkExtractor.mayContainLinks(in: [nil, "", "plain text https://example.com/a"]))
     }
 
     /// The row carries the verdict as stored, for the load to compare its own answer
