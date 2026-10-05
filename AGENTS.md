@@ -87,7 +87,7 @@ Notes:
 
 App flow:
 - `esc-chatmail/App/esc_chatmailApp.swift` boots the app, initializes `Dependencies.shared`, restores auth, waits for Core Data, and prewarms WebKit.
-- `esc-chatmail/App/ContentView.swift` gates between sign-in and the main conversation UI. It also acts on the Settings app's Sign Out switch (`esc-chatmail/Resources/Settings.bundle`, `SettingsAppSignOutController` / `SettingsAppSignOutPolicy`); there is no in-app settings screen. `SettingsAppAccountPublisher`, started in `esc_chatmailApp.init`, keeps that page's Account and Version rows current.
+- `esc-chatmail/App/ContentView.swift` gates between sign-in and the main conversation UI. It also acts on the Settings app's Sign Out switch (`esc-chatmail/Resources/Settings.bundle`, `SettingsAppSignOutController` / `SettingsAppSignOutPolicy`); there is no in-app settings screen. `SettingsAppAccountPublisher`, started in `esc_chatmailApp.init` (the version is republished by `AppStartupBootstrap` after fresh-install cleanup wipes the defaults domain), keeps that page's Account and Version rows current.
 - Main user surfaces live in:
   - `esc-chatmail/Views/Main/ConversationListView.swift`
   - `esc-chatmail/Views/Chat/ChatView.swift`

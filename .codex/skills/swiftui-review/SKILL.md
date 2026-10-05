@@ -38,7 +38,7 @@ Find the smallest safe change or the highest-signal review findings without dest
    - Prefer moving repeated work into existing loaders, caches, or `ViewModelTaskManager` rather than adding new ad hoc tasks in views.
 
 5. Check navigation and presentation.
-   - `ConversationListView` uses `navigationDestination(item:)` plus composer/settings sheets.
+   - `ConversationListView` uses `navigationDestination(item:)` plus the composer sheet. There is no in-app settings screen: `ContentView` acts on the Settings app's Sign Out switch through `SettingsAppSignOutController`, whose `SettingsAppSignOutPrompter` presents a UIKit alert via `TopPresentableViewController` so it shows over any open sheet.
    - `ChatView` uses several `sheet(item:)` and `sheet(isPresented:)` flows for full message view, forward compose, and contacts.
    - `ComposeView` has both standard and iMessage-style presentation paths.
 

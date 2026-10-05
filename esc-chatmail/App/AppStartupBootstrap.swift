@@ -5,6 +5,11 @@ private func prepareProductionAppPersistence() async -> Bool {
     guard await FreshInstallHandler().checkAndHandleFreshInstall() else {
         return false
     }
+    // Fresh-install (or installation-ID mismatch) cleanup, when it ran, removed
+    // the whole defaults domain, including the Version row App.init just
+    // published for the Settings app, and nothing else rewrites it in this
+    // process. The write is skipped when the value is unchanged.
+    SettingsAppAccountPublisher.shared.publishAppVersion()
 
     // Start loading only after fresh-install cleanup has had a chance to reset
     // persistent state, then wait before exposing the store to either

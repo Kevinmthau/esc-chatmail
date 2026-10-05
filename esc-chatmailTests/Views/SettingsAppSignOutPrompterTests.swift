@@ -10,10 +10,13 @@ import UIKit
 final class SettingsAppSignOutPrompterTests: XCTestCase {
     /// While the presenter is still looking for a controller the gate holds,
     /// so a second look cannot stack a prompt; once it gives up the gate
-    /// releases, so the request is asked about again on the next look.
+    /// releases, so the request is asked about again on the next look. The
+    /// stacked call would present from its own task, so the count is checked
+    /// only after the waits that let such a task run.
     ///
     /// Revert-check: removing `self.isAwaitingPresenter = false` from
-    /// `SettingsAppSignOutPrompter.presentConfirmation` makes this fail.
+    /// `SettingsAppSignOutPrompter.presentConfirmation` makes this fail, and so
+    /// does removing its `guard !isConfirmationActive`.
     func testPresentConfirmation_presenterGivesUp_releasesConfirmationGate() async {
         let presenter = SuspendedPresenter()
         let prompter = SettingsAppSignOutPrompter(present: presenter.present)
@@ -23,10 +26,10 @@ final class SettingsAppSignOutPrompterTests: XCTestCase {
 
         XCTAssertTrue(prompter.isConfirmationActive)
         prompter.presentConfirmation(accountEmail: nil, onSignOut: {}, onCancel: {})
-        XCTAssertEqual(presenter.callCount, 1)
 
         presenter.finishPendingCall(returning: false)
         await waitUntil { !prompter.isConfirmationActive }
+        XCTAssertEqual(presenter.callCount, 1, "a call while the gate held must not have presented")
 
         prompter.presentConfirmation(accountEmail: nil, onSignOut: {}, onCancel: {})
         await waitUntil { presenter.callCount == 2 }
