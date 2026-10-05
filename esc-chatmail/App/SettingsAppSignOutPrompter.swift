@@ -8,19 +8,27 @@ import UIKit
 /// Compose or chat sheet is up, so the prompt would silently never appear.
 /// `TopPresentableViewController` shows it over whatever is on screen.
 ///
-/// The alert is held weakly: one torn down with the sheet it was shown over
-/// calls neither action handler, so a strong reference or a plain "prompt
-/// showing" flag would then report the request as handled until relaunch and
-/// block every later prompt.
-///
-/// Not actor-isolated so `ContentView` can create it as an `@State` default;
-/// every member that touches state is `@MainActor`.
-final class SettingsAppSignOutPrompter {
+/// Whether a confirmation is active is read from the alert's
+/// `presentingViewController`, which UIKit clears however the alert leaves the
+/// screen — including when it is torn down with the sheet it was shown over,
+/// which calls neither action handler. A plain "prompt showing" flag would then
+/// report the request as handled until relaunch and block every later prompt.
+/// The alert is held weakly so a dismissed one is not kept alive.
+@MainActor
+final class SettingsAppSignOutPrompter: SettingsAppSignOutPrompting {
+    typealias Present = @MainActor (UIViewController) async -> Bool
+
+    private let present: Present
     private weak var presentedAlert: UIAlertController?
     private var isAwaitingPresenter = false
 
+    /// - Parameter present: Presents an alert and reports whether it did;
+    ///   tests inject one to drive the confirmation gate without a window.
+    init(present: @escaping Present = { await TopPresentableViewController.present($0) }) {
+        self.present = present
+    }
+
     /// Whether a confirmation is on screen or about to be.
-    @MainActor
     var isConfirmationActive: Bool {
         isAwaitingPresenter || presentedAlert?.presentingViewController != nil
     }
@@ -28,7 +36,6 @@ final class SettingsAppSignOutPrompter {
     /// Presents the confirmation. When no view controller can present within
     /// `TopPresentableViewController.present`'s retry window it logs and gives
     /// up, leaving the request pending for the next foregrounding.
-    @MainActor
     func presentConfirmation(
         accountEmail: String?,
         onSignOut: @escaping () -> Void,
@@ -45,8 +52,8 @@ final class SettingsAppSignOutPrompter {
         alert.addAction(UIAlertAction(title: "Sign Out", style: .destructive) { _ in onSignOut() })
 
         isAwaitingPresenter = true
-        Task { @MainActor [weak self] in
-            let didPresent = await TopPresentableViewController.present(alert)
+        Task { @MainActor [weak self, present] in
+            let didPresent = await present(alert)
             guard let self else { return }
             self.isAwaitingPresenter = false
             if didPresent {
@@ -62,7 +69,6 @@ final class SettingsAppSignOutPrompter {
 
     /// Tells the user a confirmed sign-out never started (its reset marker
     /// could not be saved), so the app is still signed in.
-    @MainActor
     func presentFailure() {
         let alert = UIAlertController(
             title: "Couldn’t Sign Out",
@@ -70,8 +76,8 @@ final class SettingsAppSignOutPrompter {
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: "OK", style: .cancel))
-        Task { @MainActor in
-            await TopPresentableViewController.present(alert)
+        Task { @MainActor [present] in
+            _ = await present(alert)
         }
     }
 }

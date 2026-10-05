@@ -1,11 +1,9 @@
 import XCTest
 @testable import esc_chatmail
 
-/// HONEST SCOPE: `ContentView`, which feeds this policy, never mounts in the
-/// unit-test host (`initializeApp()` no-ops there), and the confirmation is a
-/// UIKit alert, so the wiring itself — evaluating on appear, foreground, focus
-/// and auth change, and acting on each decision — is covered only through this
-/// policy and `SettingsAppPreferencesTests`.
+/// Acting on each decision, and which session signal feeds it, is pinned by
+/// `SettingsAppSignOutControllerTests`; when a look happens is `ContentView`
+/// wiring that no test exercises (see the HONEST SCOPE note there).
 final class SettingsAppSignOutPolicyTests: XCTestCase {
     private typealias Policy = SettingsAppSignOutPolicy
 
@@ -48,10 +46,10 @@ final class SettingsAppSignOutPolicyTests: XCTestCase {
     /// device, so the request must reach the confirmation rather than be
     /// dropped while nothing was removed.
     ///
-    /// HONEST SCOPE: this pins the policy's answer for that input. That
-    /// `ContentView` feeds it `AuthSession.isDurablySignedOut()` rather than
-    /// `!isAuthenticated` (the signal that dropped requests after a retryable
-    /// restore) is wiring the unit-test host cannot exercise.
+    /// This pins the policy's answer for that input. That the input is
+    /// `isDurablySignedOut()` rather than `!isAuthenticated` (the signal that
+    /// dropped requests after a retryable restore) is pinned by
+    /// `SettingsAppSignOutControllerTests.testEvaluate_requestWhileUnauthenticatedButAccountOnDevice_presentsConfirmation`.
     func testDecision_requestWhileAccountRemainsOnDevice_returnsConfirm() {
         XCTAssertEqual(decision(isDurablySignedOut: false), .confirm)
     }

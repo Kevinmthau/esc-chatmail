@@ -1,9 +1,10 @@
 import Foundation
 
 /// Decides what the app does with the Settings app's Sign Out switch
-/// (`SettingsAppPreferences.isSignOutRequested`) each time `ContentView`
-/// re-evaluates it: on appear, on returning to the foreground or regaining
-/// focus, and when authentication changes.
+/// (`SettingsAppPreferences.isSignOutRequested`) each time
+/// `SettingsAppSignOutController` evaluates it for `ContentView`: on appear, on
+/// returning to the foreground or regaining focus, and when authentication
+/// changes.
 enum SettingsAppSignOutPolicy {
     enum Decision: Equatable {
         /// Nothing to do now; a pending request stays pending.
@@ -23,11 +24,18 @@ enum SettingsAppSignOutPolicy {
     ///   prompt shows over `SignInView`. Discarding there would turn the switch
     ///   off while nothing was removed.
     /// - Durably signed out → discard, checked before `isRequestBeingHandled`:
-    ///   there is nothing to sign out, and a request left on would prompt right
-    ///   after the next sign-in (no teardown path clears the key). That also
-    ///   drops a switch turned on again while a confirmed sign-out is still
-    ///   cleaning up, since `isDurablySignedOut()` turns true as soon as the
-    ///   sign-out registers.
+    ///   no session remains for the switch to end (the Settings app's Account
+    ///   row reads Not Signed In), and a request left on would prompt right after
+    ///   the next sign-in (no teardown path clears the key). That also drops a
+    ///   switch turned on again while a confirmed sign-out is still cleaning
+    ///   up, since `isDurablySignedOut()` turns true as soon as the sign-out
+    ///   registers. Discarding is not a promise that nothing is left on the
+    ///   device: a launch restore whose credentials were rejected
+    ///   (`AuthSession.clearFailedGoogleSession`: invalid_grant or a missing
+    ///   Gmail scope) deliberately keeps the store and body files for the same
+    ///   account's re-sign-in, and only a different account's sign-in resets
+    ///   them (`prepareLocalStoreForAuthenticatedAccount`). This switch does
+    ///   not remove them; it ends sessions, as the old in-app Sign Out did.
     /// - Already handling a request (prompt up or pending, sign-out running) →
     ///   none, so another evaluation cannot stack a second prompt or a second
     ///   `signOut()`.
