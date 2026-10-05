@@ -65,6 +65,7 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
 
     private let gmailAPIClientProvider: @Sendable () async -> any GmailAPIClientProtocol
     private let contentHandler: HTMLContentHandler
+    private let richContentVerdictRefresher: any RichContentVerdictRefreshing
     private var recoveryTasks: [RecoveryKey: Task<RecoveryAttemptResult, Never>] = [:]
     /// Work that outlived its caller-facing deadline remains registered until
     /// it actually unwinds. Account teardown can therefore cancel and drain a
@@ -88,10 +89,12 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         noHTMLMissCacheTTL: TimeInterval = 300,
         // Generous enough that a legitimately slow recovery (large body part over a
         // poor mobile network) still completes, while still bounding a hung fetch.
-        recoveryNetworkTimeout: TimeInterval = 30
+        recoveryNetworkTimeout: TimeInterval = 30,
+        richContentVerdictRefresher: any RichContentVerdictRefreshing = RichContentVerdictRefresher.shared
     ) {
         self.gmailAPIClientProvider = gmailAPIClientProvider
         self.contentHandler = contentHandler
+        self.richContentVerdictRefresher = richContentVerdictRefresher
         self.noHTMLMissCacheTTL = noHTMLMissCacheTTL
         self.recoveryNetworkTimeout = recoveryNetworkTimeout
     }
@@ -428,6 +431,14 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                 guard isCurrent(key, htmlGeneration: htmlGeneration) else {
                     return .failed
                 }
+                // The row's stored rich-content verdict describes the HTML it had
+                // before this save (none, or a file this just replaced). Scheduled,
+                // never awaited: every deduplicated caller waits on this task, and
+                // the wait counts against the recovery deadline.
+                richContentVerdictRefresher.scheduleRefresh(
+                    messageID: messageId,
+                    handler: contentHandler
+                )
                 let sourceSignature = CanonicalEmailContent(
                     html: html,
                     plainText: nil,

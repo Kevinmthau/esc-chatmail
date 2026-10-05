@@ -47,6 +47,7 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
 
     private let contentHandler: HTMLContentHandler
     private let recoveryService: any HTMLContentRecovering
+    private let richContentVerdictRefresher: any RichContentVerdictRefreshing
     private static let previewPaddingRegex: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: "[\\u200B\\u200C\\u200D\\uFEFF\\u00A0\\s]{40,}",
@@ -56,10 +57,12 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
 
     init(
         contentHandler: HTMLContentHandler = .shared,
-        recoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared
+        recoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared,
+        richContentVerdictRefresher: any RichContentVerdictRefreshing = RichContentVerdictRefresher.shared
     ) {
         self.contentHandler = contentHandler
         self.recoveryService = recoveryService
+        self.richContentVerdictRefresher = richContentVerdictRefresher
     }
 
     func loadCanonicalEmailContent(
@@ -185,6 +188,16 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                     guard contentHandler.isAccountGenerationCurrent(accountGeneration) else {
                         return nil
                     }
+                    // The row now has an HTML file, which its stored rich-content
+                    // verdict predates: the classifier's candidate is the same HTML
+                    // as before (it was read out of the raw-source body), but the
+                    // has-HTML-source term just became true. Reached from inside a
+                    // rendered-cache producer that the invalidation above has just
+                    // cancelled, so the refresh is scheduled detached, not awaited.
+                    richContentVerdictRefresher.scheduleRefresh(
+                        messageID: messageId,
+                        handler: contentHandler
+                    )
                     await MainActor.run {
                         HTMLContentLoader.postContentSourceDidChange(
                             messageId: messageId,

@@ -1,40 +1,83 @@
 import Foundation
 
 extension MessageBubbleLoader {
+    /// The verdict `RichContentVerdictResolver` gives the request's stored state, or nil when
+    /// it cannot be determined: the account context went stale, or an HTML file exists but
+    /// could not be read.
+    ///
+    /// The same rule sync, the launch backfill and the refresher persist on the row
+    /// (`Message.richContentVerdict`), evaluated over the same inputs, so a stored verdict
+    /// and this load can only disagree when the stored one is stale. It takes no
+    /// has-HTML-source argument from the HTML analysis for that reason: the resolver derives
+    /// that term from stored state, as the writers must.
+    ///
+    /// Only the classifier term is memoized, under the candidate's source signature, which
+    /// is all that key covers. Own rows and the fallback-text term are decided fresh on
+    /// every call; memoized with the classifier they outlived a changed snippet, body or
+    /// storage URI.
     func loadRichContentClassification(
         from request: MessageBubbleContentRequest,
-        resolvedHasHTMLSource: Bool,
         accountContext: MessageBubbleAccountWorkContext
-    ) async -> Bool {
-        guard !request.isFromMe,
-              await isAccountWorkContextCurrent(accountContext) else {
-            return false
+    ) async -> Bool? {
+        guard !request.isFromMe else { return false }
+        guard await isAccountWorkContextCurrent(accountContext) else { return nil }
+
+        let inputs = request.richContentVerdictInputs
+        let handler = htmlContentHandler
+        let generation = accountContext.htmlContent
+        switch RichContentVerdictResolver.cheapTerms(
+            for: inputs,
+            storedHTML: .readThroughHandler,
+            handler: handler,
+            generation: generation
+        ) {
+        case .decided(let isRich):
+            return isRich
+        case .classifierDecides:
+            break
         }
 
+        @Sendable func classifyCandidate() -> Bool? {
+            switch RichContentVerdictResolver.classifierCandidate(
+                for: inputs,
+                storedHTML: .readThroughHandler,
+                handler: handler,
+                generation: generation
+            ) {
+            case .html(let html):
+                return RichContentClassifier.hasGenuineRichContentAfterCleanup(html)
+            case .none:
+                return false
+            case .undetermined:
+                return nil
+            }
+        }
+
+        // Signature first, candidate second, as before: a file replaced in between then
+        // memoizes the new HTML's answer under the old key, which is never asked for again.
         let sourceSignature = renderedSourceSignature(
             for: request,
             accountContext: accountContext
         )
         let variantKey = RenderedMessageVariantKey(MessageBubbleContentSource.richContentAnalysisMode)
-
-        return await renderedMessageCache.richContentClassification(
+        if let memoized = await renderedMessageCache.richContentClassification(
             messageId: request.messageID,
             sourceSignature: sourceSignature,
             variantKey: variantKey,
-            expectedAccountGeneration: accountContext.renderedMessage
+            expectedAccountGeneration: accountContext.renderedMessage,
+            producer: { classifyCandidate() }
         ) {
-            let hasRichContent = MessageBubbleContentSource.classifyRichContent(
-                messageId: request.messageID,
-                bodyStorageURI: request.bodyStorageURI,
-                bodyText: request.bodyText,
-                handler: self.htmlContentHandler,
-                expectedAccountGeneration: accountContext.htmlContent
-            )
-            return hasRichContent || (
-                resolvedHasHTMLSource &&
-                NewsletterFallbackText.looksLikeFallbackText(request.bodyText ?? request.snippet)
-            )
-        } ?? false
+            return memoized
+        }
+
+        // The memo also answers nil when its producer was invalidated mid-flight: an
+        // `invalidateContent` for this message (sync, either HTML save site) or a memory
+        // warning. That is "nothing memoized", not "not rich". Publishing it as false
+        // showed a rich row as text until its signature next changed, and with a stored
+        // verdict on screen it would flip a correctly mounted card to text. Evaluate
+        // directly instead.
+        guard !Task.isCancelled, await isAccountWorkContextCurrent(accountContext) else { return nil }
+        return classifyCandidate()
     }
 
     func loadCompatibilityContent(
