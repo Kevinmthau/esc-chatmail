@@ -59,11 +59,11 @@ final class ConversationSelectionService: ObservableObject {
     ///
     /// Invariant: the selection is always a subset of the rows the list
     /// currently shows. The "N Selected" title, the Select All / Deselect All
-    /// label (the view compares `selectedConversationIDs.count` against the
-    /// visible `filteredConversationItems.count`) and the batch archive / spam
-    /// actions all assume it, so a row that leaves the window for any reason
-    /// (filter or search mismatch, trim, archive, delete, invalidate-all)
-    /// must leave the selection with it. The `isSubset` guard keeps the
+    /// label (`ConversationListChromePolicy.trailingItem` compares the selected
+    /// count against the visible `filteredConversationItems.count`) and the
+    /// batch archive / spam actions all assume it, so a row that leaves the
+    /// window for any reason (filter or search mismatch, trim, archive,
+    /// delete, invalidate-all) must leave the selection with it. The `isSubset` guard keeps the
     /// `@Published` set untouched on the common publish where nothing left,
     /// so observers are not re-notified on every list publish.
     func retainSelection(within visibleIDs: Set<NSManagedObjectID>) {

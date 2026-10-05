@@ -52,6 +52,13 @@ struct esc_chatmailApp: App {
         AttachmentPaths.setupDirectories()
         logStartupTiming("Directories setup")
 
+        // Before any restore can publish or drop a session, background launches
+        // included. Not in the unit-test host, whose tests must not write the
+        // host app's real defaults.
+        if !isRunningUnitTests {
+            SettingsAppAccountPublisher.shared.start(observing: AuthSession.shared)
+        }
+
         // NOTE: Fresh install check and auth restoration moved to initializeApp()
         // to properly await async operations before showing ContentView
         logStartupTiming("App init complete")
