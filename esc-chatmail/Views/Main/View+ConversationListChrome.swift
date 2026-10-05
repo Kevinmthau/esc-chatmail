@@ -2,7 +2,9 @@ import SwiftUI
 
 /// iOS 26 adaptors for the conversation list's bottom chrome. On iOS 26 the
 /// bar matches Messages — Liquid Glass controls over a scroll edge effect —
-/// while earlier systems keep the pre-iOS 26 styling unchanged.
+/// while earlier systems keep the pre-iOS 26 surfaces (opaque fill, hairline,
+/// shadow) and plain `safeAreaInset`. The bar's layout and metrics live in
+/// `ConversationListView` and are shared by both.
 extension View {
     /// Pins `bar` to the bottom edge. On iOS 26 `safeAreaBar` also extends the
     /// scroll edge effect beneath it, so rows soften as they slide under the
@@ -30,6 +32,21 @@ extension View {
             glassEffect(.regular.interactive(isInteractive), in: shape)
         } else {
             background(legacyGlassSurface(shape, material: legacyMaterial))
+        }
+    }
+
+    /// Groups neighbouring glass controls on iOS 26: glass cannot sample other
+    /// glass, so Apple has nearby glass elements share one
+    /// `GlassEffectContainer` to render consistently. Spacing 0 keeps the
+    /// shapes from blending into one another across their gap — Messages'
+    /// search field and compose button stay separate. Earlier systems draw no
+    /// glass, so the content passes through.
+    @ViewBuilder
+    func conversationListGlassGroup() -> some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: 0) { self }
+        } else {
+            self
         }
     }
 }

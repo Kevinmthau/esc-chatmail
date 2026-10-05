@@ -13,7 +13,8 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// True from a confirmed Settings-app sign-out until `signOut()` returns.
     /// `AuthSession` publishes no "signing out" state, and the mailbox stays on
-    /// screen until teardown reaches `isAuthenticated = false`.
+    /// screen until teardown reaches `isAuthenticated = false`; the cleanup
+    /// that follows runs behind the same overlay.
     @State private var isSigningOutFromSettingsApp = false
     @State private var signOutPrompter = SettingsAppSignOutPrompter()
     private let settingsAppPreferences = SettingsAppPreferences()
@@ -29,7 +30,7 @@ struct ContentView: View {
             }
         }
         .overlay {
-            if isSigningOutFromSettingsApp && authSession.isAuthenticated {
+            if isSigningOutFromSettingsApp {
                 signingOutOverlay
             }
         }
@@ -42,11 +43,17 @@ struct ContentView: View {
             publishSettingsAppAccount()
             evaluateSettingsAppSignOutRequest(isSceneActive: scenePhase == .active)
         }
-        // The Settings app can only change the switch while this app is in
+        // On iPhone the Settings app changes the switch while this app is in
         // the background, so returning to the foreground is the moment to look.
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active else { return }
             evaluateSettingsAppSignOutRequest(isSceneActive: true)
+        }
+        // On iPad, Settings can sit beside this app with both scenes staying
+        // active, so no phase change follows the switch; look again when this
+        // app's window regains focus.
+        .onReceive(NotificationCenter.default.publisher(for: UIWindow.didBecomeKeyNotification)) { _ in
+            evaluateSettingsAppSignOutRequest(isSceneActive: scenePhase == .active)
         }
         .onChange(of: authSession.isAuthenticated) {
             publishSettingsAppAccount()
@@ -58,7 +65,11 @@ struct ContentView: View {
     }
 
     /// Stands in for the old in-app Settings screen's "Signing Out..." state
-    /// and swallows taps so the mailbox cannot start work while it tears down.
+    /// and swallows taps on the mailbox while it tears down. It draws inside
+    /// the root view, so a sheet left open (Compose, a chat's sheets) stays on
+    /// top of it until teardown removes the mailbox and SwiftUI dismisses the
+    /// sheet; a send tapped there is refused, because `signOut()` closes
+    /// outbound admission before its first suspension.
     private var signingOutOverlay: some View {
         ZStack {
             Color.black.opacity(0.2)
@@ -82,9 +93,13 @@ struct ContentView: View {
 
     /// Acts on the Settings app's Sign Out switch (`SettingsAppSignOutPolicy`).
     private func evaluateSettingsAppSignOutRequest(isSceneActive: Bool) {
+        let isSignOutRequested = settingsAppPreferences.isSignOutRequested
         let decision = SettingsAppSignOutPolicy.decision(
-            isSignOutRequested: settingsAppPreferences.isSignOutRequested,
-            isAuthenticated: authSession.isAuthenticated,
+            isSignOutRequested: isSignOutRequested,
+            // Only asked when there is a request to judge: while signed out,
+            // `isDurablySignedOut()` reads the keychain, and this runs on every
+            // foregrounding and focus change.
+            isDurablySignedOut: isSignOutRequested && authSession.isDurablySignedOut(),
             isRequestBeingHandled: isSigningOutFromSettingsApp || signOutPrompter.isConfirmationActive,
             isSceneActive: isSceneActive
         )
@@ -111,8 +126,8 @@ struct ContentView: View {
     /// not reentrant).
     private func signOutFromSettingsApp() {
         settingsAppPreferences.clearSignOutRequest()
-        // The alert can outlive the session it was raised for.
-        guard authSession.isAuthenticated, !isSigningOutFromSettingsApp else { return }
+        // The alert can outlive the account it was raised for.
+        guard !authSession.isDurablySignedOut(), !isSigningOutFromSettingsApp else { return }
         isSigningOutFromSettingsApp = true
         Task {
             let didSignOut = await authSession.signOut()

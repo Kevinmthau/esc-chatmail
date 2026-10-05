@@ -257,6 +257,7 @@ struct ConversationListView: View {
                 viewModel.reportSpamSelectedConversations()
             }
         }
+        .conversationListGlassGroup()
         .padding(.horizontal, Self.bottomBarHorizontalPadding)
         .padding(.bottom, Self.bottomBarBottomPadding)
     }
@@ -289,6 +290,7 @@ struct ConversationListView: View {
             searchBar
             composeButton
         }
+        .conversationListGlassGroup()
         .padding(.horizontal, Self.bottomBarHorizontalPadding)
         .padding(.bottom, Self.bottomBarBottomPadding)
     }

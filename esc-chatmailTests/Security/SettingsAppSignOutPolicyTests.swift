@@ -3,68 +3,82 @@ import XCTest
 
 /// HONEST SCOPE: `ContentView`, which feeds this policy, never mounts in the
 /// unit-test host (`initializeApp()` no-ops there), and the confirmation is a
-/// UIKit alert, so the wiring itself — evaluating on appear/foreground/auth
-/// change and acting on each decision — is covered only through this policy
-/// and `SettingsAppPreferencesTests`.
+/// UIKit alert, so the wiring itself — evaluating on appear, foreground, focus
+/// and auth change, and acting on each decision — is covered only through this
+/// policy and `SettingsAppPreferencesTests`.
 final class SettingsAppSignOutPolicyTests: XCTestCase {
     private typealias Policy = SettingsAppSignOutPolicy
 
     private func decision(
         isSignOutRequested: Bool = true,
-        isAuthenticated: Bool = true,
+        isDurablySignedOut: Bool = false,
         isRequestBeingHandled: Bool = false,
         isSceneActive: Bool = true
     ) -> Policy.Decision {
         Policy.decision(
             isSignOutRequested: isSignOutRequested,
-            isAuthenticated: isAuthenticated,
+            isDurablySignedOut: isDurablySignedOut,
             isRequestBeingHandled: isRequestBeingHandled,
             isSceneActive: isSceneActive
         )
     }
 
     func testDecision_noRequest_returnsNoneForEveryOtherInput() {
-        for isAuthenticated in [false, true] {
+        for isDurablySignedOut in [false, true] {
             for isRequestBeingHandled in [false, true] {
                 for isSceneActive in [false, true] {
                     XCTAssertEqual(
                         decision(
                             isSignOutRequested: false,
-                            isAuthenticated: isAuthenticated,
+                            isDurablySignedOut: isDurablySignedOut,
                             isRequestBeingHandled: isRequestBeingHandled,
                             isSceneActive: isSceneActive
                         ),
                         .none,
-                        "authenticated: \(isAuthenticated), handled: \(isRequestBeingHandled), active: \(isSceneActive)"
+                        "signedOut: \(isDurablySignedOut), handled: \(isRequestBeingHandled), active: \(isSceneActive)"
                     )
                 }
             }
         }
     }
 
-    func testDecision_requestWhileAuthenticatedAndActive_returnsConfirm() {
-        XCTAssertEqual(decision(), .confirm)
+    /// Covers a signed-in mailbox, and equally a reauthentication-pending
+    /// session or a retryably failed launch restore: `SignInView` shows in
+    /// both, yet the account (credentials, store, bodies) is still on the
+    /// device, so the request must reach the confirmation rather than be
+    /// dropped while nothing was removed.
+    ///
+    /// HONEST SCOPE: this pins the policy's answer for that input. That
+    /// `ContentView` feeds it `AuthSession.isDurablySignedOut()` rather than
+    /// `!isAuthenticated` (the signal that dropped requests after a retryable
+    /// restore) is wiring the unit-test host cannot exercise.
+    func testDecision_requestWhileAccountRemainsOnDevice_returnsConfirm() {
+        XCTAssertEqual(decision(isDurablySignedOut: false), .confirm)
     }
 
     /// No AuthSession teardown path clears the Settings key, so a switch left
     /// on while signed out would prompt right after the next sign-in.
     ///
-    /// Revert-check: removing the `isAuthenticated` guard in
+    /// Revert-check: removing the `isDurablySignedOut` guard in
     /// `SettingsAppSignOutPolicy.decision` makes this fail.
-    func testDecision_requestWhileSignedOut_discardsRequest() {
-        XCTAssertEqual(decision(isAuthenticated: false), .discardRequest)
-        XCTAssertEqual(decision(isAuthenticated: false, isSceneActive: false), .discardRequest)
+    func testDecision_requestWhileDurablySignedOut_discardsRequest() {
+        XCTAssertEqual(decision(isDurablySignedOut: true), .discardRequest)
+        XCTAssertEqual(decision(isDurablySignedOut: true, isSceneActive: false), .discardRequest)
     }
 
-    /// A switch turned on again while a confirmed sign-out finishes its
-    /// cleanup (session already ended, request still being handled) is
-    /// dropped instead of surviving into the next account's session.
-    func testDecision_requestWhileHandledSignOutHasEndedSession_discardsRequest() {
-        XCTAssertEqual(decision(isAuthenticated: false, isRequestBeingHandled: true), .discardRequest)
+    /// A switch turned on again while a confirmed sign-out is still cleaning
+    /// up (already durably signed out, request still being handled) is dropped
+    /// instead of surviving into the next account's session.
+    ///
+    /// Revert-check: moving the `isDurablySignedOut` guard after the
+    /// `isRequestBeingHandled` guard in `SettingsAppSignOutPolicy.decision`
+    /// makes this fail.
+    func testDecision_requestWhileHandledSignOutIsCleaningUp_discardsRequest() {
+        XCTAssertEqual(decision(isDurablySignedOut: true, isRequestBeingHandled: true), .discardRequest)
     }
 
-    /// Returning to the foreground again while the prompt is up (or the
-    /// sign-out runs) must not stack a second prompt or a second `signOut()`.
+    /// Another evaluation while the prompt is up (or the sign-out runs) must
+    /// not stack a second prompt or a second `signOut()`.
     ///
     /// Revert-check: removing `!isRequestBeingHandled` from
     /// `SettingsAppSignOutPolicy.decision` makes this fail.
