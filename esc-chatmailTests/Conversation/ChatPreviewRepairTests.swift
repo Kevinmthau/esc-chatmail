@@ -1,4 +1,5 @@
 import CoreData
+import os
 import XCTest
 @testable import esc_chatmail
 
@@ -998,6 +999,154 @@ final class ChatPreviewRepairTests: XCTestCase {
         withExtendedLifetime(repair) {}
     }
 
+    // Revert-check: `cancellation.check()` in the row loop of
+    // `ChatPreviewRepair.prepareBatch`, and the `withTaskCancellationHandler`
+    // in `ChatPreviewRepair.performBatch` that sets the flag it reads. A
+    // `Task.checkCancellation()` in that loop never throws (`context.perform`
+    // runs its block with no current task), so the batch derives "002" and
+    // "003" under the caller's lease and returns.
+    func testPrepareBatch_cancellationLandsMidBatch_stopsDerivingFurtherRows() async throws {
+        for id in ["001", "002", "003"] { _ = try message(id) }
+        try viewContext.save()
+        let probe = MidBatchProbe()
+        let repair = makeRepair(parkingOn: probe)
+        let background = stack.newBackgroundContext()
+
+        let task = Task { try await repair.prepareBatch(in: background, after: nil, limit: 3) }
+        await cancelAfterFirstDerivedRow(task, parkedOn: probe)
+
+        await assertThrowsCancellation(task)
+        XCTAssertEqual(probe.derivedMessageIDs, ["001"])
+        let rewritten = await rewrittenMessageIDs(in: background)
+        XCTAssertEqual(rewritten, ["001"], "Rows after the cancellation must not be rewritten")
+    }
+
+    // Revert-check: `cancellation.check()` in the row loop of
+    // `ChatPreviewRepair.prepareDeferredRetryBatch`. The conversation is the
+    // only deferred one, so nothing but that row check can stop the batch
+    // before it derives "002" and "003".
+    func testDeferredRetry_cancellationLandsMidBatch_stopsDerivingFurtherRows() async throws {
+        let cleared = ConversationBuilder().build(in: viewContext)
+        for id in ["001", "002", "003"] { try storedRow(id, in: cleared) }
+        try viewContext.save()
+        let probe = MidBatchProbe()
+        let repair = makeRepair(parkingOn: probe)
+        let background = stack.newBackgroundContext()
+        let deferred = [ChatPreviewRepair.DeferredConversation(id: cleared.id)]
+
+        let task = Task {
+            try await repair.prepareDeferredRetryBatch(in: background, deferredConversations: deferred, after: nil)
+        }
+        await cancelAfterFirstDerivedRow(task, parkedOn: probe)
+
+        await assertThrowsCancellation(task)
+        XCTAssertEqual(probe.derivedMessageIDs, ["001"])
+        let rewritten = await rewrittenMessageIDs(in: background)
+        XCTAssertEqual(rewritten, ["001"], "Rows after the cancellation must not be rewritten")
+    }
+
+    // Revert-check: the per-conversation `cancellation.check()` in
+    // `ChatPreviewRepair.prepareDeferredRetryBatch`. The conversation after
+    // the cancellation is gone, so it has no row for the row check to stop
+    // at: without the per-conversation check the sweep examines it and
+    // returns a drained batch. The fixed IDs order the cleared conversation
+    // first.
+    func testDeferredRetry_cancellationLandsBetweenConversations_stopsExaminingLaterConversations() async throws {
+        let cleared = ConversationBuilder()
+            .withId(try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000001")))
+            .build(in: viewContext)
+        try storedRow("001", in: cleared)
+        try viewContext.save()
+        let vanished = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000002"))
+        let probe = MidBatchProbe()
+        let repair = makeRepair(parkingOn: probe)
+        let background = stack.newBackgroundContext()
+        let deferred = [
+            ChatPreviewRepair.DeferredConversation(id: cleared.id),
+            ChatPreviewRepair.DeferredConversation(id: vanished)
+        ]
+
+        let task = Task {
+            try await repair.prepareDeferredRetryBatch(in: background, deferredConversations: deferred, after: nil)
+        }
+        await cancelAfterFirstDerivedRow(task, parkedOn: probe)
+
+        await assertThrowsCancellation(task)
+        XCTAssertEqual(probe.derivedMessageIDs, ["001"])
+    }
+
+    // Revert-check: the entry `cancellation.check()` in
+    // `ChatPreviewRepair.performBatch` (main scan: no row is left after
+    // "001", so there is no row check to stop the batch and it returns
+    // drained), and `prepareLegacyDeferredMigrationBatch` running through
+    // `performBatch` at all.
+    // HONEST SCOPE: the legacy migration's per-chunk check is not pinned on
+    // its own. No seam fires between lookup chunks, and the entry check stops
+    // an already-cancelled caller before the first chunk.
+    func testPrepareBatch_callerAlreadyCancelled_throwsWithoutRunning() async throws {
+        _ = try message("001")
+        try viewContext.save()
+        let repair = ChatPreviewRepair(htmlContentHandler: handler)
+        let background = stack.newBackgroundContext()
+
+        await assertThrowsCancellation(Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await repair.prepareBatch(in: background, after: "001")
+        })
+        await assertThrowsCancellation(Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await repair.prepareLegacyDeferredMigrationBatch(
+                in: background,
+                legacyDeferredMessageIDs: ["001"]
+            )
+        })
+    }
+
+    private func makeRepair(parkingOn probe: MidBatchProbe) -> ChatPreviewRepair {
+        var repair = ChatPreviewRepair(htmlContentHandler: handler)
+        repair.didDeriveRow = { probe.didDeriveRow($0) }
+        return repair
+    }
+
+    /// Cancels `task` while its batch is parked on `probe` after its first
+    /// derived row, then lets the batch run on. `Task.cancel()` runs the
+    /// task's cancellation handlers before it returns, so the batch resumes
+    /// with the cancellation already delivered.
+    private func cancelAfterFirstDerivedRow<Value>(
+        _ task: Task<Value, Error>,
+        parkedOn probe: MidBatchProbe
+    ) async {
+        await waitUntil { probe.derivedMessageIDs.count == 1 }
+        task.cancel()
+        probe.resumeBatch()
+    }
+
+    private func assertThrowsCancellation<Value>(
+        _ task: Task<Value, Error>,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled batch must throw instead of returning", file: file, line: line)
+        } catch {
+            XCTAssertTrue(error is CancellationError, "Unexpected error: \(error)", file: file, line: line)
+        }
+    }
+
+    /// The rows a batch had rewritten in `context` when it stopped.
+    private func rewrittenMessageIDs(in context: NSManagedObjectContext) async -> [String] {
+        await context.perform {
+            context.updatedObjects.compactMap { ($0 as? Message)?.id }.sorted()
+        }
+    }
+
+    private func storedRow(_ id: String, in conversation: Conversation) throws {
+        let row = MessageBuilder().withId(id).inConversation(conversation).build(in: viewContext)
+        row.chatPreviewText = "Old preview"
+        row.bodyStorageURI = try XCTUnwrap(handler.saveHTML(html, for: id)).absoluteString
+    }
+
     private func drainBackfill() async throws {
         let repair = ChatPreviewRepair(htmlContentHandler: handler, pass: .blankPreviewBackfill)
         let background = stack.newBackgroundContext()
@@ -1132,6 +1281,33 @@ private actor ChatPreviewRepairGate {
         let pending = continuations
         continuations.removeAll()
         pending.forEach { $0.resume() }
+    }
+}
+
+/// Parks a batch on its context's queue after the first row it derives, so a
+/// test can cancel the calling task at a known point inside the batch.
+private final class MidBatchProbe: Sendable {
+    private let messageIDs = OSAllocatedUnfairLock(initialState: [String]())
+    private let resume = DispatchSemaphore(value: 0)
+
+    var derivedMessageIDs: [String] {
+        messageIDs.withLock { $0 }
+    }
+
+    /// `ChatPreviewRepair.didDeriveRow`; runs on the context's queue.
+    func didDeriveRow(_ messageID: String) {
+        let isFirstRow = messageIDs.withLock { messageIDs in
+            messageIDs.append(messageID)
+            return messageIDs.count == 1
+        }
+        // Bounded, so a failing test cannot park the context's queue forever.
+        if isFirstRow {
+            _ = resume.wait(timeout: .now() + 60)
+        }
+    }
+
+    func resumeBatch() {
+        resume.signal()
     }
 }
 

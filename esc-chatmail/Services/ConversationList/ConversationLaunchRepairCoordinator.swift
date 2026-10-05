@@ -148,6 +148,8 @@ final class ConversationLaunchRepairCoordinator {
     /// escalate it). 100-row batches could hold it for seconds on a large,
     /// throttled store; the per-batch lease, sync-idle check, and save are
     /// cheap next to the derivation. Unmeasured: tune with a trace if needed.
+    /// A cancelled run does not finish its batch: `ChatPreviewRepair` stops at
+    /// the next row and the hold ends there.
     static let chatPreviewRepairBatchSize = 25
 
     /// One entry per persisted-preview pass, run in order under a single
@@ -322,6 +324,13 @@ final class ConversationLaunchRepairCoordinator {
                 CacheCoordinator.shared.applyInvalidationPlan(plan, accountContext: accountContext)
             }
             return batch
+        } catch is CancellationError {
+            // `cancel()` landed mid-batch and the repair stopped at its next
+            // row. Nothing was saved or checkpointed, so a later run redoes
+            // the batch: the same outcome as the cancellation guard above,
+            // not a failure to log.
+            await context.perform { context.rollback() }
+            return nil
         } catch {
             await context.perform { context.rollback() }
             Log.error("Chat preview repair will retry after an incomplete batch", category: .conversation, error: error)

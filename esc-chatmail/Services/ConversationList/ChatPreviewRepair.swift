@@ -1,11 +1,16 @@
 import CoreData
 import Foundation
+import os
 
 /// Rewrites persisted `Message.chatPreviewText` in ID-ordered batches. The
 /// caller owns the account lease, pending-send serialization, save, and durable
 /// cursor checkpoint. Messages in conversations with a pending
 /// `OutboundSendMutationRecord` are deferred, never rewritten; once the main
 /// scan drains, only those deferred conversations are retried.
+///
+/// Cancelling the calling task stops a batch at its next row
+/// (`performBatch`): the batch throws `CancellationError`, and the caller
+/// discards it and rolls the context back, as for any other thrown batch.
 ///
 /// Split across:
 /// - `ChatPreviewRepair.swift` - passes, batches, and preview derivation
@@ -73,6 +78,56 @@ struct ChatPreviewRepair {
 
     let htmlContentHandler: HTMLContentHandler
     var pass: Pass = .receivedHTMLRederivation
+#if DEBUG
+    /// Test seam: runs on the context's queue after each row a batch derives,
+    /// so a test can land a cancellation between two rows of one batch.
+    var didDeriveRow: (@Sendable (_ messageID: String) -> Void)?
+#endif
+
+    /// The calling task's cancellation, in a form a `context.perform` block
+    /// can read. That block runs on the context's queue with no current Swift
+    /// task, so in there `Task.isCancelled` is always false and
+    /// `Task.checkCancellation()` never throws, however long ago the caller
+    /// was cancelled (a closure that evaluates `Task.isCancelled` inside the
+    /// block is equally blind). `performBatch` sets this from the calling
+    /// task's cancellation handler instead, and the batch loops read it.
+    private final class BatchCancellation: Sendable {
+        private let isCancelled = OSAllocatedUnfairLock(initialState: false)
+
+        func cancel() {
+            isCancelled.withLock { $0 = true }
+        }
+
+        func check() throws {
+            if isCancelled.withLock({ $0 }) {
+                throw CancellationError()
+            }
+        }
+    }
+
+    /// Runs one batch on `context`'s queue and stops it when the calling task
+    /// is cancelled. `body` does not start for an already-cancelled caller,
+    /// and its loops call `BatchCancellation.check()` before each row (each
+    /// lookup chunk, for the legacy migration), so a cancellation that lands
+    /// mid-batch throws at the next row instead of deriving the rest of the
+    /// batch under the caller's lease and the cleanup-sensitive gate
+    /// optimistic sends wait on. Rows the batch had already rewritten are
+    /// still unsaved in `context`; the caller rolls them back with the thrown
+    /// batch.
+    private static func performBatch<Value>(
+        in context: NSManagedObjectContext,
+        _ body: @escaping (BatchCancellation) throws -> Value
+    ) async throws -> Value {
+        let cancellation = BatchCancellation()
+        return try await withTaskCancellationHandler {
+            try await context.perform {
+                try cancellation.check()
+                return try body(cancellation)
+            }
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
 
     /// The next batch for `checkpoint`: a legacy-list migration first if the
     /// checkpoint still carries per-message deferred IDs, then a main-scan
@@ -124,12 +179,12 @@ struct ChatPreviewRepair {
     ) async throws -> Batch {
         let ids = Array(Set(legacyDeferredMessageIDs)).sorted()
         let chunkSize = max(1, lookupChunkSize)
-        return try await context.perform {
+        return try await Self.performBatch(in: context) { cancellation in
             var batch = Batch(phase: .legacyDeferredMigration)
             var seen = Set<UUID>()
             var chunkStart = ids.startIndex
             while chunkStart < ids.endIndex {
-                try Task.checkCancellation()
+                try cancellation.check()
                 let chunk = Array(ids[chunkStart..<min(chunkStart + chunkSize, ids.endIndex)])
                 let request = Message.fetchRequest()
                 request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
@@ -200,14 +255,13 @@ struct ChatPreviewRepair {
             return Batch(phase: .deferredRetry, didDrain: true, retryCursor: retryCursor)
         }
         let derivationLimit = max(1, limit)
-        return try await context.perform {
-            try Task.checkCancellation()
+        return try await Self.performBatch(in: context) { cancellation in
             let pendingConversationIDs = try Self.pendingConversationIDs(in: context)
             var batch = Batch(phase: .deferredRetry, retryCursor: retryCursor)
             var derivedCount = 0
             for entry in remaining {
                 guard derivedCount < derivationLimit else { break }
-                try Task.checkCancellation()
+                try cancellation.check()
                 let resumeAfter = retryCursor?.conversationKey == entry.sortKey ? retryCursor?.afterMessageID : nil
                 let scope = try Self.retryScope(
                     for: entry,
@@ -239,7 +293,7 @@ struct ChatPreviewRepair {
                 request.fetchBatchSize = budget
                 let messages = try context.fetch(request)
                 for message in messages {
-                    try Task.checkCancellation()
+                    try cancellation.check()
                     applyDerivedPreview(to: message, recordingChangeIn: &batch)
                 }
                 derivedCount += messages.count
@@ -266,8 +320,7 @@ struct ChatPreviewRepair {
         startingAt firstMessageID: String? = nil,
         limit: Int = 100
     ) async throws -> Batch {
-        try await context.perform {
-            try Task.checkCancellation()
+        try await Self.performBatch(in: context) { cancellation in
             let pendingConversationIDs = try Self.pendingConversationIDs(in: context)
             let request = Message.fetchRequest()
             var predicates = [Self.basePredicate(for: pass)]
@@ -286,7 +339,7 @@ struct ChatPreviewRepair {
             var batch = Batch(lastMessageID: messageID, didDrain: messages.isEmpty)
             var deferredIDs = Set<UUID>()
             for message in messages {
-                try Task.checkCancellation()
+                try cancellation.check()
                 if let conversation = message.conversation,
                    pendingConversationIDs.contains(conversation.id) {
                     // Retained failed sends can live indefinitely. Remember the
@@ -354,6 +407,9 @@ struct ChatPreviewRepair {
         }
         // Missing files and empty derivations preserve the existing
         // preview; a later source recovery re-enters the ingest path.
+#if DEBUG
+        didDeriveRow?(message.id)
+#endif
     }
 
     private static func basePredicate(for pass: Pass) -> NSPredicate {
