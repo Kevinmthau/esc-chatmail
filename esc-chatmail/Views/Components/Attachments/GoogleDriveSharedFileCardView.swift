@@ -12,31 +12,10 @@ struct GoogleDriveSharedFileCardView: View {
         Button {
             openURL(link.url)
         } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                GoogleDriveSharedFilePreview(
-                    link: link,
-                    thumbnailURL: metadata?.thumbnailURL,
-                    isLoadingMetadata: isLoadingMetadata
-                )
-                .frame(height: 154)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    titleBlock
-
-                    Text(link.sourceLabel)
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(cardBorder, lineWidth: 0.6)
+            GoogleDriveSharedFileCardContent(
+                link: link,
+                metadata: metadata,
+                isLoadingMetadata: isLoadingMetadata
             )
         }
         .buttonStyle(.plain)
@@ -48,42 +27,9 @@ struct GoogleDriveSharedFileCardView: View {
         .accessibilityHint("Opens the shared Google file")
     }
 
-    @ViewBuilder
-    private var titleBlock: some View {
-        if let title = metadata?.title, !title.isEmpty {
-            Text(title)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                skeletonLine(width: 196, height: 18)
-                skeletonLine(width: 142, height: 18)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityHidden(true)
-        }
-    }
-
-    private var cardBackground: Color {
-        Color(uiColor: .systemGray6)
-    }
-
-    private var cardBorder: Color {
-        Color(uiColor: .separator).opacity(0.18)
-    }
-
     private var accessibilityLabel: String {
         let resolvedTitle = metadata?.title ?? link.kind.title
         return "\(resolvedTitle), \(link.sourceLabel)"
-    }
-
-    @ViewBuilder
-    private func skeletonLine(width: CGFloat, height: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .fill(Color(uiColor: .tertiarySystemFill))
-            .frame(width: width, height: height)
     }
 
     private func loadMetadata() async {
@@ -104,6 +50,107 @@ struct GoogleDriveSharedFileCardView: View {
             metadata = resolvedMetadata
             isLoadingMetadata = false
         }
+    }
+}
+
+/// The card's layout for one metadata state. It owns no state and starts no metadata load
+/// (`GoogleDriveSharedFileCardView` does both), so a test can mount each state directly.
+///
+/// Its height must not depend on `metadata` or `isLoadingMetadata`. The row is on screen
+/// before the card's metadata task has run (a title the provider already caches still arrives
+/// a pass after mount), so a height that follows the title resizes a mounted row and shifts
+/// the chat transcript; `MessageDisplayPolicy.showsTextLoadingPlaceholder` describes what a
+/// row resizing after mount costs the chat's hidden initial-anchor pass.
+struct GoogleDriveSharedFileCardContent: View {
+    let link: SharedDocumentLink
+    let metadata: GoogleDriveSharedFileMetadata?
+    let isLoadingMetadata: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            GoogleDriveSharedFilePreview(
+                link: link,
+                thumbnailURL: metadata?.thumbnailURL,
+                isLoadingMetadata: isLoadingMetadata
+            )
+            .frame(height: 154)
+
+            VStack(alignment: .leading, spacing: 6) {
+                titleBlock
+
+                Text(link.sourceLabel)
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(cardBorder, lineWidth: 0.6)
+        )
+    }
+
+    private var resolvedTitle: String? {
+        guard let title = metadata?.title, !title.isEmpty else {
+            return nil
+        }
+        return title
+    }
+
+    /// Two title lines tall in every state: the title reserves both lines whatever its length
+    /// (`reservesSpace`), and the skeleton is drawn over that same reserved text rather than
+    /// sized on its own, so the two cannot drift apart with the font.
+    ///
+    /// They used to be sized separately. The skeleton was 44pt (two 18pt bars, 8pt apart), a
+    /// one-line title 21.67pt and a two-line title 43pt, so the card shrank by 22.33pt when
+    /// metadata resolved to a one-line title (the usual case, and always for the
+    /// `link.kind.title` fallback) and by 1pt for a longer one.
+    ///
+    /// The title font is a fixed 18pt and does not follow Dynamic Type; the reserved height
+    /// comes from the text itself, so it would hold if that changed.
+    private var titleBlock: some View {
+        // The blank stand-in draws nothing; it only reserves the two lines.
+        Text(resolvedTitle ?? " ")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(.primary)
+            .lineLimit(2, reservesSpace: true)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .topLeading) {
+                if resolvedTitle == nil {
+                    titleSkeleton
+                }
+            }
+    }
+
+    /// One bar per reserved title line, pinned to the top and bottom of the reserved area.
+    private var titleSkeleton: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            skeletonLine(width: 196, height: 18)
+            Spacer(minLength: 0)
+            skeletonLine(width: 142, height: 18)
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var cardBackground: Color {
+        Color(uiColor: .systemGray6)
+    }
+
+    private var cardBorder: Color {
+        Color(uiColor: .separator).opacity(0.18)
+    }
+
+    @ViewBuilder
+    private func skeletonLine(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(Color(uiColor: .tertiarySystemFill))
+            .frame(width: width, height: height)
     }
 }
 
