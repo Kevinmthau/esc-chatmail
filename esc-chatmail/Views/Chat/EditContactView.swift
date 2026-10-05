@@ -154,84 +154,11 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
     }
 
     @MainActor
-    static func topPresentableViewController(startingFrom rootViewController: UIViewController) -> UIViewController {
-        var topViewController = visibleContentViewController(from: rootViewController)
-
-        while let presented = topViewController.presentedViewController {
-            guard presented.viewIfLoaded?.window != nil, !presented.isBeingDismissed else { break }
-            topViewController = visibleContentViewController(from: presented)
-        }
-
-        return topViewController
-    }
-
-    @MainActor
-    static func canPresent(from viewController: UIViewController) -> Bool {
-        guard viewController.viewIfLoaded?.window != nil, !viewController.isBeingDismissed else {
-            return false
-        }
-
-        guard let presented = viewController.presentedViewController else {
-            return true
-        }
-
-        return presented.isBeingDismissed
-    }
-
-    @MainActor
-    private static func visibleContentViewController(from viewController: UIViewController) -> UIViewController {
-        if let navigationController = viewController as? UINavigationController,
-           let visibleViewController = navigationController.visibleViewController {
-            return visibleContentViewController(from: visibleViewController)
-        }
-
-        if let tabBarController = viewController as? UITabBarController,
-           let selectedViewController = tabBarController.selectedViewController {
-            return visibleContentViewController(from: selectedViewController)
-        }
-
-        return viewController
-    }
-
-    @MainActor
-    private func getTopViewController() -> UIViewController? {
-        let windowScenes = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .filter { $0.activationState == .foregroundActive || $0.activationState == .foregroundInactive }
-
-        let windows = windowScenes.flatMap(\.windows)
-        let window = windows.first(where: \.isKeyWindow)
-            ?? windows.first(where: { !$0.isHidden && $0.windowLevel == .normal })
-
-        guard let rootViewController = window?.rootViewController else { return nil }
-        return Self.topPresentableViewController(startingFrom: rootViewController)
-    }
-
-    @MainActor
     private func present(_ viewController: UIViewController, preferredPresenter: UIViewController? = nil) async {
-        for _ in 0..<20 {
-            if let presenter = resolvePresenter(preferredPresenter: preferredPresenter) {
-                presenter.present(viewController, animated: true)
-                return
-            }
-
-            guard await Task.sleepUnlessCancelled(nanoseconds: 50_000_000) else { return }
+        guard await TopPresentableViewController.present(viewController, preferredPresenter: preferredPresenter) else {
+            Log.error("Failed to find active presenter for contact UI", category: .ui)
+            return
         }
-
-        Log.error("Failed to find active presenter for contact UI", category: .ui)
-    }
-
-    @MainActor
-    private func resolvePresenter(preferredPresenter: UIViewController?) -> UIViewController? {
-        if let preferredPresenter, Self.canPresent(from: preferredPresenter) {
-            return preferredPresenter
-        }
-
-        guard let topViewController = getTopViewController(), Self.canPresent(from: topViewController) else {
-            return nil
-        }
-
-        return topViewController
     }
 
     private func makeContactNavigationController(

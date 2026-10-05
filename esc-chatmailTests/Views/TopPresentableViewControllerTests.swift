@@ -2,22 +2,24 @@ import XCTest
 import UIKit
 @testable import esc_chatmail
 
+/// Moved from `ContactPresenterTests` with `TopPresentableViewController`'s
+/// extraction from `ContactPresenter`; the assertions are unchanged.
 @MainActor
-final class ContactPresenterTests: XCTestCase {
-    func testCanPresentRequiresWindowHierarchy() {
+final class TopPresentableViewControllerTests: XCTestCase {
+    func testCanPresent_viewControllerOutsideWindow_returnsFalseUntilInstalled() {
         let viewController = UIViewController()
         viewController.loadViewIfNeeded()
 
-        XCTAssertFalse(ContactPresenter.canPresent(from: viewController))
+        XCTAssertFalse(TopPresentableViewController.canPresent(from: viewController))
 
         let window = UIWindow()
         window.rootViewController = viewController
         window.makeKeyAndVisible()
 
-        XCTAssertTrue(ContactPresenter.canPresent(from: viewController))
+        XCTAssertTrue(TopPresentableViewController.canPresent(from: viewController))
     }
 
-    func testTopPresentableViewControllerUsesVisibleNavigationControllerChild() {
+    func testResolve_navigationController_returnsVisibleChild() {
         let rootViewController = UIViewController()
         let detailViewController = UIViewController()
         let navigationController = UINavigationController(rootViewController: rootViewController)
@@ -27,12 +29,12 @@ final class ContactPresenterTests: XCTestCase {
         window.rootViewController = navigationController
         window.makeKeyAndVisible()
 
-        let resolved = ContactPresenter.topPresentableViewController(startingFrom: navigationController)
+        let resolved = TopPresentableViewController.resolve(startingFrom: navigationController)
 
         XCTAssertTrue(resolved === detailViewController)
     }
 
-    func testTopPresentableViewControllerSkipsPresentedControllerOutsideWindowHierarchy() {
+    func testResolve_presentedControllerOutsideWindow_isSkipped() {
         let rootViewController = TestViewController()
         let dismissedSheetHost = TestViewController()
         rootViewController.stubPresentedViewController = dismissedSheetHost
@@ -44,7 +46,7 @@ final class ContactPresenterTests: XCTestCase {
         rootViewController.loadViewIfNeeded()
         dismissedSheetHost.loadViewIfNeeded()
 
-        let resolved = ContactPresenter.topPresentableViewController(startingFrom: rootViewController)
+        let resolved = TopPresentableViewController.resolve(startingFrom: rootViewController)
 
         XCTAssertTrue(resolved === rootViewController)
     }

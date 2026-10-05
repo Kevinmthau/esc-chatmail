@@ -30,9 +30,7 @@ struct ConversationListView: View {
 
     var body: some View {
         conversationList
-            .safeAreaInset(edge: .bottom) {
-                bottomBar
-            }
+            .conversationListBottomBar(bottomBar)
             .environment(\.managedObjectContext, viewContext)
             .environmentObject(deps)
             .environmentObject(authSession)
@@ -43,7 +41,6 @@ struct ConversationListView: View {
     @State private var selectedConversation: Conversation?
     @State private var pendingConversationReference: ConversationReference?
     @State private var showingComposer = false
-    @State private var showingSettings = false
     @FocusState private var isSearchFieldFocused: Bool
 
     private var conversationList: some View {
@@ -104,7 +101,12 @@ struct ConversationListView: View {
         .listStyle(.plain)
         .animation(nil, value: viewModel.filteredConversationItems.count)
         .scrollDismissesKeyboard(.immediately)
-        .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
+        .navigationTitle(
+            ConversationListChromePolicy.navigationTitle(
+                isSelecting: viewModel.isSelecting,
+                selectedCount: viewModel.selectedConversationIDs.count
+            )
+        )
         .navigationDestination(item: $selectedConversation) { conversation in
             ChatView(
                 conversation: conversation,
@@ -126,9 +128,6 @@ struct ConversationListView: View {
                     openConversationIfAvailable(conversationReference: conversationReference)
                 }
             )
-        }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
         }
         .onAppear {
             AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
@@ -171,40 +170,80 @@ struct ConversationListView: View {
 
     // MARK: - Toolbar
 
+    /// Select (Cancel while selecting) leads and the filter menu (Select All
+    /// while selecting) trails, as in Messages. They stay plain toolbar items so
+    /// the system styles them — glass capsule and circle on iOS 26.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .navigationBarLeading) {
-            if viewModel.isSelecting {
-                Button(viewModel.selectedConversationIDs.count == viewModel.filteredConversationItems.count ? "Deselect All" : "Select All") {
-                    viewModel.selectAllVisibleConversations()
-                }
-            } else {
-                Button(action: {
-                    isSearchFieldFocused = false
-                    showingSettings = true
-                }) {
-                    Image(systemName: "gear")
-                }
-            }
-        }
-        ToolbarItem(placement: .navigationBarTrailing) {
-            Button(viewModel.isSelecting ? "Cancel" : "Select") {
+        ToolbarItem(placement: .topBarLeading) {
+            Button(ConversationListChromePolicy.leadingButtonTitle(isSelecting: viewModel.isSelecting)) {
                 isSearchFieldFocused = false
                 withAnimation {
                     viewModel.toggleSelectionMode()
                 }
             }
         }
+        switch trailingToolbarItem {
+        case .filterMenu:
+            ToolbarItem(placement: .topBarTrailing) {
+                filterMenu
+            }
+        case let .selectAll(title, isEnabled):
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(title) {
+                    viewModel.selectAllVisibleConversations()
+                }
+                .disabled(!isEnabled)
+            }
+        }
+    }
+
+    private var trailingToolbarItem: ConversationListChromePolicy.TrailingItem {
+        ConversationListChromePolicy.trailingItem(
+            isSelecting: viewModel.isSelecting,
+            selectedCount: viewModel.selectedConversationIDs.count,
+            visibleCount: viewModel.filteredConversationItems.count
+        )
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            ForEach(ConversationFilter.allCases, id: \.self) { filter in
+                Button {
+                    // Each choice resigns search focus itself: the menu now
+                    // sits in the navigation bar, where SwiftUI hosts it as a
+                    // native bar-button menu and a gesture on its label (the
+                    // old `simultaneousGesture` resign) is not reliably
+                    // delivered, and Menu has no pre-presentation hook.
+                    isSearchFieldFocused = false
+                    viewModel.currentFilter = filter
+                } label: {
+                    SwiftUI.Label(filter.rawValue, systemImage: filter.icon)
+                }
+            }
+        } label: {
+            SwiftUI.Label("Filter", systemImage: viewModel.currentFilter.icon)
+        }
+        .accessibilityLabel("Filter conversations")
     }
 
     // MARK: - Bottom Bar
 
+    /// Search field and compose button share one height, as in Messages.
+    private static let bottomBarControlHeight: CGFloat = 48
+    private static let bottomBarHorizontalPadding: CGFloat = 20
+    private static let bottomBarBottomPadding: CGFloat = 8
+
     private var bottomBar: some View {
         Group {
-            if viewModel.isSelecting && !viewModel.selectedConversationIDs.isEmpty {
+            switch ConversationListChromePolicy.bottomBar(
+                isSelecting: viewModel.isSelecting,
+                selectedCount: viewModel.selectedConversationIDs.count
+            ) {
+            case .selectionActions:
                 selectionActionBar
-            } else {
-                navigationBar
+            case .searchAndCompose:
+                searchAndComposeBar
             }
         }
     }
@@ -218,8 +257,8 @@ struct ConversationListView: View {
                 viewModel.reportSpamSelectedConversations()
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 14)
+        .padding(.horizontal, Self.bottomBarHorizontalPadding)
+        .padding(.bottom, Self.bottomBarBottomPadding)
     }
 
     /// Capsule-shaped action-bar button; the archive and spam buttons were
@@ -239,57 +278,19 @@ struct ConversationListView: View {
             .foregroundColor(.primary)
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
-            .background(glassSurface(Capsule(), material: .thinMaterial))
+            .conversationListGlassBackground(Capsule(), legacyMaterial: .thinMaterial)
         }
     }
 
-    /// Shared "glass" chrome for the bottom-bar surfaces: a 0.95-opacity
-    /// system-background fill, a 0.5pt gray hairline stroke, and a soft drop
-    /// shadow. Only the selection action bar passes `material:` (layering
-    /// `.thinMaterial` over the fill); the search bar and circle buttons are
-    /// deliberately material-free, matching the pre-refactor styling.
-    private func glassSurface<S: InsettableShape>(_ shape: S, material: Material? = nil) -> some View {
-        ZStack {
-            shape
-                .fill(Color(UIColor.systemBackground).opacity(0.95))
-            if let material {
-                shape
-                    .fill(material)
-            }
-        }
-        .overlay(
-            shape
-                .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 2)
-    }
-
-    private var navigationBar: some View {
-        HStack(spacing: 14) {
-            filterMenuButton
+    /// Messages' bottom bar: the search field takes all the width the compose
+    /// button leaves.
+    private var searchAndComposeBar: some View {
+        HStack(spacing: 12) {
             searchBar
             composeButton
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 14)
-    }
-
-    private var filterMenuButton: some View {
-        Menu {
-            ForEach(ConversationFilter.allCases, id: \.self) { filter in
-                Button {
-                    viewModel.currentFilter = filter
-                } label: {
-                    SwiftUI.Label(filter.rawValue, systemImage: filter.icon)
-                }
-            }
-        } label: {
-            circleButton(icon: viewModel.currentFilter.icon)
-        }
-        // Menu has no pre-presentation action hook; resign focus alongside the
-        // label tap so the keyboard isn't dismissed out-of-band by the menu.
-        .simultaneousGesture(TapGesture().onEnded { isSearchFieldFocused = false })
-        .accessibilityLabel("Filter conversations")
+        .padding(.horizontal, Self.bottomBarHorizontalPadding)
+        .padding(.bottom, Self.bottomBarBottomPadding)
     }
 
     private var searchBar: some View {
@@ -313,8 +314,9 @@ struct ConversationListView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(glassSurface(Capsule()))
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: Self.bottomBarControlHeight)
+        .conversationListGlassBackground(Capsule(), isInteractive: false)
     }
 
     private var composeButton: some View {
@@ -322,7 +324,12 @@ struct ConversationListView: View {
             isSearchFieldFocused = false
             showingComposer = true
         }) {
-            circleButton(icon: "square.and.pencil")
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(.primary)
+                .frame(width: Self.bottomBarControlHeight, height: Self.bottomBarControlHeight)
+                .contentShape(Circle())
+                .conversationListGlassBackground(Circle())
         }
         .accessibilityLabel("Compose new message")
         .accessibilityIdentifier("ComposeNewMessageButton")
@@ -356,16 +363,5 @@ struct ConversationListView: View {
 
     private func resolveConversation(with objectID: NSManagedObjectID) -> Conversation? {
         try? viewContext.existingObject(with: objectID) as? Conversation
-    }
-
-    private func circleButton(icon: String) -> some View {
-        ZStack {
-            glassSurface(Circle())
-
-            Image(systemName: icon)
-                .font(.system(size: 22, weight: .regular))
-                .foregroundColor(.primary)
-        }
-        .frame(width: 52, height: 52)
     }
 }
