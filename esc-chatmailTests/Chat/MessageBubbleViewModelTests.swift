@@ -782,8 +782,6 @@ final class MessageBubbleViewModelTests: XCTestCase {
             knownStoredVerdict: ChatMessageRowModelMapper.knownRichContentVerdict(
                 stored: storedVerdict,
                 chatPreviewText: chatPreviewText,
-                bodyText: nil,
-                snippet: nil,
                 isFromMe: false,
                 isForwardedEmail: false
             )

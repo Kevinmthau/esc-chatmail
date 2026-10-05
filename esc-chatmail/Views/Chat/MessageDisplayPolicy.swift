@@ -92,8 +92,7 @@ enum MessageDisplayPolicy {
     ///
     /// - Parameter knownStoredVerdict: `ChatMessageRowModel.knownRichContentVerdict`, already
     ///   nil for rows whose load does not publish the stored rule's answer (own, forwarded,
-    ///   and blank-preview rows), for rows never stamped under the current epoch, and for
-    ///   rows whose stored text may carry a shared-document link.
+    ///   and blank-preview rows) and for rows never stamped under the current epoch.
     ///
     /// The value and its known-ness come from this one function on purpose. Built separately
     /// (a flag from the row, a value from the view model) the flag could say "known" while

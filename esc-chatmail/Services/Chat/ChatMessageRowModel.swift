@@ -457,8 +457,6 @@ enum ChatMessageRowModelMapper {
             knownRichContentVerdict: knownRichContentVerdict(
                 stored: storedRichContentVerdict,
                 chatPreviewText: message.chatPreviewTextValue,
-                bodyText: message.bodyTextValue,
-                snippet: message.snippet,
                 isFromMe: message.isFromMe,
                 isForwardedEmail: message.isForwardedEmail
             ),
@@ -509,33 +507,28 @@ enum ChatMessageRowModelMapper {
     ///   whatever the stored rule says, and the bubble holds a forward off the
     ///   card until its load has published.
     ///
-    /// And nil where the verdict is known but the row's rendering is not: a row
-    /// whose stored text could carry a shared-document link. The load extracts
-    /// those links from `chatPreviewText`, `bodyText` and `snippet`
-    /// (`MessageBubbleLoader.extractSharedDocumentLinks`), and the bubble then
-    /// strips their URLs from its text and appends a card for each. Rendered
-    /// from a known verdict, such a row would show the raw URL and then swap,
-    /// where it used to wait behind the pill. Only a substring check runs here
-    /// (`SharedDocumentLinkExtractor.mayContainLinks`), not the extractor's
-    /// data-detector pass: this is evaluated for every row of every window
-    /// re-map on the main actor. It covers literally spelled hosts; a link
-    /// with an encoded host is missed, and that row still shows the swap.
+    /// A row whose stored text carries a shared-document link is not held back.
+    /// It used to be reported as unknown, because the load would still strip the
+    /// link's URL from the bubble text and append a card, and a row rendered
+    /// from a known verdict would have shown the raw URL and then swapped. The
+    /// row now carries those links itself (`storedSharedDocumentLinks`, for
+    /// exactly the rows that pass the guards here), so it mounts with them. The
+    /// one spelling that still swaps is a link whose host the row's cheap check
+    /// misses (`SharedDocumentLinkExtractor.mayContainLinks`); the old gate ran
+    /// the same check and did not hold that row back either.
     ///
     /// Pure and precomputed here because the bubble reads it several times per
     /// body evaluation.
     static func knownRichContentVerdict(
         stored: RichContentVerdict,
         chatPreviewText: String?,
-        bodyText: String?,
-        snippet: String?,
         isFromMe: Bool,
         isForwardedEmail: Bool
     ) -> Bool? {
         guard let isRich = stored.isRich,
               !isFromMe,
               !isForwardedEmail,
-              MessagePreviewText.nonEmpty(chatPreviewText) != nil,
-              !SharedDocumentLinkExtractor.mayContainLinks(in: [chatPreviewText, bodyText, snippet]) else {
+              MessagePreviewText.nonEmpty(chatPreviewText) != nil else {
             return nil
         }
         return isRich
