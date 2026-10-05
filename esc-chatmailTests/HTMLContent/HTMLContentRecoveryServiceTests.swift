@@ -739,6 +739,102 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
         XCTAssertEqual(contentHandler.loadHTML(for: messageId), html)
     }
 
+    // Recovery puts HTML on disk for a row sync stamped without it (or replaces the
+    // file the row was stamped from), so the row's stored rich-content verdict
+    // describes a state it no longer has. Left alone, the bubble renders that
+    // verdict at mount and swaps to what the load concludes, on every open.
+    //
+    // Revert-check: the `richContentVerdictRefresher.scheduleRefresh(messageID:handler:)`
+    // call after the successful `saveHTML` in
+    // `HTMLContentRecoveryService.performRecoveryToCompletion`.
+    //
+    // HONEST SCOPE: pins that one refresh is scheduled, for the saved message, through
+    // the handler that holds the saved file, and that a recovery which saves nothing
+    // schedules none. That a scheduled refresh re-stamps the row is
+    // RichContentVerdictRefresherTests' job; a double stands in here because the
+    // default refresher is inert under unit tests.
+    func testRecoverHTMLContent_savedHTML_schedulesOneRichContentVerdictRefresh() async {
+        /// Records instead of refreshing. `lock` guards both arrays.
+        final class RefreshRecorder: RichContentVerdictRefreshing, @unchecked Sendable {
+            let lock = NSLock()
+            var recordedMessageIDs: [String] = []
+            var recordedHandlers: [HTMLContentHandler] = []
+
+            var messageIDs: [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return recordedMessageIDs
+            }
+
+            var handlers: [HTMLContentHandler] {
+                lock.lock()
+                defer { lock.unlock() }
+                return recordedHandlers
+            }
+
+            func scheduleRefresh(messageID: String, handler: HTMLContentHandler) {
+                lock.lock()
+                recordedMessageIDs.append(messageID)
+                recordedHandlers.append(handler)
+                lock.unlock()
+            }
+        }
+
+        let messageId = "html-recovery-verdict-refresh-\(UUID().uuidString)"
+        let plainMessageId = "html-recovery-verdict-refresh-no-html-\(UUID().uuidString)"
+        let attachmentId = "html-body-\(UUID().uuidString)"
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>VERDICT_REFRESH_TOKEN</h1>
+          <p>Recovered newsletter body.</p>
+        </body>
+        </html>
+        """
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTMLRecoveryVerdictRefresh-\(UUID().uuidString)", isDirectory: true)
+        let contentHandler = HTMLContentHandler(messagesDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let mockAPIClient = MockGmailAPIClient()
+        mockAPIClient.getMessageResponses[messageId] = makeHTMLAttachmentMessage(
+            id: messageId,
+            attachmentId: attachmentId
+        )
+        mockAPIClient.attachmentResponses["\(messageId):\(attachmentId)"] = Data(html.utf8)
+        mockAPIClient.getMessageResponses[plainMessageId] = makePlainTextOnlyMessage(id: plainMessageId)
+
+        let recorder = RefreshRecorder()
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler,
+            richContentVerdictRefresher: recorder
+        )
+
+        let withoutHTML = await service.recoverHTMLContent(messageId: plainMessageId)
+
+        XCTAssertNil(withoutHTML)
+        XCTAssertTrue(
+            recorder.messageIDs.isEmpty,
+            "A recovery that found no HTML saved nothing, so there is no verdict to refresh"
+        )
+
+        let recovered = await service.recoverHTMLContent(messageId: messageId)
+
+        XCTAssertEqual(recovered, html)
+        XCTAssertEqual(
+            contentHandler.loadHTML(for: messageId),
+            html,
+            "Positive control: recovery reached the save"
+        )
+        XCTAssertEqual(recorder.messageIDs, [messageId])
+        XCTAssertTrue(
+            recorder.handlers.first === contentHandler,
+            "The refresh must read through the handler that holds the recovered file"
+        )
+    }
+
     private func makeHTMLAttachmentMessage(id: String, attachmentId: String) -> GmailMessage {
         let plainText = "Fallback plain text body"
 

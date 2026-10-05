@@ -219,6 +219,142 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertEqual(row.fallbackPreviewText, "Here are the two PDFs.")
     }
 
+    // MARK: - Stored shared-document links
+
+    /// A row whose stored fields decide its shared-document links carries them, so its bubble
+    /// mounts with the links' URLs stripped and their cards shown instead of rendering the raw
+    /// URL until the load publishes. Own rows and incoming rows alike; the link may sit in any
+    /// of the three fields the load searches.
+    ///
+    /// Revert-check: mapping `storedSharedDocumentLinks: []` in `ChatMessageRowModelMapper.map`
+    /// fails every assertion but the last; returning `[]` from
+    /// `Message.storedSharedDocumentLinks` does the same.
+    func testMap_storedPreviewRow_carriesTheSharedDocumentLinksItsLoadPublishes() throws {
+        let incoming = MessageBuilder()
+            .withId("row-model-links-incoming-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("See the plan\n\nhttps://docs.google.com/spreadsheets/d/rowsheet1/edit")
+            .withSnippet("See the plan")
+            .build(in: viewContext)
+        incoming.chatPreviewText = "See the plan https://docs.google.com/document/d/rowdoc1/edit"
+        let own = MessageBuilder()
+            .withId("row-model-links-own-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("Sharing the deck")
+            .withSnippet("Sharing the deck https://DOCS.GOOGLE.COM/presentation/d/rowdeck1/edit")
+            .fromMe()
+            .build(in: viewContext)
+        own.chatPreviewText = "Sharing the deck"
+        let plain = MessageBuilder()
+            .withId("row-model-links-plain-\(UUID().uuidString)")
+            .build(in: viewContext)
+        plain.chatPreviewText = "Lunch tomorrow?"
+        try viewContext.obtainPermanentIDs(for: [incoming, own, plain])
+        try viewContext.save()
+
+        let incomingRow = ChatMessageRowModelMapper.map(incoming)
+        let ownRow = ChatMessageRowModelMapper.map(own)
+
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks.map(\.id),
+            ["googleDoc|rowdoc1", "googleSheet|rowsheet1"]
+        )
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks.first?.url.absoluteString,
+            "https://docs.google.com/document/d/rowdoc1/edit"
+        )
+        XCTAssertEqual(ownRow.storedSharedDocumentLinks.map(\.id), ["googleSlides|rowdeck1"])
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks,
+            SharedDocumentLinkExtractor.storedRowLinks(
+                chatPreviewText: incomingRow.chatPreviewText,
+                bodyText: incomingRow.bodyText,
+                snippet: incomingRow.snippet,
+                isForwardedEmail: incomingRow.isForwardedEmail
+            )
+        )
+        XCTAssertTrue(ChatMessageRowModelMapper.map(plain).storedSharedDocumentLinks.isEmpty)
+    }
+
+    /// A forward, and a row with no stored preview, carry no links whatever their stored text
+    /// holds: their loads search other text (`SharedDocumentLinkExtractor.storedRowMayCarryLinks`),
+    /// so links computed from stored fields would not be the load's.
+    ///
+    /// Revert-check: `Message.storedSharedDocumentLinks` calling
+    /// `SharedDocumentLinkExtractor.bubbleLinks` without the `storedRowMayCarryLinks` guard
+    /// fails both assertions.
+    func testMap_forwardedOrBlankPreviewRow_carriesNoSharedDocumentLinks() throws {
+        let linkText = "Plan: https://docs.google.com/document/d/rowdoc2/edit"
+        let forwarded = MessageBuilder()
+            .withId("row-model-links-forwarded-\(UUID().uuidString)")
+            .withSubject("Fwd: Plan")
+            .withBody(linkText)
+            .withSnippet(linkText)
+            .build(in: viewContext)
+        forwarded.chatPreviewText = linkText
+        let blankPreview = MessageBuilder()
+            .withId("row-model-links-blank-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody(linkText)
+            .withSnippet(linkText)
+            .build(in: viewContext)
+        blankPreview.chatPreviewText = " \n "
+        try viewContext.obtainPermanentIDs(for: [forwarded, blankPreview])
+        try viewContext.save()
+
+        XCTAssertTrue(ChatMessageRowModelMapper.map(forwarded).storedSharedDocumentLinks.isEmpty)
+        XCTAssertTrue(ChatMessageRowModelMapper.map(blankPreview).storedSharedDocumentLinks.isEmpty)
+    }
+
+    /// The links are memoized per message (`Message.storedSharedDocumentLinks`), and a re-map
+    /// after any of their inputs changed must not serve the earlier answer: the bubble would
+    /// strip a URL its text no longer holds, or keep a card for a link that is gone, until its
+    /// load published.
+    ///
+    /// Revert-check: each step changes one input. Dropping `hasher.combine(chatPreviewText)`,
+    /// `hasher.combine(bodyText)` or `hasher.combine(snippet)` from the fingerprint in
+    /// `Message.storedSharedDocumentLinks` fails the step that changes that field, and moving
+    /// the `storedRowMayCarryLinks` guard behind the memo lookup fails the forwarded step.
+    ///
+    /// HONEST SCOPE: pins that the memo is never stale, not that it saves anything. Nothing
+    /// here can observe that a re-map with unchanged inputs skipped the data-detector pass;
+    /// with the memo removed every assertion still passes.
+    func testMap_storedSharedDocumentLinks_followEveryInputChangeOnTheSameMessage() throws {
+        let message = MessageBuilder()
+            .withId("row-model-links-memo-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("Plain body")
+            .withSnippet("Plain snippet")
+            .build(in: viewContext)
+        message.chatPreviewText = "First https://docs.google.com/document/d/memo1/edit"
+        try viewContext.obtainPermanentIDs(for: [message])
+        try viewContext.save()
+        func mappedLinkIDs() -> [String] {
+            ChatMessageRowModelMapper.map(message).storedSharedDocumentLinks.map(\.id)
+        }
+
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo1"])
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo1"], "A re-map with unchanged inputs")
+
+        message.chatPreviewText = "Second https://docs.google.com/document/d/memo2/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2"])
+
+        message.bodyText = "Body https://docs.google.com/spreadsheets/d/memo3/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2", "googleSheet|memo3"])
+
+        message.snippet = "Snippet https://docs.google.com/presentation/d/memo4/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2", "googleSheet|memo3", "googleSlides|memo4"])
+
+        message.subject = "Fwd: Plan"
+        XCTAssertEqual(mappedLinkIDs(), [], "A forward's stored fields do not decide its links")
+
+        message.subject = "Re: Plan"
+        message.chatPreviewText = "No link any more"
+        message.bodyText = "Plain body"
+        message.snippet = "Plain snippet"
+        XCTAssertEqual(mappedLinkIDs(), [])
+    }
+
     func testMap_preservesOutgoingForwardedAffordances() throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -572,6 +708,366 @@ final class ChatMessageRowModelTests: XCTestCase {
         record.remoteCommittedThreadId = "gmail-thread-id"
         try viewContext.save()
         XCTAssertTrue(ChatMessageRowModelMapper.map(optimistic).isConfirmedInGmail)
+    }
+
+    // MARK: - Stored rich-content verdict
+
+    /// A blank stored preview sends the load down the compatibility path, whose verdict is a
+    /// different expression from the stored rule's, so the stored verdict predicts nothing
+    /// and the bubble must not route on it.
+    ///
+    /// Revert-check: the `MessagePreviewText.nonEmpty(chatPreviewText) != nil` guard in
+    /// `ChatMessageRowModelMapper.knownRichContentVerdict`.
+    func testKnownRichContentVerdict_blankOrWhitespacePreview_isNil() {
+        let blankPreviews: [String?] = [nil, "", "   ", "\n\t "]
+        for preview in blankPreviews {
+            for stored in [RichContentVerdict.notRich, .rich] {
+                XCTAssertNil(
+                    ChatMessageRowModelMapper.knownRichContentVerdict(
+                        stored: stored,
+                        chatPreviewText: preview,
+                        isFromMe: false,
+                        isForwardedEmail: false
+                    ),
+                    "preview \(String(describing: preview)), stored \(stored)"
+                )
+            }
+        }
+    }
+
+    /// The load publishes not-rich for own rows, and a rich verdict left behind by an
+    /// `isFromMe` that flipped since the stamp must not card one.
+    ///
+    /// Revert-check: the `!isFromMe` guard in
+    /// `ChatMessageRowModelMapper.knownRichContentVerdict`.
+    func testKnownRichContentVerdict_ownRow_isNil() {
+        for stored in [RichContentVerdict.notRich, .rich] {
+            XCTAssertNil(
+                ChatMessageRowModelMapper.knownRichContentVerdict(
+                    stored: stored,
+                    chatPreviewText: "Stored preview",
+                    isFromMe: true,
+                    isForwardedEmail: false
+                ),
+                "stored \(stored)"
+            )
+        }
+    }
+
+    /// A forward whose block parses publishes not-rich whatever the stored rule says, and the
+    /// bubble holds a forward off the card until its load has published.
+    ///
+    /// Revert-check: the `!isForwardedEmail` guard in
+    /// `ChatMessageRowModelMapper.knownRichContentVerdict`.
+    func testKnownRichContentVerdict_forwardedRow_isNil() {
+        for stored in [RichContentVerdict.notRich, .rich] {
+            XCTAssertNil(
+                ChatMessageRowModelMapper.knownRichContentVerdict(
+                    stored: stored,
+                    chatPreviewText: "Stored preview",
+                    isFromMe: false,
+                    isForwardedEmail: true
+                ),
+                "stored \(stored)"
+            )
+        }
+    }
+
+    /// An unstamped row has nothing to route on and shows the loading pill, as every row did
+    /// before verdicts were stored.
+    ///
+    /// Revert-check: `ChatMessageRowModelMapper.knownRichContentVerdict` returning
+    /// `stored.isRich`. Defaulting unknown to false renders the row as text at mount, and
+    /// its load then swaps a rich one for a card.
+    func testKnownRichContentVerdict_unknownStoredVerdict_isNil() {
+        XCTAssertNil(
+            ChatMessageRowModelMapper.knownRichContentVerdict(
+                stored: .unknown,
+                chatPreviewText: "Stored preview",
+                isFromMe: false,
+                isForwardedEmail: false
+            )
+        )
+    }
+
+    /// Revert-check: `ChatMessageRowModelMapper.knownRichContentVerdict` returning
+    /// `stored.isRich` once its guards pass.
+    func testKnownRichContentVerdict_receivedRowWithPreview_isTheStoredVerdict() {
+        XCTAssertEqual(
+            ChatMessageRowModelMapper.knownRichContentVerdict(
+                stored: .notRich,
+                chatPreviewText: "Stored preview",
+                isFromMe: false,
+                isForwardedEmail: false
+            ),
+            false
+        )
+        XCTAssertEqual(
+            ChatMessageRowModelMapper.knownRichContentVerdict(
+                stored: .rich,
+                chatPreviewText: "Stored preview",
+                isFromMe: false,
+                isForwardedEmail: false
+            ),
+            true
+        )
+    }
+
+    /// A received row whose stored text carries a shared-document link routes on its stored
+    /// verdict like any other, and carries the links its load will publish. It used to be
+    /// reported as unknown (a `SharedDocumentLinkExtractor.mayContainLinks` guard) so that it
+    /// waited behind the pill instead of rendering the raw URL and then swapping to text plus
+    /// a card. With the links on the row there is no swap left to hide, and the pill only
+    /// delayed a rendering that was already known.
+    ///
+    /// Revert-check: restoring a `!SharedDocumentLinkExtractor.mayContainLinks(in:)` guard to
+    /// `ChatMessageRowModelMapper.knownRichContentVerdict` (over the preview alone, or over
+    /// all three fields again) fails the verdict assertion for the carriers it sees. Mapping
+    /// `storedSharedDocumentLinks: []` in `ChatMessageRowModelMapper.map` fails the link
+    /// assertion: the known verdict without the links is the swap the old guard prevented.
+    func testMap_receivedRowCarryingSharedDocumentLink_hasKnownVerdictAndItsLinks() throws {
+        let link = "https://docs.google.com/document/d/abc123/edit"
+        let carriers: [(name: String, preview: String, body: String, snippet: String, expectedIDs: [String])] = [
+            ("preview", "Here is the doc \(link)", "Plain body", "Plain snippet", ["googleDoc|abc123"]),
+            ("body", "Here is the doc", "Plan: \(link)", "Plain snippet", ["googleDoc|abc123"]),
+            ("snippet", "Here is the doc", "Plain body", "Plan: \(link)", ["googleDoc|abc123"]),
+            (
+                "upper-case host",
+                "Folder https://DRIVE.GOOGLE.COM/drive/folders/xyz",
+                "Plain body",
+                "Plain snippet",
+                ["googleDriveFolder|xyz"]
+            )
+        ]
+        for carrier in carriers {
+            for stored in [RichContentVerdict.notRich, .rich] {
+                let message = MessageBuilder()
+                    .withId("verdict-link-\(UUID().uuidString)")
+                    .withSubject("Re: Plan")
+                    .withBody(carrier.body)
+                    .withSnippet(carrier.snippet)
+                    .build(in: viewContext)
+                message.chatPreviewText = carrier.preview
+                message.storedRichContentVerdict = stored
+
+                let row = ChatMessageRowModelMapper.map(message)
+
+                XCTAssertEqual(row.knownRichContentVerdict, stored.isRich, "\(carrier.name), stored \(stored)")
+                XCTAssertEqual(
+                    row.storedSharedDocumentLinks.map(\.id),
+                    carrier.expectedIDs,
+                    "\(carrier.name), stored \(stored)"
+                )
+            }
+        }
+    }
+
+    /// The row carries the verdict as stored, for the load to compare its own answer
+    /// against, beside the gated one the view routes on. An own row, a forward and a
+    /// blank-preview row keep the first while the second is nil.
+    ///
+    /// Revert-check: `storedRichContentVerdict: storedRichContentVerdict` in
+    /// `ChatMessageRowModelMapper.map` (passing the gated value loses it on those three rows)
+    /// and in `ChatMessageRowModel.makeContentRequest()` (dropping the argument leaves the
+    /// request's default `.unknown`).
+    func testMap_storedRichContentVerdict_isCarriedUngatedIntoRowAndContentRequest() {
+        let own = MessageBuilder()
+            .withId("verdict-own-\(UUID().uuidString)")
+            .fromMe()
+            .build(in: viewContext)
+        own.chatPreviewText = "Own reply"
+        let forwarded = MessageBuilder()
+            .withId("verdict-forwarded-\(UUID().uuidString)")
+            .withSubject("Fwd: Spring plans")
+            .build(in: viewContext)
+        forwarded.chatPreviewText = "FYI"
+        let blankPreview = MessageBuilder()
+            .withId("verdict-blank-preview-\(UUID().uuidString)")
+            .build(in: viewContext)
+        let received = MessageBuilder()
+            .withId("verdict-received-\(UUID().uuidString)")
+            .build(in: viewContext)
+        received.chatPreviewText = "Stored preview"
+        let messages = [own, forwarded, blankPreview, received]
+        for message in messages {
+            message.storedRichContentVerdict = .rich
+        }
+
+        let rows = ChatMessageRowModelMapper.map(messages)
+
+        XCTAssertEqual(rows.map(\.storedRichContentVerdict), [.rich, .rich, .rich, .rich])
+        XCTAssertEqual(
+            rows.map { $0.makeContentRequest().storedRichContentVerdict },
+            [.rich, .rich, .rich, .rich]
+        )
+        XCTAssertEqual(rows.map(\.knownRichContentVerdict), [nil, nil, nil, true])
+    }
+
+    /// The bubble load and the verdict's writers must evaluate the resolver over the same
+    /// stored state, or a stored verdict and the load disagree with nothing stale: the raw
+    /// body and snippet, not the cleaned or trimmed ones the row also carries.
+    ///
+    /// Revert-check: `MessageBubbleContentRequest.richContentVerdictInputs` reading the
+    /// request's raw `bodyText` and `snippet` (substituting `cleanedSnippet` breaks the
+    /// equality with `Message.richContentVerdictInputs`).
+    func testMakeContentRequest_richContentVerdictInputs_matchTheMessagesOwn() {
+        let messageID = "verdict-inputs-\(UUID().uuidString)"
+        let bodyStorageURI = "/tmp/\(messageID).html"
+        let message = MessageBuilder()
+            .withId(messageID)
+            .withSnippet("Raw snippet")
+            .withBody("  Raw body, untrimmed \n")
+            .build(in: viewContext)
+        message.cleanedSnippet = "Cleaned snippet"
+        message.chatPreviewText = "Stored preview"
+        message.bodyStorageURI = bodyStorageURI
+
+        let request = ChatMessageRowModelMapper.map(message).makeContentRequest()
+
+        XCTAssertEqual(request.richContentVerdictInputs, message.richContentVerdictInputs)
+        XCTAssertEqual(
+            request.richContentVerdictInputs,
+            RichContentVerdictInputs(
+                messageID: messageID,
+                isFromMe: false,
+                bodyStorageURI: bodyStorageURI,
+                bodyText: "  Raw body, untrimmed \n",
+                snippet: "Raw snippet"
+            )
+        )
+    }
+
+    /// A verdict write (sync, the launch backfill, the refresher) must re-render the row but
+    /// not restart its load: the verdict is an output of the load, not an input.
+    ///
+    /// Revert-check: the verdict fields staying out of `MessageBubbleLoadSignatureComponents`
+    /// (adding either one fails the two signature equalities). Dropping them from
+    /// `ChatMessageRowModel`'s equality fails the inequality.
+    func testMap_storedVerdictChange_changesRowButNotLoadSignature() {
+        let message = MessageBuilder()
+            .withId("verdict-signature-\(UUID().uuidString)")
+            .build(in: viewContext)
+        message.chatPreviewText = "Stored preview"
+        message.storedRichContentVerdict = .notRich
+        let notRichRow = ChatMessageRowModelMapper.map(message)
+        // Nothing else about the row varies between two mappings.
+        XCTAssertEqual(ChatMessageRowModelMapper.map(message), notRichRow)
+
+        message.storedRichContentVerdict = .rich
+        let richRow = ChatMessageRowModelMapper.map(message)
+
+        XCTAssertNotEqual(richRow, notRichRow)
+        XCTAssertEqual(notRichRow.knownRichContentVerdict, false)
+        XCTAssertEqual(richRow.knownRichContentVerdict, true)
+        XCTAssertEqual(richRow.loadSignatureComponents, notRichRow.loadSignatureComponents)
+        XCTAssertEqual(
+            richRow.loadSignatureComponents.signature(
+                htmlSourceSignature: "unchanged", contactRefreshToken: 0
+            ),
+            notRichRow.loadSignatureComponents.signature(
+                htmlSourceSignature: "unchanged", contactRefreshToken: 0
+            )
+        )
+    }
+
+    /// What the signature exclusion buys: a bubble whose row's verdict was just written
+    /// keeps its published load instead of starting another.
+    ///
+    /// Revert-check: adding `storedRichContentVerdict` or `knownRichContentVerdict` to
+    /// `MessageBubbleLoadSignatureComponents` changes the view model's signature and starts
+    /// load 2.
+    func testMap_storedVerdictWrite_doesNotRestartBubbleLoad() async throws {
+        let message = MessageBuilder()
+            .withId("verdict-load-\(UUID().uuidString)")
+            .build(in: viewContext)
+        message.chatPreviewText = "Stored preview"
+        try viewContext.obtainPermanentIDs(for: [message])
+
+        let loader = AttachmentRefreshBubbleLoader()
+        let viewModel = MessageBubbleViewModel(loader: loader)
+        func loadContext() -> MessageBubbleLoadContext {
+            let row = ChatMessageRowModelMapper.map(message)
+            return MessageBubbleLoadContext(
+                messageID: row.id,
+                contentSignature: row.loadSignatureComponents.signature(
+                    htmlSourceSignature: "unchanged", contactRefreshToken: 0
+                ),
+                prefetchedSenderName: nil, senderRequest: nil,
+                contentRequest: row.makeContentRequest()
+            )
+        }
+        await viewModel.loadIfNeeded(using: loadContext())
+        let initialLoads = await loader.loadCount
+        XCTAssertEqual(initialLoads, 1)
+
+        message.storedRichContentVerdict = .rich
+        await viewModel.loadIfNeeded(using: loadContext())
+
+        let loadsAfterVerdictWrite = await loader.loadCount
+        XCTAssertEqual(loadsAfterVerdictWrite, 1)
+    }
+
+    /// Re-stamping a row with the verdict it already holds (sync's update path, the launch
+    /// backfill, the refresher) must not mark it dirty, or every pass would save untouched
+    /// rows and could conflict with a fresher writer over nothing.
+    ///
+    /// Revert-check: the `richContentVerdict != storedValue` guard in
+    /// `Message.storedRichContentVerdict`'s setter. The raw write below shows what the
+    /// unguarded setter does: Core Data marks an object updated on any attribute write,
+    /// equal value or not.
+    func testStoredRichContentVerdictSetter_unchangedValue_doesNotDirtyMessage() throws {
+        let message = MessageBuilder()
+            .withId("verdict-setter-\(UUID().uuidString)")
+            .build(in: viewContext)
+        message.storedRichContentVerdict = .rich
+        try viewContext.save()
+        XCTAssertFalse(message.isUpdated)
+
+        message.storedRichContentVerdict = .rich
+
+        XCTAssertFalse(message.isUpdated)
+        XCTAssertFalse(viewContext.hasChanges)
+
+        let unchangedRawValue = message.richContentVerdict
+        message.richContentVerdict = unchangedRawValue
+        XCTAssertTrue(message.isUpdated)
+        try viewContext.save()
+
+        // The guard skips equal values only.
+        message.storedRichContentVerdict = .notRich
+        XCTAssertTrue(message.isUpdated)
+        XCTAssertEqual(message.richContentVerdict, RichContentVerdict.notRich.storedValue())
+        message.storedRichContentVerdict = .unknown
+        XCTAssertEqual(message.richContentVerdict, 0)
+    }
+
+    /// A raw value stamped under another epoch is no verdict: the row maps as unknown and
+    /// the view gets nothing to route on, so the bubble shows the loading pill rather than
+    /// older classifier code's answer.
+    ///
+    /// Revert-check: the epoch comparison in `RichContentVerdict.init(storedValue:epoch:)`,
+    /// which `Message.storedRichContentVerdict`'s getter decodes through.
+    func testStoredRichContentVerdict_rawValueFromAnotherEpoch_readsUnknown() {
+        let currentEpoch = CacheVersioning.richContentVerdictEpoch
+        let otherEpoch: Int16 = currentEpoch == 1 ? 2 : currentEpoch - 1
+        let message = MessageBuilder()
+            .withId("verdict-epoch-\(UUID().uuidString)")
+            .build(in: viewContext)
+        message.chatPreviewText = "Stored preview"
+        // Never stamped.
+        XCTAssertEqual(message.storedRichContentVerdict, .unknown)
+
+        message.richContentVerdict = RichContentVerdict.rich.storedValue(epoch: otherEpoch)
+
+        XCTAssertEqual(message.storedRichContentVerdict, .unknown)
+        let otherEpochRow = ChatMessageRowModelMapper.map(message)
+        XCTAssertEqual(otherEpochRow.storedRichContentVerdict, .unknown)
+        XCTAssertNil(otherEpochRow.knownRichContentVerdict)
+
+        message.richContentVerdict = RichContentVerdict.rich.storedValue(epoch: currentEpoch)
+
+        XCTAssertEqual(message.storedRichContentVerdict, .rich)
+        XCTAssertEqual(ChatMessageRowModelMapper.map(message).knownRichContentVerdict, true)
     }
 }
 

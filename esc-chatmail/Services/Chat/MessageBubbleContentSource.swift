@@ -5,6 +5,9 @@ import Foundation
 /// computes the source signatures that key its derived-content cache entries.
 enum MessageBubbleContentSource {
     static let chatBubblePreviewMode = "chat-bubble-preview"
+    /// Variant of the memoized classifier answer for a message's HTML candidate
+    /// (`RichContentVerdictResolver.classifierCandidate`): the classifier term only,
+    /// not the whole verdict.
     static let richContentAnalysisMode = "rich-content-analysis"
 
     /// Process a single message - can be called from background thread
@@ -48,55 +51,6 @@ enum MessageBubbleContentSource {
             sanitizeRawEmailSource: true,
             classifyRichContent: true
         )
-    }
-
-    /// Classifies rich HTML without deriving chat-bubble text. Used when
-    /// Message.chatPreviewText is already the visible bubble source.
-    static func classifyRichContent(
-        messageId: String,
-        bodyStorageURI: String? = nil,
-        bodyText: String? = nil,
-        handler: HTMLContentHandler,
-        expectedAccountGeneration: HTMLContentAccountGeneration? = nil
-    ) -> Bool {
-        guard let html = richContentHTMLCandidate(
-            messageId: messageId,
-            bodyStorageURI: bodyStorageURI,
-            bodyText: bodyText,
-            handler: handler,
-            expectedAccountGeneration: expectedAccountGeneration
-        ) else {
-            return false
-        }
-
-        return RichContentClassifier.hasGenuineRichContentAfterCleanup(html)
-    }
-
-    private static func richContentHTMLCandidate(
-        messageId: String,
-        bodyStorageURI: String?,
-        bodyText: String?,
-        handler: HTMLContentHandler,
-        expectedAccountGeneration: HTMLContentAccountGeneration?
-    ) -> String? {
-        if let html = loadHTML(
-            messageId: messageId,
-            bodyStorageURI: bodyStorageURI,
-            handler: handler,
-            expectedAccountGeneration: expectedAccountGeneration
-        ) {
-            return html
-        }
-
-        guard let bodyText else {
-            return nil
-        }
-
-        if let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: bodyText) {
-            return rawSourceHTML
-        }
-
-        return ChatBubbleTextProcessor.containsHTMLTags(bodyText) ? bodyText : nil
     }
 
     static func contentSourceSignature(

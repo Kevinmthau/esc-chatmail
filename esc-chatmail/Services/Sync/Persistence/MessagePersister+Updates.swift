@@ -209,7 +209,7 @@ extension MessagePersister {
             var senderHeaderDisplayNameUpdateEmails = Set<String>()
             var senderHeaderDisplayNameUpdateConversationIDs = Set<NSManagedObjectID>()
             let shouldPreserveLocalMailboxState = HistoryProcessor.hasPendingLocalModification(message: existingMessage)
-            let canonicalHTML = processedMessage.canonicalContent?.html ?? processedMessage.htmlBody
+            let canonicalHTML = processedMessage.storedHTML
             let previousHTMLSourceSignature = canonicalHTML == nil ? nil : htmlContentHandler.canonicalHTMLSourceSignature(
                 messageId: processedMessage.id,
                 bodyStorageURI: previousBodyStorageURI
@@ -346,6 +346,30 @@ extension MessagePersister {
 
             if let savedBodyStorageURI {
                 existingMessage.bodyStorageURI = savedBodyStorageURI
+            }
+            // Re-stamp whenever this update could have changed the verdict or
+            // left it unknown. A refetch that saved HTML always does (the
+            // pre-run makes that free). One that brought no HTML can still
+            // rewrite snippet and bodyText, and every update rewrites
+            // isFromMe from that fetch's alias set, none of which shows up in
+            // the rendered-content change flags below. A verdict left over
+            // from the old inputs would be rendered as known: "not rich" on a
+            // now-received row shows its text and then swaps to a card.
+            // (bodyStorageURI, the fourth input, changes here only when HTML
+            // was saved, which already re-stamps.)
+            let verdictInputsChanged =
+                existingMessage.isFromMe != previousIsFromMe ||
+                existingMessage.bodyText != previousBodyText ||
+                existingMessage.snippet != previousSnippet
+            if savedBodyStorageURI != nil ||
+                verdictInputsChanged ||
+                existingMessage.storedRichContentVerdict == .unknown {
+                self.stampRichContentVerdict(
+                    on: existingMessage,
+                    savedHTML: savedBodyStorageURI == nil ? nil : canonicalHTML,
+                    prerun: processedMessage.richContentPrerun,
+                    htmlContentHandler: htmlContentHandler
+                )
             }
 
             let messageLabelIds = Set(processedMessage.labelIds)

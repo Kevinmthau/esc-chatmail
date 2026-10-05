@@ -1,4 +1,5 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
 final class MessageBubbleLoaderTests: XCTestCase {
@@ -233,6 +234,279 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(result.fullTextContent, "Canonical stored preview")
         let recoveryCallCount = await recoverer.recoveryCallCount()
         XCTAssertEqual(recoveryCallCount, 0)
+    }
+
+    // MARK: - Shared-document links a row carries before its load
+
+    /// A non-forwarded row with a stored preview mounts with links computed from its stored
+    /// fields (`SharedDocumentLinkExtractor.storedRowLinks`): the bubble strips their URLs from
+    /// its text and shows a card for each before the load has run. The load must then publish
+    /// exactly those links, in that order. Any difference re-renders the mounted bubble when
+    /// the load lands: a URL reappearing in the text, a card arriving, leaving or moving.
+    ///
+    /// Revert-check: dropping `bodyText` or `snippet` from the `bubbleLinks` call in
+    /// `SharedDocumentLinkExtractor.storedRowLinks` fails the body-only and snippet-only rows.
+    /// From the other side, in `MessageBubbleLoader.loadContent`, a nil
+    /// `sharedDocumentLinkBodyText`, or a `sharedDocumentLinkSnippet` read from
+    /// `request.cleanedSnippet`, fails the same rows on both assertions.
+    ///
+    /// HONEST SCOPE: the two sides are equal by construction (both call
+    /// `SharedDocumentLinkExtractor.bubbleLinks`), so this cannot tell a shared definition from
+    /// two copies that behave alike. What it pins is that both feed it the same three stored
+    /// fields, and what those fields yield.
+    func testLoadContent_storedPreviewRow_publishesTheLinksTheRowCarriesBeforeItsLoad() async {
+        struct Row {
+            let name: String
+            let chatPreviewText: String
+            var bodyText: String? = "Plain body"
+            var snippet: String? = "Plain snippet"
+            var isFromMe = false
+            var hasHTMLSource = false
+            let expectedIDs: [String]
+        }
+        let rows = [
+            Row(
+                name: "link in the preview",
+                chatPreviewText: "Here is the doc: https://docs.google.com/document/d/doc1/edit",
+                expectedIDs: ["googleDoc|doc1"]
+            ),
+            Row(
+                name: "link only in the body",
+                chatPreviewText: "See the plan",
+                bodyText: "See the plan\n\nhttps://docs.google.com/spreadsheets/d/sheet1/edit",
+                expectedIDs: ["googleSheet|sheet1"]
+            ),
+            Row(
+                name: "link only in the snippet",
+                chatPreviewText: "See the deck",
+                bodyText: nil,
+                snippet: "See the deck https://docs.google.com/presentation/d/deck1/edit",
+                expectedIDs: ["googleSlides|deck1"]
+            ),
+            Row(
+                name: "one link per field, in the bubble's order of preference",
+                chatPreviewText: "Deck https://docs.google.com/presentation/d/deck2/edit",
+                bodyText: "Doc https://docs.google.com/document/d/doc2/edit",
+                snippet: "Sheet https://docs.google.com/spreadsheets/d/sheet2/edit",
+                expectedIDs: ["googleSlides|deck2", "googleDoc|doc2", "googleSheet|sheet2"]
+            ),
+            Row(
+                name: "one document linked from preview and body",
+                chatPreviewText: "Doc https://docs.google.com/document/d/doc3/edit",
+                bodyText: "Doc https://docs.google.com/document/d/doc3/edit?usp=sharing\n\n> quoted",
+                expectedIDs: ["googleDoc|doc3"]
+            ),
+            Row(
+                name: "more links than a bubble shows",
+                chatPreviewText: (1...3)
+                    .map { "https://docs.google.com/document/d/first\($0)/edit" }
+                    .joined(separator: "\n"),
+                bodyText: (1...3)
+                    .map { "https://docs.google.com/document/d/second\($0)/edit" }
+                    .joined(separator: "\n"),
+                expectedIDs: ["googleDoc|first1", "googleDoc|first2", "googleDoc|first3", "googleDoc|second1"]
+            ),
+            Row(
+                name: "preview padded with whitespace",
+                chatPreviewText: " \n https://drive.google.com/drive/folders/folder1 \n",
+                expectedIDs: ["googleDriveFolder|folder1"]
+            ),
+            Row(
+                name: "own reply as Gmail echoes it, with an HTML source",
+                chatPreviewText: "Sharing https://docs.google.com/document/d/doc4/edit",
+                isFromMe: true,
+                hasHTMLSource: true,
+                expectedIDs: ["googleDoc|doc4"]
+            ),
+            Row(
+                name: "host mentioned with no document link",
+                chatPreviewText: "I found it on google.com, see https://www.google.com/search?q=plan",
+                expectedIDs: []
+            ),
+            Row(name: "no links", chatPreviewText: "Lunch tomorrow?", expectedIDs: [])
+        ]
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentRecoveryService: MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        for row in rows {
+            let messageId = "bubble-stored-links-\(UUID().uuidString)"
+            await RenderedMessageCache.shared.invalidate(messageId: messageId)
+            let request = MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: row.bodyText,
+                chatPreviewText: row.chatPreviewText,
+                bodyStorageURI: nil,
+                cleanedSnippet: "Cleaned snippet",
+                snippet: row.snippet,
+                subject: "Re: Plan",
+                senderName: "Alice Example",
+                hasHTMLSource: row.hasHTMLSource,
+                hasAttachments: false,
+                isFromMe: row.isFromMe,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+
+            let result = await loader.loadContent(from: request)
+
+            XCTAssertTrue(result.isComplete, row.name)
+            XCTAssertEqual(result.sharedDocumentLinks.map(\.id), row.expectedIDs, row.name)
+            XCTAssertEqual(
+                result.sharedDocumentLinks,
+                SharedDocumentLinkExtractor.storedRowLinks(
+                    chatPreviewText: request.chatPreviewText,
+                    bodyText: request.bodyText,
+                    snippet: request.snippet,
+                    isForwardedEmail: request.isForwardedEmail
+                ),
+                row.name
+            )
+        }
+    }
+
+    /// The same equality from a stored `Message`, through the path the transcript takes: the
+    /// row model the bubble mounts with, and the content request that row model hands its load.
+    ///
+    /// Revert-check: mapping `storedSharedDocumentLinks: []` in `ChatMessageRowModelMapper.map`
+    /// fails both rows; so does `Message.storedSharedDocumentLinks` reading `cleanedSnippet`
+    /// where the load reads `snippet`, on the incoming row.
+    @MainActor
+    func testLoadContent_mappedRow_publishesTheLinksItsRowModelCarries() async throws {
+        let stack = TestCoreDataStack()
+        let viewContext = stack.makeMainQueueViewContext()
+        let incoming = MessageBuilder()
+            .withId("bubble-mapped-links-incoming-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("See the plan\n\nhttps://docs.google.com/document/d/mapped1/edit")
+            .withSnippet("See the plan https://docs.google.com/spreadsheets/d/mapped2/edit")
+            .build(in: viewContext)
+        incoming.chatPreviewText = "See the plan"
+        incoming.cleanedSnippet = "See the plan"
+        let own = MessageBuilder()
+            .withId("bubble-mapped-links-own-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("Sharing https://drive.google.com/file/d/mapped3/view")
+            .withSnippet("Sharing https://drive.google.com/file/d/mapped3/view")
+            .fromMe()
+            .build(in: viewContext)
+        own.chatPreviewText = "Sharing https://drive.google.com/file/d/mapped3/view"
+        try viewContext.obtainPermanentIDs(for: [incoming, own])
+        try viewContext.save()
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentRecoveryService: MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let expectedIDs = [
+            incoming.id: ["googleDoc|mapped1", "googleSheet|mapped2"],
+            own.id: ["googleDriveFile|mapped3"]
+        ]
+        for row in ChatMessageRowModelMapper.map([incoming, own]) {
+            await RenderedMessageCache.shared.invalidate(messageId: row.id)
+
+            let result = await loader.loadContent(from: row.makeContentRequest())
+
+            XCTAssertTrue(result.isComplete, row.id)
+            XCTAssertEqual(row.storedSharedDocumentLinks.map(\.id), expectedIDs[row.id], row.id)
+            XCTAssertEqual(result.sharedDocumentLinks, row.storedSharedDocumentLinks, row.id)
+        }
+    }
+
+    /// Where stored fields do not decide a row's links, the row carries none and the load's
+    /// are the only ones: a blank stored preview, whose load searches the text its
+    /// compatibility path derives, and a forward, whose load searches its parsed lead-in. This
+    /// is why the bubble takes the load's links once it has published instead of the row's
+    /// throughout (`MessageDisplayPolicy.sharedDocumentLinks`): these rows would never show a
+    /// card.
+    ///
+    /// Revert-check: in `SharedDocumentLinkExtractor.storedRowMayCarryLinks`, dropping the
+    /// `MessagePreviewText.nonEmpty(chatPreviewText)` term fails the blank-preview request's
+    /// final assertion, and dropping `!isForwardedEmail` fails the forward's.
+    ///
+    /// HONEST SCOPE: the first three assertions pin the loader's behavior for the two
+    /// populations as it is today, which is what justifies excluding them. If the load ever
+    /// published for them what stored fields give, the exclusions (and the swap a
+    /// blank-preview row still shows) could go.
+    func testLoadContent_blankPreviewOrForwardedRow_publishesLinksTheRowDoesNotCarry() async {
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+        func request(
+            chatPreviewText: String?,
+            bodyText: String,
+            subject: String,
+            isForwardedEmail: Bool
+        ) async -> MessageBubbleContentRequest {
+            let messageId = "bubble-load-decided-links-\(UUID().uuidString)"
+            await RenderedMessageCache.shared.invalidate(messageId: messageId)
+            return MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: bodyText,
+                chatPreviewText: chatPreviewText,
+                bodyStorageURI: nil,
+                cleanedSnippet: nil,
+                snippet: nil,
+                subject: subject,
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: isForwardedEmail,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        }
+        let blankPreview = await request(
+            chatPreviewText: nil,
+            bodyText: "Here is the doc: https://docs.google.com/document/d/blank1/edit",
+            subject: "Re: Plan",
+            isForwardedEmail: false
+        )
+        let forwarded = await request(
+            chatPreviewText: "FYI https://docs.google.com/document/d/leadin1/edit",
+            bodyText: """
+            FYI https://docs.google.com/document/d/leadin1/edit
+
+            ---------- Forwarded message ---------
+            From: Jane Example <jane@example.com>
+            Date: Mon, Feb 16, 2026 at 5:56 PM
+            Subject: Spring plans
+            To: me@example.com
+
+            The sheet: https://docs.google.com/spreadsheets/d/forwarded1/edit
+            """,
+            subject: "Fwd: Spring plans",
+            isForwardedEmail: true
+        )
+
+        let blankPreviewResult = await loader.loadContent(from: blankPreview)
+        let forwardedResult = await loader.loadContent(from: forwarded)
+
+        XCTAssertEqual(blankPreviewResult.sharedDocumentLinks.map(\.id), ["googleDoc|blank1"])
+        XCTAssertNotNil(forwardedResult.forwardedDisplayContent)
+        XCTAssertEqual(
+            forwardedResult.sharedDocumentLinks.map(\.id),
+            ["googleDoc|leadin1"],
+            "A forward's load searches its lead-in only, not the forwarded body"
+        )
+        for request in [blankPreview, forwarded] {
+            XCTAssertTrue(
+                SharedDocumentLinkExtractor.storedRowLinks(
+                    chatPreviewText: request.chatPreviewText,
+                    bodyText: request.bodyText,
+                    snippet: request.snippet,
+                    isForwardedEmail: request.isForwardedEmail
+                ).isEmpty,
+                request.subject ?? ""
+            )
+        }
     }
 
     func testLoadContent_htmlMessageMissingChatPreviewTextUsesDOMFallback() async {
@@ -2183,6 +2457,394 @@ final class MessageBubbleLoaderTests: XCTestCase {
         )
         XCTAssertNil(renderedArtifacts)
     }
+
+    // MARK: - Stored rich-content verdict
+
+    // The stored-preview branch (non-empty `chatPreviewText`, no parsed forward block)
+    // publishes `RichContentVerdictResolver`'s verdict over the row's stored state, and asks
+    // for a re-stamp when that verdict differs from the one the row carries.
+    //
+    // HONEST SCOPE (refresh tests): they inject a recording `RichContentVerdictRefreshing`,
+    // so they pin that the loader asks, for which message and through which handler. That
+    // the row is then re-stamped is `RichContentVerdictRefresher`'s own contract.
+
+    func testLoadContent_storedPreviewFallbackLikeBodyWithStoredHTML_isRich() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveHTML(richVerdictPlainHTML)
+        // Premise: the stored HTML alone is not rich, so a rich verdict can only be the
+        // fallback-text term.
+        XCTAssertFalse(RichContentClassifier.hasGenuineRichContentAfterCleanup(richVerdictPlainHTML))
+
+        // Revert-check: the fallback-text term of `RichContentVerdictResolver.cheapTerms`
+        // (`.decided(true)`), evaluated by `MessageBubbleLoader.loadRichContentClassification`.
+        let result = await fixture.loader.loadContent(
+            from: fixture.request(bodyText: richVerdictFallbackLikeText)
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.fullTextContent, "Stored preview")
+        XCTAssertTrue(result.hasRichHTMLContent)
+    }
+
+    func testLoadContent_storedPreviewFallbackLikeBodyWithDanglingStorageURI_isRich() async {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        let danglingURI = fixture.directory
+            .appendingPathComponent("dangling-\(UUID().uuidString).html")
+            .absoluteString
+
+        // "Has an HTML source" is the stored URI, not "its HTML can be loaded": the preview
+        // card's own pipeline recovers a missing file.
+        // Revert-check: `inputs.bodyStorageURI != nil` in `RichContentVerdictResolver.cheapTerms`.
+        let result = await fixture.loader.loadContent(
+            from: fixture.request(bodyText: richVerdictFallbackLikeText, bodyStorageURI: danglingURI)
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertTrue(result.hasRichHTMLContent)
+    }
+
+    func testLoadContent_storedPreviewFallbackLikeBodyFromMe_isNotRich() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveHTML(richVerdictPlainHTML)
+
+        // Revert-check: the own-row guards, `guard !request.isFromMe` in
+        // `MessageBubbleLoader.loadRichContentClassification` and `guard !inputs.isFromMe` in
+        // `RichContentVerdictResolver.cheapTerms`.
+        // HONEST SCOPE: either guard alone keeps this passing; it fails only with both gone.
+        let result = await fixture.loader.loadContent(
+            from: fixture.request(bodyText: richVerdictFallbackLikeText, isFromMe: true)
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertFalse(result.hasRichHTMLContent)
+    }
+
+    func testLoadContent_storedPreviewNilBodyWithFallbackLikeSnippet_isRich() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveHTML(richVerdictPlainHTML)
+
+        // The snippet has to be multi-line: fallback text is recognised by URL-bearing lines.
+        // Revert-check: the `?? inputs.snippet` fallback in `RichContentVerdictResolver.cheapTerms`.
+        let result = await fixture.loader.loadContent(
+            from: fixture.request(bodyText: nil, snippet: richVerdictFallbackLikeText)
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertTrue(result.hasRichHTMLContent)
+    }
+
+    func testLoadContent_storedPreviewBlankBodyWithFallbackLikeSnippet_isNotRich() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveHTML(richVerdictPlainHTML)
+
+        // A stored body, even a blank one, is the row's text: nil-coalescing never reaches
+        // the snippet. The writers evaluate the raw `Message.bodyText` the same way, so
+        // treating blank as absent here would make the load contradict the stored verdict.
+        // Revert-check: `inputs.bodyText ?? inputs.snippet` in
+        // `RichContentVerdictResolver.cheapTerms` (and the untrimmed `bodyText` in
+        // `MessageBubbleContentRequest.richContentVerdictInputs`).
+        let result = await fixture.loader.loadContent(
+            from: fixture.request(bodyText: "", snippet: richVerdictFallbackLikeText)
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertFalse(result.hasRichHTMLContent)
+    }
+
+    func testLoadContent_storedPreviewFallbackTermAfterMemoizedClassifierAnswer_isDecidedFresh() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveHTML(richVerdictPlainHTML)
+
+        let ordinaryRequest = fixture.request(bodyText: "Plain reply body.")
+        let fallbackRequest = fixture.request(bodyText: richVerdictFallbackLikeText)
+        // Premise: all three loads share one memo key. The candidate is the stored file,
+        // whose signature does not cover `bodyText`.
+        XCTAssertEqual(
+            fixture.loader.renderedSourceSignature(for: ordinaryRequest),
+            fixture.loader.renderedSourceSignature(for: fallbackRequest)
+        )
+
+        // Revert-check: `RichContentVerdictResolver.cheapTerms` evaluated outside the
+        // `renderedMessageCache.richContentClassification` producer in
+        // `MessageBubbleLoader.loadRichContentClassification`. Memoized with the classifier,
+        // the first load's answer is returned for the second and the second's for the third.
+        let first = await fixture.loader.loadContent(from: ordinaryRequest)
+        let second = await fixture.loader.loadContent(from: fallbackRequest)
+        let third = await fixture.loader.loadContent(from: ordinaryRequest)
+
+        XCTAssertFalse(first.hasRichHTMLContent)
+        XCTAssertTrue(second.hasRichHTMLContent)
+        XCTAssertFalse(third.hasRichHTMLContent)
+    }
+
+    func testLoadContent_htmlSourceHintWithoutStoredSource_doesNotMakeFallbackTextRich() async {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+
+        // Deliberate: the request's `hasHTMLSource` hint no longer feeds the verdict. The
+        // resolver derives has-HTML-source from stored state (`bodyStorageURI`, or a file for
+        // the message ID), which is all the writers of `Message.richContentVerdict` can see,
+        // so the persisted verdict and this load agree. With neither stored, fallback-like
+        // text is just text.
+        // Revert-check: the stored-state `hasHTMLSource` in
+        // `RichContentVerdictResolver.cheapTerms` (feeding it `request.hasHTMLSource` or the
+        // HTML analysis's `hasHTMLSource` makes this row rich).
+        let result = await fixture.loader.loadContent(
+            from: fixture.request(bodyText: richVerdictFallbackLikeText, hasHTMLSource: true)
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertTrue(result.htmlAnalysis.hasHTMLSource, "premise: the hint still reaches the HTML analysis")
+        XCTAssertFalse(result.hasRichHTMLContent)
+    }
+
+    func testLoadContent_computedVerdictWithUnknownStoredVerdict_schedulesOneRefresh() async throws {
+        for (html, expectedRich) in [(richVerdictRichHTML, true), (richVerdictPlainHTML, false)] {
+            let fixture = RichVerdictLoaderFixture()
+            defer { fixture.removeFiles() }
+            try fixture.saveHTML(html)
+
+            let result = await fixture.loader.loadContent(
+                from: fixture.request(storedRichContentVerdict: .unknown)
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertEqual(result.hasRichHTMLContent, expectedRich)
+            // Revert-check: the `richContentVerdictRefresher.scheduleRefresh` call in
+            // `MessageBubbleLoader.loadContent`, with the loader's own `htmlContentHandler`
+            // (the refresher must read the directory this load classified).
+            XCTAssertEqual(
+                fixture.refresher.refreshes,
+                [fixture.expectedRefresh],
+                "computed rich=\(expectedRich), stored unknown"
+            )
+        }
+    }
+
+    func testLoadContent_computedVerdictOppositeOfStoredVerdict_schedulesOneRefresh() async throws {
+        let cases: [(html: String, stored: RichContentVerdict, expectedRich: Bool)] = [
+            (richVerdictRichHTML, .notRich, true),
+            (richVerdictPlainHTML, .rich, false)
+        ]
+        for testCase in cases {
+            let fixture = RichVerdictLoaderFixture()
+            defer { fixture.removeFiles() }
+            try fixture.saveHTML(testCase.html)
+
+            let result = await fixture.loader.loadContent(
+                from: fixture.request(storedRichContentVerdict: testCase.stored)
+            )
+
+            XCTAssertTrue(result.isComplete)
+            // A computed verdict always wins over the stored one.
+            XCTAssertEqual(result.hasRichHTMLContent, testCase.expectedRich, "stored \(testCase.stored)")
+            // Revert-check: the `!= request.storedRichContentVerdict` comparison and the
+            // `scheduleRefresh` call in `MessageBubbleLoader.loadContent` (refreshing only
+            // unknown rows leaves a stale known verdict swapping on every open).
+            XCTAssertEqual(
+                fixture.refresher.refreshes,
+                [fixture.expectedRefresh],
+                "stored \(testCase.stored)"
+            )
+        }
+    }
+
+    func testLoadContent_computedVerdictEqualToStoredVerdict_schedulesNoRefresh() async throws {
+        let cases: [(html: String, stored: RichContentVerdict)] = [
+            (richVerdictRichHTML, .rich),
+            (richVerdictPlainHTML, .notRich)
+        ]
+        for testCase in cases {
+            let fixture = RichVerdictLoaderFixture()
+            defer { fixture.removeFiles() }
+            try fixture.saveHTML(testCase.html)
+
+            let result = await fixture.loader.loadContent(
+                from: fixture.request(storedRichContentVerdict: testCase.stored)
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertEqual(result.hasRichHTMLContent, testCase.stored == .rich)
+            // Revert-check: the `RichContentVerdict(isRich:) != request.storedRichContentVerdict`
+            // condition in `MessageBubbleLoader.loadContent` (an unconditional refresh takes
+            // a lease and a store read for every bubble mount).
+            XCTAssertTrue(fixture.refresher.refreshes.isEmpty, "stored \(testCase.stored)")
+        }
+    }
+
+    func testLoadContent_ownRowWithDifferingStoredVerdict_schedulesNoRefresh() async throws {
+        for stored in [RichContentVerdict.unknown, .rich] {
+            let fixture = RichVerdictLoaderFixture()
+            defer { fixture.removeFiles() }
+            try fixture.saveHTML(richVerdictRichHTML)
+
+            let result = await fixture.loader.loadContent(
+                from: fixture.request(isFromMe: true, storedRichContentVerdict: stored)
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertFalse(result.hasRichHTMLContent)
+            // The own-row verdict (not rich) differs from both stored values here.
+            // Revert-check: `!request.isFromMe` in the refresh condition of
+            // `MessageBubbleLoader.loadContent`.
+            XCTAssertTrue(fixture.refresher.refreshes.isEmpty, "stored \(stored)")
+        }
+    }
+
+    func testLoadContent_parsedForwardedRowWithDifferingStoredVerdict_schedulesNoRefresh() async throws {
+        for stored in [RichContentVerdict.unknown, .rich] {
+            let fixture = RichVerdictLoaderFixture()
+            defer { fixture.removeFiles() }
+            try fixture.saveHTML(richVerdictRichHTML)
+
+            let result = await fixture.loader.loadContent(
+                from: fixture.request(
+                    bodyText: richVerdictForwardedBody,
+                    chatPreviewText: "Canonical chat lead-in.",
+                    isForwardedEmail: true,
+                    storedRichContentVerdict: stored
+                )
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertNotNil(result.forwardedDisplayContent, "premise: the forward block parses")
+            XCTAssertFalse(result.hasRichHTMLContent)
+            // A forwarded card publishes "not rich" without classifying, which says nothing
+            // about the row's stored state; both stored values here differ from it.
+            // Revert-check: `resolvedStoredPreviewVerdict` assigned on the stored-preview
+            // branch only in `MessageBubbleLoader.loadContent` (comparing the published
+            // `loadedContent.hasRichContent` instead schedules here).
+            XCTAssertTrue(fixture.refresher.refreshes.isEmpty, "stored \(stored)")
+        }
+    }
+
+    func testLoadContent_blankPreviewCompatibilityRow_schedulesNoRefresh() async throws {
+        let blankPreviews: [String?] = [nil, " \n\t "]
+        let storedVerdicts: [RichContentVerdict] = [.unknown, .notRich, .rich]
+        for chatPreviewText in blankPreviews {
+            for stored in storedVerdicts {
+                let fixture = RichVerdictLoaderFixture()
+                defer { fixture.removeFiles() }
+                try fixture.saveHTML(richVerdictRichHTML)
+
+                let result = await fixture.loader.loadContent(
+                    from: fixture.request(
+                        chatPreviewText: chatPreviewText,
+                        storedRichContentVerdict: stored
+                    )
+                )
+
+                XCTAssertTrue(result.isComplete)
+                // The compatibility path's verdict is a different expression (network
+                // recovery, no fallback-text term), so it is never compared. Whatever it
+                // published differs from `.unknown` and from one of the two known values.
+                // Revert-check: `resolvedStoredPreviewVerdict` assigned on the stored-preview
+                // branch only in `MessageBubbleLoader.loadContent`.
+                XCTAssertTrue(
+                    fixture.refresher.refreshes.isEmpty,
+                    "stored \(stored), chatPreviewText \(String(describing: chatPreviewText))"
+                )
+            }
+        }
+    }
+
+    func testLoadContent_unreadableOwnHTMLFile_keepsStoredVerdictAndSchedulesNoRefresh() async throws {
+        let cases: [(stored: RichContentVerdict, expectedRich: Bool)] = [
+            (.rich, true),
+            (.unknown, false),
+            (.notRich, false)
+        ]
+        for testCase in cases {
+            let fixture = RichVerdictLoaderFixture()
+            defer { fixture.removeFiles() }
+            // Written directly: the handler itself only ever writes valid UTF-8.
+            try fixture.writeMessageFile(richVerdictInvalidUTF8HTML)
+            XCTAssertTrue(fixture.handler.htmlFileExists(for: fixture.messageID), "premise: the file exists")
+            XCTAssertNil(fixture.handler.loadHTML(for: fixture.messageID), "premise: the file cannot be read")
+
+            let result = await fixture.loader.loadContent(
+                from: fixture.request(storedRichContentVerdict: testCase.stored)
+            )
+
+            XCTAssertTrue(result.isComplete)
+            // Revert-check: `?? request.storedRichContentVerdict.isRich` in
+            // `MessageBubbleLoader.loadContent`, and `.undetermined` for an existing but
+            // unreadable file in `RichContentVerdictResolver.classifierCandidate` (falling
+            // through to the next candidate computes "not rich": a stored-rich row then
+            // flips to text and is re-stamped not rich).
+            XCTAssertEqual(result.hasRichHTMLContent, testCase.expectedRich, "stored \(testCase.stored)")
+            XCTAssertTrue(fixture.refresher.refreshes.isEmpty, "stored \(testCase.stored)")
+        }
+    }
+
+    func testLoadContent_classifierMemoInvalidatedWhileLoadWaitsOnIt_evaluatesDirectly() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveHTML(richVerdictRichHTML)
+        let request = fixture.request(storedRichContentVerdict: .unknown)
+        let loader = fixture.loader
+        let renderedCache = fixture.renderedCache
+        let messageID = fixture.messageID
+        let sourceSignature = loader.renderedSourceSignature(for: request)
+
+        // Occupy the memo's in-flight slot, under exactly the key the load asks for, with a
+        // producer this test parks. The load then joins it instead of starting its own,
+        // which makes the mid-flight invalidation a sequence of observed steps rather than
+        // a race against a synchronous classification.
+        let gate = RichVerdictMemoProducerGate()
+        let occupant = Task {
+            await renderedCache.richContentClassification(
+                messageId: messageID,
+                sourceSignature: sourceSignature,
+                variantKey: RenderedMessageVariantKey(MessageBubbleContentSource.richContentAnalysisMode),
+                producer: {
+                    await gate.enterAndWaitForRelease()
+                    // A stale "not rich" for HTML that is rich: nothing may publish it.
+                    return false
+                }
+            )
+        }
+        guard await waitUntilRichVerdictCondition(condition: { await gate.hasEntered() }) else {
+            await gate.release()
+            _ = await occupant.value
+            return XCTFail("The parked producer never started")
+        }
+
+        let load = Task { await loader.loadContent(from: request) }
+        let joined = await waitUntilRichVerdictCondition {
+            await renderedCache.getStatistics().duplicateWorkAvoided >= 1
+        }
+        guard joined else {
+            await gate.release()
+            _ = await occupant.value
+            _ = await load.value
+            return XCTFail("The load never joined the parked classifier memo")
+        }
+
+        await renderedCache.invalidate(messageId: messageID)
+        await gate.release()
+        let occupantAnswer = await occupant.value
+        let result = await load.value
+
+        XCTAssertNil(occupantAnswer, "premise: the memo drops an invalidated producer's answer")
+        XCTAssertTrue(result.isComplete)
+        // Revert-check: the direct `classifyCandidate()` evaluation after the memo in
+        // `MessageBubbleLoader.loadRichContentClassification`. Publishing the memo's nil as
+        // false, or returning it as undetermined, shows this rich row as text; the refresh
+        // proves a computed verdict was published, not a stored one.
+        // HONEST SCOPE: the nil comes from the joined-work branch of
+        // `RenderedMessageCache.cachedOrProduce`. A load whose own producer is invalidated
+        // gets nil from the same `isCurrent` check, but that producer is a synchronous
+        // classification with no seam to park, so that branch is not the one run here.
+        XCTAssertTrue(result.hasRichHTMLContent)
+        XCTAssertEqual(fixture.refresher.refreshes, [fixture.expectedRefresh])
+    }
 }
 
 private final class MockBubbleContactsResolver: ContactsResolving, @unchecked Sendable {
@@ -2383,4 +3045,223 @@ private let staleBubbleFallbackHTML = """
   </details>
 </body>
 </html>
+"""
+
+// MARK: - Stored rich-content verdict support
+
+/// Records what the loader asks to be re-stamped. The loader calls `scheduleRefresh`
+/// synchronously before `loadContent` returns, so the record is final once the load is.
+/// `@unchecked Sendable`: `lock` guards `recorded`.
+private final class RecordingRichContentVerdictRefresher: RichContentVerdictRefreshing, @unchecked Sendable {
+    struct Refresh: Equatable {
+        let messageID: String
+        let handlerID: ObjectIdentifier
+    }
+
+    private let lock = NSLock()
+    private var recorded: [Refresh] = []
+
+    var refreshes: [Refresh] {
+        lock.withLock { recorded }
+    }
+
+    func scheduleRefresh(messageID: String, handler: HTMLContentHandler) {
+        lock.withLock {
+            recorded.append(Refresh(messageID: messageID, handlerID: ObjectIdentifier(handler)))
+        }
+    }
+}
+
+/// Never asked for a parse by these loads (none needs canonical HTML for its analysis);
+/// injected so the fixture captures no generation from the process-wide provider.
+private struct RichVerdictInertParsedEmailProvider: ParsedEmailProviding {
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
+        includeRenderQuality: Bool,
+        includePreviewImages: Bool
+    ) async -> ParsedEmail? {
+        nil
+    }
+
+    func invalidate(messageId: String) async {}
+}
+
+/// A loader over its own Messages directory, rendered cache and analysis cache, with a
+/// recording refresher, so these tests touch neither the app's HTML storage nor the
+/// process-wide caches.
+private struct RichVerdictLoaderFixture {
+    let directory: URL
+    let handler: HTMLContentHandler
+    let renderedCache: RenderedMessageCache
+    let refresher: RecordingRichContentVerdictRefresher
+    let loader: MessageBubbleLoader
+    let messageID: String
+
+    init() {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BubbleRichVerdict-\(UUID().uuidString)", isDirectory: true)
+        handler = HTMLContentHandler(messagesDirectory: directory)
+        renderedCache = RenderedMessageCache()
+        refresher = RecordingRichContentVerdictRefresher()
+        let recovery = MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:])
+        loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentHandler: handler,
+            htmlContentLoader: HTMLContentLoader(contentHandler: handler, recoveryService: recovery),
+            htmlContentRecoveryService: recovery,
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache(),
+            parsedEmailProvider: RichVerdictInertParsedEmailProvider(),
+            renderedMessageCache: renderedCache,
+            richContentVerdictRefresher: refresher
+        )
+        messageID = "bubble-rich-verdict-\(UUID().uuidString)"
+    }
+
+    /// The one refresh a drifted load asks for: this message, through the loader's handler.
+    var expectedRefresh: RecordingRichContentVerdictRefresher.Refresh {
+        RecordingRichContentVerdictRefresher.Refresh(
+            messageID: messageID,
+            handlerID: ObjectIdentifier(handler)
+        )
+    }
+
+    /// An incoming, non-forwarded row with a stored preview unless overridden. The
+    /// `hasHTMLSource` hint defaults to true so no load needs canonical HTML for its analysis.
+    func request(
+        bodyText: String? = "Plain reply body.",
+        chatPreviewText: String? = "Stored preview",
+        bodyStorageURI: String? = nil,
+        snippet: String? = "Stored preview",
+        hasHTMLSource: Bool = true,
+        isFromMe: Bool = false,
+        isForwardedEmail: Bool = false,
+        storedRichContentVerdict: RichContentVerdict = .unknown
+    ) -> MessageBubbleContentRequest {
+        MessageBubbleContentRequest(
+            messageID: messageID,
+            bodyText: bodyText,
+            chatPreviewText: chatPreviewText,
+            bodyStorageURI: bodyStorageURI,
+            cleanedSnippet: "Stored preview",
+            snippet: snippet,
+            subject: "Stored verdict",
+            senderName: "Alice Example",
+            hasHTMLSource: hasHTMLSource,
+            hasAttachments: false,
+            isFromMe: isFromMe,
+            isForwardedEmail: isForwardedEmail,
+            isLikelyCalendarInvite: false,
+            effectiveSenderEmail: "alice@example.com",
+            attachmentSnapshots: [],
+            storedRichContentVerdict: storedRichContentVerdict
+        )
+    }
+
+    func saveHTML(_ html: String) throws {
+        _ = try XCTUnwrap(handler.saveHTML(html, for: messageID))
+    }
+
+    /// Writes the message's own HTML file without going through the handler.
+    func writeMessageFile(_ data: Data) throws {
+        try data.write(to: directory.appendingPathComponent("\(messageID).html"))
+    }
+
+    func removeFiles() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+/// Parks a `RenderedMessageCache` producer until the test releases it.
+private actor RichVerdictMemoProducerGate {
+    private var entered = false
+    private var released = false
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func enterAndWaitForRelease() async {
+        entered = true
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func hasEntered() -> Bool { entered }
+
+    func release() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+/// Polls until `condition` holds or the wall-clock deadline passes. Returns false on
+/// timeout instead of failing, so the caller can release what it parked first.
+private func waitUntilRichVerdictCondition(
+    timeout: TimeInterval = 5.0,
+    pollIntervalNanoseconds: UInt64 = 10_000_000,
+    condition: @escaping () async -> Bool
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+    }
+    return false
+}
+
+/// Reads like a newsletter's plain-text fallback to `NewsletterFallbackText`: a marker
+/// phrase plus at least two URL-bearing lines.
+private let richVerdictFallbackLikeText = """
+American Museum of Natural History
+https://e.example.com/click?sid=abc123
+
+View in Browser
+https://e.example.com/view?sid=abc123
+
+Manage Subscriptions
+https://e.example.com/preferences?sid=abc123
+"""
+
+/// Not rich to `RichContentClassifier`.
+private let richVerdictPlainHTML = "<html><body><p>Sounds good to me.</p></body></html>"
+
+/// Rich to `RichContentClassifier` (a `<section>` is always rich).
+private let richVerdictRichHTML = """
+<!DOCTYPE html>
+<html>
+<body>
+  <section>
+    <table role="presentation" width="100%">
+      <tr><td><h1>Statement ready</h1></td></tr>
+      <tr><td><p>Your monthly account statement is now available.</p></td></tr>
+      <tr><td><a href="https://example.com/review">Review statement</a></td></tr>
+    </table>
+  </section>
+</body>
+</html>
+"""
+
+/// An HTML file that exists but does not decode as UTF-8, so `HTMLContentHandler.loadHTML`
+/// answers nil for it.
+private let richVerdictInvalidUTF8HTML: Data = {
+    var bytes = Array("<html><body>".utf8)
+    bytes.append(contentsOf: [0xC3, 0x28, 0xFF, 0xFE])
+    bytes.append(contentsOf: Array("</body></html>".utf8))
+    return Data(bytes)
+}()
+
+private let richVerdictForwardedBody = """
+Stale raw lead-in.
+
+---------- Forwarded message ---------
+From: Jane Example <jane@example.com>
+Date: Wed, Apr 22, 2026 at 8:12 AM
+Subject: Dinner reservation
+To: Kevin Thau <kevin@example.com>
+
+Your table is confirmed for 7:30 PM.
 """

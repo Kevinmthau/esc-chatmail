@@ -8,8 +8,13 @@ struct MessageContentView: View {
     let showHTMLPreview: Bool
     /// The routing input `showHTMLPreview` was decided on (`MessageBubble.displayInput`).
     let displayInput: MessageDisplayInput
+    /// Whether `displayInput`'s rich-content verdict is one the load will not change, from
+    /// the resolution that built it (`MessageBubble.resolvedRichVerdict`).
+    let richVerdictIsKnown: Bool
     let fullTextContent: String?
     let fallbackPreviewText: String?
+    /// The load's links once it has published, before that the ones the row carries
+    /// (`MessageDisplayPolicy.sharedDocumentLinks`).
     let sharedDocumentLinks: [SharedDocumentLink]
     let hasLoadedContent: Bool
     /// Whether MessageBubble shows any attachments above this content: its filtered set, not
@@ -61,6 +66,7 @@ struct MessageContentView: View {
         } else if MessageDisplayPolicy.showsTextLoadingPlaceholder(
             hasLoadedContent: hasLoadedContent,
             routing: displayInput,
+            richVerdictIsKnown: richVerdictIsKnown,
             chatPreviewText: message.chatPreviewText,
             hasDisplayableAttachments: hasDisplayableAttachments
         ) {
@@ -71,7 +77,8 @@ struct MessageContentView: View {
             // → bubble swap grew the transcript on every fresh mount. So are the user's
             // attachments-only rows, whose pill vanished into nothing once the load finished. An
             // incoming row the load can still route to a card keeps the pill whatever it stores:
-            // its text would be shown and then replaced by the card.
+            // its text would be shown and then replaced by the card. That now takes a row with
+            // no known rich-content verdict; with one, the load's routing is already known.
             loadingPlaceholder
         } else {
             if let text = resolvedVisibleText, !text.isEmpty {

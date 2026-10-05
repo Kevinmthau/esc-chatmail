@@ -95,7 +95,7 @@ struct MessageBubble: View {
             hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
-            hasRichHTMLContent: viewModel.hasRichHTMLContent,
+            hasRichHTMLContent: resolvedRichVerdict.hasRichHTMLContent,
             isFromMe: message.isFromMe,
             isOneToOneConversation: isEffectivelyOneToOneConversation,
             subject: message.subject,
@@ -104,8 +104,32 @@ struct MessageBubble: View {
         )
     }
 
+    /// The verdict `displayInput` routes on and whether a load can still change it: the
+    /// load's once published, before that the verdict stored on the row. Resolved from the
+    /// row on every pass rather than seeded into the view model the way the HTML-source hint
+    /// is (`MessageBubbleViewModel.init`): a seed is taken once per mount, and a verdict can
+    /// be stamped while the bubble is mounted (the launch backfill, the refresher), which
+    /// has to reach a row still waiting on its load.
+    private var resolvedRichVerdict: MessageDisplayPolicy.ResolvedRichVerdict {
+        MessageDisplayPolicy.resolvedRichVerdict(
+            hasLoadedContent: viewModel.hasLoadedContent,
+            loadedHasRichHTMLContent: viewModel.hasRichHTMLContent,
+            knownStoredVerdict: message.knownRichContentVerdict
+        )
+    }
+
     private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {
         viewModel.forwardedDisplayContent ?? message.outgoingForwardedDisplayContent
+    }
+
+    /// The row's own links until the load has published its own, so a row that renders before
+    /// its load mounts with its document cards (`MessageDisplayPolicy.sharedDocumentLinks`).
+    private var resolvedSharedDocumentLinks: [SharedDocumentLink] {
+        MessageDisplayPolicy.sharedDocumentLinks(
+            hasLoadedContent: viewModel.hasLoadedContent,
+            loaded: viewModel.sharedDocumentLinks,
+            stored: message.storedSharedDocumentLinks
+        )
     }
 
     /// Vertical alignment that centers the failed-send badge on the content bubble. Defaults to
@@ -206,9 +230,10 @@ struct MessageBubble: View {
                     style: style,
                     showHTMLPreview: showHTMLPreview,
                     displayInput: displayInput,
+                    richVerdictIsKnown: resolvedRichVerdict.isKnown,
                     fullTextContent: viewModel.fullTextContent,
                     fallbackPreviewText: message.fallbackPreviewText,
-                    sharedDocumentLinks: viewModel.sharedDocumentLinks,
+                    sharedDocumentLinks: resolvedSharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
                     hasDisplayableAttachments: !displayableAttachments.isEmpty,
                     forwardedDisplayContent: resolvedForwardedDisplayContent,

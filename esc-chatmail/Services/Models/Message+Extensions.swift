@@ -12,6 +12,17 @@ private final class CalendarInviteLikelihoodEntry {
     }
 }
 
+/// NSCache entry for the memoized stored shared-document links.
+private final class StoredSharedDocumentLinksEntry {
+    let fingerprint: Int
+    let value: [SharedDocumentLink]
+
+    init(fingerprint: Int, value: [SharedDocumentLink]) {
+        self.fingerprint = fingerprint
+        self.value = value
+    }
+}
+
 enum MessagePreviewText {
     static func nonEmpty(_ text: String?) -> String? {
         guard let text else { return nil }
@@ -123,6 +134,15 @@ extension Message {
     @NSManaged public var replyFromAddress: String?
     /// Raw RFC Reply-To header. A single header may contain a mailbox list.
     @NSManaged public var replyTo: String?
+    /// Raw persisted rich-content verdict (`RichContentVerdict.storedValue`);
+    /// read and write it through `storedRichContentVerdict`. Optional in the
+    /// model, so a row can hold NULL, which this scalar reads as 0 but a
+    /// `richContentVerdict == 0` predicate does not match on SQLite. The v4
+    /// to v5 migration wrote the default 0 into existing rows on the runtime
+    /// it was tested on (`RichContentVerdictV5MigrationTests`), but that is
+    /// Core Data's choice, not this model's. Never filter on it without the
+    /// `== nil` disjunct.
+    @NSManaged public var richContentVerdict: Int16
     @NSManaged public var localModifiedAt: Date?
     @NSManaged public var conversation: Conversation?
     @NSManaged public var labels: Set<Label>?
@@ -142,6 +162,31 @@ extension Message {
     /// True when the message has local HTML content available via storage URI or message-id file.
     var hasHTMLSource: Bool {
         bodyStorageURI != nil || HTMLContentHandler.shared.htmlFileExists(for: id)
+    }
+
+    /// The verdict `RichContentVerdictResolver` last gave this row's stored
+    /// state, under the current epoch. The setter leaves the attribute alone
+    /// when the encoded value is unchanged, so re-stamping a row does not mark
+    /// it dirty and cannot conflict with a fresher writer over nothing.
+    var storedRichContentVerdict: RichContentVerdict {
+        get { RichContentVerdict(storedValue: richContentVerdict) }
+        set {
+            let storedValue = newValue.storedValue()
+            if richContentVerdict != storedValue {
+                richContentVerdict = storedValue
+            }
+        }
+    }
+
+    /// This row's stored state as the rich-content verdict reads it.
+    var richContentVerdictInputs: RichContentVerdictInputs {
+        RichContentVerdictInputs(
+            messageID: id,
+            isFromMe: isFromMe,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            snippet: snippet
+        )
     }
 
     /// Array of attachments for convenient iteration
@@ -228,6 +273,62 @@ extension Message {
 
         return hasInviteSubjectPrefix && hasCalendarStructure && hasDateSignal
     }
+
+    /// The shared-document links this row's bubble load will publish, from stored fields
+    /// alone (`SharedDocumentLinkExtractor.storedRowLinks`, which says where they decide
+    /// them), so the row model can carry them and the bubble mount in its final form.
+    ///
+    /// Memoized like `isLikelyCalendarInvite`, and for the same reason: this runs once per
+    /// row-model mapping on the main actor, and the extraction is a data-detector pass over
+    /// the whole plain-text body. The cheap gate runs ahead of the memo, so a row that
+    /// cannot carry a link (nearly every row) pays one substring search and never hashes
+    /// its body. Keyed by objectID and invalidated by a fingerprint of the three inputs.
+    ///
+    /// Not fenced by the account boundary, and it does not need to be: an entry is returned
+    /// only to the object ID it was stored under, and only while that row's three texts hash
+    /// to the fingerprint it was computed from, so it is the value recomputing would give.
+    var storedSharedDocumentLinks: [SharedDocumentLink] {
+        let chatPreviewText = chatPreviewText
+        let bodyText = bodyText
+        let snippet = snippet
+        let isForwardedEmail = isForwardedEmail
+        guard SharedDocumentLinkExtractor.storedRowMayCarryLinks(
+            chatPreviewText: chatPreviewText,
+            bodyText: bodyText,
+            snippet: snippet,
+            isForwardedEmail: isForwardedEmail
+        ) else {
+            return []
+        }
+
+        var hasher = Hasher()
+        hasher.combine(chatPreviewText)
+        hasher.combine(bodyText)
+        hasher.combine(snippet)
+        let fingerprint = hasher.finalize()
+        if let cached = Self.storedSharedDocumentLinksCache.object(forKey: objectID),
+           cached.fingerprint == fingerprint {
+            return cached.value
+        }
+
+        let value = SharedDocumentLinkExtractor.storedRowLinks(
+            chatPreviewText: chatPreviewText,
+            bodyText: bodyText,
+            snippet: snippet,
+            isForwardedEmail: isForwardedEmail
+        )
+        Self.storedSharedDocumentLinksCache.setObject(
+            StoredSharedDocumentLinksEntry(fingerprint: fingerprint, value: value),
+            forKey: objectID
+        )
+        return value
+    }
+
+    private static let storedSharedDocumentLinksCache: NSCache<NSManagedObjectID, StoredSharedDocumentLinksEntry> = {
+        let cache = NSCache<NSManagedObjectID, StoredSharedDocumentLinksEntry>()
+        cache.countLimit = 512
+        return cache
+    }()
 
     /// Attachments suitable for display in the chat UI, filtered against a
     /// precomputed HTML analysis (the live render path builds the analysis via

@@ -235,6 +235,18 @@ struct ChatMessageRowModel: Equatable {
     let hasHTMLSource: Bool
     let isForwardedEmail: Bool
     let isLikelyCalendarInvite: Bool
+    /// The row's persisted rich-content verdict as stored
+    /// (`Message.storedRichContentVerdict`). Carried to the bubble load so it
+    /// can notice a stale one, and as what it publishes when its own
+    /// evaluation is undetermined (`MessageBubbleContentRequest`); views route
+    /// on `knownRichContentVerdict`.
+    let storedRichContentVerdict: RichContentVerdict
+    /// The stored verdict where the bubble may route on it before its load
+    /// publishes, else nil (`ChatMessageRowModelMapper.knownRichContentVerdict`).
+    /// Deliberately absent from `loadSignatureComponents`: a verdict write
+    /// (sync, the launch backfill, the refresher) must re-render the row
+    /// without restarting its load.
+    let knownRichContentVerdict: Bool?
     let htmlDisplayCleanupMode: HTMLContentCleanupMode
     let hasAttachments: Bool
     let attachments: [ChatMessageAttachmentModel]
@@ -256,6 +268,14 @@ struct ChatMessageRowModel: Equatable {
     let isConfirmedInGmail: Bool
     let forwardedDisplaySubject: String?
     let outgoingForwardedDisplayContent: ForwardedMessageDisplayContent?
+    /// The shared-document links this row's content load will publish, where stored fields
+    /// alone decide them (`Message.storedSharedDocumentLinks`): a non-forwarded row with a
+    /// stored `chatPreviewText`. Empty for every other row, and for one with no links. The
+    /// bubble shows these until its load has published
+    /// (`MessageDisplayPolicy.sharedDocumentLinks`), so a row that renders before its load
+    /// already has the links' URLs stripped from its text and their cards below it. Their
+    /// inputs are all in `loadSignatureComponents`, so a change to them also restarts the load.
+    let storedSharedDocumentLinks: [SharedDocumentLink]
     /// Precomputed so MessageBubble body recomputation does not hash message text.
     let loadSignatureComponents: MessageBubbleLoadSignatureComponents
     /// The transcript's view identity, shared by an optimistic reply and its
@@ -317,7 +337,8 @@ struct ChatMessageRowModel: Equatable {
             isForwardedEmail: isForwardedEmail,
             isLikelyCalendarInvite: isLikelyCalendarInvite,
             effectiveSenderEmail: effectiveSenderEmail,
-            attachmentSnapshots: attachments.map(\.bubbleSnapshot)
+            attachmentSnapshots: attachments.map(\.bubbleSnapshot),
+            storedRichContentVerdict: storedRichContentVerdict
         )
     }
 
@@ -406,6 +427,7 @@ enum ChatMessageRowModelMapper {
         )
 
         let attachments = message.attachmentsArray.map(map)
+        let storedRichContentVerdict = message.storedRichContentVerdict
         return ChatMessageRowModel(
             id: message.id,
             messageObjectID: message.objectID,
@@ -431,6 +453,13 @@ enum ChatMessageRowModelMapper {
             hasHTMLSource: message.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isLikelyCalendarInvite: message.isLikelyCalendarInvite,
+            storedRichContentVerdict: storedRichContentVerdict,
+            knownRichContentVerdict: knownRichContentVerdict(
+                stored: storedRichContentVerdict,
+                chatPreviewText: message.chatPreviewTextValue,
+                isFromMe: message.isFromMe,
+                isForwardedEmail: message.isForwardedEmail
+            ),
             htmlDisplayCleanupMode: message.htmlDisplayCleanupMode,
             hasAttachments: message.hasAttachments,
             attachments: attachments,
@@ -441,6 +470,7 @@ enum ChatMessageRowModelMapper {
             isConfirmedInGmail: isConfirmedInGmail,
             forwardedDisplaySubject: message.forwardedDisplaySubject,
             outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent,
+            storedSharedDocumentLinks: message.storedSharedDocumentLinks,
             loadSignatureComponents: MessageBubbleLoadSignatureComponents(
                 bodyStorageURI: message.bodyStorageURI,
                 bodyText: message.bodyTextValue,
@@ -460,6 +490,48 @@ enum ChatMessageRowModelMapper {
                 objectID: message.objectID
             )
         )
+    }
+
+    /// The stored verdict a bubble may route on before its load publishes, or nil
+    /// where the load does not publish that verdict, so the stored one predicts
+    /// nothing:
+    ///
+    /// - a blank `chatPreviewText`: the load takes the compatibility path, whose
+    ///   verdict is a different expression (network recovery, no fallback-text
+    ///   term) and can differ from the stored rule's;
+    /// - own rows: the load publishes not-rich for them, and the routing alone
+    ///   would card an own row with a new subject in a group conversation on a
+    ///   rich verdict. Their stored verdict is not-rich whenever it is current,
+    ///   but an `isFromMe` that flipped since the stamp must not reach the view;
+    /// - forwarded rows: a forward whose block parses publishes not-rich
+    ///   whatever the stored rule says, and the bubble holds a forward off the
+    ///   card until its load has published.
+    ///
+    /// A row whose stored text carries a shared-document link is not held back.
+    /// It used to be reported as unknown, because the load would still strip the
+    /// link's URL from the bubble text and append a card, and a row rendered
+    /// from a known verdict would have shown the raw URL and then swapped. The
+    /// row now carries those links itself (`storedSharedDocumentLinks`, for
+    /// exactly the rows that pass the guards here), so it mounts with them. The
+    /// one spelling that still swaps is a link whose host the row's cheap check
+    /// misses (`SharedDocumentLinkExtractor.mayContainLinks`); the old gate ran
+    /// the same check and did not hold that row back either.
+    ///
+    /// Pure and precomputed here because the bubble reads it several times per
+    /// body evaluation.
+    static func knownRichContentVerdict(
+        stored: RichContentVerdict,
+        chatPreviewText: String?,
+        isFromMe: Bool,
+        isForwardedEmail: Bool
+    ) -> Bool? {
+        guard let isRich = stored.isRich,
+              !isFromMe,
+              !isForwardedEmail,
+              MessagePreviewText.nonEmpty(chatPreviewText) != nil else {
+            return nil
+        }
+        return isRich
     }
 
     private static func resolvedFallbackPreviewText(
