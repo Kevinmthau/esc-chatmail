@@ -173,19 +173,36 @@ final class ConversationLaunchRepairCoordinator {
     private func chatPreviewPasses() -> [ChatPreviewPass] {
         [
             ChatPreviewPass(
-                repair: ChatPreviewRepair(htmlContentHandler: htmlContentHandler, pass: .receivedHTMLRederivation),
+                repair: chatPreviewRepair(for: .receivedHTMLRederivation),
                 migrationKey: Self.chatPreviewRepairMigrationKey,
                 checkpointKey: Self.chatPreviewRepairCheckpointKey
             ),
             ChatPreviewPass(
-                repair: ChatPreviewRepair(htmlContentHandler: htmlContentHandler, pass: .blankPreviewBackfill),
+                repair: chatPreviewRepair(for: .blankPreviewBackfill),
                 migrationKey: Self.blankChatPreviewBackfillMigrationKey,
                 checkpointKey: Self.blankChatPreviewBackfillCheckpointKey
             )
         ]
     }
 
+    private func chatPreviewRepair(for pass: ChatPreviewRepair.Pass) -> ChatPreviewRepair {
 #if DEBUG
+        return ChatPreviewRepair(
+            htmlContentHandler: htmlContentHandler,
+            pass: pass,
+            didDeriveRow: chatPreviewRepairDidDeriveRow
+        )
+#else
+        return ChatPreviewRepair(htmlContentHandler: htmlContentHandler, pass: pass)
+#endif
+    }
+
+#if DEBUG
+    /// Test seam: handed to each pass's `ChatPreviewRepair.didDeriveRow` when
+    /// a run starts, so a test can land `cancel()` between two rows of a
+    /// batch this coordinator is running.
+    var chatPreviewRepairDidDeriveRow: (@Sendable (_ messageID: String) -> Void)?
+
     func waitForChatPreviewRepairCompletion() async {
         await taskManager.waitForCompletion(of: Self.chatPreviewRepairTaskKey)
     }
@@ -251,13 +268,28 @@ final class ConversationLaunchRepairCoordinator {
             }
             let batchCheckpoint = checkpoint
             let batchRetryCursor = retryCursor
-            let batch = await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
-                await self.prepareAndSaveChatPreviewBatch(
-                    pass: pass,
-                    lease: lease,
-                    checkpoint: batchCheckpoint,
-                    retryAfter: batchRetryCursor
-                )
+            // The throwing variant on purpose: it runs the batch in this
+            // task, so `cancel()` reaches it (the cancellation handler in
+            // `ChatPreviewRepair.performBatch` and the `Task.isCancelled`
+            // guards in `prepareAndSaveChatPreviewBatch`). The non-throwing
+            // `performCleanupSensitiveMutation` runs its operation in an
+            // unstructured task this task's cancellation never reaches, so a
+            // cancelled batch derived every remaining row, saved, and
+            // checkpointed under the lease and the gate.
+            let batch: ChatPreviewRepair.Batch?
+            do {
+                batch = try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
+                    await self.prepareAndSaveChatPreviewBatch(
+                        pass: pass,
+                        lease: lease,
+                        checkpoint: batchCheckpoint,
+                        retryAfter: batchRetryCursor
+                    )
+                }
+            } catch {
+                // Cancelled while queued on the gate (the only error the
+                // serializer throws here): the batch never started.
+                batch = nil
             }
             var isComplete = false
             var isFinished = true
