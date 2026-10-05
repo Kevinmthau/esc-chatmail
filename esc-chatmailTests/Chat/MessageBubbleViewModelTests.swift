@@ -612,6 +612,8 @@ final class MessageBubbleViewModelTests: XCTestCase {
                     subject: nil,
                     senderEmail: nil
                 ),
+                // Own rows never consult the verdict, known or not.
+                richVerdictIsKnown: false,
                 chatPreviewText: nil,
                 hasDisplayableAttachments: false
             )
@@ -654,14 +656,16 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertFalse(showsLoadingPlaceholder())
     }
 
-    /// An incoming row with a stored preview, sampled the way the views sample it
-    /// (`MessageBubble.showHTMLPreview`, then `MessageContentView.textContent`) on a fresh mount's
-    /// first pass, before anything has started the load; while its first load is parked; and
-    /// again once it lands with a "rich" verdict. A row with a new subject is never a text bubble
-    /// before that verdict routes it to the preview card; a reply, which no verdict routes to a
-    /// card, is its stored text throughout.
+    /// An incoming row with a stored preview and no stored rich-content verdict, sampled the way
+    /// the views sample it (`MessageBubble.showHTMLPreview`, then `MessageContentView.textContent`)
+    /// on a fresh mount's first pass, before anything has started the load; while its first load
+    /// is parked; and again once it lands with a "rich" verdict. A row with a new subject is never
+    /// a text bubble before that verdict routes it to the preview card; a reply, which no verdict
+    /// routes to a card, is its stored text throughout. Rows that carry a stored verdict are
+    /// mirrored in the section below.
     ///
-    /// Revert-check: replacing `!loadCanRouteToHTMLPreview(routing)` in
+    /// Revert-check: replacing
+    /// `!loadCanRouteToHTMLPreview(routing, richVerdictIsKnown: richVerdictIsKnown)` in
     /// `MessageDisplayPolicy.showsTextLoadingPlaceholder` with the flag list it superseded
     /// (`!routing.isNewsletter && !routing.isLikelyCalendarInvite &&
     /// !isTrustedTransactionalSender(routing.senderEmail)`) renders the new-subject row as text
@@ -712,6 +716,9 @@ final class MessageBubbleViewModelTests: XCTestCase {
             return MessageDisplayPolicy.showsTextLoadingPlaceholder(
                 hasLoadedContent: viewModel.hasLoadedContent,
                 routing: routing,
+                // No stored verdict: unknown until the load publishes, and once it has, the
+                // decision returns on `hasLoadedContent` before it reads this.
+                richVerdictIsKnown: false,
                 chatPreviewText: "Stored preview",
                 hasDisplayableAttachments: false
             ) ? .loadingPlaceholder : .storedText
@@ -740,6 +747,382 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.hasLoadedContent)
         XCTAssertEqual(presentation(subject: "Your receipt"), .previewCard)
         XCTAssertEqual(presentation(subject: "Re: Dinner"), .storedText)
+    }
+
+    // MARK: - Stored rich-content verdict (mirrored view decisions)
+
+    private enum MirroredPresentation: Equatable {
+        case previewCard
+        case loadingPlaceholder
+        case storedText
+    }
+
+    /// What the bubble shows for an incoming row in a one-to-one conversation that is not a
+    /// forward, decided the way the views decide it from the view model's real published state
+    /// and the verdict the row stores: the row model's gate on the stored verdict
+    /// (`ChatMessageRowModel.knownRichContentVerdict`), then `MessageBubble.resolvedRichVerdict`
+    /// feeding `MessageBubble.displayInput` and `MessageBubble.showHTMLPreview`, then
+    /// `MessageContentView.textContent` with the known-ness from that same resolution.
+    ///
+    /// HONEST SCOPE: this mirror reproduces private SwiftUI wiring (`MessageBubble.displayInput`
+    /// / `MessageContentView`) that no UI test target covers. It shows the policy functions
+    /// compose to the intended presentation over the view model's real state; it cannot notice
+    /// the views composing them differently (`displayInput` reading
+    /// `viewModel.hasRichHTMLContent` again, or `MessageContentView` handed a known-ness that
+    /// did not come from the resolution that built its routing input).
+    private func mirroredPresentation(
+        of viewModel: MessageBubbleViewModel,
+        storedVerdict: RichContentVerdict,
+        subject: String,
+        chatPreviewText: String? = "Stored preview"
+    ) -> MirroredPresentation {
+        let resolvedRichVerdict = MessageDisplayPolicy.resolvedRichVerdict(
+            hasLoadedContent: viewModel.hasLoadedContent,
+            loadedHasRichHTMLContent: viewModel.hasRichHTMLContent,
+            knownStoredVerdict: ChatMessageRowModelMapper.knownRichContentVerdict(
+                stored: storedVerdict,
+                chatPreviewText: chatPreviewText,
+                bodyText: nil,
+                snippet: nil,
+                isFromMe: false,
+                isForwardedEmail: false
+            )
+        )
+        let displayInput = MessageDisplayInput(
+            hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: resolvedRichVerdict.hasRichHTMLContent,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: subject,
+            senderEmail: "alice@example.com"
+        )
+        if MessageDisplayPolicy.shouldShowHTMLPreview(displayInput) {
+            return .previewCard
+        }
+        return MessageDisplayPolicy.showsTextLoadingPlaceholder(
+            hasLoadedContent: viewModel.hasLoadedContent,
+            routing: displayInput,
+            richVerdictIsKnown: resolvedRichVerdict.isKnown,
+            chatPreviewText: chatPreviewText,
+            hasDisplayableAttachments: false
+        ) ? .loadingPlaceholder : .storedText
+    }
+
+    /// A row stamped rich whose subject is not a reply is the preview card from its first pass:
+    /// before `loadIfNeeded` has run (the view model seeded with the row's hint, as
+    /// `MessageBubble.init` seeds it), while the load is parked, and once it lands. It shows
+    /// neither the pill nor its stored text first. A reply stamped rich is its stored text
+    /// throughout: the routing keeps an ordinary sender's replies in bubbles whatever the
+    /// verdict, and with the verdict known nothing is left for the load to decide.
+    ///
+    /// Revert-check: dropping the `if let knownStoredVerdict` branch from
+    /// `MessageDisplayPolicy.resolvedRichVerdict` (unknown until the load publishes) turns the
+    /// first-pass and mid-flight "Your receipt" samples into `.loadingPlaceholder`.
+    func testLoadIfNeeded_incomingRowStoredRich_showsPreviewCardBeforeItsLoadPublishes() async {
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [Self.makeStoredPreviewContentResult(hasRichHTMLContent: true)],
+            gatedCallIndex: 1
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader, initialHasHTMLSource: true)
+
+        // First pass: no load has run, and the view model carries only the row's hint.
+        XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Your receipt"),
+            .previewCard
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Re: Dinner"),
+            .storedText
+        )
+
+        let load = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(hasHTMLSource: true, includesSenderRequest: false)
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Your receipt"),
+            .previewCard
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Re: Dinner"),
+            .storedText
+        )
+
+        await loader.release()
+        await load.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Your receipt"),
+            .previewCard
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Re: Dinner"),
+            .storedText
+        )
+    }
+
+    /// A row stamped not-rich whose subject is not a reply is its stored text from its first
+    /// pass, while the load is parked, and once it lands confirming the verdict: no pill, and so
+    /// no pill → bubble swap growing the transcript. The same parked row without a stored verdict
+    /// waits on the pill, which is what the stored verdict removed.
+    ///
+    /// Revert-check: ignoring `richVerdictIsKnown` in
+    /// `MessageDisplayPolicy.loadCanRouteToHTMLPreview` (trying both verdicts whatever it says),
+    /// or dropping the `if let knownStoredVerdict` branch from
+    /// `MessageDisplayPolicy.resolvedRichVerdict`, turns the first-pass and mid-flight
+    /// `.notRich` samples into `.loadingPlaceholder`.
+    func testLoadIfNeeded_incomingRowStoredNotRich_rendersStoredTextBeforeItsLoadPublishes() async {
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [Self.makeStoredPreviewContentResult(hasRichHTMLContent: false)],
+            gatedCallIndex: 1
+        )
+        // Seeded with the row's hint, as `MessageBubble.init` seeds it: the first pass is
+        // asked about an HTML row, which without a known verdict would be the pill.
+        let viewModel = MessageBubbleViewModel(loader: loader, initialHasHTMLSource: true)
+
+        XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .notRich, subject: "Your receipt"),
+            .storedText
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .unknown, subject: "Your receipt"),
+            .loadingPlaceholder,
+            "premise: the same first pass without a stored verdict waits on the pill"
+        )
+
+        let load = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(hasHTMLSource: true, includesSenderRequest: false)
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .notRich, subject: "Your receipt"),
+            .storedText
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .unknown, subject: "Your receipt"),
+            .loadingPlaceholder,
+            "premise: without a stored verdict this parked row waits on the pill"
+        )
+
+        await loader.release()
+        await load.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertFalse(viewModel.hasRichHTMLContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .notRich, subject: "Your receipt"),
+            .storedText
+        )
+    }
+
+    /// The load is authoritative once it has published. A row stamped not-rich whose load finds
+    /// rich content (a stale stamp: the load evaluates the same rule over the row's current
+    /// state) is its stored text only until the load lands, then the preview card.
+    /// (`MessageBubbleLoader.loadContent` asks for the stamp to be refreshed.)
+    ///
+    /// Revert-check: testing `knownStoredVerdict` ahead of `hasLoadedContent` in
+    /// `MessageDisplayPolicy.resolvedRichVerdict` leaves the row on `.storedText` after the load.
+    func testLoadIfNeeded_storedNotRichThenLoadPublishesRich_loadVerdictRoutesToPreviewCard() async {
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [Self.makeStoredPreviewContentResult(hasRichHTMLContent: true)],
+            gatedCallIndex: 1
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+
+        let load = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(hasHTMLSource: true, includesSenderRequest: false)
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .notRich, subject: "Your receipt"),
+            .storedText
+        )
+
+        await loader.release()
+        await load.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertTrue(viewModel.hasRichHTMLContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .notRich, subject: "Your receipt"),
+            .previewCard
+        )
+    }
+
+    /// The other direction of the same rule: a row stamped rich whose load finds none is the
+    /// preview card only until the load lands, then its stored text.
+    ///
+    /// Revert-check: testing `knownStoredVerdict` ahead of `hasLoadedContent` in
+    /// `MessageDisplayPolicy.resolvedRichVerdict` leaves the row on `.previewCard` after the
+    /// load.
+    func testLoadIfNeeded_storedRichThenLoadPublishesNotRich_loadVerdictRoutesToStoredText() async {
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [Self.makeStoredPreviewContentResult(hasRichHTMLContent: false)],
+            gatedCallIndex: 1
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+
+        let load = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(hasHTMLSource: true, includesSenderRequest: false)
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Your receipt"),
+            .previewCard
+        )
+
+        await loader.release()
+        await load.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertFalse(viewModel.hasRichHTMLContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Your receipt"),
+            .storedText
+        )
+    }
+
+    /// An incomplete load is never applied: `hasLoadedContent` stays false while the HTML-source
+    /// hint published when the load began still stands. A row without a stored verdict is
+    /// stranded on the pill in that state (the closing assertion); a row with one renders its
+    /// card or its stored text through it.
+    ///
+    /// Revert-check: dropping the `if let knownStoredVerdict` branch from
+    /// `MessageDisplayPolicy.resolvedRichVerdict` turns both "Your receipt" samples into
+    /// `.loadingPlaceholder`; ignoring `richVerdictIsKnown` in
+    /// `MessageDisplayPolicy.loadCanRouteToHTMLPreview` does so for the `.notRich` one.
+    func testLoadIfNeeded_incompleteLoadWithStoredVerdict_neverShowsLoadingPlaceholder() async {
+        let loader = MockMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [Self.makeIncompleteContentResult()]
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+
+        await viewModel.loadIfNeeded(using: makeContext(hasHTMLSource: true, includesSenderRequest: false))
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Your receipt"),
+            .previewCard
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .notRich, subject: "Your receipt"),
+            .storedText
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .rich, subject: "Re: Dinner"),
+            .storedText
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .notRich, subject: "Re: Dinner"),
+            .storedText
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .unknown, subject: "Your receipt"),
+            .loadingPlaceholder,
+            "premise: without a stored verdict an incomplete load leaves this row on the pill"
+        )
+    }
+
+    /// A row with no stored verdict behaves as every row did before verdicts were stored: with a
+    /// new subject it keeps the pill while its load is parked and through an incomplete load, and
+    /// leaves it only when a load publishes. A reply, which no verdict cards, is its stored text
+    /// throughout. A row the row model reports as unknown although it stores a verdict keeps the
+    /// pill the same way: one with a blank preview, whose load does not publish the stored rule's
+    /// answer.
+    ///
+    /// Revert-check: reporting the fall-through of `MessageDisplayPolicy.resolvedRichVerdict` as
+    /// known (`isKnown: true`) renders the new-subject row as `.storedText` mid-flight and after
+    /// the incomplete load. Dropping the blank-preview guard from
+    /// `ChatMessageRowModelMapper.knownRichContentVerdict` turns the blank-preview sample into
+    /// `.previewCard`.
+    func testLoadIfNeeded_incomingRowWithoutKnownVerdict_keepsLoadingPlaceholderUntilALoadPublishes() async {
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [
+                Self.makeIncompleteContentResult(),
+                Self.makeStoredPreviewContentResult(hasRichHTMLContent: false)
+            ],
+            gatedCallIndex: 1
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+        let context = makeContext(hasHTMLSource: true, includesSenderRequest: false)
+
+        let load = Task {
+            await viewModel.loadIfNeeded(using: context)
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .unknown, subject: "Your receipt"),
+            .loadingPlaceholder
+        )
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .unknown, subject: "Re: Dinner"),
+            .storedText
+        )
+        XCTAssertEqual(
+            mirroredPresentation(
+                of: viewModel,
+                storedVerdict: .rich,
+                subject: "Your receipt",
+                chatPreviewText: nil
+            ),
+            .loadingPlaceholder
+        )
+
+        await loader.release()
+        await load.value
+
+        // The parked load came back incomplete, so nothing was applied.
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .unknown, subject: "Your receipt"),
+            .loadingPlaceholder
+        )
+
+        await viewModel.loadIfNeeded(using: context)
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(
+            mirroredPresentation(of: viewModel, storedVerdict: .unknown, subject: "Your receipt"),
+            .storedText
+        )
     }
 
     /// A row that renders its stored text before its load, sampled the way the views sample it
@@ -959,6 +1342,32 @@ final class MessageBubbleViewModelTests: XCTestCase {
             sharedDocumentLinks: [],
             forwardedDisplayContent: nil,
             htmlAnalysis: .placeholder(hasHTMLSource: hasHTMLSource)
+        )
+    }
+
+    /// What a load publishes for an incoming HTML row with a stored preview: the preview verbatim
+    /// as `fullTextContent`, and the rich-content verdict.
+    private static func makeStoredPreviewContentResult(hasRichHTMLContent: Bool) -> MessageBubbleContentResult {
+        MessageBubbleContentResult(
+            fullTextContent: "Stored preview",
+            hasRichHTMLContent: hasRichHTMLContent,
+            sharedDocumentLinks: [],
+            forwardedDisplayContent: nil,
+            htmlAnalysis: .placeholder(hasHTMLSource: true)
+        )
+    }
+
+    /// What an invalidated or unavailable load returns, as the real loader builds it (no HTML
+    /// source, incomplete). The view model never applies it, so a test that then reads the
+    /// HTML-source hint is reading the one published when the load began.
+    private static func makeIncompleteContentResult() -> MessageBubbleContentResult {
+        MessageBubbleContentResult(
+            fullTextContent: nil,
+            hasRichHTMLContent: false,
+            sharedDocumentLinks: [],
+            forwardedDisplayContent: nil,
+            htmlAnalysis: .placeholder(hasHTMLSource: false),
+            isComplete: false
         )
     }
 

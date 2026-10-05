@@ -22,6 +22,7 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
     let htmlAnalysisCache: MessageBubbleHTMLAnalysisCache
     let parsedEmailProvider: any ParsedEmailProviding
     let renderedMessageCache: RenderedMessageCache
+    let richContentVerdictRefresher: any RichContentVerdictRefreshing
 
     init(
         contactsResolver: any ContactsResolving = ContactsResolver.shared,
@@ -30,7 +31,8 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
         htmlContentRecoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared,
         htmlAnalysisCache: MessageBubbleHTMLAnalysisCache = .shared,
         parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared,
-        renderedMessageCache: RenderedMessageCache = .shared
+        renderedMessageCache: RenderedMessageCache = .shared,
+        richContentVerdictRefresher: any RichContentVerdictRefreshing = RichContentVerdictRefresher.shared
     ) {
         self.contactsResolver = contactsResolver
         self.htmlContentHandler = htmlContentHandler
@@ -39,6 +41,7 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
         self.htmlAnalysisCache = htmlAnalysisCache
         self.parsedEmailProvider = parsedEmailProvider
         self.renderedMessageCache = renderedMessageCache
+        self.richContentVerdictRefresher = richContentVerdictRefresher
     }
 
     func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult {
@@ -71,16 +74,29 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
         let forwardedDisplayContent = forwardedDisplayContent(from: request)
         let storedChatPreviewText = nonEmptyText(request.chatPreviewText)
         let loadedContent: (plainText: String?, hasRichContent: Bool)
+        // The resolver's verdict when this load computed one: the stored-preview branch
+        // only. Forwarded rows publish false without classifying, and blank-preview rows
+        // use the compatibility path, whose verdict is a different expression (network
+        // recovery, no fallback-text term); neither is comparable with the stored verdict.
+        var resolvedStoredPreviewVerdict: Bool?
         if forwardedDisplayContent != nil {
             loadedContent = (plainText: nil, hasRichContent: false)
         } else if storedChatPreviewText != nil {
+            resolvedStoredPreviewVerdict = await loadRichContentClassification(
+                from: request,
+                accountContext: accountContext
+            )
+            // Undetermined (an HTML file that exists but cannot be read) publishes what the
+            // row already stores, so a correctly mounted card is not flipped to text by a
+            // "not rich" nothing established. With no stored verdict either, it publishes
+            // not-rich, as every such load did before verdicts were stored: an incomplete
+            // result instead would leave the row on the loading pill for as long as the
+            // file stayed unreadable.
             loadedContent = (
                 plainText: nil,
-                hasRichContent: await loadRichContentClassification(
-                    from: request,
-                    resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource,
-                    accountContext: accountContext
-                )
+                hasRichContent: resolvedStoredPreviewVerdict
+                    ?? request.storedRichContentVerdict.isRich
+                    ?? false
             )
         } else {
             loadedContent = await loadCompatibilityContent(
@@ -92,6 +108,21 @@ final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
 
         guard await isAccountWorkContextCurrent(accountContext) else {
             return unavailableContentResult()
+        }
+
+        // The stored verdict is what the bubble rendered before this load, so a difference
+        // is a stale or missing stamp: a row the launch backfill has not reached, HTML that
+        // changed with no refresh, a classifier change without an epoch bump. Ask for the
+        // row to be re-stamped so the next mount agrees. The refresher recomputes from
+        // stored state itself; this load's answer is never what gets written. Own rows are
+        // skipped: nothing reads their verdict, and optimistic rows are never stamped.
+        if let resolvedStoredPreviewVerdict,
+           !request.isFromMe,
+           RichContentVerdict(isRich: resolvedStoredPreviewVerdict) != request.storedRichContentVerdict {
+            richContentVerdictRefresher.scheduleRefresh(
+                messageID: request.messageID,
+                handler: htmlContentHandler
+            )
         }
 
         let fullTextContent: String?

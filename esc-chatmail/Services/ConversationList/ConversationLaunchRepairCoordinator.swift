@@ -35,6 +35,7 @@ final class ConversationLaunchRepairCoordinator {
     private let htmlContentHandler: HTMLContentHandler
     private let repairTaskPriority: TaskPriority?
     private var isChatPreviewRepairRunning = false
+    private var isRichContentVerdictBackfillRunning = false
     private let taskManager = ViewModelTaskManager()
     private var cancellables = Set<AnyCancellable>()
 
@@ -55,9 +56,14 @@ final class ConversationLaunchRepairCoordinator {
     ///     `SyncEngine`; tests inject a controllable waiter.
     ///   - notificationCenter: Source of `.syncCompleted` for the repair
     ///     re-arm. Production passes `.default`.
-    ///   - repairTaskPriority: Priority of the three store sweeps (list
-    ///     titles, missing previews, persisted chat previews). Production keeps
-    ///     `.background` so launch maintenance never competes with the UI.
+    ///   - repairTaskPriority: Priority of the three store sweeps that take it
+    ///     directly (list titles, missing previews, persisted chat previews).
+    ///     Production keeps `.background` so those never compete with the UI.
+    ///     The rich-content verdict backfill does not run at this value: it
+    ///     runs at `.utility` whenever this is non-nil, because its leased,
+    ///     CPU-bound batches block sign-out and must not sit unscheduled
+    ///     (`richContentVerdictBackfillPriority`), and inherits the caller's
+    ///     priority when this is nil.
     ///     Tests pass `nil` to inherit the test's priority: on a loaded CI VM
     ///     `.background` jobs sat unscheduled for over a minute, and neither
     ///     polling nor joining the worker task reliably lifts jobs it has
@@ -90,6 +96,7 @@ final class ConversationLaunchRepairCoordinator {
         repairListConversationTitles()
         repairMissingConversationPreviews()
         repairPersistedChatPreviews()
+        backfillRichContentVerdicts()
     }
 
     /// Cancels any in-flight pass. An incomplete repair clears its running
@@ -113,6 +120,7 @@ final class ConversationLaunchRepairCoordinator {
                 self.hasObservedSyncCompletionThisLaunch = true
                 self.repairMissingConversationPreviews()
                 self.repairPersistedChatPreviews()
+                self.backfillRichContentVerdicts()
             }
             .store(in: &cancellables)
     }
@@ -338,6 +346,163 @@ final class ConversationLaunchRepairCoordinator {
             storage.migrationFlags.set(true, forKey: pass.migrationKey)
             storage.migrationFlags.setString(nil, forKey: pass.checkpointKey)
         }
+    }
+
+    // MARK: - Rich content verdict backfill
+
+    /// Embeds the verdict epoch, so an epoch bump re-arms the pass: every stored
+    /// verdict then reads as unknown and has to be stamped again.
+    nonisolated static let richContentVerdictBackfillMigrationKey =
+        "richContentVerdictBackfill.e\(CacheVersioning.richContentVerdictEpoch)"
+    /// The scan cursor: the lowest message ID examined so far. Deliberately not
+    /// one of `chatPreviewRepairCheckpointKeys`. That list is decoded as
+    /// `ChatPreviewRepair.Checkpoint` and read by conversation maintenance for
+    /// deferred conversations, and this pass defers none.
+    nonisolated static let richContentVerdictBackfillCursorKey =
+        richContentVerdictBackfillMigrationKey + ".cursor"
+    private static let richContentVerdictBackfillTaskKey = "backfillRichContentVerdicts"
+    /// Rows per account work lease. Each unstamped row reads an HTML file and
+    /// runs the cleanup chain plus the classifier while the lease is held, and
+    /// sign-out waits for outstanding leases without being able to cancel
+    /// them. Smaller than `chatPreviewRepairBatchSize` because this pass does
+    /// that work for every received row on every upgraded device, and again
+    /// after each epoch bump, so a transition is far likelier to land on one
+    /// of its leases. Every batch with a stamped row is a real save (one SQLite
+    /// transaction plus persistent-history rows, kept until maintenance purges
+    /// them). Unmeasured: tune with a trace if needed.
+    static let richContentVerdictBackfillBatchSize = 10
+
+    /// The leased work is CPU-bound and blocks sign-out, so it must not sit
+    /// unscheduled the way `.background` jobs can. Tests pass nil to inherit
+    /// their own priority, as for the other sweeps.
+    private var richContentVerdictBackfillPriority: TaskPriority? {
+        repairTaskPriority == nil ? nil : .utility
+    }
+
+#if DEBUG
+    func waitForRichContentVerdictBackfillCompletion() async {
+        await taskManager.waitForCompletion(of: Self.richContentVerdictBackfillTaskKey)
+    }
+#endif
+
+    /// Stamps received rows that hold no rich-content verdict under the current
+    /// epoch (`RichContentVerdictBackfill`), so their bubbles mount in final
+    /// form instead of behind the loading pill.
+    ///
+    /// Its own task rather than a third pass inside `repairPersistedChatPreviews`:
+    /// that function's early-out is the two preview flags, which are latched on
+    /// every already-upgraded device, and a mailbox-wide scan holding
+    /// `isChatPreviewRepairRunning` would refuse every sync-completion re-arm of
+    /// the deferred-retry sweep for its whole duration. The verdict has no
+    /// ordering dependency on the preview passes; `chatPreviewText` is not one
+    /// of its inputs.
+    ///
+    /// Not account-scoped, like the preview passes' flags: every row the
+    /// current build ingests is stamped as it is written, so a replacement
+    /// account, or a fresh install that latches on an empty store, leaves
+    /// nothing behind. An inherited cursor only makes the scan skip IDs above
+    /// it, and those rows read as unknown until a bubble load stamps them.
+    func backfillRichContentVerdicts() {
+        guard !isRichContentVerdictBackfillRunning,
+              !storage.migrationFlags.bool(forKey: Self.richContentVerdictBackfillMigrationKey) else {
+            return
+        }
+        isRichContentVerdictBackfillRunning = true
+        taskManager.run(
+            Self.richContentVerdictBackfillTaskKey,
+            priority: richContentVerdictBackfillPriority
+        ) { [weak self] in
+            guard let self else { return }
+            defer { isRichContentVerdictBackfillRunning = false }
+            guard let request = await accountWorkCoordinator.makeAccountWorkRequest() else { return }
+            await runRichContentVerdictBackfill(request: request)
+        }
+    }
+
+    private func runRichContentVerdictBackfill(request: AccountWorkRequest) async {
+        let backfill = RichContentVerdictBackfill(htmlContentHandler: htmlContentHandler)
+        var cursor = storage.migrationFlags.string(forKey: Self.richContentVerdictBackfillCursorKey)
+        while !Task.isCancelled {
+            // Never wait for sync while holding a lease: account teardown
+            // waits for leases to drain before replacing the store. The wait
+            // is only politeness (a run can start the moment it returns);
+            // correctness against a concurrent sync save comes from the
+            // batch context's store-trump policy and from the persister
+            // stamping every row it writes.
+            await syncWaiter.waitForCurrentSyncToComplete()
+            guard !Task.isCancelled,
+                  let lease = await accountWorkCoordinator.acquireAccountWorkLease(
+                      kind: .maintenance,
+                      for: request
+                  ) else {
+                return
+            }
+            // One release for every outcome of the batch: a leaked lease hangs
+            // every later sign-out.
+            let batch = await prepareAndSaveRichContentVerdictBatch(backfill, lease: lease, before: cursor)
+            await accountWorkCoordinator.endRun(lease)
+            // A failed or refused batch leaves the cursor where it was; the
+            // next launch or sync completion retries from there.
+            guard let batch, !batch.didDrain else { return }
+            cursor = batch.lastMessageID
+            await Task.yield()
+        }
+    }
+
+    /// Takes no cleanup-sensitive gate and issues no cache invalidation: no
+    /// content changed, and evicting `RenderedMessageCache` for every received
+    /// row would throw away what open chats have loaded.
+    private func prepareAndSaveRichContentVerdictBatch(
+        _ backfill: RichContentVerdictBackfill,
+        lease: SyncRun,
+        before cursor: String?
+    ) async -> RichContentVerdictBackfill.Batch? {
+        guard !Task.isCancelled, await accountWorkCoordinator.isActiveRun(lease) else { return nil }
+        let context = storage.makeBackgroundContext()
+        // Store-trump: a row sync or the refresher stamped while this batch
+        // classified carries the fresher verdict, and must win.
+        context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
+        do {
+            let batch = try await backfill.prepareBatch(
+                in: context,
+                before: cursor,
+                limit: Self.richContentVerdictBackfillBatchSize
+            )
+            guard !Task.isCancelled,
+                  await accountWorkCoordinator.isActiveRun(lease),
+                  await Self.saveOffMainActor(context, using: storage.saveIfNeeded) else {
+                await context.perform { context.rollback() }
+                return nil
+            }
+            // Written only after a successful save, with no suspension in
+            // between, so a cursor never points past rows that were not stamped.
+            if batch.didDrain {
+                storage.migrationFlags.set(true, forKey: Self.richContentVerdictBackfillMigrationKey)
+                storage.migrationFlags.setString(nil, forKey: Self.richContentVerdictBackfillCursorKey)
+            } else {
+                storage.migrationFlags.setString(
+                    batch.lastMessageID,
+                    forKey: Self.richContentVerdictBackfillCursorKey
+                )
+            }
+            return batch
+        } catch {
+            await context.perform { context.rollback() }
+            Log.error("Rich content verdict backfill will retry after an incomplete batch", category: .conversation, error: error)
+            return nil
+        }
+    }
+
+    /// `storage.saveIfNeeded` blocks its caller for the commit (and for the
+    /// store lock when a sync save is in flight). The preview passes rarely
+    /// have anything to save; this pass saves nearly every batch, hundreds or
+    /// thousands of times on a large mailbox, so the wait is kept off the
+    /// main actor. The save seam itself stays injectable for tests.
+    private nonisolated static func saveOffMainActor(
+        _ context: NSManagedObjectContext,
+        using saveIfNeeded: @escaping (NSManagedObjectContext) -> Bool
+    ) async -> Bool {
+        saveIfNeeded(context)
     }
 
     func refreshConversationNames() {

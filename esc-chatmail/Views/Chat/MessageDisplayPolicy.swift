@@ -74,12 +74,54 @@ enum MessageDisplayPolicy {
         return hasRichHTMLContent
     }
 
-    /// Whether some outcome of the bubble's async content load routes this row to the HTML
-    /// preview card: `shouldShowHTMLPreview` for either rich-content verdict.
+    /// The rich-content verdict a bubble routes on, and whether a load can still change it.
+    struct ResolvedRichVerdict: Equatable {
+        let hasRichHTMLContent: Bool
+        /// False only while the row is waiting on a load to learn its verdict.
+        let isKnown: Bool
+    }
+
+    /// Resolves the verdict for a bubble's `MessageDisplayInput`: the load's once it has
+    /// published, else the verdict stored on the row, else unknown (routed as not rich,
+    /// which is all the view had before verdicts were stored).
     ///
-    /// The rich-content verdict (`hasRichHTMLContent`) is the routing input a load decides:
-    /// false until the load publishes, either value after. Both are tried rather than only
-    /// `true`, so the answer does not assume a rich verdict can only add cards.
+    /// The load stays authoritative once it has published. It evaluates the same rule the
+    /// stored verdict was stamped with (`RichContentVerdictResolver`) over the row's current
+    /// state, so the two differ only when the stored one is stale, and the load then has it
+    /// re-stamped (`MessageBubbleLoader.loadContent`).
+    ///
+    /// - Parameter knownStoredVerdict: `ChatMessageRowModel.knownRichContentVerdict`, already
+    ///   nil for rows whose load does not publish the stored rule's answer (own, forwarded,
+    ///   and blank-preview rows), for rows never stamped under the current epoch, and for
+    ///   rows whose stored text may carry a shared-document link.
+    ///
+    /// The value and its known-ness come from this one function on purpose. Built separately
+    /// (a flag from the row, a value from the view model) the flag could say "known" while
+    /// the value was still the view model's default false, and the bubble would render text
+    /// and then swap to a card.
+    static func resolvedRichVerdict(
+        hasLoadedContent: Bool,
+        loadedHasRichHTMLContent: Bool,
+        knownStoredVerdict: Bool?
+    ) -> ResolvedRichVerdict {
+        if hasLoadedContent {
+            return ResolvedRichVerdict(hasRichHTMLContent: loadedHasRichHTMLContent, isKnown: true)
+        }
+        if let knownStoredVerdict {
+            return ResolvedRichVerdict(hasRichHTMLContent: knownStoredVerdict, isKnown: true)
+        }
+        return ResolvedRichVerdict(hasRichHTMLContent: false, isKnown: false)
+    }
+
+    /// Whether some outcome of the bubble's async content load routes this row to the HTML
+    /// preview card.
+    ///
+    /// The rich-content verdict (`hasRichHTMLContent`) is the routing input a load decides.
+    /// With `richVerdictIsKnown` false it is unknown: `input` carries false, the load may
+    /// publish either value, and this is `shouldShowHTMLPreview` for either. Both are tried
+    /// rather than only `true`, so the answer does not assume a rich verdict can only add
+    /// cards. With `richVerdictIsKnown` true, `input` already carries the verdict the load
+    /// will publish (`resolvedRichVerdict`), so only that one is asked.
     ///
     /// `hasHTMLSource` also reaches the routing from the view model, but needs no enumerating.
     /// It appears only in the routing's opening guard, and a load only ever upgrades it
@@ -89,9 +131,17 @@ enum MessageDisplayPolicy {
     /// false, the upgrade is covered only through the rich verdict, which passes the guard on
     /// its own: that one case does assume the routing past the guard cards a rich row wherever
     /// it cards a non-rich one, pinned by `testLoadCanRouteToHTMLPreview_boundsEveryLoadOutcome`.
+    /// With a known verdict even that cover is gone: a known not-rich row whose hint is still
+    /// false answers false although an upgraded hint could card it (a calendar invite), so
+    /// the known form bounds the load's outcomes only once the hint is true, which is the
+    /// only place the placeholder decision asks it.
     /// A routing input a load can change that is added later must be enumerated here too.
-    static func loadCanRouteToHTMLPreview(_ input: MessageDisplayInput) -> Bool {
-        [false, true].contains { verdict in
+    static func loadCanRouteToHTMLPreview(
+        _ input: MessageDisplayInput,
+        richVerdictIsKnown: Bool
+    ) -> Bool {
+        let verdicts = richVerdictIsKnown ? [input.hasRichHTMLContent] : [false, true]
+        return verdicts.contains { verdict in
             shouldShowHTMLPreview(input.withRichHTMLContent(verdict))
         }
     }
@@ -99,9 +149,13 @@ enum MessageDisplayPolicy {
     /// Whether a bubble routed to text (not the HTML preview card) shows the "Loading..." pill
     /// instead of its text while the async content load is still running.
     ///
-    /// - Parameter routing: the same `MessageDisplayInput` the bubble routed on
-    ///   (`MessageBubble.displayInput`), so this decision and the routing cannot be handed
-    ///   different rows.
+    /// - Parameters:
+    ///   - routing: the same `MessageDisplayInput` the bubble routed on
+    ///     (`MessageBubble.displayInput`), so this decision and the routing cannot be handed
+    ///     different rows.
+    ///   - richVerdictIsKnown: whether `routing.hasRichHTMLContent` is a verdict the load
+    ///     will not change (`resolvedRichVerdict`), from the same resolution that built
+    ///     `routing`.
     ///
     /// Forwarded rows keep the pill until the load publishes, own or incoming, whatever they
     /// store and with or without an HTML source: the first return, ahead of the HTML-source
@@ -119,29 +173,33 @@ enum MessageDisplayPolicy {
     ///
     /// Incoming rows with a stored `chatPreviewText` render it at once exactly when no outcome of
     /// the load can route them to a preview card (`loadCanRouteToHTMLPreview`). For those rows
-    /// the stored preview is the final text: the loader publishes it verbatim as
-    /// `fullTextContent` and `resolvedVisibleText` prefers it anyway, so the load can only confirm
-    /// it. The pill bought nothing there and cost a pill → bubble swap on every fresh mount: the
-    /// swap grows the transcript, which below iOS 18 restarts the hidden initial-anchor pass in
-    /// `ChatMessagesCoordinator` (its retry budget resets on growth) and so holds the reveal
-    /// until every visible load has settled, and on iOS 18 and later, where the hidden pass pins
-    /// the content end (`ChatTranscriptScrollAnchorPolicy`), is seen as a pill popping into a
-    /// bubble whenever the load outlasts the reveal. With today's routing these are the
+    /// the stored preview is the row's text: the loader publishes it verbatim as
+    /// `fullTextContent` and `resolvedVisibleText` prefers it anyway. The pill bought nothing
+    /// there and cost a pill → bubble swap on every fresh mount: the swap grows the transcript,
+    /// which below iOS 18 restarts the hidden initial-anchor pass in `ChatMessagesCoordinator`
+    /// (its retry budget resets on growth) and so holds the reveal until every visible load has
+    /// settled, and on iOS 18 and later, where the hidden pass pins the content end
+    /// (`ChatTranscriptScrollAnchorPolicy`), is seen as a pill popping into a bubble whenever
+    /// the load outlasts the reveal. With an unknown verdict and today's routing these are the
     /// reply-subject rows the routing has not already carded, flagged newsletter or calendar
-    /// invite or not.
+    /// invite or not. With a known verdict they are every row the routing has not carded: a
+    /// known rich row that routes to a card never reaches this decision (the bubble shows the
+    /// card), and any other known row ends as a text bubble.
     ///
     /// The stored text is those rows' final rendering in its shared-document links too. The
     /// links the load publishes are known at mount (`sharedDocumentLinks`), so the bubble
     /// already has their URLs stripped from its text and their cards below it. The same holds
     /// for the own rows below.
     ///
-    /// A row the load can still route to a card keeps the pill, whatever text it stores. The
-    /// rich-content verdict needs the HTML and is not known at mount, so the stored text is not
-    /// yet known to be the row's final rendering. Rendering it anyway showed the whole stored
-    /// preview and then swapped it for a card: visibly, whenever the load outlasted the reveal
-    /// or the row mounted while scrolling back. An incomplete load leaves such a row on the
-    /// pill: its result is never applied, so `hasLoadedContent` stays false while the hint
-    /// published when the load began still stands.
+    /// A row the load can still route to a card keeps the pill, whatever text it stores. That
+    /// takes an unknown verdict: a row never stamped under the current verdict epoch (the
+    /// launch backfill has not reached it, or its HTML could not be read). Its stored text is
+    /// not yet known to be the row's final rendering. Rendering it anyway showed the whole
+    /// stored preview and then swapped it for a card: visibly, whenever the load outlasted the
+    /// reveal or the row mounted while scrolling back. An incomplete load leaves such a row on
+    /// the pill: its result is never applied, so `hasLoadedContent` stays false while the hint
+    /// published when the load began still stands. A row with a known verdict renders its
+    /// stored text or its card through an incomplete load instead.
     ///
     /// Asked of the routing rather than re-listed here, forwarded rows aside (above). A
     /// hand-kept list of newsletter, invite and trusted-sender exclusions was wrong in both
@@ -179,7 +237,9 @@ enum MessageDisplayPolicy {
     /// about a rich verdict the loader never returns for an own row with a stored preview
     /// (`MessageBubbleLoader.loadRichContentClassification`), and the routing alone would card
     /// an own row with a new subject in a group conversation on that verdict, so the pill would
-    /// come back on rows that render their text today.
+    /// come back on rows that render their text today. For the same reason an own row's stored
+    /// verdict never reaches the routing: `ChatMessageRowModelMapper.knownRichContentVerdict`
+    /// reports it as unknown.
     ///
     /// The same own rows with no stored preview but with displayed attachments skip it too: an
     /// attachments-only reply. Its stored preview is blank because it has no text of its own
@@ -196,6 +256,7 @@ enum MessageDisplayPolicy {
     static func showsTextLoadingPlaceholder(
         hasLoadedContent: Bool,
         routing: MessageDisplayInput,
+        richVerdictIsKnown: Bool,
         chatPreviewText: String?,
         hasDisplayableAttachments: Bool
     ) -> Bool {
@@ -206,7 +267,7 @@ enum MessageDisplayPolicy {
         if !routing.isFromMe {
             let rendersStoredIncomingPreview =
                 MessagePreviewText.nonEmpty(chatPreviewText) != nil &&
-                !loadCanRouteToHTMLPreview(routing)
+                !loadCanRouteToHTMLPreview(routing, richVerdictIsKnown: richVerdictIsKnown)
             return !rendersStoredIncomingPreview
         }
 

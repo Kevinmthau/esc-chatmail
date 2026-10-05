@@ -95,12 +95,26 @@ struct MessageBubble: View {
             hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
-            hasRichHTMLContent: viewModel.hasRichHTMLContent,
+            hasRichHTMLContent: resolvedRichVerdict.hasRichHTMLContent,
             isFromMe: message.isFromMe,
             isOneToOneConversation: isEffectivelyOneToOneConversation,
             subject: message.subject,
             senderEmail: message.effectiveSenderEmail,
             isLikelyCalendarInvite: message.isLikelyCalendarInvite
+        )
+    }
+
+    /// The verdict `displayInput` routes on and whether a load can still change it: the
+    /// load's once published, before that the verdict stored on the row. Resolved from the
+    /// row on every pass rather than seeded into the view model the way the HTML-source hint
+    /// is (`MessageBubbleViewModel.init`): a seed is taken once per mount, and a verdict can
+    /// be stamped while the bubble is mounted (the launch backfill, the refresher), which
+    /// has to reach a row still waiting on its load.
+    private var resolvedRichVerdict: MessageDisplayPolicy.ResolvedRichVerdict {
+        MessageDisplayPolicy.resolvedRichVerdict(
+            hasLoadedContent: viewModel.hasLoadedContent,
+            loadedHasRichHTMLContent: viewModel.hasRichHTMLContent,
+            knownStoredVerdict: message.knownRichContentVerdict
         )
     }
 
@@ -216,6 +230,7 @@ struct MessageBubble: View {
                     style: style,
                     showHTMLPreview: showHTMLPreview,
                     displayInput: displayInput,
+                    richVerdictIsKnown: resolvedRichVerdict.isKnown,
                     fullTextContent: viewModel.fullTextContent,
                     fallbackPreviewText: message.fallbackPreviewText,
                     sharedDocumentLinks: resolvedSharedDocumentLinks,

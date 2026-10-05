@@ -256,6 +256,13 @@ final class HTMLContentHandler: @unchecked Sendable {
         }
 
         guard FileManager.default.fileExists(atPath: url.path) else {
+            // A file removed behind the handler's back can still have a positive
+            // signature cached, and `htmlFileExists` answers from that cache: it would
+            // go on reporting a file that every load then fails to read, which
+            // `RichContentVerdictResolver` treats as "exists but unreadable". A cached
+            // "missing" is left alone; dropping it would re-stat the file on the next
+            // signature read of every HTML-less message.
+            invalidateStalePresentSignature(for: url)
             return nil
         }
 
@@ -604,6 +611,13 @@ final class HTMLContentHandler: @unchecked Sendable {
 
     private func invalidateSignatureCache(for fileURL: URL) {
         Self.fileSignatureCache.removeObject(forKey: cacheKey(for: fileURL))
+    }
+
+    private func invalidateStalePresentSignature(for fileURL: URL) {
+        let cacheKey = cacheKey(for: fileURL)
+        if let cached = Self.fileSignatureCache.object(forKey: cacheKey), cached != "missing" {
+            Self.fileSignatureCache.removeObject(forKey: cacheKey)
+        }
     }
 
     private func clearCaches() {

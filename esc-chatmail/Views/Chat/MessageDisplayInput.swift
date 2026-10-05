@@ -5,7 +5,9 @@ struct MessageDisplayInput {
     let hasHTMLSource: Bool
     let isForwardedEmail: Bool
     let isNewsletter: Bool
-    /// The verdict the bubble's async content load publishes; false until it has.
+    /// The row's rich-content verdict: the one the bubble's async content load published,
+    /// before that the verdict stored on the row, and false while neither is known
+    /// (`MessageDisplayPolicy.resolvedRichVerdict`).
     /// `private(set)` only so `withRichHTMLContent(_:)` can copy the value.
     private(set) var hasRichHTMLContent: Bool
     let isFromMe: Bool
