@@ -256,6 +256,14 @@ struct ChatMessageRowModel: Equatable {
     let isConfirmedInGmail: Bool
     let forwardedDisplaySubject: String?
     let outgoingForwardedDisplayContent: ForwardedMessageDisplayContent?
+    /// The shared-document links this row's content load will publish, where stored fields
+    /// alone decide them (`Message.storedSharedDocumentLinks`): a non-forwarded row with a
+    /// stored `chatPreviewText`. Empty for every other row, and for one with no links. The
+    /// bubble shows these until its load has published
+    /// (`MessageDisplayPolicy.sharedDocumentLinks`), so a row that renders before its load
+    /// already has the links' URLs stripped from its text and their cards below it. Their
+    /// inputs are all in `loadSignatureComponents`, so a change to them also restarts the load.
+    let storedSharedDocumentLinks: [SharedDocumentLink]
     /// Precomputed so MessageBubble body recomputation does not hash message text.
     let loadSignatureComponents: MessageBubbleLoadSignatureComponents
     /// The transcript's view identity, shared by an optimistic reply and its
@@ -441,6 +449,7 @@ enum ChatMessageRowModelMapper {
             isConfirmedInGmail: isConfirmedInGmail,
             forwardedDisplaySubject: message.forwardedDisplaySubject,
             outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent,
+            storedSharedDocumentLinks: message.storedSharedDocumentLinks,
             loadSignatureComponents: MessageBubbleLoadSignatureComponents(
                 bodyStorageURI: message.bodyStorageURI,
                 bodyText: message.bodyTextValue,

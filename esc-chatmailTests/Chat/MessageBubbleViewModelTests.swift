@@ -742,6 +742,96 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertEqual(presentation(subject: "Re: Dinner"), .storedText)
     }
 
+    /// A row that renders its stored text before its load, sampled the way the views sample it
+    /// (`MessageBubble.resolvedSharedDocumentLinks`, then `MessageContentView.resolvedVisibleText`
+    /// and its document cards): on a fresh mount's first pass, while the load is parked, and
+    /// once it has published. The bubble is the same throughout: the text without the
+    /// document's URL, and the document's card. It used to mount showing the raw URL and no
+    /// card, and swap when the load published, growing the transcript after mount.
+    ///
+    /// Revert-check: `MessageDisplayPolicy.sharedDocumentLinks` returning `loaded`
+    /// unconditionally (the view model's links, as `MessageBubble` passed before) fails the
+    /// first-pass and mid-flight samples, which read the URL in the text and no card.
+    ///
+    /// HONEST SCOPE: `rendering` mirrors the two view decisions from the view model's real
+    /// published state and the links the row would carry. The views' own composition is not
+    /// covered (there is no UI test target), in particular `MessageBubble` handing
+    /// `resolvedSharedDocumentLinks`, not `viewModel.sharedDocumentLinks`, to
+    /// `MessageContentView`. That the real loader publishes what the row carries is pinned in
+    /// `MessageBubbleLoaderTests`; the stubbed result here is built by hand.
+    func testLoadIfNeeded_storedPreviewRowWithSharedDocumentLink_rendersTextAndCardThroughoutLoad() async throws {
+        struct Rendering: Equatable {
+            let visibleText: String?
+            let cardIDs: [String]
+        }
+        let chatPreviewText = "Here is the doc: https://docs.google.com/document/d/abc123/edit"
+        let url = try XCTUnwrap(URL(string: "https://docs.google.com/document/d/abc123/edit"))
+        let loadedLink = SharedDocumentLink(
+            id: SharedDocumentLinkExtractor.dedupeKey(for: url, kind: .googleDoc),
+            url: url,
+            kind: .googleDoc
+        )
+        let rowLinks = SharedDocumentLinkExtractor.storedRowLinks(
+            chatPreviewText: chatPreviewText,
+            bodyText: "Body",
+            snippet: "Snippet",
+            isForwardedEmail: false
+        )
+        let loader = GatedMessageBubbleLoader(
+            senderResults: [],
+            contentResults: [
+                MessageBubbleContentResult(
+                    fullTextContent: chatPreviewText,
+                    hasRichHTMLContent: false,
+                    sharedDocumentLinks: [loadedLink],
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .placeholder(hasHTMLSource: true)
+                )
+            ],
+            gatedCallIndex: 1
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader, initialHasHTMLSource: true)
+        func rendering() -> Rendering {
+            let links = MessageDisplayPolicy.sharedDocumentLinks(
+                hasLoadedContent: viewModel.hasLoadedContent,
+                loaded: viewModel.sharedDocumentLinks,
+                stored: rowLinks
+            )
+            return Rendering(
+                visibleText: MessageContentView.resolvedVisibleText(
+                    fullTextContent: viewModel.fullTextContent,
+                    fallbackPreviewText: nil,
+                    chatPreviewText: chatPreviewText,
+                    sharedDocumentLinks: links
+                ),
+                cardIDs: links.map(\.id)
+            )
+        }
+        let final = Rendering(visibleText: "Here is the doc:", cardIDs: ["googleDoc|abc123"])
+
+        // The first body pass: nothing has started the load yet.
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(rendering(), final)
+
+        let load = Task {
+            await viewModel.loadIfNeeded(
+                using: self.makeContext(hasHTMLSource: true, includesSenderRequest: false)
+            )
+        }
+        let gateEntered = await loader.waitForGateEntry()
+        XCTAssertTrue(gateEntered, "gated load never started")
+
+        XCTAssertFalse(viewModel.hasLoadedContent)
+        XCTAssertEqual(rendering(), final)
+
+        await loader.release()
+        await load.value
+
+        XCTAssertTrue(viewModel.hasLoadedContent)
+        XCTAssertEqual(viewModel.sharedDocumentLinks, [loadedLink])
+        XCTAssertEqual(rendering(), final)
+    }
+
     /// The early-return branch records the requested signature even when it skips loading, so a
     /// refresh that is still in flight when the signature returns to the published one is dropped
     /// by `isStillActive` instead of overwriting what is already correct on screen.

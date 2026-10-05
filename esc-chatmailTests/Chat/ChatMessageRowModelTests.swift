@@ -219,6 +219,142 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertEqual(row.fallbackPreviewText, "Here are the two PDFs.")
     }
 
+    // MARK: - Stored shared-document links
+
+    /// A row whose stored fields decide its shared-document links carries them, so its bubble
+    /// mounts with the links' URLs stripped and their cards shown instead of rendering the raw
+    /// URL until the load publishes. Own rows and incoming rows alike; the link may sit in any
+    /// of the three fields the load searches.
+    ///
+    /// Revert-check: mapping `storedSharedDocumentLinks: []` in `ChatMessageRowModelMapper.map`
+    /// fails every assertion but the last; returning `[]` from
+    /// `Message.storedSharedDocumentLinks` does the same.
+    func testMap_storedPreviewRow_carriesTheSharedDocumentLinksItsLoadPublishes() throws {
+        let incoming = MessageBuilder()
+            .withId("row-model-links-incoming-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("See the plan\n\nhttps://docs.google.com/spreadsheets/d/rowsheet1/edit")
+            .withSnippet("See the plan")
+            .build(in: viewContext)
+        incoming.chatPreviewText = "See the plan https://docs.google.com/document/d/rowdoc1/edit"
+        let own = MessageBuilder()
+            .withId("row-model-links-own-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("Sharing the deck")
+            .withSnippet("Sharing the deck https://DOCS.GOOGLE.COM/presentation/d/rowdeck1/edit")
+            .fromMe()
+            .build(in: viewContext)
+        own.chatPreviewText = "Sharing the deck"
+        let plain = MessageBuilder()
+            .withId("row-model-links-plain-\(UUID().uuidString)")
+            .build(in: viewContext)
+        plain.chatPreviewText = "Lunch tomorrow?"
+        try viewContext.obtainPermanentIDs(for: [incoming, own, plain])
+        try viewContext.save()
+
+        let incomingRow = ChatMessageRowModelMapper.map(incoming)
+        let ownRow = ChatMessageRowModelMapper.map(own)
+
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks.map(\.id),
+            ["googleDoc|rowdoc1", "googleSheet|rowsheet1"]
+        )
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks.first?.url.absoluteString,
+            "https://docs.google.com/document/d/rowdoc1/edit"
+        )
+        XCTAssertEqual(ownRow.storedSharedDocumentLinks.map(\.id), ["googleSlides|rowdeck1"])
+        XCTAssertEqual(
+            incomingRow.storedSharedDocumentLinks,
+            SharedDocumentLinkExtractor.storedRowLinks(
+                chatPreviewText: incomingRow.chatPreviewText,
+                bodyText: incomingRow.bodyText,
+                snippet: incomingRow.snippet,
+                isForwardedEmail: incomingRow.isForwardedEmail
+            )
+        )
+        XCTAssertTrue(ChatMessageRowModelMapper.map(plain).storedSharedDocumentLinks.isEmpty)
+    }
+
+    /// A forward, and a row with no stored preview, carry no links whatever their stored text
+    /// holds: their loads search other text (`SharedDocumentLinkExtractor.storedRowMayCarryLinks`),
+    /// so links computed from stored fields would not be the load's.
+    ///
+    /// Revert-check: `Message.storedSharedDocumentLinks` calling
+    /// `SharedDocumentLinkExtractor.bubbleLinks` without the `storedRowMayCarryLinks` guard
+    /// fails both assertions.
+    func testMap_forwardedOrBlankPreviewRow_carriesNoSharedDocumentLinks() throws {
+        let linkText = "Plan: https://docs.google.com/document/d/rowdoc2/edit"
+        let forwarded = MessageBuilder()
+            .withId("row-model-links-forwarded-\(UUID().uuidString)")
+            .withSubject("Fwd: Plan")
+            .withBody(linkText)
+            .withSnippet(linkText)
+            .build(in: viewContext)
+        forwarded.chatPreviewText = linkText
+        let blankPreview = MessageBuilder()
+            .withId("row-model-links-blank-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody(linkText)
+            .withSnippet(linkText)
+            .build(in: viewContext)
+        blankPreview.chatPreviewText = " \n "
+        try viewContext.obtainPermanentIDs(for: [forwarded, blankPreview])
+        try viewContext.save()
+
+        XCTAssertTrue(ChatMessageRowModelMapper.map(forwarded).storedSharedDocumentLinks.isEmpty)
+        XCTAssertTrue(ChatMessageRowModelMapper.map(blankPreview).storedSharedDocumentLinks.isEmpty)
+    }
+
+    /// The links are memoized per message (`Message.storedSharedDocumentLinks`), and a re-map
+    /// after any of their inputs changed must not serve the earlier answer: the bubble would
+    /// strip a URL its text no longer holds, or keep a card for a link that is gone, until its
+    /// load published.
+    ///
+    /// Revert-check: each step changes one input. Dropping `hasher.combine(chatPreviewText)`,
+    /// `hasher.combine(bodyText)` or `hasher.combine(snippet)` from the fingerprint in
+    /// `Message.storedSharedDocumentLinks` fails the step that changes that field, and moving
+    /// the `storedRowMayCarryLinks` guard behind the memo lookup fails the forwarded step.
+    ///
+    /// HONEST SCOPE: pins that the memo is never stale, not that it saves anything. Nothing
+    /// here can observe that a re-map with unchanged inputs skipped the data-detector pass;
+    /// with the memo removed every assertion still passes.
+    func testMap_storedSharedDocumentLinks_followEveryInputChangeOnTheSameMessage() throws {
+        let message = MessageBuilder()
+            .withId("row-model-links-memo-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("Plain body")
+            .withSnippet("Plain snippet")
+            .build(in: viewContext)
+        message.chatPreviewText = "First https://docs.google.com/document/d/memo1/edit"
+        try viewContext.obtainPermanentIDs(for: [message])
+        try viewContext.save()
+        func mappedLinkIDs() -> [String] {
+            ChatMessageRowModelMapper.map(message).storedSharedDocumentLinks.map(\.id)
+        }
+
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo1"])
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo1"], "A re-map with unchanged inputs")
+
+        message.chatPreviewText = "Second https://docs.google.com/document/d/memo2/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2"])
+
+        message.bodyText = "Body https://docs.google.com/spreadsheets/d/memo3/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2", "googleSheet|memo3"])
+
+        message.snippet = "Snippet https://docs.google.com/presentation/d/memo4/edit"
+        XCTAssertEqual(mappedLinkIDs(), ["googleDoc|memo2", "googleSheet|memo3", "googleSlides|memo4"])
+
+        message.subject = "Fwd: Plan"
+        XCTAssertEqual(mappedLinkIDs(), [], "A forward's stored fields do not decide its links")
+
+        message.subject = "Re: Plan"
+        message.chatPreviewText = "No link any more"
+        message.bodyText = "Plain body"
+        message.snippet = "Plain snippet"
+        XCTAssertEqual(mappedLinkIDs(), [])
+    }
+
     func testMap_preservesOutgoingForwardedAffordances() throws {
         let conversation = ConversationBuilder()
             .visible()

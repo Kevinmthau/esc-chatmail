@@ -130,6 +130,11 @@ enum MessageDisplayPolicy {
     /// reply-subject rows the routing has not already carded, flagged newsletter or calendar
     /// invite or not.
     ///
+    /// The stored text is those rows' final rendering in its shared-document links too. The
+    /// links the load publishes are known at mount (`sharedDocumentLinks`), so the bubble
+    /// already has their URLs stripped from its text and their cards below it. The same holds
+    /// for the own rows below.
+    ///
     /// A row the load can still route to a card keeps the pill, whatever text it stores. The
     /// rich-content verdict needs the HTML and is not known at mount, so the stored text is not
     /// yet known to be the row's final rendering. Rendering it anyway showed the whole stored
@@ -209,6 +214,34 @@ enum MessageDisplayPolicy {
         guard isOwnTextBubble else { return true }
         let rendersStoredOwnPreview = MessagePreviewText.nonEmpty(chatPreviewText) != nil
         return !rendersStoredOwnPreview && !hasDisplayableAttachments
+    }
+
+    /// The shared-document links a bubble renders: the load's once it has published, before
+    /// that the ones the row carries (`ChatMessageRowModel.storedSharedDocumentLinks`).
+    ///
+    /// The links decide two things in the bubble: their URLs are stripped from its text
+    /// (`MessageContentView.resolvedVisibleText`) and a card is appended for each. They used to
+    /// come from the load alone, so every row that renders before its load (the rows
+    /// `showsTextLoadingPlaceholder` exempts, and every row with no HTML source) showed the raw
+    /// URL and then swapped to text plus a card, growing the transcript after mount. For the
+    /// rows whose stored fields decide the links, the row's are what the load will publish
+    /// (one definition, `SharedDocumentLinkExtractor.bubbleLinks`), so nothing changes when it
+    /// does.
+    ///
+    /// The load's replace the row's rather than the row's being used throughout: a row whose
+    /// stored fields do not decide its links carries none (a blank stored preview, a forward),
+    /// and neither does one whose link the row's cheap check misses
+    /// (`SharedDocumentLinkExtractor.mayContainLinks`). Those gain their cards when the load
+    /// publishes, as every row did.
+    ///
+    /// During an in-place refresh `hasLoadedContent` stays true, so the previous load's links
+    /// stay up with the rest of its content until the new result replaces them together.
+    static func sharedDocumentLinks(
+        hasLoadedContent: Bool,
+        loaded: [SharedDocumentLink],
+        stored: [SharedDocumentLink]
+    ) -> [SharedDocumentLink] {
+        hasLoadedContent ? loaded : stored
     }
 
     static func isTrustedTransactionalSender(_ senderEmail: String?) -> Bool {

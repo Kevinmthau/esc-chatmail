@@ -1,4 +1,5 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
 final class MessageBubbleLoaderTests: XCTestCase {
@@ -233,6 +234,279 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(result.fullTextContent, "Canonical stored preview")
         let recoveryCallCount = await recoverer.recoveryCallCount()
         XCTAssertEqual(recoveryCallCount, 0)
+    }
+
+    // MARK: - Shared-document links a row carries before its load
+
+    /// A non-forwarded row with a stored preview mounts with links computed from its stored
+    /// fields (`SharedDocumentLinkExtractor.storedRowLinks`): the bubble strips their URLs from
+    /// its text and shows a card for each before the load has run. The load must then publish
+    /// exactly those links, in that order. Any difference re-renders the mounted bubble when
+    /// the load lands: a URL reappearing in the text, a card arriving, leaving or moving.
+    ///
+    /// Revert-check: dropping `bodyText` or `snippet` from the `bubbleLinks` call in
+    /// `SharedDocumentLinkExtractor.storedRowLinks` fails the body-only and snippet-only rows.
+    /// From the other side, in `MessageBubbleLoader.loadContent`, a nil
+    /// `sharedDocumentLinkBodyText`, or a `sharedDocumentLinkSnippet` read from
+    /// `request.cleanedSnippet`, fails the same rows on both assertions.
+    ///
+    /// HONEST SCOPE: the two sides are equal by construction (both call
+    /// `SharedDocumentLinkExtractor.bubbleLinks`), so this cannot tell a shared definition from
+    /// two copies that behave alike. What it pins is that both feed it the same three stored
+    /// fields, and what those fields yield.
+    func testLoadContent_storedPreviewRow_publishesTheLinksTheRowCarriesBeforeItsLoad() async {
+        struct Row {
+            let name: String
+            let chatPreviewText: String
+            var bodyText: String? = "Plain body"
+            var snippet: String? = "Plain snippet"
+            var isFromMe = false
+            var hasHTMLSource = false
+            let expectedIDs: [String]
+        }
+        let rows = [
+            Row(
+                name: "link in the preview",
+                chatPreviewText: "Here is the doc: https://docs.google.com/document/d/doc1/edit",
+                expectedIDs: ["googleDoc|doc1"]
+            ),
+            Row(
+                name: "link only in the body",
+                chatPreviewText: "See the plan",
+                bodyText: "See the plan\n\nhttps://docs.google.com/spreadsheets/d/sheet1/edit",
+                expectedIDs: ["googleSheet|sheet1"]
+            ),
+            Row(
+                name: "link only in the snippet",
+                chatPreviewText: "See the deck",
+                bodyText: nil,
+                snippet: "See the deck https://docs.google.com/presentation/d/deck1/edit",
+                expectedIDs: ["googleSlides|deck1"]
+            ),
+            Row(
+                name: "one link per field, in the bubble's order of preference",
+                chatPreviewText: "Deck https://docs.google.com/presentation/d/deck2/edit",
+                bodyText: "Doc https://docs.google.com/document/d/doc2/edit",
+                snippet: "Sheet https://docs.google.com/spreadsheets/d/sheet2/edit",
+                expectedIDs: ["googleSlides|deck2", "googleDoc|doc2", "googleSheet|sheet2"]
+            ),
+            Row(
+                name: "one document linked from preview and body",
+                chatPreviewText: "Doc https://docs.google.com/document/d/doc3/edit",
+                bodyText: "Doc https://docs.google.com/document/d/doc3/edit?usp=sharing\n\n> quoted",
+                expectedIDs: ["googleDoc|doc3"]
+            ),
+            Row(
+                name: "more links than a bubble shows",
+                chatPreviewText: (1...3)
+                    .map { "https://docs.google.com/document/d/first\($0)/edit" }
+                    .joined(separator: "\n"),
+                bodyText: (1...3)
+                    .map { "https://docs.google.com/document/d/second\($0)/edit" }
+                    .joined(separator: "\n"),
+                expectedIDs: ["googleDoc|first1", "googleDoc|first2", "googleDoc|first3", "googleDoc|second1"]
+            ),
+            Row(
+                name: "preview padded with whitespace",
+                chatPreviewText: " \n https://drive.google.com/drive/folders/folder1 \n",
+                expectedIDs: ["googleDriveFolder|folder1"]
+            ),
+            Row(
+                name: "own reply as Gmail echoes it, with an HTML source",
+                chatPreviewText: "Sharing https://docs.google.com/document/d/doc4/edit",
+                isFromMe: true,
+                hasHTMLSource: true,
+                expectedIDs: ["googleDoc|doc4"]
+            ),
+            Row(
+                name: "host mentioned with no document link",
+                chatPreviewText: "I found it on google.com, see https://www.google.com/search?q=plan",
+                expectedIDs: []
+            ),
+            Row(name: "no links", chatPreviewText: "Lunch tomorrow?", expectedIDs: [])
+        ]
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentRecoveryService: MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        for row in rows {
+            let messageId = "bubble-stored-links-\(UUID().uuidString)"
+            await RenderedMessageCache.shared.invalidate(messageId: messageId)
+            let request = MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: row.bodyText,
+                chatPreviewText: row.chatPreviewText,
+                bodyStorageURI: nil,
+                cleanedSnippet: "Cleaned snippet",
+                snippet: row.snippet,
+                subject: "Re: Plan",
+                senderName: "Alice Example",
+                hasHTMLSource: row.hasHTMLSource,
+                hasAttachments: false,
+                isFromMe: row.isFromMe,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+
+            let result = await loader.loadContent(from: request)
+
+            XCTAssertTrue(result.isComplete, row.name)
+            XCTAssertEqual(result.sharedDocumentLinks.map(\.id), row.expectedIDs, row.name)
+            XCTAssertEqual(
+                result.sharedDocumentLinks,
+                SharedDocumentLinkExtractor.storedRowLinks(
+                    chatPreviewText: request.chatPreviewText,
+                    bodyText: request.bodyText,
+                    snippet: request.snippet,
+                    isForwardedEmail: request.isForwardedEmail
+                ),
+                row.name
+            )
+        }
+    }
+
+    /// The same equality from a stored `Message`, through the path the transcript takes: the
+    /// row model the bubble mounts with, and the content request that row model hands its load.
+    ///
+    /// Revert-check: mapping `storedSharedDocumentLinks: []` in `ChatMessageRowModelMapper.map`
+    /// fails both rows; so does `Message.storedSharedDocumentLinks` reading `cleanedSnippet`
+    /// where the load reads `snippet`, on the incoming row.
+    @MainActor
+    func testLoadContent_mappedRow_publishesTheLinksItsRowModelCarries() async throws {
+        let stack = TestCoreDataStack()
+        let viewContext = stack.makeMainQueueViewContext()
+        let incoming = MessageBuilder()
+            .withId("bubble-mapped-links-incoming-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("See the plan\n\nhttps://docs.google.com/document/d/mapped1/edit")
+            .withSnippet("See the plan https://docs.google.com/spreadsheets/d/mapped2/edit")
+            .build(in: viewContext)
+        incoming.chatPreviewText = "See the plan"
+        incoming.cleanedSnippet = "See the plan"
+        let own = MessageBuilder()
+            .withId("bubble-mapped-links-own-\(UUID().uuidString)")
+            .withSubject("Re: Plan")
+            .withBody("Sharing https://drive.google.com/file/d/mapped3/view")
+            .withSnippet("Sharing https://drive.google.com/file/d/mapped3/view")
+            .fromMe()
+            .build(in: viewContext)
+        own.chatPreviewText = "Sharing https://drive.google.com/file/d/mapped3/view"
+        try viewContext.obtainPermanentIDs(for: [incoming, own])
+        try viewContext.save()
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentRecoveryService: MockHTMLContentRecoverer(recoveredHTMLByMessageID: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let expectedIDs = [
+            incoming.id: ["googleDoc|mapped1", "googleSheet|mapped2"],
+            own.id: ["googleDriveFile|mapped3"]
+        ]
+        for row in ChatMessageRowModelMapper.map([incoming, own]) {
+            await RenderedMessageCache.shared.invalidate(messageId: row.id)
+
+            let result = await loader.loadContent(from: row.makeContentRequest())
+
+            XCTAssertTrue(result.isComplete, row.id)
+            XCTAssertEqual(row.storedSharedDocumentLinks.map(\.id), expectedIDs[row.id], row.id)
+            XCTAssertEqual(result.sharedDocumentLinks, row.storedSharedDocumentLinks, row.id)
+        }
+    }
+
+    /// Where stored fields do not decide a row's links, the row carries none and the load's
+    /// are the only ones: a blank stored preview, whose load searches the text its
+    /// compatibility path derives, and a forward, whose load searches its parsed lead-in. This
+    /// is why the bubble takes the load's links once it has published instead of the row's
+    /// throughout (`MessageDisplayPolicy.sharedDocumentLinks`): these rows would never show a
+    /// card.
+    ///
+    /// Revert-check: in `SharedDocumentLinkExtractor.storedRowMayCarryLinks`, dropping the
+    /// `MessagePreviewText.nonEmpty(chatPreviewText)` term fails the blank-preview request's
+    /// final assertion, and dropping `!isForwardedEmail` fails the forward's.
+    ///
+    /// HONEST SCOPE: the first three assertions pin the loader's behavior for the two
+    /// populations as it is today, which is what justifies excluding them. If the load ever
+    /// published for them what stored fields give, the exclusions (and the swap a
+    /// blank-preview row still shows) could go.
+    func testLoadContent_blankPreviewOrForwardedRow_publishesLinksTheRowDoesNotCarry() async {
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+        func request(
+            chatPreviewText: String?,
+            bodyText: String,
+            subject: String,
+            isForwardedEmail: Bool
+        ) async -> MessageBubbleContentRequest {
+            let messageId = "bubble-load-decided-links-\(UUID().uuidString)"
+            await RenderedMessageCache.shared.invalidate(messageId: messageId)
+            return MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: bodyText,
+                chatPreviewText: chatPreviewText,
+                bodyStorageURI: nil,
+                cleanedSnippet: nil,
+                snippet: nil,
+                subject: subject,
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: isForwardedEmail,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        }
+        let blankPreview = await request(
+            chatPreviewText: nil,
+            bodyText: "Here is the doc: https://docs.google.com/document/d/blank1/edit",
+            subject: "Re: Plan",
+            isForwardedEmail: false
+        )
+        let forwarded = await request(
+            chatPreviewText: "FYI https://docs.google.com/document/d/leadin1/edit",
+            bodyText: """
+            FYI https://docs.google.com/document/d/leadin1/edit
+
+            ---------- Forwarded message ---------
+            From: Jane Example <jane@example.com>
+            Date: Mon, Feb 16, 2026 at 5:56 PM
+            Subject: Spring plans
+            To: me@example.com
+
+            The sheet: https://docs.google.com/spreadsheets/d/forwarded1/edit
+            """,
+            subject: "Fwd: Spring plans",
+            isForwardedEmail: true
+        )
+
+        let blankPreviewResult = await loader.loadContent(from: blankPreview)
+        let forwardedResult = await loader.loadContent(from: forwarded)
+
+        XCTAssertEqual(blankPreviewResult.sharedDocumentLinks.map(\.id), ["googleDoc|blank1"])
+        XCTAssertNotNil(forwardedResult.forwardedDisplayContent)
+        XCTAssertEqual(
+            forwardedResult.sharedDocumentLinks.map(\.id),
+            ["googleDoc|leadin1"],
+            "A forward's load searches its lead-in only, not the forwarded body"
+        )
+        for request in [blankPreview, forwarded] {
+            XCTAssertTrue(
+                SharedDocumentLinkExtractor.storedRowLinks(
+                    chatPreviewText: request.chatPreviewText,
+                    bodyText: request.bodyText,
+                    snippet: request.snippet,
+                    isForwardedEmail: request.isForwardedEmail
+                ).isEmpty,
+                request.subject ?? ""
+            )
+        }
     }
 
     func testLoadContent_htmlMessageMissingChatPreviewTextUsesDOMFallback() async {

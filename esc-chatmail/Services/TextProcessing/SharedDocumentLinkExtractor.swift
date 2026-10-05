@@ -59,6 +59,104 @@ enum SharedDocumentLinkExtractor {
         try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     }()
 
+    /// Whether any of these texts spells a host `extract` accepts, without running the data
+    /// detector. `googleWorkspaceKind` accepts only `docs.google.com` and `drive.google.com`,
+    /// compared lowercased, so a text that spells `google.com` in no letter case has no
+    /// literally spelled link. True does not mean a link exists.
+    ///
+    /// Not a strict superset of `extract`. Foundation also resolves a percent-encoded host
+    /// (`docs.%67oogle.com`) and compatibility or ignorable characters in one (full-width
+    /// letters, a soft hyphen) to `docs.google.com`, and those spellings are missed here.
+    /// Normalising for them would cost a second pass over every non-ASCII body, which is most
+    /// mail, for a spelling ordinary links never use.
+    ///
+    /// Searched through `NSString` on purpose: this runs on the main actor for every row of
+    /// every window re-map (`Message.storedSharedDocumentLinks`), over the whole plain-text
+    /// body. Measured on a 10 KB body (macOS, optimized): about 4 to 6 ns/byte this way, 75 to
+    /// 80 ns/byte through the Swift `String.range(of:options:)` overload, and 125 to 155
+    /// ns/byte for the data detector pass it stands in front of. Do not simplify it back.
+    /// Keep the needle in step with `googleWorkspaceKind` if it ever accepts another host.
+    static func mayContainLinks(in textCandidates: [String?]) -> Bool {
+        textCandidates.contains { text in
+            guard let text else { return false }
+            return (text as NSString)
+                .range(of: "google.com", options: [.caseInsensitive, .literal])
+                .location != NSNotFound
+        }
+    }
+
+    /// The most links one bubble shows cards for.
+    static let bubbleLinkLimit = 4
+
+    /// The shared-document links a chat bubble shows for a message, searched in the order the
+    /// bubble prefers its texts. The one definition for the bubble's content load
+    /// (`MessageBubbleLoader.loadContent`) and for the links a row carries before that load
+    /// (`storedRowLinks`): the bubble strips these links' URLs from its text and appends a card
+    /// for each, so two definitions that disagreed on order, trimming or the limit would
+    /// re-render a mounted row when its load publishes.
+    static func bubbleLinks(
+        preferredText: String?,
+        bodyText: String?,
+        snippet: String?
+    ) -> [SharedDocumentLink] {
+        let candidates = [preferredText, bodyText, snippet]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return extract(from: candidates, maxCount: bubbleLinkLimit)
+    }
+
+    /// Whether a row's stored fields decide the links its content load will publish, and could
+    /// hold one. The cheap half of `storedRowLinks`, split out so a caller that memoizes the
+    /// expensive half can skip its bookkeeping for the rows this rejects, which is nearly all
+    /// of them.
+    ///
+    /// Stored fields decide the links exactly where the load searches the stored
+    /// `chatPreviewText` first (`MessageBubbleLoader.loadContent`):
+    ///
+    /// - not a forwarded row: the load searches a parsed forward's lead-in instead, and
+    ///   neither `bodyText` nor `snippet`. The bubble shows no document cards for a forward
+    ///   before its load in any case (the loading pill, or an own forward's summary card);
+    /// - a non-blank `chatPreviewText`: without one the load searches the text its
+    ///   compatibility path derives, which is not stored.
+    ///
+    /// `mayContainLinks` runs last: it is the only check that reads the body.
+    static func storedRowMayCarryLinks(
+        chatPreviewText: String?,
+        bodyText: String?,
+        snippet: String?,
+        isForwardedEmail: Bool
+    ) -> Bool {
+        !isForwardedEmail &&
+            MessagePreviewText.nonEmpty(chatPreviewText) != nil &&
+            mayContainLinks(in: [chatPreviewText, bodyText, snippet])
+    }
+
+    /// The links a row's content load will publish, from stored fields alone, so the bubble
+    /// can mount with them instead of showing a raw URL and swapping to text plus a card when
+    /// the load lands. Empty where stored fields do not decide them
+    /// (`storedRowMayCarryLinks`), and the bubble then has no links until its load publishes.
+    ///
+    /// One spelling is missed: a link `mayContainLinks` does not see (an encoded host) is
+    /// absent here and present in the load's result, so that row still swaps after mount. The
+    /// load stays the authority once it has published (`MessageDisplayPolicy.sharedDocumentLinks`).
+    static func storedRowLinks(
+        chatPreviewText: String?,
+        bodyText: String?,
+        snippet: String?,
+        isForwardedEmail: Bool
+    ) -> [SharedDocumentLink] {
+        guard storedRowMayCarryLinks(
+            chatPreviewText: chatPreviewText,
+            bodyText: bodyText,
+            snippet: snippet,
+            isForwardedEmail: isForwardedEmail
+        ) else {
+            return []
+        }
+        return bubbleLinks(preferredText: chatPreviewText, bodyText: bodyText, snippet: snippet)
+    }
+
     static func extract(from textCandidates: [String], maxCount: Int = 4) -> [SharedDocumentLink] {
         guard maxCount > 0, let detector = linkDetector else {
             return []

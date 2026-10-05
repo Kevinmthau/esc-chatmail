@@ -10,6 +10,8 @@ struct MessageContentView: View {
     let displayInput: MessageDisplayInput
     let fullTextContent: String?
     let fallbackPreviewText: String?
+    /// The load's links once it has published, before that the ones the row carries
+    /// (`MessageDisplayPolicy.sharedDocumentLinks`).
     let sharedDocumentLinks: [SharedDocumentLink]
     let hasLoadedContent: Bool
     /// Whether MessageBubble shows any attachments above this content: its filtered set, not

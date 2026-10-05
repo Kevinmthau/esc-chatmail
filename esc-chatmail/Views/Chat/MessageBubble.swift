@@ -108,6 +108,16 @@ struct MessageBubble: View {
         viewModel.forwardedDisplayContent ?? message.outgoingForwardedDisplayContent
     }
 
+    /// The row's own links until the load has published its own, so a row that renders before
+    /// its load mounts with its document cards (`MessageDisplayPolicy.sharedDocumentLinks`).
+    private var resolvedSharedDocumentLinks: [SharedDocumentLink] {
+        MessageDisplayPolicy.sharedDocumentLinks(
+            hasLoadedContent: viewModel.hasLoadedContent,
+            loaded: viewModel.sharedDocumentLinks,
+            stored: message.storedSharedDocumentLinks
+        )
+    }
+
     /// Vertical alignment that centers the failed-send badge on the content bubble. Defaults to
     /// center, so a row with no content bubble (attachments only) centers the badge on the column
     /// instead of hanging it below the row.
@@ -208,7 +218,7 @@ struct MessageBubble: View {
                     displayInput: displayInput,
                     fullTextContent: viewModel.fullTextContent,
                     fallbackPreviewText: message.fallbackPreviewText,
-                    sharedDocumentLinks: viewModel.sharedDocumentLinks,
+                    sharedDocumentLinks: resolvedSharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
                     hasDisplayableAttachments: !displayableAttachments.isEmpty,
                     forwardedDisplayContent: resolvedForwardedDisplayContent,

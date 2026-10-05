@@ -830,4 +830,41 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertTrue(MessageDisplayPolicy.isTrustedTransactionalSender("xyz123@marketplace.amazon.com"))
         XCTAssertTrue(MessageDisplayPolicy.isTrustedTransactionalSender("BILL <approvals@hq.bill.com>"))
     }
+
+    // MARK: - Shared-document links
+
+    /// Before the load publishes, the bubble renders the links its row carries; once it has,
+    /// the load's, whatever they are.
+    ///
+    /// Revert-check: in `MessageDisplayPolicy.sharedDocumentLinks`, returning `loaded`
+    /// unconditionally (what `MessageBubble` passed before) fails the pre-load assertion;
+    /// returning `stored` unconditionally fails the two loaded ones; and
+    /// `loaded.isEmpty ? stored : loaded` fails the last, where the load found no links.
+    func testSharedDocumentLinks_rowLinksUntilTheLoadPublishes_thenTheLoads() throws {
+        func link(_ resourceID: String) throws -> SharedDocumentLink {
+            let url = try XCTUnwrap(URL(string: "https://docs.google.com/document/d/\(resourceID)/edit"))
+            return SharedDocumentLink(
+                id: SharedDocumentLinkExtractor.dedupeKey(for: url, kind: .googleDoc),
+                url: url,
+                kind: .googleDoc
+            )
+        }
+        let stored = [try link("stored")]
+        let loaded = [try link("loaded")]
+
+        XCTAssertEqual(
+            MessageDisplayPolicy.sharedDocumentLinks(hasLoadedContent: false, loaded: [], stored: stored),
+            stored
+        )
+        XCTAssertEqual(
+            MessageDisplayPolicy.sharedDocumentLinks(hasLoadedContent: true, loaded: loaded, stored: []),
+            loaded,
+            "A row that carries none (blank preview, forward, a link its cheap check misses) gains the load's"
+        )
+        XCTAssertEqual(
+            MessageDisplayPolicy.sharedDocumentLinks(hasLoadedContent: true, loaded: [], stored: stored),
+            [],
+            "The load is the authority once it has published"
+        )
+    }
 }
