@@ -171,17 +171,25 @@ struct ConversationRowView: View {
                             Text(formatDate(date))
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
+                                .lineLimit(1)
                         }
 
                         Image(systemName: "chevron.right")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(Color(.tertiaryLabel))
                     }
+                    // The timestamp takes its width before the title, which
+                    // truncates instead, as in Messages. Beside a long title the
+                    // stack otherwise gave the timestamp less than its width, so
+                    // at accessibility text sizes "Yesterday" wrapped and only
+                    // that row grew a line taller. The line limit truncates,
+                    // rather than wraps, a timestamp that still does not fit.
+                    .layoutPriority(1)
                 }
 
                 // Bottom row: snippet only. Both lines are reserved so a
                 // one-line preview keeps the full row height, as in Messages.
-                Text(snapshot.snippet ?? "No messages")
+                Text(ConversationRowPolicy.previewText(snippet: snapshot.snippet))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .lineLimit(2, reservesSpace: true)

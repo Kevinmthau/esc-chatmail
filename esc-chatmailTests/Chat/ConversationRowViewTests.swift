@@ -208,6 +208,16 @@ final class ConversationRowViewTests: XCTestCase {
         )
     }
 
+    // Revert-check: ConversationRowPolicy.previewText(snippet:)'s
+    // MessagePreviewText.nonEmpty — reverting it to `snippet ?? "No messages"`
+    // hands the row the blank snippets this test asserts never reach it.
+    func testPreviewText_blankSnippet_fallsBackToNoMessages() {
+        XCTAssertEqual(ConversationRowPolicy.previewText(snippet: nil), "No messages")
+        XCTAssertEqual(ConversationRowPolicy.previewText(snippet: ""), "No messages")
+        XCTAssertEqual(ConversationRowPolicy.previewText(snippet: " \n"), "No messages")
+        XCTAssertEqual(ConversationRowPolicy.previewText(snippet: "See you then"), "See you then")
+    }
+
     private func makeParticipantInfo(
         displayNames: [String],
         photos: [ProfilePhoto],
