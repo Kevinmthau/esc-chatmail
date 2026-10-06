@@ -171,7 +171,6 @@ struct ConversationRowView: View {
                             Text(formatDate(date))
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
-                                .lineLimit(1)
                         }
 
                         Image(systemName: "chevron.right")
@@ -184,7 +183,6 @@ struct ConversationRowView: View {
                     // at accessibility text sizes "Yesterday" wrapped and only
                     // that row grew a line taller. The line limit truncates,
                     // rather than wraps, a timestamp that still does not fit.
-                    .layoutPriority(1)
                 }
 
                 // Bottom row: snippet only. Both lines are reserved so a
