@@ -45,7 +45,7 @@ final class ConversationRowLayoutTests: XCTestCase {
         )
 
         // Revert-check: dropping `reservesSpace: true` from the preview `Text` in
-        // `ConversationRowView.body` makes this fail (the one-line row is a line shorter).
+        // `ConversationRowView.body` makes this fail (68pt to the two-line row's 88pt).
         XCTAssertEqual(oneLine, twoLines, accuracy: 0.01)
     }
 
@@ -56,7 +56,7 @@ final class ConversationRowLayoutTests: XCTestCase {
         // Revert-check: passing the stored snippet straight through again
         // (`snapshot.snippet ?? "No messages"`) instead of
         // `ConversationRowPolicy.previewText(snippet:)` makes this fail: the empty `Text`
-        // reserves no preview lines, so the row collapses.
+        // does not reserve its two preview lines (64pt to 88pt).
         XCTAssertEqual(empty, oneLine, accuracy: 0.01)
     }
 
@@ -77,7 +77,7 @@ final class ConversationRowLayoutTests: XCTestCase {
         // Revert-check: removing both `.layoutPriority(1)` from the timestamp and chevron
         // stack in `ConversationRowView.body` and the timestamp's `.lineLimit(1)` makes this
         // fail: beside the long title the timestamp gets less than its width and wraps to a
-        // second line.
+        // second line (201.67pt to 163.67pt).
         // HONEST SCOPE: removing only one of the two passes. Either keeps the timestamp to
         // one line, and a height cannot tell a truncated timestamp (the line limit alone)
         // from a whole one.
