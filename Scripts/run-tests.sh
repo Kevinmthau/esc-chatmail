@@ -38,6 +38,9 @@ else
   ARGS+=("-testPlan" "esc-chatmail")
 fi
 
+# scratch revert-check: run only the row suites.
+ARGS+=("-only-testing:esc-chatmailTests/ConversationRowLayoutTests" "-only-testing:esc-chatmailTests/ConversationRowViewTests")
+
 xcodebuild test \
   -scheme "${SCHEME}" \
   -configuration "${CONFIGURATION}" \
