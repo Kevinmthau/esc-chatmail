@@ -90,7 +90,7 @@ enum ConversationRowPolicy {
     /// The row's preview line: "No messages" for a conversation without a
     /// snippet, and a blank stand-in for an empty one. The stand-in draws
     /// nothing but reserves the preview's two lines, as
-    /// `GoogleDriveSharedFileCardView.titleBlock`'s does; an empty `Text` does
+    /// `GoogleDriveSharedFileCardContent.titleBlock`'s does; an empty `Text` does
     /// not, and that row measured 64pt to a one-line preview's 88pt at the
     /// default text size. An empty snippet stays blank rather than reading as
     /// "No messages", since its conversation can still hold messages: the golden
