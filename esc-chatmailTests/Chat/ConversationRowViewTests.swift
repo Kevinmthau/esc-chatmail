@@ -208,14 +208,21 @@ final class ConversationRowViewTests: XCTestCase {
         )
     }
 
-    // Revert-check: ConversationRowPolicy.previewText(snippet:)'s
-    // MessagePreviewText.nonEmpty — reverting it to `snippet ?? "No messages"`
-    // hands the row the blank snippets this test asserts never reach it.
-    func testPreviewText_blankSnippet_fallsBackToNoMessages() {
-        XCTAssertEqual(ConversationRowPolicy.previewText(snippet: nil), "No messages")
-        XCTAssertEqual(ConversationRowPolicy.previewText(snippet: ""), "No messages")
-        XCTAssertEqual(ConversationRowPolicy.previewText(snippet: " \n"), "No messages")
-        XCTAssertEqual(ConversationRowPolicy.previewText(snippet: "See you then"), "See you then")
+    // Revert-check: ConversationSnapshot.init's MessagePreviewText.nonEmpty —
+    // storing `conversation.snippet` as is again hands the row the blank
+    // snippets this test asserts never reach it.
+    func testConversationSnapshot_blankSnippet_readsAsNil() {
+        let stack = TestCoreDataStack()
+        // ConversationSnapshot(from:) reads the conversation on this @MainActor
+        // test body, so the context must be main-queue.
+        let context = stack.makeMainQueueViewContext()
+        let empty = ConversationBuilder().withSnippet("").build(in: context)
+        let whitespace = ConversationBuilder().withSnippet(" \n").build(in: context)
+        let padded = ConversationBuilder().withSnippet(" See you then ").build(in: context)
+
+        XCTAssertNil(ConversationSnapshot(from: empty).snippet)
+        XCTAssertNil(ConversationSnapshot(from: whitespace).snippet)
+        XCTAssertEqual(ConversationSnapshot(from: padded).snippet, "See you then")
     }
 
     private func makeParticipantInfo(

@@ -171,6 +171,13 @@ struct ConversationRowView: View {
                             Text(formatDate(date))
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
+                                // One line, so the timestamp never makes its row
+                                // alone taller: beside a long title the stack can
+                                // give it less than its width, and at accessibility
+                                // text sizes "Yesterday" wrapped. It truncates there
+                                // instead. It takes no layout priority: kept whole,
+                                // it could leave a long title only an ellipsis at
+                                // the largest sizes.
                                 .lineLimit(1)
                         }
 
@@ -178,18 +185,12 @@ struct ConversationRowView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(Color(.tertiaryLabel))
                     }
-                    // The timestamp takes its width before the title, which
-                    // truncates instead, as in Messages. Beside a long title the
-                    // stack otherwise gave the timestamp less than its width, so
-                    // at accessibility text sizes "Yesterday" wrapped and only
-                    // that row grew a line taller. The line limit truncates,
-                    // rather than wraps, a timestamp that still does not fit.
-                    .layoutPriority(1)
                 }
 
                 // Bottom row: snippet only. Both lines are reserved so a
                 // one-line preview keeps the full row height, as in Messages.
-                Text(ConversationRowPolicy.previewText(snippet: snapshot.snippet))
+                // A blank stored snippet arrives as nil (`ConversationSnapshot.snippet`).
+                Text(snapshot.snippet ?? "No messages")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .lineLimit(2, reservesSpace: true)

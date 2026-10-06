@@ -86,16 +86,4 @@ enum ConversationRowPolicy {
 
         return participantInfo?.formattedDisplayName ?? storedDisplayName
     }
-
-    /// The row's preview line. A blank stored snippet reads as no snippet: the
-    /// "No messages" a rollup recompute leaves the row showing anyway, since
-    /// rollups store a blank preview as nil. One can still be stored (the RFC
-    /// 2047 header repair writes its decoded text as is, and the preview repair
-    /// skips a blank snippet no message can replace), and passed through as an
-    /// empty string it rendered an empty `Text`, which does not reserve its two
-    /// lines: that row measured 64pt to a one-line preview's 88pt at the default
-    /// text size.
-    static func previewText(snippet: String?) -> String {
-        MessagePreviewText.nonEmpty(snippet) ?? "No messages"
-    }
 }
