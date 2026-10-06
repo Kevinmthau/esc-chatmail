@@ -95,6 +95,6 @@ enum ConversationRowPolicy {
     /// empty string it rendered an empty `Text`, which reserves no lines, so
     /// that row collapsed below the two preview lines every other row keeps.
     static func previewText(snippet: String?) -> String {
-        MessagePreviewText.nonEmpty(snippet) ?? "No messages"
+        snippet ?? "No messages"
     }
 }
