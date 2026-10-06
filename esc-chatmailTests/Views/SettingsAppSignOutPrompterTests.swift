@@ -44,7 +44,7 @@ final class SettingsAppSignOutPrompterTests: XCTestCase {
     /// `presentedAlert != nil` in place of its `presentingViewController` in
     /// `SettingsAppSignOutPrompter.isConfirmationActive` makes this fail.
     func testPresentConfirmation_alertDismissedUnanswered_releasesConfirmationGate() async throws {
-        let window = try makeWindow()
+        let window = try makeTestHostWindow()
         let root = UIViewController()
         window.rootViewController = root
         window.makeKeyAndVisible()
@@ -73,14 +73,6 @@ final class SettingsAppSignOutPrompterTests: XCTestCase {
     }
 
     // MARK: - Helpers
-
-    private func makeWindow() throws -> UIWindow {
-        let scene = try XCTUnwrap(
-            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first,
-            "the hosted test app has a window scene"
-        )
-        return UIWindow(windowScene: scene)
-    }
 
     private func waitUntil(
         timeout: TimeInterval = 5.0,

@@ -52,6 +52,37 @@ struct ConversationRowView: View {
         self.conversationContext = conversationContext
     }
 
+    /// Row spacing matched to Messages (iOS 26), measured side by side at the
+    /// same text size. The text column's padding sets the row height instead of
+    /// a fixed frame, so rows grow with Dynamic Type as Messages' do; the old
+    /// fixed 88pt row left its text almost no room at larger text sizes. The
+    /// bottom padding is deeper than the top because the title's line box holds
+    /// more room above its ascenders than the last preview line holds below its
+    /// descenders; 11 over 14.5 spaces the visible text evenly between
+    /// separators, as in Messages. The padding is on the text column, not the
+    /// row, so the avatar and unread dot stay centered on the full row height.
+    private static let textColumnTopPadding: CGFloat = 11
+    private static let textColumnBottomPadding: CGFloat = 14.5
+    private static let titleToPreviewSpacing: CGFloat = 4
+    private static let rowLeadingPadding: CGFloat = 8
+    private static let unreadIndicatorToAvatarSpacing: CGFloat = 9
+    private static let avatarToTextSpacing: CGFloat = 12
+    private static let rowTrailingPadding: CGFloat = 20
+    private static let timestampToChevronSpacing: CGFloat = 12
+
+    /// The text column's leading edge, where the row's separator starts, as in
+    /// Messages. By default a List separator starts at the row's first `Text`,
+    /// which is the initials monogram of an avatar without a photo, so those rows'
+    /// separators ran in under the avatar. The row's root reads this guide into
+    /// `listRowSeparatorLeading`, which overrides anything the avatar contributes.
+    private enum TextColumnLeadingAlignmentID: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat {
+            context[HorizontalAlignment.leading]
+        }
+    }
+
+    private static let textColumnLeading = HorizontalAlignment(TextColumnLeadingAlignmentID.self)
+
     var body: some View {
         // Bind participant data once per body evaluation. The previous per-call-site
         // computed properties repeated the rollup-cache lookups and key builds for every
@@ -96,27 +127,29 @@ struct ConversationRowView: View {
             cachedFull: cachedFull,
             infoKey: infoKey
         ) ? infoKey : nil
-        let rowContent = HStack(spacing: 12) {
-            // Unread indicator with fixed width container
-            ZStack {
-                if snapshot.inboxUnreadCount > 0 {
-                    Circle()
-                        .fill(Color.blue)
-                        .frame(width: 10, height: 10)
+        let rowContent = HStack(spacing: Self.avatarToTextSpacing) {
+            HStack(spacing: Self.unreadIndicatorToAvatarSpacing) {
+                // Unread indicator with fixed width container
+                ZStack {
+                    if snapshot.inboxUnreadCount > 0 {
+                        Circle()
+                            .fill(Color.blue)
+                            .frame(width: 10, height: 10)
+                    }
                 }
+                .frame(width: 10, height: 10)
+
+                // Avatar stack
+                AvatarStackView(
+                    alignedAvatarPhotos: avatarPhotos,
+                    participants: participantNames,
+                    showsGroupAvatar: showsGroupAvatar,
+                    fallbackDisplayText: fallbackName
+                )
+                    .frame(width: 44, height: 44)
             }
-            .frame(width: 10, height: 10)
 
-            // Avatar stack
-            AvatarStackView(
-                alignedAvatarPhotos: avatarPhotos,
-                participants: participantNames,
-                showsGroupAvatar: showsGroupAvatar,
-                fallbackDisplayText: fallbackName
-            )
-                .frame(width: 44, height: 44)
-
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Self.titleToPreviewSpacing) {
                 // Top row: Name, date, and chevron
                 HStack {
                     HStack(spacing: 4) {
@@ -133,11 +166,19 @@ struct ConversationRowView: View {
 
                     Spacer()
 
-                    HStack(spacing: 4) {
+                    HStack(spacing: Self.timestampToChevronSpacing) {
                         if let date = snapshot.lastMessageDate {
                             Text(formatDate(date))
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
+                                // One line, so the timestamp never makes its row
+                                // alone taller: beside a long title the stack can
+                                // give it less than its width, and at accessibility
+                                // text sizes "Yesterday" wrapped. It truncates there
+                                // instead. It takes no layout priority: kept whole,
+                                // it could leave a long title only an ellipsis at
+                                // the largest sizes.
+                                .lineLimit(1)
                         }
 
                         Image(systemName: "chevron.right")
@@ -146,15 +187,20 @@ struct ConversationRowView: View {
                     }
                 }
 
-                // Bottom row: snippet only
-                Text(snapshot.snippet ?? "No messages")
+                // Bottom row: snippet only. Both lines are reserved so a
+                // one-line preview keeps the full row height, as in Messages.
+                Text(ConversationRowPolicy.previewText(snippet: snapshot.snippet))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(2, reservesSpace: true)
             }
+            .padding(.top, Self.textColumnTopPadding)
+            .padding(.bottom, Self.textColumnBottomPadding)
+            .alignmentGuide(Self.textColumnLeading) { $0[.leading] }
         }
-        .frame(height: 88)
-        .padding(.horizontal, 12)
+        .padding(.leading, Self.rowLeadingPadding)
+        .padding(.trailing, Self.rowTrailingPadding)
+        .alignmentGuide(.listRowSeparatorLeading) { $0[Self.textColumnLeading] }
 
         rowContent
             .task(id: participantLoadKey) {

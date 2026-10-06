@@ -81,27 +81,13 @@ final class GoogleDriveSharedFileCardContentTests: XCTestCase {
         metadata: GoogleDriveSharedFileMetadata?,
         isLoadingMetadata: Bool
     ) throws -> UIHostingController<GoogleDriveSharedFileCardContent> {
-        let scene = try XCTUnwrap(
-            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first,
-            "The test host app has no window scene to mount the card in"
-        )
-        let host = UIHostingController(
-            rootView: GoogleDriveSharedFileCardContent(
+        try mountInTestWindow(
+            GoogleDriveSharedFileCardContent(
                 link: link,
                 metadata: metadata,
                 isLoadingMetadata: isLoadingMetadata
             )
         )
-        // The window's safe area is not part of the card.
-        host.safeAreaRegions = []
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
-        window.isHidden = false
-        addTeardownBlock { @MainActor in
-            window.isHidden = true
-        }
-        host.view.layoutIfNeeded()
-        return host
     }
 
     /// Moves the mounted card to the resolved state, as the metadata load does.
