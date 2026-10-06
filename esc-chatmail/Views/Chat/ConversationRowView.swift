@@ -171,7 +171,6 @@ struct ConversationRowView: View {
                             Text(formatDate(date))
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
-                                .lineLimit(1)
                         }
 
                         Image(systemName: "chevron.right")
