@@ -192,7 +192,7 @@ struct ConversationRowView: View {
                 Text(ConversationRowPolicy.previewText(snippet: snapshot.snippet))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                    .lineLimit(2, reservesSpace: true)
+                    .lineLimit(2)
             }
             .padding(.top, Self.textColumnTopPadding)
             .padding(.bottom, Self.textColumnBottomPadding)
