@@ -8,14 +8,6 @@ struct ConversationSnapshot: Equatable {
     let objectID: NSManagedObjectID
     let inboxUnreadCount: Int32
     let pinned: Bool
-    /// The stored snippet, trimmed, or nil when blank, so the row shows a blank
-    /// one as it shows a missing one ("No messages"), as a rollup recompute
-    /// would leave it: rollups store a blank preview as nil. A blank one can
-    /// still be stored (the RFC 2047 header repair writes its decoded text as
-    /// is, and the preview repair skips a blank snippet no message can replace).
-    /// Passed through, it rendered an empty `Text`, which does not reserve the
-    /// preview's two lines: that row measured 64pt to a one-line preview's 88pt
-    /// at the default text size.
     let snippet: String?
     let lastMessageDate: Date?
     let displayNameHint: String?
@@ -36,7 +28,7 @@ struct ConversationSnapshot: Equatable {
         self.objectID = conversation.objectID
         self.inboxUnreadCount = conversation.inboxUnreadCount
         self.pinned = conversation.pinned
-        self.snippet = MessagePreviewText.nonEmpty(conversation.snippet)
+        self.snippet = conversation.snippet
         self.lastMessageDate = conversation.lastMessageDate
         self.displayNameHint = conversation.displayName
         self.participantHash = conversation.participantHash

@@ -189,8 +189,7 @@ struct ConversationRowView: View {
 
                 // Bottom row: snippet only. Both lines are reserved so a
                 // one-line preview keeps the full row height, as in Messages.
-                // A blank stored snippet arrives as nil (`ConversationSnapshot.snippet`).
-                Text(snapshot.snippet ?? "No messages")
+                Text(ConversationRowPolicy.previewText(snippet: snapshot.snippet))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .lineLimit(2, reservesSpace: true)

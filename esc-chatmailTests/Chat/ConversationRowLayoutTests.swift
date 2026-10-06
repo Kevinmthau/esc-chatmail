@@ -12,10 +12,11 @@ import XCTest
 ///
 /// HONEST SCOPE: these mount `ConversationRowView` on its own, not in the conversation list's
 /// `List`, and for a mailing-list conversation, which loads no participants, so nothing async
-/// re-renders the row after mount. Participant loading changes only the title text and the
-/// avatar, which sits in a fixed 44pt frame, so it cannot change a row's height on its own.
-/// Every fixture is Latin text: a line set in a fallback font with taller lines (emoji, Thai,
-/// Devanagari) can still make its row taller, since the row sizes to its text.
+/// re-renders the row after mount. Participant loading changes only the avatar, which sits in
+/// a fixed 44pt frame, and the title's text, which stays one line. Every fixture is Latin text:
+/// a line set in a fallback font with taller lines (emoji, CJK, Thai, Devanagari) can still
+/// make its row taller, since the row sizes to its text, including a loaded title that brings
+/// such a character.
 @MainActor
 final class ConversationRowLayoutTests: XCTestCase {
     /// iPhone 17 Pro's width. The list gives the row its full width (zero row insets).
@@ -56,10 +57,9 @@ final class ConversationRowLayoutTests: XCTestCase {
         let oneLine = try rowHeight()
         let empty = try rowHeight(snippet: "")
 
-        // Revert-check: storing `conversation.snippet` as is again in
-        // `ConversationSnapshot.init`, instead of through `MessagePreviewText.nonEmpty`,
-        // makes this fail: the empty `Text` does not reserve its two preview lines
-        // (64pt to 88pt).
+        // Revert-check: dropping the blank stand-in from
+        // `ConversationRowPolicy.previewText(snippet:)` (`snippet ?? "No messages"`) makes
+        // this fail: the empty `Text` does not reserve its two preview lines (64pt to 88pt).
         XCTAssertEqual(empty, oneLine, accuracy: 0.01)
     }
 
