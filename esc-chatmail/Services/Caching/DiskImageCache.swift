@@ -5,7 +5,7 @@ import UIKit
 /// Persistent disk cache for remote images (Google People API photos, etc.)
 /// Survives app restarts, reducing network requests significantly.
 actor DiskImageCache: PeriodicCleanupHandler {
-    static let shared = DiskImageCache()
+    static let shared = DiskImageCache(startsPeriodicCleanup: true)
 
     private nonisolated let cacheDirectory: URL
     private let fileManager = FileManager.default
@@ -24,8 +24,13 @@ actor DiskImageCache: PeriodicCleanupHandler {
     private let cleanupTask = PeriodicCleanupTask()
 
     /// The directory and cleanup parameters are testing seams; production code
-    /// uses `shared`, which owns `Caches/ImageCache` and sweeps it hourly.
-    init(cacheDirectory: URL? = nil, startsPeriodicCleanup: Bool = true) {
+    /// uses `shared`, which owns `Caches/ImageCache` and opts into the hourly
+    /// sweep. The sweep is opt-in, not the default, because `PeriodicCleanupTask`
+    /// retains its handler for the life of a task nothing cancels, and its
+    /// immediate first pass would race a test still writing fixtures into the
+    /// injected directory (the test's own `performCleanup()` then returns early
+    /// on `isCleaningUp`).
+    init(cacheDirectory: URL? = nil, startsPeriodicCleanup: Bool = false) {
         if let cacheDirectory {
             self.cacheDirectory = cacheDirectory
         } else {
