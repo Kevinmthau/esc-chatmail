@@ -5,6 +5,9 @@ import UIKit
 /// Persistent disk cache for remote images (Google People API photos, etc.)
 /// Survives app restarts, reducing network requests significantly.
 actor DiskImageCache: PeriodicCleanupHandler {
+    /// The production cache: owns `Caches/ImageCache` and sweeps it hourly.
+    /// The `true` here is what keeps that directory bounded across relaunches
+    /// (see `init`); nothing else schedules the sweep.
     static let shared = DiskImageCache(startsPeriodicCleanup: true)
 
     private nonisolated let cacheDirectory: URL
@@ -23,14 +26,17 @@ actor DiskImageCache: PeriodicCleanupHandler {
     /// Periodic cleanup task helper
     private let cleanupTask = PeriodicCleanupTask()
 
-    /// The directory and cleanup parameters are testing seams; production code
-    /// uses `shared`, which owns `Caches/ImageCache` and opts into the hourly
-    /// sweep. The sweep is opt-in, not the default, because `PeriodicCleanupTask`
-    /// retains its handler for the life of a task nothing cancels, and its
-    /// immediate first pass would race a test still writing fixtures into the
-    /// injected directory (the test's own `performCleanup()` then returns early
-    /// on `isCleaningUp`).
-    init(cacheDirectory: URL? = nil, startsPeriodicCleanup: Bool = false) {
+    /// The directory and the sweep flag are testing seams; production code
+    /// uses `shared`. The flag has no default because neither value is safe
+    /// to assume. On, an injected instance is retained for the life of a task
+    /// nothing cancels (`PeriodicCleanupTask` captures its handler) and its
+    /// immediate first pass races a test still writing fixtures into the
+    /// directory, whose own `performCleanup()` then returns early on
+    /// `isCleaningUp`. Off, a production instance silently stops bounding its
+    /// directory: `save()`'s size check fires only on an estimate that restarts
+    /// at zero every launch, so without the hourly sweep the directory grows
+    /// without limit across relaunches.
+    init(cacheDirectory: URL? = nil, startsPeriodicCleanup: Bool) {
         if let cacheDirectory {
             self.cacheDirectory = cacheDirectory
         } else {

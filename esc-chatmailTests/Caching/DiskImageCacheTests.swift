@@ -84,6 +84,31 @@ final class DiskImageCacheTests: XCTestCase {
         XCTAssertEqual(current, bytes)
     }
 
+    /// Opting into the periodic sweep runs its first pass at once, with no
+    /// explicit `performCleanup()` call; `shared` relies on this to bound
+    /// `Caches/ImageCache` across relaunches. The sweep's task retains the
+    /// instance for the rest of the process, which is why the other tests opt
+    /// out.
+    ///
+    /// Revert-check: fails if `init` stops starting `cleanupTask` when
+    /// `startsPeriodicCleanup` is true, or starts it without `runImmediately`.
+    ///
+    /// HONEST SCOPE: this pins the flag's wiring on an injected directory, not
+    /// that `shared` passes `true`. That literal is documented at its
+    /// declaration; the shared instance sweeps the real cache directory, so no
+    /// test constructs it.
+    func testInit_startsPeriodicCleanupTrue_sweepsTheDirectoryWithoutAnExplicitCall() async throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacyFile = directory.appendingPathComponent(
+            legacyFilename(for: "https://cdn.example.com/newsletters/2026/10/images/story-a.jpg")
+        )
+        try Data("legacy".utf8).write(to: legacyFile)
+
+        _ = DiskImageCache(cacheDirectory: directory, startsPeriodicCleanup: true)
+
+        await waitUntil { !FileManager.default.fileExists(atPath: legacyFile.path) }
+    }
+
     /// The name the retired scheme produced: the URL's base64, filesystem-safe,
     /// cut to 64 characters.
     private func legacyFilename(for url: String) -> String {
@@ -92,5 +117,23 @@ final class DiskImageCacheTests: XCTestCase {
             .replacingOccurrences(of: "+", with: "-")
             .prefix(64)
         return "\(stem).cache"
+    }
+
+    /// Copied shape from ContactsAuthorizationCoordinatorTests, minus the
+    /// main-actor condition: this suite polls the filesystem. The sweep lands
+    /// within milliseconds; the deadline is a generous bound, not a pace.
+    private func waitUntil(
+        timeout: TimeInterval = 10.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        condition: @escaping @Sendable () -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }
