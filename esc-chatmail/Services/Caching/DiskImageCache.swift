@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -22,14 +23,22 @@ actor DiskImageCache: PeriodicCleanupHandler {
     /// Periodic cleanup task helper
     private let cleanupTask = PeriodicCleanupTask()
 
-    private init() {
-        let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        self.cacheDirectory = cachesPath.appendingPathComponent("ImageCache")
-        Self.createDirectoryIfNeeded(at: cacheDirectory)
+    /// The directory and cleanup parameters are testing seams; production code
+    /// uses `shared`, which owns `Caches/ImageCache` and sweeps it hourly.
+    init(cacheDirectory: URL? = nil, startsPeriodicCleanup: Bool = true) {
+        if let cacheDirectory {
+            self.cacheDirectory = cacheDirectory
+        } else {
+            let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+                ?? FileManager.default.temporaryDirectory
+            self.cacheDirectory = cachesPath.appendingPathComponent("ImageCache")
+        }
+        Self.createDirectoryIfNeeded(at: self.cacheDirectory)
 
-        // Start periodic cleanup in a separate task to comply with Swift 6 actor init rules
-        Task { self.cleanupTask.start(handler: self, interval: .hours(1), runImmediately: true) }
+        if startsPeriodicCleanup {
+            // Start periodic cleanup in a separate task to comply with Swift 6 actor init rules
+            Task { self.cleanupTask.start(handler: self, interval: .hours(1), runImmediately: true) }
+        }
     }
 
     // MARK: - PeriodicCleanupHandler
@@ -148,14 +157,39 @@ actor DiskImageCache: PeriodicCleanupHandler {
         return totalSize
     }
 
+    // MARK: - Filenames
+
+    private static let cacheFileExtension = ".cache"
+
+    /// CANONICAL mapping from an image URL to its cache filename: the SHA-256
+    /// digest of the whole URL, so distinct URLs never share a file and the
+    /// name is the same across launches. The scheme it replaced was the URL's
+    /// base64 cut to 64 characters, which is only its first 48 bytes: every
+    /// image behind one CDN path (a newsletter's entire image set) collapsed
+    /// onto a single file, and once the memory tier no longer held them the
+    /// first picture fetched was served for all of them — two different
+    /// newsletters showing the same hero card. `isCurrentCacheFilename`
+    /// recognizes this scheme so the sweep can drop the legacy files.
+    static func cacheFilename(for urlString: String) -> String {
+        let digest = SHA256.hash(data: Data(urlString.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return "\(hex)\(cacheFileExtension)"
+    }
+
+    /// True for a name `cacheFilename(for:)` can produce: 64 lowercase hex
+    /// characters plus the cache extension. A legacy base64 name always carries
+    /// an uppercase letter (every URL scheme encodes to one within its first
+    /// characters), so none is mistaken for a current entry.
+    static func isCurrentCacheFilename(_ filename: String) -> Bool {
+        guard filename.hasSuffix(cacheFileExtension) else { return false }
+        let stem = filename.dropLast(cacheFileExtension.count)
+        return stem.count == 64 && stem.allSatisfy { $0.isASCII && $0.isHexDigit && !$0.isUppercase }
+    }
+
     // MARK: - Private Helpers
 
     private func cacheFileURL(for urlString: String) -> URL {
-        let hash = urlString.data(using: .utf8)?.base64EncodedString()
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "+", with: "-")
-            .prefix(64) ?? "unknown"
-        return cacheDirectory.appendingPathComponent("\(hash).cache")
+        cacheDirectory.appendingPathComponent(Self.cacheFilename(for: urlString))
     }
 
     private func cleanExpiredEntries() async {
@@ -183,6 +217,14 @@ actor DiskImageCache: PeriodicCleanupHandler {
         var fileInfos: [(url: URL, date: Date, size: Int64)] = []
 
         while let fileURL = enumerator.nextObject() as? URL {
+            // A legacy base64-named entry (see `cacheFilename(for:)`) is never
+            // read again, so reclaim it now instead of after its 7-day age-out;
+            // it may hold the wrong picture for every URL that shared its prefix.
+            guard Self.isCurrentCacheFilename(fileURL.lastPathComponent) else {
+                filesToDelete.append(fileURL)
+                continue
+            }
+
             guard let values = try? fileURL.resourceValues(forKeys: [.contentAccessDateKey, .contentModificationDateKey, .fileSizeKey]),
                   let fileSize = values.fileSize else {
                 continue
