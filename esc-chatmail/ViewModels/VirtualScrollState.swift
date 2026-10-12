@@ -204,6 +204,16 @@ final class VirtualScrollState: ObservableObject {
     /// publication, so a row the lazy stack re-creates after scrolling away
     /// and back does not animate in again.
     var localSendAppendedMessageIDs: Set<NSManagedObjectID> = []
+    /// Object IDs of window rows whose views are in the transcript hierarchy
+    /// (`markRowRealized`, from each row's `onAppear`). The hidden anchor
+    /// pass reads `isNewestVisibleRowRealized` from it: anchor geometry that
+    /// reads correct over a lazy stack that left the tail unrealized was the
+    /// blank open (`ChatTranscriptRealizationPolicy`). Pruned to the window on
+    /// every publish (`setMessageWindow`), not cleared: a row that stays in
+    /// the window keeps its view, and `onAppear` fires once per view.
+    /// Cleared by `cleanup()`, after which the rows remount. Not published;
+    /// a row's `onAppear` must not re-render the transcript.
+    var realizedRowObjectIDs: Set<NSManagedObjectID> = []
     private var followsLatestInsertions = true
     var followIntentRevision: UInt = 0
     /// While the coordinator's initial bottom-anchor pass is still positioning
@@ -319,6 +329,21 @@ final class VirtualScrollState: ObservableObject {
         scrollPosition = index
         updateVisibleMessages()
         preloadIfNeeded()
+    }
+
+    /// Records that the row's view entered the transcript hierarchy. Called
+    /// from each row's `onAppear`, including during the hidden anchor pass,
+    /// which `markIndexVisible` ignores; realization is not a position.
+    func markRowRealized(_ objectID: NSManagedObjectID) {
+        realizedRowObjectIDs.insert(objectID)
+    }
+
+    /// Whether the newest displayed row's view is in the hierarchy. False
+    /// with no rows, and false for a newest row that was published but not
+    /// realized by the lazy stack (`ChatTranscriptRealizationPolicy`).
+    var isNewestVisibleRowRealized: Bool {
+        guard let newestRow = visibleMessages.last else { return false }
+        return realizedRowObjectIDs.contains(newestRow.objectID)
     }
 
     /// Holds `markIndexVisible` for `duration` while the view animates a
@@ -557,6 +582,7 @@ final class VirtualScrollState: ObservableObject {
         isProgrammaticScrollHoldActive = false
         heldVisibleIndex = nil
         deferredLeadingReplayIndex = nil
+        realizedRowObjectIDs.removeAll()
         windowLoadLifecycle = .idle
         needsDatasetReconciliationAfterCurrentLoad = false
         needsUnclassifiedRefreshCountReconciliation = false

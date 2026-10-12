@@ -5970,7 +5970,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             let geometryCheckID = coordinator.initialAnchorGeometryCheckID
             coordinator.handleBottomAnchorGeometryUpdate(
                 isBottomAnchorVisible: false,
-                hasBottomAnchorGeometry: false
+                hasBottomAnchorGeometry: false,
+                isNewestRowRealized: true
             ) { step in
                 anchorSteps.append(step)
             }
@@ -6569,7 +6570,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             let geometryCheckID = coordinator.initialAnchorGeometryCheckID
             coordinator.handleBottomAnchorGeometryUpdate(
                 isBottomAnchorVisible: false,
-                hasBottomAnchorGeometry: false
+                hasBottomAnchorGeometry: false,
+                isNewestRowRealized: true
             ) { step in
                 anchorSteps.append(step)
             }
@@ -6585,7 +6587,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         currentTime = 1_003.2
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: false,
-            hasBottomAnchorGeometry: false
+            hasBottomAnchorGeometry: false,
+            isNewestRowRealized: true
         ) { _ in
             XCTFail("The wall-clock fallback reveal must not issue an initial scroll")
         }
@@ -7173,6 +7176,251 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                 )
             ]
         )
+    }
+
+    // MARK: - Tail realization (ChatTranscriptRealizationPolicy)
+
+    private static let realizationNudgeStep = ChatMessagesCoordinator.BottomAnchorStep(
+        delay: 0,
+        animated: false,
+        logMessage: "ChatView initial layout nudge -> second-newest row",
+        kind: .realizationNudge
+    )
+    private static let realizationNudgeReturnStep = ChatMessagesCoordinator.BottomAnchorStep(
+        delay: 0,
+        animated: false,
+        logMessage: "ChatView realization nudge return -> bottom anchor"
+    )
+
+    /// The anchor reads at the content end on the validating sample, but the
+    /// newest row's view is not in the hierarchy (the lazy stack released it,
+    /// or a republish made an unrealized row the newest, after the
+    /// confirmation sample): confirming would reveal a blank transcript. The
+    /// pass nudges the offset for real, scrolls back to the anchor a frame
+    /// later, and re-confirms once the row is realized.
+    ///
+    /// Revert-check: dropping the `isNewestRowRealized` condition from the
+    /// `.validatingVisibility` branch of
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` reveals on
+    /// the second sample with no step.
+    func testInitialReveal_newestRowUnrealizedAtValidation_nudgesInsteadOfRevealing() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        appear(coordinator, rows: rows) { anchorSteps.append($0) }
+
+        var geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        reportParkedTestGeometry(coordinator, contentMinY: Self.contentEndMinY) {
+            anchorSteps.append($0)
+        }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertTrue(anchorSteps.isEmpty)
+
+        geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        reportParkedTestGeometry(
+            coordinator,
+            isNewestRowRealized: false,
+            contentMinY: Self.contentEndMinY
+        ) {
+            anchorSteps.append($0)
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertEqual(anchorSteps, [Self.realizationNudgeStep])
+
+        // The return scroll follows a frame later, then the re-probe.
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        XCTAssertEqual(
+            anchorSteps,
+            [Self.realizationNudgeStep, Self.realizationNudgeReturnStep]
+        )
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        // With the newest row realized at the content end, the pass confirms.
+        await confirmInitialBottomAnchor(
+            coordinator,
+            contentMinY: Self.contentEndMinY,
+            contentHeight: Self.parkedTestContentHeight,
+            viewportHeight: Self.parkedTestViewportHeight
+        )
+        XCTAssertEqual(anchorSteps.count, 2)
+    }
+
+    /// The anchor stays at the content end through the confirmation delay,
+    /// but the newest row's view never enters the hierarchy: the wake-up
+    /// nudges instead of validating, and the pass confirms once the row is
+    /// realized.
+    ///
+    /// Revert-check: dropping the `isTrackedNewestRowRealized` guard from the
+    /// wake-up in `ChatMessagesCoordinator.beginInitialVisibilityConfirmation`
+    /// validates and reveals on the next sample without a step.
+    func testInitialReveal_newestRowUnrealizedThroughConfirmation_nudgesInsteadOfValidating() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        appear(coordinator, rows: rows) { anchorSteps.append($0) }
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        reportParkedTestGeometry(
+            coordinator,
+            isNewestRowRealized: false,
+            contentMinY: Self.contentEndMinY
+        ) {
+            anchorSteps.append($0)
+        }
+        // The confirmation wakes (the injected sleep returns at once), finds
+        // the tail unrealized, nudges, returns, and schedules the re-probe.
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [Self.realizationNudgeStep, Self.realizationNudgeReturnStep]
+        )
+
+        await confirmInitialBottomAnchor(
+            coordinator,
+            contentMinY: Self.contentEndMinY,
+            contentHeight: Self.parkedTestContentHeight,
+            viewportHeight: Self.parkedTestViewportHeight
+        )
+        XCTAssertEqual(anchorSteps.count, 2)
+    }
+
+    /// A probe for a trailing anchor that has never laid out is a nudge while
+    /// the newest row is unrealized: scrolling to the pinned end would move
+    /// nothing. The budget stays untouched, as for every never-laid-out probe.
+    ///
+    /// Revert-check: `ChatTranscriptRealizationPolicy.probeKind(isNewestRowRealized:)`
+    /// returning `.bottomAnchor` for an unrealized row makes every first step
+    /// the plain bottom-anchor scroll.
+    func testInitialAnchor_anchorNeverLaidOutWithNewestRowUnrealized_probesWithNudge() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        appear(coordinator, rows: rows) { anchorSteps.append($0) }
+
+        for probe in 0..<3 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false,
+                hasBottomAnchorGeometry: false,
+                isNewestRowRealized: false
+            ) { anchorSteps.append($0) }
+            XCTAssertEqual(anchorSteps.dropFirst(2 * probe).first, Self.realizationNudgeStep)
+            XCTAssertFalse(
+                coordinator.isReadyToShow,
+                "Never-laid-out probes must not consume the retry budget (probe \(probe))"
+            )
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+            XCTAssertEqual(anchorSteps.count, 2 * (probe + 1))
+            XCTAssertEqual(
+                anchorSteps.dropFirst(2 * probe + 1).first,
+                Self.realizationNudgeReturnStep
+            )
+        }
+
+        // Once the tail is realized at the content end, the pass confirms.
+        await confirmInitialBottomAnchor(
+            coordinator,
+            contentMinY: Self.contentEndMinY,
+            contentHeight: Self.parkedTestContentHeight,
+            viewportHeight: Self.parkedTestViewportHeight
+        )
+        XCTAssertEqual(anchorSteps.count, 6)
+    }
+
+    /// A pass issues at most three nudges. Growth resets the retry budget
+    /// and a nudge's own re-estimation can read as growth, so without the cap
+    /// a tail that never reports realized would nudge until the time limit;
+    /// past it the probes are the plain bottom-anchor scroll and the budget
+    /// ends the pass as before.
+    ///
+    /// Revert-check: `ChatMessagesCoordinator.maximumRealizationNudgesPerInitialPass`
+    /// and the downgrade at the top of `continueInitialPass`; without them the
+    /// fourth probe is a nudge with a return step.
+    func testInitialAnchor_realizationNudges_areCappedPerPass() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        appear(coordinator, rows: rows) { anchorSteps.append($0) }
+
+        for _ in 0..<3 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(
+                isBottomAnchorVisible: false,
+                hasBottomAnchorGeometry: false,
+                isNewestRowRealized: false
+            ) { anchorSteps.append($0) }
+            await waitUntil {
+                coordinator.initialAnchorGeometryCheckID != geometryCheckID
+            }
+        }
+        XCTAssertEqual(anchorSteps.count, 6)
+        XCTAssertEqual(anchorSteps.filter { $0.kind == .realizationNudge }.count, 3)
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            hasBottomAnchorGeometry: false,
+            isNewestRowRealized: false
+        ) { anchorSteps.append($0) }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        XCTAssertEqual(anchorSteps.count, 7)
+        XCTAssertEqual(
+            anchorSteps.last,
+            .init(
+                delay: 0,
+                animated: false,
+                logMessage: "ChatView initial layout scroll -> bottom anchor"
+            )
+        )
+        XCTAssertFalse(coordinator.isReadyToShow)
+    }
+
+    /// An offscreen anchor with the newest row in the hierarchy is the growth
+    /// case (bubbles above pushed the anchor off) and keeps the plain
+    /// bottom-anchor scroll, which lands on the realized anchor; no return
+    /// step follows it.
+    ///
+    /// Revert-check: routing every probe through `.realizationNudge` in
+    /// `ChatMessagesCoordinator.continueInitialPass` (or
+    /// `ChatTranscriptRealizationPolicy.probeKind` returning it for a
+    /// realized row) changes the step and adds the return scroll.
+    func testInitialAnchor_anchorOffscreenWithNewestRowRealized_keepsBottomAnchorProbe() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        appear(coordinator, rows: rows) { anchorSteps.append($0) }
+
+        let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        reportParkedTestGeometry(
+            coordinator,
+            isBottomAnchorVisible: false,
+            isNewestRowRealized: true,
+            contentMinY: Self.contentEndMinY
+        ) {
+            anchorSteps.append($0)
+        }
+        await waitUntil {
+            coordinator.initialAnchorGeometryCheckID != geometryCheckID
+        }
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout scroll -> bottom anchor"
+                )
+            ]
+        )
+        XCTAssertEqual(anchorSteps.first?.kind, .bottomAnchor)
     }
 
     /// A revealed transcript that ends up parked past its content end is
@@ -7866,12 +8114,14 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     private func reportParkedTestGeometry(
         _ coordinator: ChatMessagesCoordinator,
         isBottomAnchorVisible: Bool = true,
+        isNewestRowRealized: Bool = true,
         isUserScrollInteractionActive: Bool = false,
         contentMinY: CGFloat,
         scrollAction: @escaping ChatMessagesCoordinator.BottomAnchorAction
     ) {
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: isBottomAnchorVisible,
+            isNewestRowRealized: isNewestRowRealized,
             isUserScrollInteractionActive: isUserScrollInteractionActive,
             contentMinY: contentMinY,
             contentHeight: Self.parkedTestContentHeight,
@@ -8158,8 +8408,13 @@ private actor WatchdogWaitRecorder {
 /// frame must not charge the initial retry budget), while the vast majority
 /// of coordinator tests model a laid-out anchor.
 private extension ChatMessagesCoordinator {
+    /// `isNewestRowRealized` defaults to true for the same reason: production
+    /// callers pass the view's realization evidence explicitly, while the
+    /// vast majority of coordinator tests model a tail the lazy stack has
+    /// realized (the state every test predating the evidence assumed).
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
+        isNewestRowRealized: Bool = true,
         isUserScrollInteractionActive: Bool = false,
         contentMinY: CGFloat? = nil,
         contentHeight: CGFloat? = nil,
@@ -8169,6 +8424,7 @@ private extension ChatMessagesCoordinator {
         handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: isBottomAnchorVisible,
             hasBottomAnchorGeometry: true,
+            isNewestRowRealized: isNewestRowRealized,
             isUserScrollInteractionActive: isUserScrollInteractionActive,
             contentMinY: contentMinY,
             contentHeight: contentHeight,

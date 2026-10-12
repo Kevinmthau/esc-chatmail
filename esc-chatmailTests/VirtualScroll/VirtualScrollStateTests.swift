@@ -1225,6 +1225,70 @@ final class VirtualScrollStateTests: XCTestCase {
         await waitUntilArrivedPageLoads(arrivedDuringHold + 1, in: gates)
     }
 
+    func testMarkRowRealized_newestVisibleRowRealizedFollowsWindowPublishes() async throws {
+        // Revert-check: VirtualScrollState.realizedRowObjectIDs, its
+        // `markRowRealized` writer and the prune in `setMessageWindow`. The
+        // hidden anchor pass confirms a reveal only with the newest row's
+        // view in the hierarchy (`ChatTranscriptRealizationPolicy`); a set
+        // that reads realized for a row the lazy stack never placed, or that
+        // keeps rows a publish dropped, lets it confirm a blank transcript.
+        let (conversation, messages) = try makeConversationWithMessages(count: 6)
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: VirtualScrollConfiguration(
+                visibleItemCount: 3,
+                bufferSize: 1,
+                pageSize: 3,
+                preloadThreshold: 1
+            ),
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.isInitialLoadComplete && state.visibleMessages.count == 3
+        }
+        let newestRow = try XCTUnwrap(state.visibleMessages.last)
+        XCTAssertEqual(newestRow.objectID, messages[5].objectID)
+        XCTAssertFalse(
+            state.isNewestVisibleRowRealized,
+            "A published row is not realized until its view appears"
+        )
+
+        // An older row's view appearing says nothing about the newest.
+        state.markRowRealized(messages[3].objectID)
+        XCTAssertFalse(state.isNewestVisibleRowRealized)
+
+        state.markRowRealized(newestRow.objectID)
+        XCTAssertTrue(state.isNewestVisibleRowRealized)
+
+        // A publish that keeps the row keeps its realization (its view
+        // persists and `onAppear` will not fire again)...
+        let window = try XCTUnwrap(state.messageWindow)
+        state.setMessageWindow(window)
+        XCTAssertTrue(state.isNewestVisibleRowRealized)
+
+        // ...and one that drops it forgets it, so a row that comes back is
+        // realized only when its new view appears.
+        state.setMessageWindow(
+            MessageWindow(
+                startIndex: window.startIndex,
+                endIndex: window.endIndex - 1,
+                messageIDs: Array(window.messageIDs.dropLast()),
+                isLoading: false
+            )
+        )
+        XCTAssertFalse(state.realizedRowObjectIDs.contains(newestRow.objectID))
+        XCTAssertTrue(state.realizedRowObjectIDs.contains(messages[3].objectID))
+
+        // Disappearing tears the views down; the set goes with them.
+        state.cleanup()
+        XCTAssertTrue(state.realizedRowObjectIDs.isEmpty)
+    }
+
     func testInitialPublish_afterOwnerCancelledUnresolved_rescuesThePhase() async throws {
         // Revert-check: the `windowLoadLifecycle == .idle && !isInitialLoadComplete`
         // rescue arm of publishInitialWindow's ownsInitialPublish predicate

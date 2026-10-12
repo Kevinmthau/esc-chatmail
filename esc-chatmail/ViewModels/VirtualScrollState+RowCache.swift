@@ -11,6 +11,9 @@ extension VirtualScrollState {
 
         let allowedIDs = Set(window.messageIDs)
         resolvedRowsByID = resolvedRowsByID.filter { allowedIDs.contains($0.key) }
+        // Rows that stay in the window keep their views (and their recorded
+        // realization); rows that leave it would remount if they came back.
+        realizedRowObjectIDs = realizedRowObjectIDs.intersection(allowedIDs)
     }
 
     func invalidateCachedRows(for objectIDs: Set<NSManagedObjectID>) {

@@ -357,7 +357,18 @@ struct ChatMessagesView: View {
                     .contextMenu { messageContextMenu(for: message) } preview: {
                         MessageContextMenuPreview(message: message)
                     }
-                    .onAppear { scrollState.markIndexVisible(absoluteIndex) }
+                    .onAppear {
+                        scrollState.markIndexVisible(absoluteIndex)
+                        // Realization evidence for the hidden anchor pass
+                        // (`ChatTranscriptRealizationPolicy`): the row's view
+                        // is in the hierarchy, which a lazy stack reports
+                        // under the opaque cover as well. Not gated by the
+                        // anchor hold, which only parks window moves.
+                        scrollState.markRowRealized(message.objectID)
+                        if index == displayedMessages.count - 1 {
+                            coordinator.handleNewestRowRealized()
+                        }
+                    }
                 }
 
                 Color.clear.frame(height: bottomContentInset)
@@ -434,7 +445,8 @@ struct ChatMessagesView: View {
                 let geometry = ChatScrollGeometry(
                     bottomAnchorFrame: frame,
                     contentFrame: contentFrame,
-                    viewportSize: geometryProxy.size
+                    viewportSize: geometryProxy.size,
+                    isNewestRowRealized: scrollState.isNewestVisibleRowRealized
                 )
                 Color.clear
                     .id(scrollState.latestWindowLayoutID)
@@ -798,6 +810,7 @@ struct ChatMessagesView: View {
             // A null/empty frame means the lazy trailing anchor has not laid
             // out yet, which must not count against the initial retry budget.
             hasBottomAnchorGeometry: !frame.isNull && !frame.isEmpty,
+            isNewestRowRealized: geometry.isNewestRowRealized,
             isUserScrollInteractionActive: isScrollGestureActive,
             contentMinY: geometry.contentFrame.isNull
                 ? nil
@@ -850,7 +863,7 @@ struct ChatMessagesView: View {
         Log.diagnostic(
             .chatView,
             level: .info,
-            "ChatView revealed rows=\(scrollState.visibleMessages.count) scrollOffsetY=\(String(format: "%.1f", tracking.contentOffsetY)) offsetTracked=\(ChatTranscriptOffsetShifter.isSupported) anchorMaxY=\(anchorMaxY) viewportHeight=\(viewportHeight)",
+            "ChatView revealed rows=\(scrollState.visibleMessages.count) newestRowRealized=\(scrollState.isNewestVisibleRowRealized) scrollOffsetY=\(String(format: "%.1f", tracking.contentOffsetY)) offsetTracked=\(ChatTranscriptOffsetShifter.isSupported) anchorMaxY=\(anchorMaxY) viewportHeight=\(viewportHeight)",
             category: .ui
         )
     }
@@ -1004,6 +1017,22 @@ struct ChatMessagesView: View {
 
     private func performBottomAnchor(_ step: ChatMessagesCoordinator.BottomAnchorStep, proxy: ScrollViewProxy) {
         ChatBottomInsetPolicy.coordinatorDidScroll(state: &transcriptShiftTracking.shiftState)
+        if step.kind == .realizationNudge {
+            // A real offset change away from the pinned end, so the lazy
+            // stack fills the rect it is moved to; the coordinator scrolls
+            // back to the anchor one frame later
+            // (`ChatTranscriptRealizationPolicy`). Unanimated and under the
+            // opaque cover. A one-row window has no target and takes the
+            // bottom-anchor scroll below instead.
+            let rows = ChatTranscriptIdentityPolicy.rows(for: scrollState.visibleMessages)
+            if let targetIndex = ChatTranscriptRealizationPolicy.nudgeTargetIndex(
+                rowCount: rows.count
+            ) {
+                Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
+                proxy.scrollTo(rows[targetIndex].id, anchor: .bottom)
+                return
+            }
+        }
         if step.animated {
             withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
                 Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
@@ -1098,6 +1127,10 @@ private struct ChatScrollGeometry: Equatable {
     let bottomAnchorFrame: CGRect
     let contentFrame: CGRect
     let viewportSize: CGSize
+    /// The newest displayed row's view is in the hierarchy
+    /// (`VirtualScrollState.isNewestVisibleRowRealized`). Part of the
+    /// geometry so its change re-reports through the same `onChange`.
+    let isNewestRowRealized: Bool
 }
 
 private struct ChatScrollGeometryPreferenceKey: PreferenceKey {
