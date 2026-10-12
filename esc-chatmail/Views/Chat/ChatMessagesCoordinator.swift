@@ -71,6 +71,14 @@ final class ChatMessagesCoordinator: ObservableObject {
     }
 
     private static let maximumInitialScrollAttempts = 2
+    /// Realization nudges one hidden pass may issue
+    /// (`ChatTranscriptRealizationPolicy`). Growth resets the retry budget,
+    /// and a nudge's own re-estimation can read as growth, so the budget
+    /// alone would let a tail that never reports realized (a row whose
+    /// `onAppear` never fires) nudge until the time limit. Past the cap the
+    /// probes fall back to the plain bottom-anchor scroll and the budget
+    /// ends the pass as before.
+    private static let maximumRealizationNudgesPerInitialPass = 3
     private static let maximumPostRevealScrollAttempts = 2
     private static let postRevealBottomFollowGracePeriod: TimeInterval = 3.0
     private static let geometryChangeTolerance: CGFloat = 0.5
@@ -130,9 +138,22 @@ final class ChatMessagesCoordinator: ObservableObject {
     }
 
     struct BottomAnchorStep: Equatable {
+        /// What the view scrolls to for this step.
+        enum Kind: Equatable {
+            /// `scrollTo(bottomID, anchor: .bottom)`: the trailing 1pt anchor
+            /// at the viewport bottom.
+            case bottomAnchor
+            /// The hidden pass's realization nudge: a real offset change away
+            /// from the content end (`ChatTranscriptRealizationPolicy`), which
+            /// the coordinator follows with a `.bottomAnchor` step one frame
+            /// later. Issued only while the transcript is hidden.
+            case realizationNudge
+        }
+
         let delay: TimeInterval
         let animated: Bool
         let logMessage: String
+        var kind: Kind = .bottomAnchor
     }
 
     struct PostSendAnchorIntent: Equatable {
@@ -229,6 +250,18 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// via `maximumPostRevealBottomFollowLifetime`.
     private var postRevealBottomFollowArmedAt: TimeInterval = 0
     private var isTrackedBottomAnchorVisible = false
+    /// The newest displayed row's view is in the transcript hierarchy, as of
+    /// the latest geometry update (`VirtualScrollState.isNewestVisibleRowRealized`).
+    /// The hidden pass confirms only with it: anchor geometry that reads
+    /// correct over an unrealized tail is the blank open
+    /// (`ChatTranscriptRealizationPolicy`).
+    private var isTrackedNewestRowRealized = false
+    /// The current pass has logged its first realization nudge; the rest of
+    /// its nudges are the same event.
+    private var didLogRealizationNudgeDuringInitialPass = false
+    /// Nudges the current pass has issued, against
+    /// `maximumRealizationNudgesPerInitialPass`.
+    private var realizationNudgesIssuedDuringInitialPass = 0
     private var trackedContentMinY: CGFloat?
     private var trackedContentHeight: CGFloat?
     private var trackedViewportHeight: CGFloat?
@@ -577,6 +610,12 @@ final class ChatMessagesCoordinator: ObservableObject {
         // decides this explicitly. (Tests use a defaulted overload in their
         // own target.)
         hasBottomAnchorGeometry: Bool,
+        // Deliberately no default either: whether the newest row's view is
+        // in the hierarchy is the one signal that tells a filled viewport
+        // from a lazy stack that left its tail unrealized
+        // (`ChatTranscriptRealizationPolicy`), so every caller decides it.
+        // (Tests use a defaulted overload in their own target.)
+        isNewestRowRealized: Bool,
         isUserScrollInteractionActive: Bool = false,
         contentMinY: CGFloat? = nil,
         contentHeight: CGFloat? = nil,
@@ -591,6 +630,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             hasObservedBottomAnchorGeometry = true
         }
         isTrackedBottomAnchorVisible = isBottomAnchorVisible
+        isTrackedNewestRowRealized = isNewestRowRealized
         if let contentMinY {
             trackedContentMinY = contentMinY
         }
@@ -762,7 +802,24 @@ final class ChatMessagesCoordinator: ObservableObject {
         // scroll again instead.
         if isBottomAnchorVisible && !isTrackedContentParkedPastEnd {
             if phase == .validatingVisibility {
-                completeInitialReveal(wasVisiblyConfirmed: true)
+                if isNewestRowRealized {
+                    completeInitialReveal(wasVisiblyConfirmed: true)
+                    return
+                }
+                // The anchor reads at the content end, yet the newest row's
+                // view is not in the hierarchy: the lazy stack left the tail
+                // unrealized at the offset the end pin jumped it to, and
+                // confirming would reveal a blank transcript with no warning
+                // (`ChatTranscriptRealizationPolicy`). Probe with a real
+                // offset change instead; `scrollTo` to the pinned end moves
+                // nothing.
+                continueInitialPass(
+                    scrollAttempts: scrollAttempts,
+                    phase: phase,
+                    didObserveGrowth: didObserveGrowth,
+                    probeKind: .realizationNudge,
+                    scrollAction: scrollAction
+                )
                 return
             }
             guard phase != .confirmingVisibility else {
@@ -783,10 +840,59 @@ final class ChatMessagesCoordinator: ObservableObject {
             if didObserveGrowth {
                 didObserveGrowthDuringInitialRecheck = true
             }
-            beginInitialVisibilityConfirmation(scrollAttempts: scrollAttempts)
+            // Realization is not required to start confirming: the newest
+            // row's `onAppear` can land a frame after the geometry report
+            // that first shows the anchor, and the wake-up reads the latest
+            // value (`beginInitialVisibilityConfirmation`).
+            beginInitialVisibilityConfirmation(
+                scrollAttempts: scrollAttempts,
+                scrollAction: scrollAction
+            )
             return
         }
 
+        continueInitialPass(
+            scrollAttempts: scrollAttempts,
+            phase: phase,
+            didObserveGrowth: didObserveGrowth,
+            // An offscreen anchor with the newest row in the hierarchy is the
+            // growth case (bubbles above pushed the anchor off; `scrollTo`
+            // lands on the realized anchor). Without the newest row's view the
+            // anchor is unrealized or at the end of an unfilled rect, where
+            // `scrollTo` to the pinned end is a no-op; the probe must move the
+            // offset for real (`ChatTranscriptRealizationPolicy`).
+            probeKind: ChatTranscriptRealizationPolicy.probeKind(
+                isNewestRowRealized: isNewestRowRealized
+            ),
+            scrollAction: scrollAction
+        )
+    }
+
+    /// The hidden pass's next step after a report that did not present the
+    /// tail (anchor offscreen or parked, or the newest row not realized at
+    /// the content end): reveal at the time limit or once the retry budget
+    /// is spent, otherwise issue a probe scroll of `probeKind` and schedule
+    /// the re-probe that follows it.
+    ///
+    /// - Parameter phase: the pending phase the report found. A report that
+    ///   lands while a probe's re-check is still pending
+    ///   (`.checkingAfterScroll`) only latches its growth.
+    private func continueInitialPass(
+        scrollAttempts: Int,
+        phase: InitialRevealPhase,
+        didObserveGrowth: Bool,
+        probeKind requestedProbeKind: BottomAnchorStep.Kind,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        let probeKind: BottomAnchorStep.Kind
+        if requestedProbeKind == .realizationNudge,
+           realizationNudgesIssuedDuringInitialPass >= Self.maximumRealizationNudgesPerInitialPass {
+            // Three real round trips that did not realize the tail: more
+            // will not. Let the plain probes and the budget end the pass.
+            probeKind = .bottomAnchor
+        } else {
+            probeKind = requestedProbeKind
+        }
         guard phase != .checkingAfterScroll else {
             // This event's tracker overwrite above already consumed its
             // growth delta; latch the observation so the next probe still
@@ -824,8 +930,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         didObserveGrowthDuringInitialRecheck = false
 
         // "Offscreen" before the lazy trailing anchor has ever laid out only
-        // means "not realized yet"; keep scrolling (registration can land the
-        // scroll) but leave the budget untouched until real geometry exists.
+        // means "not realized yet"; keep scrolling (a nudge realizes it, and
+        // the bottom-anchor scroll's registration can land) but leave the
+        // budget untouched until real geometry exists.
         if hasObservedBottomAnchorGeometry {
             guard chargedAttempts < Self.maximumInitialScrollAttempts else {
                 // The past-end correction lands a parked transcript on its end
@@ -848,35 +955,83 @@ final class ChatMessagesCoordinator: ObservableObject {
             scrollAttempts: nextAttempt,
             phase: .checkingAfterScroll
         )
+        if probeKind == .realizationNudge {
+            realizationNudgesIssuedDuringInitialPass += 1
+        }
+        if probeKind == .realizationNudge && !didLogRealizationNudgeDuringInitialPass {
+            didLogRealizationNudgeDuringInitialPass = true
+            // Always logged, like the fallback reveals: the one field signal
+            // that the lazy stack left the tail unrealized on this open.
+            Log.warning(
+                "ChatView initial anchor: newest row not realized at the content end; nudging the transcript; \(trackedGeometryDescription)",
+                category: .ui
+            )
+        }
         taskManager.run(TaskKey.initialGeometryCheck) { [weak self, sleep] in
             guard !Task.isCancelled else { return }
+            if probeKind == .realizationNudge {
+                // The nudge moved the view off the end; bring it back one
+                // frame later, once the scroll view has applied the nudge.
+                // Two scrolls in one update coalesce into the last, which
+                // would be the no-op the nudge exists to avoid.
+                await sleep(UInt64(UIConfig.postSendLayoutCommitDelay * 1_000_000_000))
+                guard !Task.isCancelled,
+                      self?.isInitialProbePending(attempt: nextAttempt) == true else {
+                    return
+                }
+                scrollAction(
+                    BottomAnchorStep(
+                        delay: 0,
+                        animated: false,
+                        logMessage: "ChatView realization nudge return -> bottom anchor"
+                    )
+                )
+            }
             // Pace the re-probe like the sibling rechecks in this file: a
             // bare Task.yield() sampled the first, possibly unconverged
             // layout pass of a lazy scroll-to-tail and burned the budget
             // within a couple of commits.
             await sleep(UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            guard let self,
-                  case .pending(let currentAttempts, .checkingAfterScroll) =
-                    self.initialRevealState,
-                  currentAttempts == nextAttempt else {
+            guard !Task.isCancelled,
+                  let self,
+                  self.isInitialProbePending(attempt: nextAttempt) else {
                 return
             }
             self.initialRevealState = .pending(
-                scrollAttempts: currentAttempts,
+                scrollAttempts: nextAttempt,
                 phase: .awaitingGeometry
             )
             self.initialAnchorGeometryCheckID = UUID()
         }
-        scrollAction(
-            BottomAnchorStep(
-                delay: 0,
-                animated: false,
-                logMessage: nextAttempt <= 1
-                    ? "ChatView initial layout scroll -> bottom anchor"
-                    : "ChatView initial layout retry -> bottom anchor"
+        switch probeKind {
+        case .bottomAnchor:
+            scrollAction(
+                BottomAnchorStep(
+                    delay: 0,
+                    animated: false,
+                    logMessage: nextAttempt <= 1
+                        ? "ChatView initial layout scroll -> bottom anchor"
+                        : "ChatView initial layout retry -> bottom anchor"
+                )
             )
-        )
+        case .realizationNudge:
+            scrollAction(
+                BottomAnchorStep(
+                    delay: 0,
+                    animated: false,
+                    logMessage: "ChatView initial layout nudge -> second-newest row",
+                    kind: .realizationNudge
+                )
+            )
+        }
+    }
+
+    /// Whether the pass is still waiting on the re-check of probe `attempt`.
+    private func isInitialProbePending(attempt: Int) -> Bool {
+        guard case .pending(let currentAttempts, .checkingAfterScroll) = initialRevealState else {
+            return false
+        }
+        return currentAttempts == attempt
     }
 
     /// Holds the post-reveal/post-send bottom follow while the view animates
@@ -1848,6 +2003,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         lastBottomAnchorGeometryReportAt = nil
         didObserveGrowthDuringInitialRecheck = false
         didObserveParkedPastEndDuringInitialPass = false
+        didLogRealizationNudgeDuringInitialPass = false
+        realizationNudgesIssuedDuringInitialPass = 0
         initialAnchorGeometryCheckID = UUID()
         Log.diagnostic(
             .chatView,
@@ -1920,7 +2077,10 @@ final class ChatMessagesCoordinator: ObservableObject {
         initialRevealState == .ready(wasEmptyConversation: true)
     }
 
-    private func beginInitialVisibilityConfirmation(scrollAttempts: Int) {
+    private func beginInitialVisibilityConfirmation(
+        scrollAttempts: Int,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
         initialRevealState = .pending(
             scrollAttempts: scrollAttempts,
             phase: .confirmingVisibility
@@ -1940,12 +2100,38 @@ final class ChatMessagesCoordinator: ObservableObject {
                   !self.isTrackedContentParkedPastEnd else {
                 return
             }
+            guard self.isTrackedNewestRowRealized else {
+                // The anchor stayed at the content end through the
+                // confirmation delay, but the newest row's view never
+                // entered the hierarchy: the lazy stack left the tail
+                // unrealized, and validating would reveal a blank transcript
+                // (`ChatTranscriptRealizationPolicy`). Probe with a real
+                // offset change; the re-probe it schedules re-confirms.
+                self.continueInitialPass(
+                    scrollAttempts: currentAttempts,
+                    phase: .confirmingVisibility,
+                    didObserveGrowth: false,
+                    probeKind: .realizationNudge,
+                    scrollAction: scrollAction
+                )
+                return
+            }
             self.initialRevealState = .pending(
                 scrollAttempts: currentAttempts,
                 phase: .validatingVisibility
             )
             self.initialAnchorGeometryCheckID = UUID()
         }
+    }
+
+    /// The view's newest displayed row entered the hierarchy (its
+    /// `onAppear`). While the hidden pass is pending, re-probe at once so a
+    /// confirmation waiting on realization does not wait for the next
+    /// geometry change as well. The report this triggers carries the new
+    /// `isNewestRowRealized`; a pass mid re-check only latches it.
+    func handleNewestRowRealized() {
+        guard case .pending = initialRevealState else { return }
+        initialAnchorGeometryCheckID = UUID()
     }
 
     private func requestPostRevealBottomScroll(
@@ -2191,7 +2377,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         let contentMaxY = trackedContentMinY.flatMap { minY in
             trackedContentHeight.map { minY + $0 }
         }
-        return "anchorVisible=\(isTrackedBottomAnchorVisible) contentMaxY=\(describe(contentMaxY)) contentHeight=\(describe(trackedContentHeight)) viewportHeight=\(describe(trackedViewportHeight))"
+        return "anchorVisible=\(isTrackedBottomAnchorVisible) newestRowRealized=\(isTrackedNewestRowRealized) contentMaxY=\(describe(contentMaxY)) contentHeight=\(describe(trackedContentHeight)) viewportHeight=\(describe(trackedViewportHeight))"
     }
 
     /// - Parameter fallbackReason: why an unconfirmed reveal happened, for its
@@ -2253,13 +2439,16 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// so a reader rubber-banding the end does not write the warning the
     /// blank-open report is read by. Diagnostics only: it changes no state.
     ///
-    /// Together with the reveal and correction warnings, it splits the next
-    /// device report of a blank open: a warning names a scroll position
-    /// problem. No warning at all means the last geometry the coordinator
-    /// received read as correct while nothing showed, which points at
-    /// drawing rather than position, unless geometry deliveries stopped
-    /// (then the tracked values are stale; the watchdog's line says when the
-    /// last report came).
+    /// Together with the reveal, correction and realization-nudge warnings,
+    /// it splits the next device report of a blank open: a reveal or
+    /// correction warning names a scroll position problem, a nudge warning
+    /// names a lazy stack that left the tail unrealized
+    /// (`ChatTranscriptRealizationPolicy`). No warning at all means the last
+    /// geometry the coordinator received read as correct, with the newest
+    /// row in the hierarchy, while nothing showed, which points at drawing
+    /// rather than position or realization, unless geometry deliveries
+    /// stopped (then the tracked values are stale; the watchdog's line says
+    /// when the last report came).
     private func schedulePostRevealAudit() {
         let delay = Self.postRevealAuditDelay
         taskManager.run(TaskKey.postRevealAudit) { [weak self, watchdogSleep] in
