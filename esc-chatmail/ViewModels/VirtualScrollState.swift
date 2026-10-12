@@ -165,7 +165,18 @@ final class VirtualScrollState: ObservableObject {
         }
     }
 
-    @Published var visibleMessages: [ChatMessageRowModel] = []
+    @Published var visibleMessages: [ChatMessageRowModel] = [] {
+        didSet {
+            // The publish decides which transcript views persist: rows keep
+            // their `ForEach` identity across it (`ChatTranscriptIdentityPolicy`),
+            // so realization recorded under an identity that is still
+            // published still describes a view in the hierarchy, and one
+            // that is not would remount, and re-appear, if it came back.
+            let rows = ChatTranscriptIdentityPolicy.rows(for: visibleMessages)
+            newestVisibleRowIdentity = rows.last?.id
+            realizedRowIdentities.formIntersection(Set(rows.map(\.id)))
+        }
+    }
     @Published var totalMessageCount = 0
     var scrollPosition: Int = 0
     var isLoadingMore: Bool { windowLoadLifecycle != .idle }
@@ -204,16 +215,27 @@ final class VirtualScrollState: ObservableObject {
     /// publication, so a row the lazy stack re-creates after scrolling away
     /// and back does not animate in again.
     var localSendAppendedMessageIDs: Set<NSManagedObjectID> = []
-    /// Object IDs of window rows whose views are in the transcript hierarchy
-    /// (`markRowRealized`, from each row's `onAppear`). The hidden anchor
-    /// pass reads `isNewestVisibleRowRealized` from it: anchor geometry that
-    /// reads correct over a lazy stack that left the tail unrealized was the
-    /// blank open (`ChatTranscriptRealizationPolicy`). Pruned to the window on
-    /// every publish (`setMessageWindow`), not cleared: a row that stays in
-    /// the window keeps its view, and `onAppear` fires once per view.
-    /// Cleared by `cleanup()`, after which the rows remount. Not published;
-    /// a row's `onAppear` must not re-render the transcript.
-    var realizedRowObjectIDs: Set<NSManagedObjectID> = []
+    /// Transcript `ForEach` identities (`ChatTranscriptIdentityPolicy.Row.id`)
+    /// of rows whose views are in the hierarchy (`markRowRealized`, from each
+    /// row's `onAppear`). The hidden anchor pass reads
+    /// `isNewestVisibleRowRealized` from it: anchor geometry that reads
+    /// correct over a lazy stack that left the tail unrealized was the blank
+    /// open (`ChatTranscriptRealizationPolicy`). Keyed by the view identity,
+    /// not the object ID, because realization is a fact about the view: sync
+    /// replacing the user's optimistic reply with its echo swaps the object
+    /// ID under one persisting view, with no `onAppear`
+    /// (`ChatMessageDisplayIdentity`). Pruned to the published rows on every
+    /// `visibleMessages` publish; a row the lazy stack re-places fires
+    /// `onAppear` again, which is an idempotent insert. Not maintained on
+    /// `onDisappear`: only the hidden pass consumes it, under the opaque
+    /// cover, where nothing but its own nudge moves the rows, and the nudge's
+    /// return re-places them. Cleared by `cleanup()`, after which the rows
+    /// remount. Not published; a row's `onAppear` must not re-render the
+    /// transcript.
+    var realizedRowIdentities: Set<ChatMessageDisplayIdentity> = []
+    /// Identity of the newest published row, computed once per publish for
+    /// `isNewestVisibleRowRealized`, which the view reads on every layout.
+    private(set) var newestVisibleRowIdentity: ChatMessageDisplayIdentity?
     private var followsLatestInsertions = true
     var followIntentRevision: UInt = 0
     /// While the coordinator's initial bottom-anchor pass is still positioning
@@ -332,18 +354,19 @@ final class VirtualScrollState: ObservableObject {
     }
 
     /// Records that the row's view entered the transcript hierarchy. Called
-    /// from each row's `onAppear`, including during the hidden anchor pass,
-    /// which `markIndexVisible` ignores; realization is not a position.
-    func markRowRealized(_ objectID: NSManagedObjectID) {
-        realizedRowObjectIDs.insert(objectID)
+    /// from each row's `onAppear` with the row's `ForEach` identity,
+    /// including during the hidden anchor pass, which `markIndexVisible`
+    /// ignores; realization is not a position.
+    func markRowRealized(_ rowID: ChatMessageDisplayIdentity) {
+        realizedRowIdentities.insert(rowID)
     }
 
-    /// Whether the newest displayed row's view is in the hierarchy. False
+    /// Whether the newest published row's view is in the hierarchy. False
     /// with no rows, and false for a newest row that was published but not
     /// realized by the lazy stack (`ChatTranscriptRealizationPolicy`).
     var isNewestVisibleRowRealized: Bool {
-        guard let newestRow = visibleMessages.last else { return false }
-        return realizedRowObjectIDs.contains(newestRow.objectID)
+        guard let newestVisibleRowIdentity else { return false }
+        return realizedRowIdentities.contains(newestVisibleRowIdentity)
     }
 
     /// Holds `markIndexVisible` for `duration` while the view animates a
@@ -582,7 +605,7 @@ final class VirtualScrollState: ObservableObject {
         isProgrammaticScrollHoldActive = false
         heldVisibleIndex = nil
         deferredLeadingReplayIndex = nil
-        realizedRowObjectIDs.removeAll()
+        realizedRowIdentities.removeAll()
         windowLoadLifecycle = .idle
         needsDatasetReconciliationAfterCurrentLoad = false
         needsUnclassifiedRefreshCountReconciliation = false

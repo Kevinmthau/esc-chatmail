@@ -27,9 +27,11 @@ import Foundation
 /// - Geometry alone cannot confirm a reveal. The signal that distinguishes a
 ///   filled viewport from an unfilled one is whether the newest row's view
 ///   is in the hierarchy (`VirtualScrollState.markRowRealized`, from the
-///   row's `onAppear`; a lazy stack calls it when it realizes the row, under
-///   the opaque cover as well). The pass waits for it at confirmation and at
-///   validation, bounded as before by the retry budget and the time limit.
+///   row's `onAppear`, keyed by the row's `ForEach` identity so it survives
+///   the echo swap the view does not remount for; a lazy stack calls it when
+///   it realizes the row, under the opaque cover as well). The pass waits for
+///   it at confirmation and at validation, bounded as before by the retry
+///   budget and the time limit.
 /// - A probe that scrolls to the offset the view is already at changes
 ///   nothing: `scrollTo(bottomID, anchor: .bottom)` targets the pinned end,
 ///   so under the pin it moves no pixel and hands the lazy stack no new rect.

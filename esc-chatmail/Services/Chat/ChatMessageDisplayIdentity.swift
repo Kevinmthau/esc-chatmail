@@ -18,8 +18,11 @@ import CoreData
 ///
 /// View identity only. Caches and loaders stay keyed by `message.id` and the
 /// object ID under their captured account generations; never key a cache or a
-/// `VirtualScrollState` lookup by this. Two rows can briefly share an identity
-/// (see `ChatTranscriptIdentityPolicy`), so a collection must go through that
+/// `VirtualScrollState` row lookup by this. The one `VirtualScrollState`
+/// record keyed by it is `realizedRowIdentities`, which is a fact about the
+/// view (its `onAppear` fired), so it must survive exactly the swaps the view
+/// does. Two rows can briefly share an identity (see
+/// `ChatTranscriptIdentityPolicy`), so a collection must go through that
 /// policy before it reaches a `ForEach`.
 enum ChatMessageDisplayIdentity: Hashable {
     /// A message this app sent: the optimistic message ID decoded from its RFC

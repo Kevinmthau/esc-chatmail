@@ -362,9 +362,11 @@ struct ChatMessagesView: View {
                         // Realization evidence for the hidden anchor pass
                         // (`ChatTranscriptRealizationPolicy`): the row's view
                         // is in the hierarchy, which a lazy stack reports
-                        // under the opaque cover as well. Not gated by the
-                        // anchor hold, which only parks window moves.
-                        scrollState.markRowRealized(message.objectID)
+                        // under the opaque cover as well. Keyed by the view's
+                        // identity, which survives the echo swap this view
+                        // does not remount for. Not gated by the anchor hold,
+                        // which only parks window moves.
+                        scrollState.markRowRealized(row.id)
                         if index == displayedMessages.count - 1 {
                             coordinator.handleNewestRowRealized()
                         }

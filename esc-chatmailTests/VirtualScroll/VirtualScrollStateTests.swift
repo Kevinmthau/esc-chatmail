@@ -1225,68 +1225,114 @@ final class VirtualScrollStateTests: XCTestCase {
         await waitUntilArrivedPageLoads(arrivedDuringHold + 1, in: gates)
     }
 
-    func testMarkRowRealized_newestVisibleRowRealizedFollowsWindowPublishes() async throws {
-        // Revert-check: VirtualScrollState.realizedRowObjectIDs, its
-        // `markRowRealized` writer and the prune in `setMessageWindow`. The
-        // hidden anchor pass confirms a reveal only with the newest row's
-        // view in the hierarchy (`ChatTranscriptRealizationPolicy`); a set
-        // that reads realized for a row the lazy stack never placed, or that
-        // keeps rows a publish dropped, lets it confirm a blank transcript.
+    func testMarkRowRealized_newestVisibleRowRealizedFollowsPublishedRows() throws {
+        // Revert-check: VirtualScrollState.realizedRowIdentities, its
+        // `markRowRealized` writer, and the prune in `visibleMessages`'s
+        // `didSet`. The hidden anchor pass confirms a reveal only with the
+        // newest row's view in the hierarchy
+        // (`ChatTranscriptRealizationPolicy`); a record that reads realized
+        // for a row the lazy stack never placed, or that keeps a row a
+        // publish dropped, lets it confirm a blank transcript.
         let (conversation, messages) = try makeConversationWithMessages(count: 6)
         let stack = self.stack!
         let state = VirtualScrollState(
             conversationId: conversation.id.uuidString,
-            configuration: VirtualScrollConfiguration(
-                visibleItemCount: 3,
-                bufferSize: 1,
-                pageSize: 3,
-                preloadThreshold: 1
-            ),
             initialWindowPosition: .end,
             viewContext: viewContext,
-            makeBackgroundContext: { stack.newBackgroundContext() }
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            autoLoad: false
         )
         defer { state.cleanup() }
+        let rows = messages[3...5].map { ChatMessageRowModelMapper.map($0) }
+        let newestRow = try XCTUnwrap(rows.last)
 
-        await waitUntil {
-            state.isInitialLoadComplete && state.visibleMessages.count == 3
-        }
-        let newestRow = try XCTUnwrap(state.visibleMessages.last)
-        XCTAssertEqual(newestRow.objectID, messages[5].objectID)
+        XCTAssertFalse(state.isNewestVisibleRowRealized, "No rows, nothing realized")
+        state.visibleMessages = rows
         XCTAssertFalse(
             state.isNewestVisibleRowRealized,
             "A published row is not realized until its view appears"
         )
 
         // An older row's view appearing says nothing about the newest.
-        state.markRowRealized(messages[3].objectID)
+        state.markRowRealized(rows[0].displayIdentity)
         XCTAssertFalse(state.isNewestVisibleRowRealized)
 
-        state.markRowRealized(newestRow.objectID)
+        state.markRowRealized(newestRow.displayIdentity)
         XCTAssertTrue(state.isNewestVisibleRowRealized)
 
-        // A publish that keeps the row keeps its realization (its view
-        // persists and `onAppear` will not fire again)...
-        let window = try XCTUnwrap(state.messageWindow)
-        state.setMessageWindow(window)
+        // A publish that keeps the row keeps its realization: its view
+        // persists across the publish.
+        state.visibleMessages = rows
         XCTAssertTrue(state.isNewestVisibleRowRealized)
 
-        // ...and one that drops it forgets it, so a row that comes back is
-        // realized only when its new view appears.
-        state.setMessageWindow(
-            MessageWindow(
-                startIndex: window.startIndex,
-                endIndex: window.endIndex - 1,
-                messageIDs: Array(window.messageIDs.dropLast()),
-                isLoading: false
-            )
-        )
-        XCTAssertFalse(state.realizedRowObjectIDs.contains(newestRow.objectID))
-        XCTAssertTrue(state.realizedRowObjectIDs.contains(messages[3].objectID))
+        // One that drops it forgets it, so the row counts as realized again
+        // only when its new view appears.
+        state.visibleMessages = Array(rows.dropLast())
+        XCTAssertFalse(state.realizedRowIdentities.contains(newestRow.displayIdentity))
+        XCTAssertTrue(state.realizedRowIdentities.contains(rows[0].displayIdentity))
+        state.visibleMessages = rows
+        XCTAssertFalse(state.isNewestVisibleRowRealized)
 
-        // Disappearing tears the views down; the set goes with them.
+        // Disappearing tears the views down; the record goes with them.
+        state.markRowRealized(newestRow.displayIdentity)
         state.cleanup()
-        XCTAssertTrue(state.realizedRowObjectIDs.isEmpty)
+        XCTAssertTrue(state.realizedRowIdentities.isEmpty)
+    }
+
+    /// Sync replacing the user's optimistic reply with Gmail's echo swaps the
+    /// row's object ID under one persisting transcript view
+    /// (`ChatMessageDisplayIdentity`), so no `onAppear` fires for the echo.
+    /// Realization recorded for the optimistic row must survive the swap, or
+    /// a hidden pass pending at that moment nudges a transcript that is
+    /// realized and drawn, and falls back with a false warning.
+    ///
+    /// Revert-check: keying `VirtualScrollState.realizedRowIdentities` (and
+    /// `markRowRealized`) by `NSManagedObjectID` instead of the row's
+    /// `displayIdentity` reads the echo as unrealized here.
+    func testMarkRowRealized_survivesEchoReplacingOptimisticRowInPlace() throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let optimisticID = UUID().uuidString
+        let rfcMessageID = MimeBuilder.messageId(forOptimisticMessageID: optimisticID)
+        let optimistic = MessageBuilder()
+            .withId(optimisticID)
+            .withDate(Date(timeIntervalSince1970: 10))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        optimistic.messageId = rfcMessageID
+        let echo = MessageBuilder()
+            .withId("gmail-echo-id")
+            .withDate(Date(timeIntervalSince1970: 10))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        echo.messageId = rfcMessageID
+        try viewContext.save()
+        let optimisticRow = ChatMessageRowModelMapper.map(optimistic)
+        let echoRow = ChatMessageRowModelMapper.map(echo)
+        XCTAssertEqual(optimisticRow.displayIdentity, echoRow.displayIdentity)
+        XCTAssertNotEqual(optimisticRow.objectID, echoRow.objectID)
+
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            autoLoad: false
+        )
+        defer { state.cleanup() }
+
+        state.visibleMessages = [optimisticRow]
+        state.markRowRealized(optimisticRow.displayIdentity)
+        XCTAssertTrue(state.isNewestVisibleRowRealized)
+
+        // The swap: same `ForEach` identity, new object ID, no `onAppear`.
+        state.visibleMessages = [echoRow]
+        XCTAssertTrue(state.isNewestVisibleRowRealized)
     }
 
     func testInitialPublish_afterOwnerCancelledUnresolved_rescuesThePhase() async throws {
