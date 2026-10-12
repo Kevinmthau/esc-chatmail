@@ -371,6 +371,15 @@ struct ChatMessagesView: View {
                             coordinator.handleNewestRowRealized()
                         }
                     }
+                    .onDisappear {
+                        // The view left the hierarchy: the lazy stack moved
+                        // the row out of the viewport (growth above it under
+                        // the pre-iOS 18 top anchor, or the nudge itself), so
+                        // the record follows it out; a jump back that leaves
+                        // the row unrealized must not read as realized
+                        // (`VirtualScrollState.realizedRowIdentities`).
+                        scrollState.markRowUnrealized(row.id)
+                    }
                 }
 
                 Color.clear.frame(height: bottomContentInset)

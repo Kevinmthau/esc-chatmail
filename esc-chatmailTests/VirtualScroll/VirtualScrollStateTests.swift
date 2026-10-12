@@ -1335,6 +1335,59 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(state.isNewestVisibleRowRealized)
     }
 
+    /// The newest row's view left the hierarchy after it had appeared: the
+    /// lazy stack moved it out of the viewport (below iOS 18 the hidden pass
+    /// anchors size changes at the top, so a bubble growing above it pushes
+    /// it off; the nudge itself moves it out and back). The record must
+    /// follow the view out, or a jump back that leaves the row unrealized
+    /// reads as realized and the pass confirms a blank transcript, the open
+    /// the record exists to prevent.
+    ///
+    /// Revert-check: `VirtualScrollState.markRowUnrealized`, called from each
+    /// row's `onDisappear` in `ChatMessagesView`; without it the row stays
+    /// realized here after it disappeared. HONEST SCOPE: the `onDisappear`
+    /// wiring itself has no unit-test seam; the coordinator tests model the
+    /// flag the view derives from this record.
+    func testMarkRowUnrealized_newestRowDisappearing_clearsRealizationUntilItReappears() throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 3)
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            autoLoad: false
+        )
+        defer { state.cleanup() }
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let newestRow = try XCTUnwrap(rows.last)
+
+        state.visibleMessages = rows
+        state.markRowRealized(newestRow.displayIdentity)
+        XCTAssertTrue(state.isNewestVisibleRowRealized)
+
+        state.markRowUnrealized(newestRow.displayIdentity)
+        XCTAssertFalse(
+            state.isNewestVisibleRowRealized,
+            "A row whose view left the hierarchy is no longer realized"
+        )
+
+        // An older row leaving, or one that never appeared, says nothing
+        // about the newest.
+        state.markRowRealized(newestRow.displayIdentity)
+        state.markRowRealized(rows[0].displayIdentity)
+        state.markRowUnrealized(rows[0].displayIdentity)
+        state.markRowUnrealized(rows[1].displayIdentity)
+        XCTAssertTrue(state.isNewestVisibleRowRealized)
+        XCTAssertFalse(state.realizedRowIdentities.contains(rows[0].displayIdentity))
+
+        // The nudge's return re-places the row: its `onAppear` re-records it.
+        state.markRowUnrealized(newestRow.displayIdentity)
+        XCTAssertFalse(state.isNewestVisibleRowRealized)
+        state.markRowRealized(newestRow.displayIdentity)
+        XCTAssertTrue(state.isNewestVisibleRowRealized)
+    }
+
     func testInitialPublish_afterOwnerCancelledUnresolved_rescuesThePhase() async throws {
         // Revert-check: the `windowLoadLifecycle == .idle && !isInitialLoadComplete`
         // rescue arm of publishInitialWindow's ownsInitialPublish predicate

@@ -225,13 +225,18 @@ final class VirtualScrollState: ObservableObject {
     /// replacing the user's optimistic reply with its echo swaps the object
     /// ID under one persisting view, with no `onAppear`
     /// (`ChatMessageDisplayIdentity`). Pruned to the published rows on every
-    /// `visibleMessages` publish; a row the lazy stack re-places fires
-    /// `onAppear` again, which is an idempotent insert. Not maintained on
-    /// `onDisappear`: only the hidden pass consumes it, under the opaque
-    /// cover, where nothing but its own nudge moves the rows, and the nudge's
-    /// return re-places them. Cleared by `cleanup()`, after which the rows
-    /// remount. Not published; a row's `onAppear` must not re-render the
-    /// transcript.
+    /// `visibleMessages` publish, and a row's `onDisappear` removes it
+    /// (`markRowUnrealized`): the record is the view's current placement,
+    /// not that it was placed once. Rows do move under the cover: below
+    /// iOS 18 the hidden pass anchors size changes at the top
+    /// (`ChatTranscriptScrollAnchorPolicy`), so a bubble growing above the
+    /// tail pushes the newest row off the viewport, and the jump back can
+    /// leave it unrealized; a stale "realized" there would confirm the blank
+    /// open this record exists to prevent. The nudge itself moves the newest
+    /// row out and back, so its return re-records it from the row's own
+    /// `onAppear`, which is an idempotent insert. Cleared by `cleanup()`,
+    /// after which the rows remount. Not published; a row's `onAppear` and
+    /// `onDisappear` must not re-render the transcript.
     var realizedRowIdentities: Set<ChatMessageDisplayIdentity> = []
     /// Identity of the newest published row, computed once per publish for
     /// `isNewestVisibleRowRealized`, which the view reads on every layout.
@@ -359,6 +364,13 @@ final class VirtualScrollState: ObservableObject {
     /// ignores; realization is not a position.
     func markRowRealized(_ rowID: ChatMessageDisplayIdentity) {
         realizedRowIdentities.insert(rowID)
+    }
+
+    /// Records that the row's view left the transcript hierarchy. Called from
+    /// each row's `onDisappear`, so `isNewestVisibleRowRealized` reads the
+    /// view's current placement; a row that never appeared is a no-op.
+    func markRowUnrealized(_ rowID: ChatMessageDisplayIdentity) {
+        realizedRowIdentities.remove(rowID)
     }
 
     /// Whether the newest published row's view is in the hierarchy. False
