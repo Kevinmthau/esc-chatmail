@@ -18,6 +18,8 @@ struct MessageFormatBuilder {
         let originalHTML: String?
         let to: [Participant]
         let cc: [Participant]
+        var rawToHeader: String? = nil
+        var rawCcHeader: String? = nil
     }
 
     let authSession: AuthSession
@@ -54,8 +56,10 @@ struct MessageFormatBuilder {
             }
         }
 
-        let toLine = source.to.map(formattedMailbox).joined(separator: ", ")
-        let ccLine = source.cc.map(formattedMailbox).joined(separator: ", ")
+        let toLine = source.rawToHeader.map(formattedRecipientHeader)
+            ?? source.to.map(formattedMailbox).joined(separator: ", ")
+        let ccLine = source.rawCcHeader.map(formattedRecipientHeader)
+            ?? source.cc.map(formattedMailbox).joined(separator: ", ")
 
         // Build plain text forward header
         var quotedText = "\n\n---------- Forwarded message ---------\n"
@@ -105,16 +109,99 @@ struct MessageFormatBuilder {
         }
         guard !email.isEmpty else { return displayName }
 
-        let name: String
-        if displayName.rangeOfCharacter(from: CharacterSet(charactersIn: ",\"<>\\")) != nil {
+        return "\(formattedDisplayPhrase(displayName)) <\(email)>"
+    }
+
+    private func formattedDisplayPhrase(_ displayName: String) -> String {
+        if displayName.rangeOfCharacter(from: CharacterSet(charactersIn: ",\"<>\\:;@()[]")) != nil {
             let escapedName = displayName
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
-            name = "\"\(escapedName)\""
-        } else {
-            name = displayName
+            return "\"\(escapedName)\""
         }
-        return "\(name) <\(email)>"
+        return displayName
+    }
+
+    /// Keep address groups and their separators intact; decode names only after
+    /// identifying the raw header structure so decoded punctuation stays in names.
+    private func formattedRecipientHeader(_ rawHeader: String) -> String {
+        var result = ""
+        var segmentStart = rawHeader.startIndex
+        var index = segmentStart
+        var isInsideQuotes = false
+        var isEscaped = false
+        var angleDepth = 0
+        var commentDepth = 0
+        var domainLiteralDepth = 0
+
+        while index < rawHeader.endIndex {
+            let character = rawHeader[index]
+            let nextIndex = rawHeader.index(after: index)
+            if isEscaped {
+                isEscaped = false
+            } else if rawHeader[index...].hasPrefix("=?"),
+                      let encodedEnd = rawHeader.range(of: "?=", range: nextIndex..<rawHeader.endIndex) {
+                index = encodedEnd.upperBound
+                continue
+            } else if character == "\\", isInsideQuotes || commentDepth > 0 || domainLiteralDepth > 0 {
+                isEscaped = true
+            } else if commentDepth > 0 {
+                if character == "(" { commentDepth += 1 }
+                if character == ")" { commentDepth -= 1 }
+            } else if domainLiteralDepth > 0 {
+                if character == "]" { domainLiteralDepth -= 1 }
+            } else if character == "\"" {
+                isInsideQuotes.toggle()
+            } else if !isInsideQuotes {
+                switch character {
+                case "(": commentDepth += 1
+                case "[": domainLiteralDepth += 1
+                case "<": angleDepth += 1
+                case ">": angleDepth = max(0, angleDepth - 1)
+                case ",", ":", ";":
+                    if angleDepth == 0 {
+                        result += formattedRecipientSegment(
+                            String(rawHeader[segmentStart..<index]),
+                            isGroupName: character == ":"
+                        )
+                        result.append(character)
+                        segmentStart = nextIndex
+                    }
+                default: break
+                }
+            }
+            index = nextIndex
+        }
+
+        result += formattedRecipientSegment(String(rawHeader[segmentStart...]), isGroupName: false)
+        return result
+    }
+
+    private func formattedRecipientSegment(_ rawSegment: String, isGroupName: Bool) -> String {
+        // Ordinary and unparseable spans remain verbatim, including empty groups,
+        // comments, quoted local parts, and address spellings.
+        guard RFC2047Decoder.containsEncodedWord(rawSegment) else { return rawSegment }
+        let value = rawSegment.trimmingCharacters(in: .whitespacesAndNewlines)
+        let formatted: String
+        if isGroupName {
+            guard value.rangeOfCharacter(from: CharacterSet(charactersIn: "()\"")) == nil else {
+                return rawSegment
+            }
+            formatted = formattedDisplayPhrase(RFC2047Decoder.decode(value))
+        } else if value.filter({ $0 == "<" }).count == 1,
+                  value.filter({ $0 == ">" }).count == 1,
+                  let email = EmailNormalizer.extractEmail(from: value),
+                  let addressRange = value.range(of: "<\(email)>"),
+                  value[..<addressRange.lowerBound].rangeOfCharacter(from: CharacterSet(charactersIn: "()\"")) == nil,
+                  RFC2047Decoder.containsEncodedWord(String(value[..<addressRange.lowerBound])),
+                  let name = EmailNormalizer.extractDisplayName(from: String(value[..<addressRange.upperBound])) {
+            formatted = formattedMailbox(.init(email: email, displayName: name))
+                + String(value[addressRange.upperBound...])
+        } else {
+            return rawSegment
+        }
+        return String(rawSegment.prefix(while: { $0.isWhitespace })) + formatted
+            + String(rawSegment.reversed().prefix(while: { $0.isWhitespace }).reversed())
     }
 
     /// Builds HTML content for forwarded message with proper header styling

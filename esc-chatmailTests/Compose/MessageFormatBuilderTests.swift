@@ -96,6 +96,111 @@ final class MessageFormatBuilderTests: XCTestCase {
         XCTAssertTrue(result.body.hasSuffix("Available message snippet"))
     }
 
+    func testFormatForwardedMessage_rawHeadersPreserveEmptyGroupsInPlainTextAndHTML() {
+        let result = sut.formatForwardedMessage(makePlainSource(
+            bodyText: "Original body",
+            originalHTML: "<body><p>Original body</p></body>",
+            rawToHeader: "undisclosed-recipients:;",
+            rawCcHeader: "Private Team:;"
+        ))
+
+        XCTAssertTrue(result.body.contains("To: undisclosed-recipients:;\n"))
+        XCTAssertTrue(result.body.contains("Cc: Private Team:;\n"))
+        XCTAssertTrue(result.htmlBody?.contains("<strong>To:</strong> undisclosed-recipients:;") == true)
+        XCTAssertTrue(result.htmlBody?.contains("<strong>Cc:</strong> Private Team:;") == true)
+    }
+
+    func testFormatForwardedMessage_explicitEmptyRawHeaderOverridesLegacyParticipants() {
+        let result = sut.formatForwardedMessage(makePlainSource(
+            bodyText: "Original body",
+            to: [.init(email: "stale@example.com", displayName: "Stale")],
+            rawToHeader: ""
+        ))
+
+        XCTAssertFalse(result.body.contains("\nTo:"))
+        XCTAssertFalse(result.body.contains("stale@example.com"))
+    }
+
+    func testFormatForwardedMessage_rawHeadersPreserveNamedGroupsAndMailboxOrder() {
+        let to = "Team: Alice <alice@example.com>, Bob <bob@example.com>;"
+        let cc = "First: first@example.com;, Solo <solo@example.com>, Second: second@example.com;"
+        let result = sut.formatForwardedMessage(makePlainSource(
+            bodyText: "Original body",
+            rawToHeader: to,
+            rawCcHeader: cc
+        ))
+
+        XCTAssertTrue(result.body.contains("To: \(to)\n"))
+        XCTAssertTrue(result.body.contains("Cc: \(cc)\n"))
+    }
+
+    func testFormatForwardedMessage_rawGroupNamesDecodeAfterStructuralDelimiters() {
+        let result = sut.formatForwardedMessage(makePlainSource(
+            bodyText: "Original body",
+            originalHTML: "<body>Original body</body>",
+            rawToHeader: "=?utf-8?Q?Team=3A_West=2C_Unit?=: =?utf-8?Q?Doe=2C_Jane=3B_Sr?= <jane@example.com>;"
+        ))
+
+        XCTAssertTrue(result.body.contains("To: \"Team: West, Unit\": \"Doe, Jane; Sr\" <jane@example.com>;\n"))
+        XCTAssertTrue(result.htmlBody?.contains("&quot;Team: West, Unit&quot;: &quot;Doe, Jane; Sr&quot; &lt;jane@example.com&gt;;") == true)
+    }
+
+    func testFormatForwardedMessage_rawEncodedWordsKeepLiteralDelimitersInsideNames() {
+        let result = sut.formatForwardedMessage(makePlainSource(
+            bodyText: "Original body",
+            rawToHeader: "=?utf-8?Q?Team:West;Operations?=: =?utf-8?Q?Doe,Jane?= <jane@example.com>;"
+        ))
+
+        XCTAssertTrue(result.body.contains("To: \"Team:West;Operations\": \"Doe,Jane\" <jane@example.com>;\n"))
+    }
+
+    func testFormatForwardedMessage_rawGroupsPreserveQuotedLocalPartsCommentsAndDomainLiterals() {
+        let to = "Team: =?utf-8?Q?Doe=2C_Jane?= <\"a:b;c,d\"@example.com>, \"e:f;g,h\"@example.com;"
+        let cc = "\"Team:West;Unit\": Alice (West (Unit:1); A,B) <alice@example.com>, local@[IPv6:2001:db8::1];"
+        let result = sut.formatForwardedMessage(makePlainSource(
+            bodyText: "Original body",
+            rawToHeader: to,
+            rawCcHeader: cc
+        ))
+
+        XCTAssertTrue(result.body.contains("To: Team: \"Doe, Jane\" <\"a:b;c,d\"@example.com>, \"e:f;g,h\"@example.com;\n"))
+        XCTAssertTrue(result.body.contains("Cc: \(cc)\n"))
+    }
+
+    func testFormatForwardedMessage_unparseableRawRecipientSpansRemainPresent() {
+        let to = "Team: unknown recipient, valid@example.com;, unresolved"
+        let result = sut.formatForwardedMessage(makePlainSource(bodyText: "Body", rawToHeader: to))
+
+        XCTAssertTrue(result.body.contains("To: \(to)\n"))
+    }
+
+    func testFormatForwardedMessage_decodedMailboxNamePreservesTrailingComment() {
+        let result = sut.formatForwardedMessage(makePlainSource(
+            bodyText: "Body",
+            rawToHeader: "Team: =?utf-8?Q?Doe=2C_Jane?= <jane@example.com> (Original recipient);",
+            rawCcHeader: "jane@example.com (=?utf-8?Q?Doe=2C_Jane?=)"
+        ))
+
+        XCTAssertTrue(result.body.contains("To: Team: \"Doe, Jane\" <jane@example.com> (Original recipient);\n"))
+        XCTAssertTrue(result.body.contains("Cc: jane@example.com (=?utf-8?Q?Doe=2C_Jane?=)\n"))
+    }
+
+    func testFormatForwardedMessage_complexEncodedNamesPreserveRawAddressesAndComments() {
+        let to = "=?utf-8?Q?Alice?= (old <old@example.com>) <alice@example.com>"
+        let cc = "\"=?utf-8?Q?Alice?= <old@example.com>\" <alice@example.com>"
+        let result = sut.formatForwardedMessage(makePlainSource(bodyText: "Body", rawToHeader: to, rawCcHeader: cc))
+
+        XCTAssertTrue(result.body.contains("To: \(to)\n"))
+        XCTAssertTrue(result.body.contains("Cc: \(cc)\n"))
+    }
+
+    func testFormatForwardedMessage_encodedGroupNameWithCommentRemainsVerbatim() {
+        let to = "=?utf-8?Q?Team?= (original group): alice@example.com;"
+        let result = sut.formatForwardedMessage(makePlainSource(bodyText: "Body", rawToHeader: to))
+
+        XCTAssertTrue(result.body.contains("To: \(to)\n"))
+    }
+
     // MARK: - buildFinalHTMLForForward Tests
 
     func testBuildFinalHTMLForForward_withUserContent_prependsToHTML() {
@@ -358,7 +463,14 @@ final class MessageFormatBuilderTests: XCTestCase {
         XCTAssertTrue(result.contains("<a href=\"https://web.birley.com/webmail/"))
     }
 
-    private func makePlainSource(bodyText: String?, snippet: String? = nil) -> MessageFormatBuilder.ForwardSource {
+    private func makePlainSource(
+        bodyText: String?,
+        snippet: String? = nil,
+        originalHTML: String? = nil,
+        to: [MessageFormatBuilder.ForwardSource.Participant] = [],
+        rawToHeader: String? = nil,
+        rawCcHeader: String? = nil
+    ) -> MessageFormatBuilder.ForwardSource {
         .init(
             id: "plain-forward",
             subject: "Plain message",
@@ -366,9 +478,11 @@ final class MessageFormatBuilderTests: XCTestCase {
             sender: .init(email: "sender@example.com", displayName: nil),
             bodyText: bodyText,
             snippet: snippet,
-            originalHTML: nil,
-            to: [],
-            cc: []
+            originalHTML: originalHTML,
+            to: to,
+            cc: [],
+            rawToHeader: rawToHeader,
+            rawCcHeader: rawCcHeader
         )
     }
 }

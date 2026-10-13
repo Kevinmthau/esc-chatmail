@@ -1452,14 +1452,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func makeForwardSource(_ message: Message) -> MessageFormatBuilder.ForwardSource {
-        func participants(of kind: ParticipantKind, rawHeader: String? = nil) -> [MessageFormatBuilder.ForwardSource.Participant] {
-            if let rawHeader {
-                return EmailAddressListParser.addressTokens(from: rawHeader).compactMap { mailbox in
-                    guard let email = EmailNormalizer.extractEmail(from: mailbox) else { return nil }
-                    return .init(email: email, displayName: EmailNormalizer.extractDisplayName(from: mailbox))
-                }
-            }
-
+        func participants(of kind: ParticipantKind) -> [MessageFormatBuilder.ForwardSource.Participant] {
             // Older cached messages have no original recipient headers until refetched.
             return Array(message.participants ?? [])
                 .filter { $0.kind == kind.rawValue }
@@ -1488,8 +1481,10 @@ final class ChatViewModel: ObservableObject {
             bodyText: message.bodyTextValue,
             snippet: message.snippet,
             originalHTML: loadOriginalHTML(for: message),
-            to: participants(of: .to, rawHeader: message.rawToHeader),
-            cc: participants(of: .cc, rawHeader: message.rawCcHeader)
+            to: message.rawToHeader == nil ? participants(of: .to) : [],
+            cc: message.rawCcHeader == nil ? participants(of: .cc) : [],
+            rawToHeader: message.rawToHeader,
+            rawCcHeader: message.rawCcHeader
         )
     }
 

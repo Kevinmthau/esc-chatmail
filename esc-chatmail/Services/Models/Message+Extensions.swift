@@ -130,7 +130,7 @@ extension Message {
     @NSManaged public var senderName: String?
     @NSManaged public var senderEmail: String?
     /// Original recipient headers, before normalization or contact-name enrichment.
-    /// Nil identifies historical rows whose original headers have not been refetched.
+    /// Nil means the header was not supplied, including historical rows awaiting refetch.
     @NSManaged public var rawToHeader: String?
     @NSManaged public var rawCcHeader: String?
     @NSManaged public var messageId: String?

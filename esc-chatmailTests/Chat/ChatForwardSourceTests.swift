@@ -112,6 +112,24 @@ final class ChatForwardSourceTests: XCTestCase {
         XCTAssertFalse(body.contains("hidden@example.com"))
     }
 
+    func testForward_rawRecipientGroupsPreserveGroupNamesAndEmptyGroups() {
+        let dependencies = makeDependencies()
+        let context = dependencies.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let message = MessageBuilder().inConversation(conversation).build(in: context)
+        message.rawToHeader = "undisclosed-recipients:;"
+        message.rawCcHeader = "Team: Alice <alice@example.com>, Bob <bob@example.com>;"
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: dependencies.makeChatDependencies())
+
+        viewModel.setMessageToForward(message)
+
+        guard case .forwardCompose(let forwardContext) = viewModel.destination else {
+            return XCTFail("Expected forward compose destination")
+        }
+        XCTAssertTrue(forwardContext.forwardedPlainTextBody.contains("To: undisclosed-recipients:;\n"))
+        XCTAssertTrue(forwardContext.forwardedPlainTextBody.contains("Cc: Team: Alice <alice@example.com>, Bob <bob@example.com>;\n"))
+    }
+
     func testForward_explicitEmptyRecipientHeadersDoNotUseSharedContacts() {
         let dependencies = makeDependencies()
         let context = dependencies.viewContext
