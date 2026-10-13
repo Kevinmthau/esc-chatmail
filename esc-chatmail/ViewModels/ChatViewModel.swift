@@ -1452,8 +1452,16 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func makeForwardSource(_ message: Message) -> MessageFormatBuilder.ForwardSource {
-        func participants(of kind: ParticipantKind) -> [MessageFormatBuilder.ForwardSource.Participant] {
-            Array(message.participants ?? [])
+        func participants(of kind: ParticipantKind, rawHeader: String? = nil) -> [MessageFormatBuilder.ForwardSource.Participant] {
+            if let rawHeader {
+                return EmailAddressListParser.addressTokens(from: rawHeader).compactMap { mailbox in
+                    guard let email = EmailNormalizer.extractEmail(from: mailbox) else { return nil }
+                    return .init(email: email, displayName: EmailNormalizer.extractDisplayName(from: mailbox))
+                }
+            }
+
+            // Older cached messages have no original recipient headers until refetched.
+            return Array(message.participants ?? [])
                 .filter { $0.kind == kind.rawValue }
                 .compactMap { participant in
                     guard let person = participant.person else { return nil }
@@ -1463,8 +1471,11 @@ final class ChatViewModel: ObservableObject {
         }
 
         let fromParticipant = participants(of: .from).first
-        let senderEmail = MessagePreviewText.nonEmpty(message.senderEmailValue) ?? fromParticipant?.email
-        let senderName = MessagePreviewText.nonEmpty(message.senderNameValue) ?? fromParticipant?.displayName
+        let storedSenderEmail = MessagePreviewText.nonEmpty(message.senderEmailValue)
+        let senderEmail = storedSenderEmail ?? fromParticipant?.email
+        let senderName = storedSenderEmail == nil
+            ? MessagePreviewText.nonEmpty(message.senderNameValue) ?? fromParticipant?.displayName
+            : MessagePreviewText.nonEmpty(message.senderNameValue)
         let sender: MessageFormatBuilder.ForwardSource.Participant? = senderEmail != nil || senderName != nil
             ? .init(email: senderEmail ?? "", displayName: senderName)
             : nil
@@ -1477,8 +1488,8 @@ final class ChatViewModel: ObservableObject {
             bodyText: message.bodyTextValue,
             snippet: message.snippet,
             originalHTML: loadOriginalHTML(for: message),
-            to: participants(of: .to),
-            cc: participants(of: .cc)
+            to: participants(of: .to, rawHeader: message.rawToHeader),
+            cc: participants(of: .cc, rawHeader: message.rawCcHeader)
         )
     }
 

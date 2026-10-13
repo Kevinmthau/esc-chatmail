@@ -15,6 +15,70 @@ final class MessageProcessorTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Original Recipient Headers
+
+    func testProcessGmailMessage_preservesOriginalRecipientHeadersWithoutChangingNormalizedRouting() async throws {
+        let to = "\"Original, Recipient\" <First.Last+orders@googlemail.com>, Other <other@example.com>"
+        let cc = "=?UTF-8?Q?Original_Team?= <Team.Name+copy@gmail.com>"
+        let message = makeRecipientHeaderMessage(headers: [
+            MessageHeader(name: "To", value: to),
+            MessageHeader(name: "Cc", value: cc)
+        ])
+
+        let result = try await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(result)
+
+        XCTAssertEqual(processed.headers.rawToHeader, to)
+        XCTAssertEqual(processed.headers.rawCcHeader, cc)
+        XCTAssertEqual(processed.headers.to.map(\.email), ["firstlast@gmail.com", "other@example.com"])
+        XCTAssertEqual(processed.headers.to.map(\.displayName), ["Original, Recipient", "Other"])
+        XCTAssertEqual(processed.headers.cc.map(\.email), ["teamname@gmail.com"])
+        XCTAssertEqual(processed.headers.cc.map(\.displayName), ["Original Team"])
+    }
+
+    func testProcessGmailMessage_distinguishesMissingRecipientHeadersFromExplicitEmptyHeaders() async throws {
+        for explicitEmptyHeaders in [false, true] {
+            let headers = explicitEmptyHeaders ? [
+                MessageHeader(name: "To", value: ""),
+                MessageHeader(name: "Cc", value: "")
+            ] : []
+            let result = try await processor.processGmailMessage(
+                makeRecipientHeaderMessage(headers: headers),
+                myAliases: []
+            )
+            let processed = try XCTUnwrap(result)
+
+            XCTAssertEqual(processed.headers.rawToHeader, explicitEmptyHeaders ? "" : nil)
+            XCTAssertEqual(processed.headers.rawCcHeader, explicitEmptyHeaders ? "" : nil)
+            XCTAssertTrue(processed.headers.to.isEmpty)
+            XCTAssertTrue(processed.headers.cc.isEmpty)
+        }
+    }
+
+    private func makeRecipientHeaderMessage(headers: [MessageHeader]) -> GmailMessage {
+        GmailMessage(
+            id: "original-recipient-headers",
+            threadId: "original-recipient-thread",
+            labelIds: ["INBOX"],
+            snippet: "Original body",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "text/plain",
+                filename: nil,
+                headers: [MessageHeader(name: "From", value: "Sender <sender@example.com>")] + headers,
+                body: MessageBody(
+                    size: 13,
+                    data: Data("Original body".utf8).base64EncodedString(),
+                    attachmentId: nil
+                ),
+                parts: nil
+            ),
+            sizeEstimate: 13
+        )
+    }
+
     // MARK: - Canonical MIME Content
 
     func testProcessGmailMessage_multipartAlternativePlainFirstPersistsHTMLAsCanonicalSource() async throws {

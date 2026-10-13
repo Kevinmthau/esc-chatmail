@@ -129,6 +129,10 @@ extension Message {
     @NSManaged public var bodyText: String?
     @NSManaged public var senderName: String?
     @NSManaged public var senderEmail: String?
+    /// Original recipient headers, before normalization or contact-name enrichment.
+    /// Nil identifies historical rows whose original headers have not been refetched.
+    @NSManaged public var rawToHeader: String?
+    @NSManaged public var rawCcHeader: String?
     @NSManaged public var messageId: String?
     @NSManaged public var references: String?
     @NSManaged public var replyFromAddress: String?

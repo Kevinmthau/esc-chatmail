@@ -935,6 +935,8 @@ extension GmailSendService {
         senderName: String?,
         for message: Message
     ) throws -> [MessageParticipant] {
+        message.rawToHeader = recipients.map(MimeBuilder.sanitizeHeaderValue).joined(separator: ", ")
+        message.rawCcHeader = ""
         var participants: [MessageParticipant] = []
         if let senderEmail {
             let fromHeader = MimeBuilder.formatFromHeader(

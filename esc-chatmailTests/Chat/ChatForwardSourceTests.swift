@@ -82,6 +82,77 @@ final class ChatForwardSourceTests: XCTestCase {
         XCTAssertTrue(forwardContext.forwardedPlainTextBody.contains("From: Original Sender <sender@example.com>\n"))
     }
 
+    func testForward_rawRecipientHeadersPreserveAliasesNamesAndOrder() {
+        let dependencies = makeDependencies()
+        let context = dependencies.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let message = MessageBuilder()
+            .withSender(email: "sender@example.com", name: "Original Sender")
+            .inConversation(conversation)
+            .build(in: context)
+        message.rawToHeader = "=?utf-8?Q?Original=2C_Name?= <my.name+tag@gmail.com>, Bare.Name+alias@gmail.com"
+        message.rawCcHeader = "Original Team <team+original@example.com>"
+        addMessageParticipant(email: "myname@gmail.com", name: "New Contact Name", kind: .to, to: message, in: context)
+        addMessageParticipant(email: "barename@gmail.com", name: "Invented Name", kind: .to, to: message, in: context)
+        addMessageParticipant(email: "team+original@example.com", name: "Renamed Team", kind: .cc, to: message, in: context)
+        addMessageParticipant(email: "hidden@example.com", name: "Hidden", kind: .bcc, to: message, in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: dependencies.makeChatDependencies())
+
+        viewModel.setMessageToForward(message)
+
+        guard case .forwardCompose(let forwardContext) = viewModel.destination else {
+            return XCTFail("Expected forward compose destination")
+        }
+        let body = forwardContext.forwardedPlainTextBody
+        XCTAssertTrue(body.contains("To: \"Original, Name\" <my.name+tag@gmail.com>, Bare.Name+alias@gmail.com\n"))
+        XCTAssertTrue(body.contains("Cc: Original Team <team+original@example.com>\n"))
+        XCTAssertFalse(body.contains("New Contact Name"))
+        XCTAssertFalse(body.contains("Invented Name"))
+        XCTAssertFalse(body.contains("Renamed Team"))
+        XCTAssertFalse(body.contains("hidden@example.com"))
+    }
+
+    func testForward_explicitEmptyRecipientHeadersDoNotUseSharedContacts() {
+        let dependencies = makeDependencies()
+        let context = dependencies.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let message = MessageBuilder().inConversation(conversation).build(in: context)
+        message.rawToHeader = ""
+        message.rawCcHeader = ""
+        addMessageParticipant(email: "stale@example.com", name: "Stale", kind: .to, to: message, in: context)
+        addMessageParticipant(email: "stale-cc@example.com", name: "Stale Cc", kind: .cc, to: message, in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: dependencies.makeChatDependencies())
+
+        viewModel.setMessageToForward(message)
+
+        guard case .forwardCompose(let forwardContext) = viewModel.destination else {
+            return XCTFail("Expected forward compose destination")
+        }
+        XCTAssertFalse(forwardContext.forwardedPlainTextBody.contains("\nTo:"))
+        XCTAssertFalse(forwardContext.forwardedPlainTextBody.contains("\nCc:"))
+    }
+
+    func testForward_storedBareSenderDoesNotAcquireSharedContactName() {
+        let dependencies = makeDependencies()
+        let context = dependencies.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let message = MessageBuilder()
+            .withSender(email: "sender@example.com", name: "")
+            .inConversation(conversation)
+            .build(in: context)
+        message.senderName = nil
+        addMessageParticipant(email: "sender@example.com", name: "Later Contact Name", kind: .from, to: message, in: context)
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: dependencies.makeChatDependencies())
+
+        viewModel.setMessageToForward(message)
+
+        guard case .forwardCompose(let forwardContext) = viewModel.destination else {
+            return XCTFail("Expected forward compose destination")
+        }
+        XCTAssertTrue(forwardContext.forwardedPlainTextBody.contains("From: sender@example.com\n"))
+        XCTAssertFalse(forwardContext.forwardedPlainTextBody.contains("Later Contact Name"))
+    }
+
     private func makeDependencies() -> Dependencies {
         let authSession = AuthSession(
             tokenManagerProvider: { MockTokenManager() },
