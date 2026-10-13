@@ -263,6 +263,76 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         XCTAssertEqual(result?.recipientSummary, "Doe, Jane +1")
     }
 
+    func testParseForward_encodedRecipientComma_decodesAfterSplittingAddresses() {
+        let result = ForwardedMessageDisplayParser.parseForward(
+            from: """
+            Begin forwarded message:
+            From: Jane Example <jane@example.com>
+            To: =?utf-8?Q?Doe=2C_Jane?= <jane@example.com>, bob@example.com
+            Subject: Plans
+
+            Looking forward to seeing you there.
+            """
+        )
+
+        XCTAssertEqual(result?.recipientSummary, "Doe, Jane +1")
+    }
+
+    func testParseForward_encodedSenderBrackets_doNotChangeSenderAddress() {
+        let result = ForwardedMessageDisplayParser.parseForward(
+            from: """
+            Begin forwarded message:
+            From: =?utf-8?Q?Jane_=3Cdisplay=40example.com=3E?= <real@example.com>
+            Subject: Plans
+
+            Message body.
+            """
+        )
+
+        XCTAssertEqual(result?.senderEmail, "real@example.com")
+    }
+
+    func testParseForward_indentedHeaders_remainSeparateHeaders() {
+        let result = ForwardedMessageDisplayParser.parseForward(
+            from: [
+                "Begin forwarded message:",
+                "    From: Jane Example <jane@example.com>",
+                "\tDate: Mon, Feb 16, 2026 at 5:56 PM",
+                "    Subject: Spring plans",
+                "\tTo: me@example.com",
+                "",
+                "Looking forward to seeing you there."
+            ].joined(separator: "\n")
+        )
+
+        XCTAssertEqual(result?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result?.subject, "Spring plans")
+        XCTAssertEqual(result?.recipientSummary, "me@example.com")
+        XCTAssertTrue(result?.timestampText?.contains("Feb 16") == true)
+        XCTAssertEqual(result?.previewSnippet, "Looking forward to seeing you there.")
+    }
+
+    func testParseForward_foldedHeaderValue_keepsContinuationText() {
+        let result = ForwardedMessageDisplayParser.parseForward(
+            from: [
+                "Begin forwarded message:",
+                "From: Jane",
+                "    Example <jane@example.com>",
+                "Subject: Spring plans",
+                "    for the whole team",
+                "    To: me@example.com",
+                "",
+                "Message body."
+            ].joined(separator: "\n")
+        )
+
+        XCTAssertEqual(result?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result?.senderEmail, "jane@example.com")
+        XCTAssertEqual(result?.subject, "Spring plans for the whole team")
+        XCTAssertEqual(result?.recipientSummary, "me@example.com")
+        XCTAssertEqual(result?.previewSnippet, "Message body.")
+    }
+
     func testParseOutgoingForward_inlineNaturalSentText_isNotParsedAsHeader() {
         let result = ForwardedMessageDisplayParser.parseOutgoingForward(
             from: """

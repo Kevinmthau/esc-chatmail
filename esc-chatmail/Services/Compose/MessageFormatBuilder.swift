@@ -12,11 +12,12 @@ struct MessageFormatBuilder {
         let id: String
         let subject: String?
         let internalDate: Date
-        let isFromMe: Bool
+        let sender: Participant?
         let bodyText: String?
         let snippet: String?
         let originalHTML: String?
-        let participants: [Participant]
+        let to: [Participant]
+        let cc: [Participant]
     }
 
     let authSession: AuthSession
@@ -37,21 +38,7 @@ struct MessageFormatBuilder {
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
 
-        // Build forward header info
-        var fromLine = ""
-        let participants = source.participants
-
-        if source.isFromMe {
-            fromLine = authSession.userEmail ?? "Me"
-        } else {
-            if let otherParticipant = participants.first(where: { participant in
-                let email = participant.email
-                return EmailNormalizer.normalize(email) != EmailNormalizer.normalize(authSession.userEmail ?? "")
-            }) {
-                fromLine = otherParticipant.displayName ?? otherParticipant.email
-            }
-        }
-
+        let fromLine = source.sender.map(formattedMailbox) ?? PersonDisplayNameResolver.fallbackSenderName()
         let dateLine = formatter.string(from: source.internalDate)
 
         var subject: String?
@@ -67,10 +54,8 @@ struct MessageFormatBuilder {
             }
         }
 
-        let recipientList = participants.map(\.email)
-            .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(authSession.userEmail ?? "") }
-
-        let toLine = recipientList.joined(separator: ", ")
+        let toLine = source.to.map(formattedMailbox).joined(separator: ", ")
+        let ccLine = source.cc.map(formattedMailbox).joined(separator: ", ")
 
         // Build plain text forward header
         var quotedText = "\n\n---------- Forwarded message ---------\n"
@@ -82,10 +67,15 @@ struct MessageFormatBuilder {
         if !toLine.isEmpty {
             quotedText += "To: \(toLine)\n"
         }
+        if !ccLine.isEmpty {
+            quotedText += "Cc: \(ccLine)\n"
+        }
         quotedText += "\n"
 
         // Use full body text if available, otherwise fall back to snippet
-        let messageContent = HTMLEntityDecoder.decode(source.bodyText ?? source.snippet ?? "")
+        let messageContent = MessagePreviewText.nonEmpty(source.bodyText) == nil
+            ? source.snippet ?? ""
+            : source.bodyText ?? ""
         quotedText += messageContent
 
         // Load HTML content if available
@@ -96,7 +86,8 @@ struct MessageFormatBuilder {
                 from: fromLine,
                 date: dateLine,
                 subject: subjectLine,
-                to: toLine
+                to: toLine,
+                cc: ccLine
             )
         }
 
@@ -107,8 +98,27 @@ struct MessageFormatBuilder {
         )
     }
 
+    private func formattedMailbox(_ participant: ForwardSource.Participant) -> String {
+        let email = participant.email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let displayName = MessagePreviewText.nonEmpty(participant.displayName) else {
+            return email
+        }
+        guard !email.isEmpty else { return displayName }
+
+        let name: String
+        if displayName.rangeOfCharacter(from: CharacterSet(charactersIn: ",\"<>\\")) != nil {
+            let escapedName = displayName
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            name = "\"\(escapedName)\""
+        } else {
+            name = displayName
+        }
+        return "\(name) <\(email)>"
+    }
+
     /// Builds HTML content for forwarded message with proper header styling
-    private func buildHTMLForward(originalHTML: String, from: String, date: String, subject: String, to: String) -> String {
+    private func buildHTMLForward(originalHTML: String, from: String, date: String, subject: String, to: String, cc: String) -> String {
         let headerHTML = """
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; \
         padding: 10px 0; margin: 20px 0; border-left: 2px solid #ccc; padding-left: 10px; color: #555;">
@@ -117,6 +127,7 @@ struct MessageFormatBuilder {
         <div><strong>Date:</strong> \(escapeHTML(date))</div>
         \(subject.isEmpty ? "" : "<div><strong>Subject:</strong> \(escapeHTML(subject))</div>")
         \(to.isEmpty ? "" : "<div><strong>To:</strong> \(escapeHTML(to))</div>")
+        \(cc.isEmpty ? "" : "<div><strong>Cc:</strong> \(escapeHTML(cc))</div>")
         </div>
         <hr style="border: none; border-top: 1px solid #ccc; margin: 10px 0;">
         """
@@ -170,8 +181,7 @@ struct MessageFormatBuilder {
     ///   - forwardedHTML: The original forwarded HTML content (already includes forward header)
     /// - Returns: Complete HTML with user's content prepended
     func buildFinalHTMLForForward(userContent: String, forwardedHTML: String) -> String {
-        // Extract just the user's new content (everything before the forward header)
-        let userMessage = extractUserContent(from: userContent)
+        let userMessage = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // If user didn't add any content, return the forwarded HTML as-is
         if userMessage.isEmpty {
@@ -223,36 +233,9 @@ struct MessageFormatBuilder {
         """
     }
 
-    /// Extracts the user's new content from the full plain text body.
-    ///
-    /// The plain text body contains the user's new message followed by the forwarded
-    /// message header. This extracts just the user's portion.
-    private func extractUserContent(from fullBody: String) -> String {
-        // Find the forward header separator
-        let forwardMarkers = [
-            "---------- Forwarded message ---------",
-            "---------- Forwarded message ----------",
-            "----- Forwarded message -----"
-        ]
-
-        for marker in forwardMarkers {
-            if let range = fullBody.range(of: marker) {
-                let userPart = String(fullBody[..<range.lowerBound])
-                return userPart.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-
-        // No forward marker found (for example when only the user's note is passed)
-        return fullBody.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     /// Converts plain text to HTML, preserving formatting and auto-linking URLs.
     private func convertPlainTextToHTML(_ text: String) -> String {
-        // First escape HTML characters
-        var html = escapeHTML(text)
-
-        // Auto-link URLs
-        html = autoLinkURLs(html)
+        var html = autoLinkURLs(text)
 
         // Convert line breaks to proper HTML
         // Use <br> tags to preserve line breaks
@@ -282,35 +265,32 @@ struct MessageFormatBuilder {
         return html
     }
 
-    /// Auto-links URLs in HTML-escaped text.
-    ///
-    /// Finds URLs and wraps them in anchor tags. Works on already HTML-escaped text.
+    /// Detects links in plain text, then escapes each link and surrounding text for HTML.
     private func autoLinkURLs(_ text: String) -> String {
-        // URL pattern that works with HTML-escaped text
-        // Matches http://, https://, and www. URLs
-        let urlPattern = #"(https?://[^\s<>&\"']+|www\.[^\s<>&\"']+)"#
+        let urlPattern = #"(https?://[^\s<>\"']+|www\.[^\s<>\"']+)"#
 
         guard let regex = try? NSRegularExpression(pattern: urlPattern, options: .caseInsensitive) else {
-            return text
+            return escapeHTML(text)
         }
 
-        var result = text
+        var result = ""
+        var cursor = text.startIndex
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
 
-        // Process matches in reverse order to preserve indices
-        for match in matches.reversed() {
-            guard let range = Range(match.range, in: result) else { continue }
-            let url = String(result[range])
+        for match in matches {
+            guard let range = Range(match.range, in: text) else { continue }
+            result += escapeHTML(String(text[cursor..<range.lowerBound]))
+            let url = String(text[range])
 
             // Add protocol if missing (for www. URLs)
             let href = url.lowercased().hasPrefix("http") ? url : "https://\(url)"
 
             // Create anchor tag
-            let link = "<a href=\"\(href)\" style=\"color: #007AFF; text-decoration: none;\">\(url)</a>"
-
-            result.replaceSubrange(range, with: link)
+            result += "<a href=\"\(escapeHTML(href))\" style=\"color: #007AFF; text-decoration: none;\">\(escapeHTML(url))</a>"
+            cursor = range.upperBound
         }
 
+        result += escapeHTML(String(text[cursor...]))
         return result
     }
 
