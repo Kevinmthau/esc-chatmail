@@ -32,6 +32,22 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertTrue(cidHandler.message === updatedMessage)
     }
 
+    func testDraftInlineResourceChangeUpdatesHandlerAndReloadsUnchangedHTML() {
+        var originalView = makeWebView(message: nil, html: "<img src=\"cid:logo@example.com\">")
+        originalView.inlineResources = [.init(contentID: "logo@example.com", localURL: "Attachments/first.png", mimeType: "image/png")]
+        var updatedView = originalView
+        updatedView.inlineResources = [.init(contentID: "logo@example.com", localURL: "Attachments/second.png", mimeType: "image/png")]
+        let coordinator = BaseEmailWebView.Coordinator(originalView)
+        let handler = CIDSchemeHandler(message: nil, localResources: originalView.inlineResources)
+        coordinator.cidHandler = handler
+        coordinator.recordLoadedSignature()
+
+        coordinator.updateParent(updatedView)
+
+        XCTAssertEqual(handler.localResources, updatedView.inlineResources)
+        XCTAssertTrue(coordinator.needsReload)
+    }
+
     func testCoordinatorNeedsReloadWhenMessageIdentityChangesForSameHTML() {
         let originalMessage = makeMessage(id: "message-a")
         let updatedMessage = makeMessage(id: "message-b")

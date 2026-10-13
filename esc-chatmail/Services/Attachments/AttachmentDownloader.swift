@@ -1251,6 +1251,10 @@ final class AttachmentDownloader: ObservableObject {
     ) async {
         guard isActive(generation) else { return }
         guard let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        // Keep leases observed during this sweep alive through its stale
+        // database snapshot, including files handed to a message after it.
+        let cleanupLease = ComposeAttachmentLeaseRegistry.shared.beginFileCleanup()
+        defer { ComposeAttachmentLeaseRegistry.shared.endFileCleanup(cleanupLease) }
 
         // Fetch valid file paths in background context
         let context = coreDataStack.newBackgroundContext()
@@ -1293,7 +1297,7 @@ final class AttachmentDownloader: ObservableObject {
                 let relativePath = AttachmentPaths.relativePath(from: fileURL)
                 if let path = relativePath, !validFiles.contains(path) {
                     guard !generation.isCancelled else { return }
-                    FileSystemErrorHandler.removeItem(at: fileURL, category: .attachment)
+                    Self.removeOrphanedFile(at: fileURL, relativePath: path)
                 }
             }
 
@@ -1306,7 +1310,7 @@ final class AttachmentDownloader: ObservableObject {
                 let relativePath = AttachmentPaths.relativePath(from: fileURL)
                 if let path = relativePath, !validFiles.contains(path) {
                     guard !generation.isCancelled else { return }
-                    FileSystemErrorHandler.removeItem(at: fileURL, category: .attachment)
+                    Self.removeOrphanedFile(at: fileURL, relativePath: path)
                 }
             }
         }
@@ -1314,6 +1318,19 @@ final class AttachmentDownloader: ObservableObject {
             await cleanupTask.value
         } onCancel: {
             cleanupTask.cancel()
+        }
+    }
+
+    /// Unsaved draft rows are invisible to the background-context snapshot.
+    /// Consult the live lease under the same lock as file deletion.
+    nonisolated static func removeOrphanedFile(
+        at url: URL,
+        relativePath: String,
+        leases: ComposeAttachmentLeaseRegistry = .shared
+    ) {
+        leases.withProtectedResources { resources in
+            guard !resources.filePaths.contains(relativePath) else { return }
+            FileSystemErrorHandler.removeItem(at: url, category: .attachment)
         }
     }
 }

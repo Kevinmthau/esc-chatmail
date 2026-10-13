@@ -7,6 +7,7 @@ import Contacts
 struct ComposeView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isPresented) private var isPresented
 
     @StateObject private var viewModel: ComposeViewModel
     @FocusState private var focusedField: FocusField?
@@ -95,6 +96,21 @@ struct ComposeView: View {
                         Divider()
                     }
 
+                    if viewModel.isForwardMode && !viewModel.attachments.isEmpty {
+                        AttachmentPreviewStrip(attachments: viewModel.attachments) { attachment in
+                            VStack(spacing: 4) {
+                                DraftAttachmentThumbnail(attachment: attachment) {
+                                    viewModel.removeAttachment(attachment)
+                                }
+                                .accessibilityLabel("Remove \(attachment.filenameValue)")
+                                Text(attachment.filenameValue)
+                                    .font(.caption2)
+                                    .lineLimit(2)
+                                    .frame(width: 76)
+                            }
+                        }
+                    }
+
                     bodySection
 
                     Spacer(minLength: 0)
@@ -127,6 +143,7 @@ struct ComposeView: View {
 
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button("Cancel") {
+                            viewModel.discard()
                             dismiss()
                         }
                         .disabled(viewModel.isSending)
@@ -147,6 +164,10 @@ struct ComposeView: View {
             }
         }
         .interactiveDismissDisabled(viewModel.isSending)
+        .onDisappear { viewModel.presentationDidDisappear(isPresented: isPresented) }
+        .onChange(of: isPresented) { _, presented in
+            if !presented { viewModel.discard() }
+        }
         .alert(item: $viewModel.errorAlert) { alert in
             Alert(
                 title: Text("Error"),
@@ -190,6 +211,7 @@ struct ComposeView: View {
             HStack {
                 Spacer()
                 Button {
+                    viewModel.discard()
                     dismiss()
                 } label: {
                     Image(systemName: "xmark")
@@ -321,7 +343,8 @@ struct ComposeView: View {
                 BaseEmailWebView(
                     htmlContent: previewHTML,
                     mode: .simplePreview,
-                    isDarkMode: isDarkMode
+                    isDarkMode: isDarkMode,
+                    inlineResources: viewModel.forwardedPreviewInlineResources
                 )
                     .frame(height: 240)
                     .cornerRadius(10)

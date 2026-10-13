@@ -1251,12 +1251,16 @@ final class ChatViewModel: ObservableObject {
     func editFailedReply(messageObjectID: NSManagedObjectID) -> Bool {
         guard authSession.userEmail == draftAccountEmail else { return false }
         guard !composerState.isSending, !composerState.isProcessingAttachments else { return false }
-        guard !composerState.hasDraftContent, !draftRestoreFailed else {
-            sendErrorAlert = ChatSendErrorAlert(title: "Draft Already Open", message: "Send or discard your current draft before editing this failed reply.")
-            return false
-        }
         guard let message = resolveMessage(with: messageObjectID) else { return false }
         do {
+            if let forwardContext = try draftStore.forwardRecoveryContext(message, conversation: conversation) {
+                destination = .forwardCompose(forwardContext)
+                return true
+            }
+            guard !composerState.hasDraftContent, !draftRestoreFailed else {
+                sendErrorAlert = ChatSendErrorAlert(title: "Draft Already Open", message: "Send or discard your current draft before editing this failed reply.")
+                return false
+            }
             let (snapshot, attachments) = try draftStore.recover(message, conversation: conversation,
                                                                currentUserEmail: authSession.userEmail ?? "")
             replyText = snapshot.text

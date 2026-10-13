@@ -38,6 +38,8 @@ struct BaseEmailWebView: UIViewRepresentable {
     var senderEmail: String? = nil
     /// Optional message for resolving cid: URLs to inline attachments.
     var message: Message?
+    /// Draft-owned inline bytes, allowing compose previews without a persisted source message.
+    var inlineResources: [CIDSchemeHandler.LocalResource] = []
     /// Optional callback for non-interactive previews that need their rendered height.
     var onPreviewHeightChange: ((CGFloat) -> Void)? = nil
 
@@ -49,7 +51,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
 
         // Register cid: scheme handler for inline attachments.
-        let cidHandler = CIDSchemeHandler(message: message)
+        let cidHandler = CIDSchemeHandler(message: message, localResources: inlineResources)
         context.coordinator.cidHandler = cidHandler
         configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
@@ -113,6 +115,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         func updateParent(_ parent: BaseEmailWebView) {
             self.parent = parent
             cidHandler?.message = parent.message
+            cidHandler?.localResources = parent.inlineResources
         }
 
         func loadContent(in webView: WKWebView) {
@@ -225,7 +228,8 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func reloadSignature() -> String {
-            "\(modeSignature(for: parent.mode)):\(messageIdentitySignature()):source:none:cid:unchanged"
+            let resources = parent.inlineResources.map { "\($0.contentID):\($0.localURL):\($0.mimeType)" }.joined(separator: "|")
+            return "\(modeSignature(for: parent.mode)):\(messageIdentitySignature()):source:none:cid:\(resources)"
         }
 
         private func messageIdentitySignature() -> String {

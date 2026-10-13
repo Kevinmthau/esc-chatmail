@@ -17,7 +17,8 @@ extension GmailSendService {
         senderEmail: String? = nil,
         senderName: String? = nil,
         optimisticConversation: OptimisticConversationReference? = nil,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
+        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil,
+        forwardEnvelope: StoredForwardEnvelope? = nil
     ) async throws -> OptimisticSendHandle {
         try await createOptimisticMessage(
             to: recipients,
@@ -29,7 +30,8 @@ extension GmailSendService {
             senderEmail: senderEmail,
             senderName: senderName,
             optimisticConversation: optimisticConversation,
-            replyMetadata: replyMetadata
+            replyMetadata: replyMetadata,
+            forwardEnvelope: forwardEnvelope
         )
     }
 
@@ -46,7 +48,8 @@ extension GmailSendService {
         senderEmail: String? = nil,
         senderName: String? = nil,
         optimisticConversation: OptimisticConversationReference? = nil,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
+        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil,
+        forwardEnvelope: StoredForwardEnvelope? = nil
     ) async throws -> OptimisticSendHandle {
         try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
             try await createOptimisticMessageWithoutCleanupInterleaving(
@@ -59,7 +62,8 @@ extension GmailSendService {
                 senderEmail: senderEmail,
                 senderName: senderName,
                 optimisticConversation: optimisticConversation,
-                replyMetadata: replyMetadata
+                replyMetadata: replyMetadata,
+                forwardEnvelope: forwardEnvelope
             )
         }
     }
@@ -78,7 +82,8 @@ extension GmailSendService {
         senderEmail: String?,
         senderName: String?,
         optimisticConversation: OptimisticConversationReference?,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata?
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?,
+        forwardEnvelope: StoredForwardEnvelope?
     ) async throws -> OptimisticSendHandle {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
@@ -208,7 +213,9 @@ extension GmailSendService {
             conversation: conversation
         )
         do {
-            try persistOptimisticSendMutationAndGraph(rollbackSnapshot, replyMetadata: replyMetadata)
+            try persistOptimisticSendMutationAndGraph(
+                rollbackSnapshot, replyMetadata: replyMetadata, forwardEnvelope: forwardEnvelope
+            )
         } catch {
             Log.error("Failed to persist optimistic send state", category: .message, error: error)
             rollbackOptimisticCreation(message, snapshot: rollbackSnapshot)
@@ -333,7 +340,8 @@ extension GmailSendService {
         // Restore the draft in the same save that removes the pre-admission
         // send. A crash must not leave a gap with neither durable owner.
         if let conversation = message.conversation,
-           let data = fetchOptimisticSendMutationRecords(messageID: messageID).first?.replyEnvelopeData {
+           let data = fetchOptimisticSendMutationRecords(messageID: messageID).first?.replyEnvelopeData,
+           (try? StoredForwardEnvelope.decode(from: data)) == nil {
             do {
                 let envelope = try JSONDecoder().decode(StoredReplyEnvelope.self, from: data)
                 // Merge, never replace: a chat reply's composer released at
@@ -449,6 +457,9 @@ extension GmailSendService {
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
 
         var didRecord = false
+        var replacedObjectIDs: [NSManagedObjectID] = []
+        var updatedObjectIDs: [NSManagedObjectID] = []
+        let myEmail = authSession.userEmail ?? ""
         try context.performAndWait {
             guard let record = Self.fetchOptimisticSendMutationRecords(
                 messageID: optimisticMessageID,
@@ -462,6 +473,153 @@ extension GmailSendService {
 
             record.remoteCommittedMessageId = messageID
             record.remoteCommittedThreadId = threadID
+
+            if messageID == OutboundSendRemoteState.notSentMessageID,
+               let envelope = try? StoredForwardEnvelope.decode(from: record.replyEnvelopeData),
+               envelope.recoverySourceWasConsumed == true {
+                record.replyEnvelopeData = try envelope.withoutRecoverySource().encoded()
+            }
+
+            if messageID == OutboundSendRemoteState.inFlightMessageID,
+               let envelope = try StoredForwardEnvelope.decode(from: record.replyEnvelopeData),
+               let replacedID = envelope.replacingUnsentMessageID {
+                // Copy-on-recovery leaves the failed forward intact while its
+                // composer is open. Consume it only in the same transaction
+                // as this send's admission marker. A second recovery attempt
+                // must not transmit after another one already consumed it.
+                let currentRequest = Message.fetchRequest()
+                currentRequest.predicate = MessagePredicates.id(optimisticMessageID)
+                currentRequest.fetchLimit = 1
+                guard let currentMessage = try context.fetch(currentRequest).first else {
+                    throw SendError.forwardRecoveryUnavailable
+                }
+                let currentAttachmentIDs = Set(currentMessage.attachmentsArray.map(\.objectID))
+                var sourceID: String? = replacedID
+                var seenIDs: Set<String> = [optimisticMessageID]
+                var replacedMessages: [Message] = []
+                var replacedRecords: [OutboundSendMutationRecord] = []
+                // A process death can leave both a pre-admission replacement
+                // and its original failure. Consume that whole unsent chain;
+                // a missing/ambiguous ancestor means another attempt already
+                // owns delivery, so this one must not transmit.
+                while let id = sourceID {
+                    guard seenIDs.insert(id).inserted,
+                          let sourceRecord = Self.fetchOptimisticSendMutationRecords(messageID: id, in: context).first,
+                          sourceRecord.remoteCommittedMessageId == OutboundSendRemoteState.notSentMessageID,
+                          sourceRecord.remoteCommittedThreadId == nil,
+                          let sourceEnvelope = try StoredForwardEnvelope.decode(from: sourceRecord.replyEnvelopeData) else {
+                        throw SendError.forwardRecoveryUnavailable
+                    }
+                    let sourceRequest = Message.fetchRequest()
+                    sourceRequest.predicate = MessagePredicates.id(id)
+                    sourceRequest.fetchLimit = 1
+                    guard let sourceMessage = try context.fetch(sourceRequest).first,
+                          sourceMessage.isFromMe,
+                          sourceMessage.messageIdValue.flatMap({ MimeBuilder.optimisticMessageID(from: $0) }) == id,
+                          currentAttachmentIDs.isDisjoint(with: sourceMessage.attachmentsArray.map(\.objectID)) else {
+                        throw SendError.forwardRecoveryUnavailable
+                    }
+                    replacedMessages.append(sourceMessage)
+                    replacedRecords.append(sourceRecord)
+                    sourceID = sourceEnvelope.replacingUnsentMessageID
+                }
+
+                var conversationCleanups: [NSManagedObjectID: OptimisticFailureConversationCleanup] = [:]
+                var conversationSnapshots: [NSManagedObjectID: OptimisticSendMutationSnapshot] = [:]
+                // The oldest consumed snapshot owns the pre-send state when
+                // several attempts had reactivated the same conversation.
+                for (message, sourceRecord) in zip(replacedMessages, replacedRecords)
+                    .sorted(by: { $0.1.createdAt > $1.1.createdAt }) {
+                    if let conversation = message.conversation {
+                        var snapshot = OptimisticSendMutationSnapshot(record: sourceRecord)
+                        if let newerSnapshot = conversationSnapshots[conversation.objectID],
+                           newerSnapshot.archivedAt != nil {
+                            // Only user actions can introduce a newer archive;
+                            // optimistic insertion only clears it.
+                            snapshot.archivedAt = newerSnapshot.archivedAt
+                            snapshot.hidden = newerSnapshot.hidden
+                        }
+                        conversationSnapshots[conversation.objectID] = snapshot
+                        conversationCleanups[conversation.objectID] = OptimisticFailureConversationCleanup(
+                            message: message,
+                            persistedSnapshot: snapshot
+                        )
+                    }
+                }
+                // A rejected replacement becomes the sole recovery owner,
+                // including the original conversation's rollback state.
+                if let conversation = currentMessage.conversation,
+                   let snapshot = conversationSnapshots[conversation.objectID] {
+                    snapshot.applyConversationState(to: record, preservingNewerArchive: true)
+                }
+
+                // Preserve edits in abandoned recovery branches. Definitely
+                // unsent children become independent recovery sources once
+                // their parent is consumed. Live attempts retain their link
+                // so competing admission still fails, but inherit the oldest
+                // conversation snapshot for their eventual rollback.
+                let pendingRequest = OutboundSendMutationRecord.fetchRequest()
+                pendingRequest.predicate = NSPredicate(
+                    format: "(remoteCommittedMessageId == nil OR remoteCommittedMessageId == %@) AND remoteCommittedThreadId == nil",
+                    OutboundSendRemoteState.notSentMessageID
+                )
+                let pendingRecords = try context.fetch(pendingRequest)
+                let consumedIDs = Set(replacedRecords.map(\.id))
+                var relatedIDs = consumedIDs
+                var foundDescendant = true
+                while foundDescendant {
+                    foundDescendant = false
+                    for candidate in pendingRecords where !relatedIDs.contains(candidate.id)
+                        && candidate.id != optimisticMessageID {
+                        guard let candidateEnvelope = try? StoredForwardEnvelope.decode(from: candidate.replyEnvelopeData),
+                              let parentID = candidateEnvelope.replacingUnsentMessageID,
+                              relatedIDs.contains(parentID) else { continue }
+                        let request = Message.fetchRequest()
+                        request.predicate = MessagePredicates.id(candidate.id)
+                        request.fetchLimit = 1
+                        guard let message = try context.fetch(request).first,
+                              message.isFromMe,
+                              message.messageIdValue.flatMap({ MimeBuilder.optimisticMessageID(from: $0) }) == candidate.id else {
+                            throw SendError.forwardRecoveryUnavailable
+                        }
+                        if let conversation = message.conversation,
+                           let snapshot = conversationSnapshots[conversation.objectID] {
+                            snapshot.applyConversationState(to: candidate, preservingNewerArchive: true)
+                        }
+                        if consumedIDs.contains(parentID) {
+                            candidate.replyEnvelopeData = try (
+                                candidate.remoteCommittedMessageId == OutboundSendRemoteState.notSentMessageID
+                                    ? candidateEnvelope.withoutRecoverySource()
+                                    : candidateEnvelope.withConsumedRecoverySource()
+                            ).encoded()
+                        }
+                        updatedObjectIDs.append(candidate.objectID)
+                        relatedIDs.insert(candidate.id)
+                        foundDescendant = true
+                    }
+                }
+                replacedMessages.forEach(context.delete)
+                replacedRecords.forEach(context.delete)
+                context.processPendingChanges()
+                for cleanup in conversationCleanups.values {
+                    guard let conversation = cleanup.conversation else { continue }
+                    if conversation == currentMessage.conversation {
+                        ConversationRollupUpdater().updateRollups(for: conversation, myEmail: myEmail)
+                    } else {
+                        Self.finalizeOptimisticFailureCleanup(
+                            cleanup, restoreRollupFields: true, in: context, myEmail: myEmail
+                        )
+                    }
+                    if !conversation.isDeleted {
+                        updatedObjectIDs.append(conversation.objectID)
+                    }
+                }
+                // Once admitted, this message is the sole recovery source if
+                // Gmail later rejects it. Its consumed ancestors are irrelevant.
+                record.replyEnvelopeData = try envelope.withoutRecoverySource().encoded()
+                updatedObjectIDs.append(record.objectID)
+                replacedObjectIDs = context.deletedObjects.map(\.objectID)
+            }
 
             // Legacy optimistic rows did not carry the deterministic RFC
             // Message-ID used to recognize local send state. Stamp terminal
@@ -488,6 +646,15 @@ extension GmailSendService {
                 try context.save()
             }
             didRecord = true
+        }
+        if !replacedObjectIDs.isEmpty {
+            NSManagedObjectContext.mergeChanges(
+                fromRemoteContextSave: [
+                    NSDeletedObjectsKey: replacedObjectIDs,
+                    NSUpdatedObjectsKey: updatedObjectIDs
+                ],
+                into: [viewContext]
+            )
         }
         return didRecord
     }
@@ -829,19 +996,48 @@ extension GmailSendService {
         _ cleanup: OptimisticFailureConversationCleanup?,
         restoreRollupFields: Bool
     ) {
+        Self.finalizeOptimisticFailureCleanup(
+            cleanup, restoreRollupFields: restoreRollupFields,
+            in: viewContext, myEmail: authSession.userEmail ?? ""
+        )
+    }
+
+    /// Must run on the supplied context's queue.
+    private static func finalizeOptimisticFailureCleanup(
+        _ cleanup: OptimisticFailureConversationCleanup?,
+        restoreRollupFields: Bool,
+        in context: NSManagedObjectContext,
+        myEmail: String
+    ) {
         guard let cleanup,
               let conversation = cleanup.conversation,
               conversation.managedObjectContext != nil else {
             return
         }
 
-        viewContext.processPendingChanges()
+        context.processPendingChanges()
 
         guard !conversation.isDeleted else { return }
 
         let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
+        if remainingMessages.isEmpty {
+            let draftRequest = NSFetchRequest<ChatReplyDraft>(entityName: "ChatReplyDraft")
+            draftRequest.predicate = NSPredicate(format: "conversationId == %@", conversation.id as CVarArg)
+            draftRequest.fetchLimit = 1
+            do {
+                if try context.count(for: draftRequest) > 0 {
+                    // A separate reply draft still owns this conversation's
+                    // list entry after the failed forward moves elsewhere.
+                    ConversationRollupUpdater().updateRollups(for: conversation, myEmail: myEmail)
+                    return
+                }
+            } catch {
+                Log.error("Failed to check saved draft before send cleanup", category: .coreData, error: error)
+                return
+            }
+        }
         if cleanup.wasInserted && remainingMessages.isEmpty {
-            viewContext.delete(conversation)
+            context.delete(conversation)
             return
         }
 
@@ -849,7 +1045,7 @@ extension GmailSendService {
         let archiveStateIsOptimisticOnly = cleanup.archiveStateIsOptimisticOnly()
         ConversationRollupUpdater().updateRollups(
             for: conversation,
-            myEmail: authSession.userEmail ?? ""
+            myEmail: myEmail
         )
 
         let hasSupersedingMessage = cleanup.hasRemainingMessageSupersedingOptimisticMessage(remainingMessages)
@@ -1136,7 +1332,8 @@ extension GmailSendService {
     @MainActor
     private func persistOptimisticSendMutationAndGraph(
         _ snapshot: OptimisticSendMutationSnapshot,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata?
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?,
+        forwardEnvelope: StoredForwardEnvelope?
     ) throws {
         let draftStore = ChatReplyDraftStore(context: viewContext)
         let originalDraft: ChatReplyDraft?
@@ -1152,7 +1349,9 @@ extension GmailSendService {
         ).first ?? OutboundSendMutationRecord(context: viewContext)
         snapshot.apply(to: record)
         do {
-            if let replyMetadata {
+            if let forwardEnvelope {
+                record.replyEnvelopeData = try forwardEnvelope.encoded()
+            } else if let replyMetadata {
                 record.replyEnvelopeData = try JSONEncoder().encode(StoredReplyEnvelope(replyMetadata))
                 if let conversationID = snapshot.conversationID {
                     try draftStore.remove(conversationID: conversationID)
@@ -1320,7 +1519,6 @@ extension GmailSendService {
     /// had nothing to derive from (it leaves the optimistic values in place
     /// when a saved draft keeps an otherwise empty conversation listed).
     /// Archive state keeps its own superseding-message rule.
-    @MainActor
     private static func remainingMessagesDetermineRollup<Messages: Sequence>(
         _ remainingMessages: Messages
     ) -> Bool where Messages.Element == Message {
@@ -1446,13 +1644,14 @@ extension GmailSendService {
     }
 }
 
+/// Managed-object access in these helpers stays on the caller's context queue.
 private struct OptimisticSendMutationSnapshot {
     let optimisticMessageID: String
     let conversationID: UUID?
     let conversationURI: String?
     let createdAt: Date
-    let archivedAt: Date?
-    let hidden: Bool
+    var archivedAt: Date?
+    var hidden: Bool
     let displayName: String?
     let lastMessageDate: Date?
     let snippet: String?
@@ -1490,7 +1689,6 @@ private struct OptimisticSendMutationSnapshot {
         )
     }
 
-    @MainActor
     init(optimisticMessageID: String, conversation: Conversation) {
         let newlyInsertedConversation = conversation.isInserted
         let committedValues: [String: Any] = newlyInsertedConversation
@@ -1535,14 +1733,23 @@ private struct OptimisticSendMutationSnapshot {
         record.conversationId = conversationID
         record.conversationURI = conversationURI
         record.createdAt = createdAt
-        record.archivedAt = archivedAt
-        record.hidden = hidden
+        applyConversationState(to: record)
+        record.remoteCommittedMessageId = remoteCommittedMessageId
+        record.remoteCommittedThreadId = remoteCommittedThreadId
+    }
+
+    func applyConversationState(
+        to record: OutboundSendMutationRecord,
+        preservingNewerArchive: Bool = false
+    ) {
+        if !preservingNewerArchive || record.archivedAt == nil || record.archivedAt == archivedAt {
+            record.archivedAt = archivedAt
+            record.hidden = hidden
+        }
         record.displayName = displayName
         record.lastMessageDate = lastMessageDate
         record.snippet = snippet
         record.newlyInsertedConversation = newlyInsertedConversation
-        record.remoteCommittedMessageId = remoteCommittedMessageId
-        record.remoteCommittedThreadId = remoteCommittedThreadId
     }
 
     /// Whether the conversation's archive state is one the optimistic insert
@@ -1555,13 +1762,11 @@ private struct OptimisticSendMutationSnapshot {
     /// composer releases at optimistic persistence, so the user can archive
     /// the chat (its menu, or the list) before a later rollback runs, and
     /// writing the pre-send state back unarchived it again. Their change wins.
-    @MainActor
     func archiveStateIsOptimisticOnly(of conversation: Conversation) -> Bool {
         (conversation.archivedAt == nil && !conversation.hidden) ||
             (conversation.archivedAt == archivedAt && conversation.hidden == hidden)
     }
 
-    @MainActor
     func restoreConversationState(
         _ conversation: Conversation,
         restoreRollupFields: Bool,
@@ -1608,7 +1813,6 @@ private struct OptimisticFailureConversationCleanup {
     private let optimisticMessageObjectID: NSManagedObjectID
     private let rollbackSnapshot: OptimisticSendMutationSnapshot?
 
-    @MainActor
     init(
         message: Message,
         persistedSnapshot: OptimisticSendMutationSnapshot?
@@ -1633,7 +1837,6 @@ private struct OptimisticFailureConversationCleanup {
             )
     }
 
-    @MainActor
     func hasRemainingMessageSupersedingOptimisticMessage(_ messages: [Message]) -> Bool {
         messages.contains { message in
             message.objectID != optimisticMessageObjectID
@@ -1642,13 +1845,11 @@ private struct OptimisticFailureConversationCleanup {
     }
 
     /// See `OptimisticSendMutationSnapshot.archiveStateIsOptimisticOnly`.
-    @MainActor
     func archiveStateIsOptimisticOnly() -> Bool {
         guard let conversation, let rollbackSnapshot else { return true }
         return rollbackSnapshot.archiveStateIsOptimisticOnly(of: conversation)
     }
 
-    @MainActor
     func restorePreOptimisticConversationStateIfNeeded(
         restoreRollupFields: Bool,
         restoreArchiveState: Bool

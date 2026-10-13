@@ -10,6 +10,19 @@ import WebKit
 /// with Content-ID header: <image001@domain.com>
 final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
 
+    struct LocalResource: Equatable, Sendable {
+        let contentID: String
+        let localURL: String
+        let mimeType: String
+    }
+
+    private let resourceLock = NSLock()
+    private var resources: [LocalResource] = []
+    var localResources: [LocalResource] {
+        get { resourceLock.withLock { resources } }
+        set { resourceLock.withLock { resources = newValue } }
+    }
+
     /// The message containing the attachments to resolve
     weak var message: Message? {
         didSet {
@@ -26,12 +39,14 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
 
     init(
         message: Message?,
+        localResources: [LocalResource] = [],
         coreDataStack: CoreDataStack = .shared,
         apiClient: (any GmailAPIClientProtocol)? = nil,
         makeBackgroundContext: (@Sendable () -> NSManagedObjectContext)? = nil
     ) {
         self.messageReference = MessageReference(message: message)
         self.message = message
+        self.resources = localResources
         self.makeBackgroundContext = makeBackgroundContext ?? {
             coreDataStack.newBackgroundContext()
         }
@@ -85,6 +100,17 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         guard activeTasks.isActive(taskID) else {
+            return
+        }
+
+        if let resource = localResources.first(where: {
+            EmailDocument.normalizedContentID($0.contentID) == contentId
+        }) {
+            if let data = AttachmentPaths.loadData(from: resource.localURL) {
+                respond(urlSchemeTask, taskID: taskID, with: data, mimeType: resource.mimeType)
+            } else {
+                respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
+            }
             return
         }
 

@@ -134,6 +134,7 @@ extension GmailSendService {
         /// anchor could not be fetched at all).
         case replyConversationUnavailable
         case sendAsAliasUnavailable(String)
+        case forwardRecoveryUnavailable
         case ambiguousDelivery(String)
 
         var errorDescription: String? {
@@ -165,6 +166,8 @@ extension GmailSendService {
                 return "This conversation moved while you were replying. Your draft and attachments are still here."
             case .sendAsAliasUnavailable(let address):
                 return "This message was sent to \(address), but Gmail is not configured to send from that address. Add it in Gmail Settings -> Accounts -> Send mail as."
+            case .forwardRecoveryUnavailable:
+                return "This failed forward was already replaced or is no longer available. Your current draft is still here. Reopen the failed message to check its status."
             case .ambiguousDelivery(let message):
                 return message
             }

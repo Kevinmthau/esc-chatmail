@@ -2163,7 +2163,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         senderEmail: String?,
         senderName: String?,
         optimisticConversation: OptimisticConversationReference?,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata?
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?,
+        forwardEnvelope: StoredForwardEnvelope?
     ) async throws -> OptimisticSendHandle {
         if let optimisticCreationGate {
             await optimisticCreationGate.waitUntilReleased()

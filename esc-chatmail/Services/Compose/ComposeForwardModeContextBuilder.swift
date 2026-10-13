@@ -7,6 +7,34 @@ struct ComposeForwardModeContext: Identifiable {
     let forwardedHTMLBody: String?
     let forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo]
     let forwardedRegularAttachments: [ForwardAttachmentSnapshot]
+    let initialRecipientEmails: [String]
+    let initialBody: String
+    let recoveredAttachmentReferences: [LocalAttachmentReference]
+    let recoveredMessageID: String?
+
+    init(
+        id: String,
+        initialSubject: String?,
+        forwardedPlainTextBody: String,
+        forwardedHTMLBody: String?,
+        forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo],
+        forwardedRegularAttachments: [ForwardAttachmentSnapshot],
+        initialRecipientEmails: [String] = [],
+        initialBody: String = "",
+        recoveredAttachmentReferences: [LocalAttachmentReference] = [],
+        recoveredMessageID: String? = nil
+    ) {
+        self.id = id
+        self.initialSubject = initialSubject
+        self.forwardedPlainTextBody = forwardedPlainTextBody
+        self.forwardedHTMLBody = forwardedHTMLBody
+        self.forwardedInlineAttachmentInfos = forwardedInlineAttachmentInfos
+        self.forwardedRegularAttachments = forwardedRegularAttachments
+        self.initialRecipientEmails = initialRecipientEmails
+        self.initialBody = initialBody
+        self.recoveredAttachmentReferences = recoveredAttachmentReferences
+        self.recoveredMessageID = recoveredMessageID
+    }
 }
 
 @MainActor

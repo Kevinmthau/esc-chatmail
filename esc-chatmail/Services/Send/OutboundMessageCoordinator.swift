@@ -72,6 +72,8 @@ enum OutboundMessageRequest {
         let forwardedHTMLBody: String?
         let forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo]
         let optimisticConversation: OptimisticConversationReference?
+        let inlineAttachments: [AttachmentContext]
+        let recoveredMessageID: String?
 
         init(
             recipientEmails: [String],
@@ -81,7 +83,9 @@ enum OutboundMessageRequest {
             forwardedPlainTextBody: String,
             forwardedHTMLBody: String?,
             forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo],
-            optimisticConversation: OptimisticConversationReference? = nil
+            optimisticConversation: OptimisticConversationReference? = nil,
+            inlineAttachments: [AttachmentContext] = [],
+            recoveredMessageID: String? = nil
         ) {
             self.recipientEmails = recipientEmails
             self.subject = subject
@@ -91,6 +95,8 @@ enum OutboundMessageRequest {
             self.forwardedHTMLBody = forwardedHTMLBody
             self.forwardedInlineAttachmentInfos = forwardedInlineAttachmentInfos
             self.optimisticConversation = optimisticConversation
+            self.inlineAttachments = inlineAttachments
+            self.recoveredMessageID = recoveredMessageID
         }
     }
 
@@ -262,7 +268,8 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         senderEmail: String?,
         senderName: String?,
         optimisticConversation: OptimisticConversationReference?,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata?
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?,
+        forwardEnvelope: StoredForwardEnvelope?
     ) async throws -> OptimisticSendHandle
 
     @MainActor
@@ -282,12 +289,18 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let htmlBody: String?
         let threadId: String?
         let attachments: [OutboundMessageRequest.AttachmentContext]
+        let inlineAttachments: [OutboundMessageRequest.AttachmentContext]
         let chatPreviewText: String?
         let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
         let optimisticConversation: OptimisticConversationReference?
         let replyMetadata: OutboundMessageRequest.ReplyMetadata?
+        let forwardEnvelope: StoredForwardEnvelope?
         let preTransmissionFailureDisposition: PreTransmissionFailureDisposition
         let takesConversationSendTurn: Bool
+
+        var allAttachments: [OutboundMessageRequest.AttachmentContext] {
+            attachments + inlineAttachments
+        }
     }
 
     private struct OptimisticPreparation {
@@ -370,19 +383,20 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 body: preparedSend.body,
                 subject: preparedSend.subject,
                 threadId: preparedSend.threadId,
-                attachments: preparedSend.attachments,
+                attachments: preparedSend.allAttachments,
                 chatPreviewText: preparedSend.chatPreviewText,
                 senderEmail: preparedSend.replyMetadata?.fromEmail,
                 senderName: preparedSend.replyMetadata?.fromName,
                 optimisticConversation: preparedSend.optimisticConversation,
-                replyMetadata: preparedSend.replyMetadata
+                replyMetadata: preparedSend.replyMetadata,
+                forwardEnvelope: preparedSend.forwardEnvelope
             )
             do {
                 try checkActive(reservation)
             } catch {
                 sendService.rollbackOptimisticMessageBeforeTransmission(
                     byID: handle.optimisticMessageID,
-                    fallbackAttachmentReferences: preparedSend.attachments.map(\.localAttachmentReference)
+                    fallbackAttachmentReferences: preparedSend.allAttachments.map(\.localAttachmentReference)
                 )
                 reconciliationHooks.onFailure?(
                     .init(
@@ -413,7 +427,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         } catch {
             sendService.rollbackOptimisticMessageBeforeTransmission(
                 byID: optimisticMessageID,
-                fallbackAttachmentReferences: preparedSend.attachments.map(\.localAttachmentReference)
+                fallbackAttachmentReferences: preparedSend.allAttachments.map(\.localAttachmentReference)
             )
             reconciliationHooks.onFailure?(
                 .init(
@@ -430,9 +444,9 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 conversationReference: optimisticSendHandle.conversationReference
             )
         )
-        if !preparedSend.attachments.isEmpty {
+        if !preparedSend.allAttachments.isEmpty {
             sendService.markAttachmentsAsUploading(
-                references: preparedSend.attachments.map(\.localAttachmentReference)
+                references: preparedSend.allAttachments.map(\.localAttachmentReference)
             )
         }
 
@@ -468,7 +482,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             networkPathMonitor: networkPathMonitor
         ).executeInBackground(
             input: sendInput,
-            attachmentReferences: preparedSend.attachments.map(\.localAttachmentReference),
+            attachmentReferences: preparedSend.allAttachments.map(\.localAttachmentReference),
             optimisticMessageID: optimisticMessageID,
             reconciliationHooks: effectiveHooks,
             preTransmissionFailureDisposition: preparedSend.preTransmissionFailureDisposition,
@@ -538,10 +552,12 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 htmlBody: nil,
                 threadId: nil,
                 attachments: compose.attachments,
+                inlineAttachments: [],
                 chatPreviewText: optimisticChatPreviewText(from: body),
                 inlineAttachmentInfos: [],
                 optimisticConversation: compose.optimisticConversation,
                 replyMetadata: nil,
+                forwardEnvelope: nil,
                 preTransmissionFailureDisposition: request.preTransmissionFailureDisposition,
                 takesConversationSendTurn: request.takesConversationSendTurn
             )
@@ -574,10 +590,19 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 htmlBody: htmlBody,
                 threadId: nil,
                 attachments: forward.attachments,
+                inlineAttachments: forward.inlineAttachments,
                 chatPreviewText: optimisticChatPreviewText(from: userBody),
                 inlineAttachmentInfos: forward.forwardedInlineAttachmentInfos,
                 optimisticConversation: forward.optimisticConversation,
                 replyMetadata: nil,
+                forwardEnvelope: StoredForwardEnvelope(
+                    recipientEmails: forward.recipientEmails,
+                    subject: normalizedSubject(forward.subject),
+                    authoredBody: userBody,
+                    forwardedPlainTextBody: forward.forwardedPlainTextBody,
+                    forwardedHTMLBody: forward.forwardedHTMLBody,
+                    replacingUnsentMessageID: forward.recoveredMessageID
+                ),
                 preTransmissionFailureDisposition: request.preTransmissionFailureDisposition,
                 takesConversationSendTurn: request.takesConversationSendTurn
             )
@@ -599,10 +624,12 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 htmlBody: nil,
                 threadId: metadata.threadId,
                 attachments: reply.attachments,
+                inlineAttachments: [],
                 chatPreviewText: optimisticChatPreviewText(from: body),
                 inlineAttachmentInfos: [],
                 optimisticConversation: reply.context.optimisticConversation,
                 replyMetadata: metadata,
+                forwardEnvelope: nil,
                 preTransmissionFailureDisposition: request.preTransmissionFailureDisposition,
                 takesConversationSendTurn: request.takesConversationSendTurn
             )

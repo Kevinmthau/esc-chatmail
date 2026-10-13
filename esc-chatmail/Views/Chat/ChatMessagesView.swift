@@ -973,7 +973,7 @@ struct ChatMessagesView: View {
     ) {
         switch action {
         case .editAndResend:
-            if viewModel.editFailedReply(messageObjectID: messageObjectID) {
+            if viewModel.editFailedReply(messageObjectID: messageObjectID), viewModel.destination == nil {
                 isTextFieldFocused.wrappedValue = true
             }
         case .checkDelivery:
