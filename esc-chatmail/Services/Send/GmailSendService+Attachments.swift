@@ -25,7 +25,7 @@ extension GmailSendService {
     }
 
     /// Prepares inline attachment data for sending by loading content from local URLs.
-    /// Only processes attachments that have both localURL and contentId.
+    /// Required related parts must all be readable before Gmail admission.
     func prepareInlineAttachmentInfos(_ attachmentInfos: [AttachmentInfo]) async throws -> [InlineAttachmentData] {
         var inlineData: [InlineAttachmentData] = []
 
@@ -35,10 +35,8 @@ extension GmailSendService {
                 continue
             }
 
-            // Skip if no local data available (attachment not downloaded)
             guard let data = AttachmentPaths.loadData(from: info.localURL) else {
-                Log.warning("Skipping inline attachment \(info.filename) - file not downloaded", category: .attachment)
-                continue
+                throw SendError.apiError("Failed to load inline attachment: \(info.filename)")
             }
 
             inlineData.append(InlineAttachmentData(

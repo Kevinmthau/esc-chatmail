@@ -17,7 +17,8 @@ extension GmailSendService {
         senderEmail: String? = nil,
         senderName: String? = nil,
         optimisticConversation: OptimisticConversationReference? = nil,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
+        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil,
+        forwardEnvelope: StoredForwardEnvelope? = nil
     ) async throws -> OptimisticSendHandle {
         try await createOptimisticMessage(
             to: recipients,
@@ -29,7 +30,8 @@ extension GmailSendService {
             senderEmail: senderEmail,
             senderName: senderName,
             optimisticConversation: optimisticConversation,
-            replyMetadata: replyMetadata
+            replyMetadata: replyMetadata,
+            forwardEnvelope: forwardEnvelope
         )
     }
 
@@ -46,7 +48,8 @@ extension GmailSendService {
         senderEmail: String? = nil,
         senderName: String? = nil,
         optimisticConversation: OptimisticConversationReference? = nil,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
+        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil,
+        forwardEnvelope: StoredForwardEnvelope? = nil
     ) async throws -> OptimisticSendHandle {
         try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
             try await createOptimisticMessageWithoutCleanupInterleaving(
@@ -59,7 +62,8 @@ extension GmailSendService {
                 senderEmail: senderEmail,
                 senderName: senderName,
                 optimisticConversation: optimisticConversation,
-                replyMetadata: replyMetadata
+                replyMetadata: replyMetadata,
+                forwardEnvelope: forwardEnvelope
             )
         }
     }
@@ -78,7 +82,8 @@ extension GmailSendService {
         senderEmail: String?,
         senderName: String?,
         optimisticConversation: OptimisticConversationReference?,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata?
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?,
+        forwardEnvelope: StoredForwardEnvelope?
     ) async throws -> OptimisticSendHandle {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
@@ -208,7 +213,9 @@ extension GmailSendService {
             conversation: conversation
         )
         do {
-            try persistOptimisticSendMutationAndGraph(rollbackSnapshot, replyMetadata: replyMetadata)
+            try persistOptimisticSendMutationAndGraph(
+                rollbackSnapshot, replyMetadata: replyMetadata, forwardEnvelope: forwardEnvelope
+            )
         } catch {
             Log.error("Failed to persist optimistic send state", category: .message, error: error)
             rollbackOptimisticCreation(message, snapshot: rollbackSnapshot)
@@ -333,7 +340,8 @@ extension GmailSendService {
         // Restore the draft in the same save that removes the pre-admission
         // send. A crash must not leave a gap with neither durable owner.
         if let conversation = message.conversation,
-           let data = fetchOptimisticSendMutationRecords(messageID: messageID).first?.replyEnvelopeData {
+           let data = fetchOptimisticSendMutationRecords(messageID: messageID).first?.replyEnvelopeData,
+           (try? StoredForwardEnvelope.decode(from: data)) == nil {
             do {
                 let envelope = try JSONDecoder().decode(StoredReplyEnvelope.self, from: data)
                 // Merge, never replace: a chat reply's composer released at
@@ -449,6 +457,9 @@ extension GmailSendService {
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
 
         var didRecord = false
+        var replacedObjectIDs: [NSManagedObjectID] = []
+        var updatedConversationIDs: [NSManagedObjectID] = []
+        let myEmail = authSession.userEmail ?? ""
         try context.performAndWait {
             guard let record = Self.fetchOptimisticSendMutationRecords(
                 messageID: optimisticMessageID,
@@ -462,6 +473,66 @@ extension GmailSendService {
 
             record.remoteCommittedMessageId = messageID
             record.remoteCommittedThreadId = threadID
+
+            if messageID == OutboundSendRemoteState.inFlightMessageID,
+               let envelope = try StoredForwardEnvelope.decode(from: record.replyEnvelopeData),
+               let replacedID = envelope.replacingUnsentMessageID {
+                // Copy-on-recovery leaves the failed forward intact while its
+                // composer is open. Consume it only in the same transaction
+                // as this send's admission marker. A second recovery attempt
+                // must not transmit after another one already consumed it.
+                let currentRequest = Message.fetchRequest()
+                currentRequest.predicate = MessagePredicates.id(optimisticMessageID)
+                currentRequest.fetchLimit = 1
+                guard let currentMessage = try context.fetch(currentRequest).first else {
+                    throw SendError.forwardRecoveryUnavailable
+                }
+                let currentAttachmentIDs = Set(currentMessage.attachmentsArray.map(\.objectID))
+                var sourceID: String? = replacedID
+                var seenIDs: Set<String> = [optimisticMessageID]
+                var replacedMessages: [Message] = []
+                var replacedRecords: [OutboundSendMutationRecord] = []
+                var previousConversations: [NSManagedObjectID: Conversation] = [:]
+                // A process death can leave both a pre-admission replacement
+                // and its original failure. Consume that whole unsent chain;
+                // a missing/ambiguous ancestor means another attempt already
+                // owns delivery, so this one must not transmit.
+                while let id = sourceID {
+                    guard seenIDs.insert(id).inserted,
+                          let sourceRecord = Self.fetchOptimisticSendMutationRecords(messageID: id, in: context).first,
+                          sourceRecord.remoteCommittedMessageId == OutboundSendRemoteState.notSentMessageID,
+                          sourceRecord.remoteCommittedThreadId == nil,
+                          let sourceEnvelope = try StoredForwardEnvelope.decode(from: sourceRecord.replyEnvelopeData) else {
+                        throw SendError.forwardRecoveryUnavailable
+                    }
+                    let sourceRequest = Message.fetchRequest()
+                    sourceRequest.predicate = MessagePredicates.id(id)
+                    sourceRequest.fetchLimit = 1
+                    guard let sourceMessage = try context.fetch(sourceRequest).first,
+                          sourceMessage.isFromMe,
+                          sourceMessage.messageIdValue.flatMap({ MimeBuilder.optimisticMessageID(from: $0) }) == id,
+                          currentAttachmentIDs.isDisjoint(with: sourceMessage.attachmentsArray.map(\.objectID)) else {
+                        throw SendError.forwardRecoveryUnavailable
+                    }
+                    replacedMessages.append(sourceMessage)
+                    replacedRecords.append(sourceRecord)
+                    if let previousConversation = sourceMessage.conversation {
+                        previousConversations[previousConversation.objectID] = previousConversation
+                    }
+                    sourceID = sourceEnvelope.replacingUnsentMessageID
+                }
+                replacedMessages.forEach(context.delete)
+                replacedRecords.forEach(context.delete)
+                context.processPendingChanges()
+                for previousConversation in previousConversations.values {
+                    ConversationRollupUpdater().updateRollups(for: previousConversation, myEmail: myEmail)
+                    updatedConversationIDs.append(previousConversation.objectID)
+                }
+                // Once admitted, this message is the sole recovery source if
+                // Gmail later rejects it. Its consumed ancestors are irrelevant.
+                record.replyEnvelopeData = try envelope.withoutRecoverySource().encoded()
+                replacedObjectIDs = context.deletedObjects.map(\.objectID)
+            }
 
             // Legacy optimistic rows did not carry the deterministic RFC
             // Message-ID used to recognize local send state. Stamp terminal
@@ -488,6 +559,15 @@ extension GmailSendService {
                 try context.save()
             }
             didRecord = true
+        }
+        if !replacedObjectIDs.isEmpty {
+            NSManagedObjectContext.mergeChanges(
+                fromRemoteContextSave: [
+                    NSDeletedObjectsKey: replacedObjectIDs,
+                    NSUpdatedObjectsKey: updatedConversationIDs
+                ],
+                into: [viewContext]
+            )
         }
         return didRecord
     }
@@ -1134,7 +1214,8 @@ extension GmailSendService {
     @MainActor
     private func persistOptimisticSendMutationAndGraph(
         _ snapshot: OptimisticSendMutationSnapshot,
-        replyMetadata: OutboundMessageRequest.ReplyMetadata?
+        replyMetadata: OutboundMessageRequest.ReplyMetadata?,
+        forwardEnvelope: StoredForwardEnvelope?
     ) throws {
         let draftStore = ChatReplyDraftStore(context: viewContext)
         let originalDraft: ChatReplyDraft?
@@ -1150,7 +1231,9 @@ extension GmailSendService {
         ).first ?? OutboundSendMutationRecord(context: viewContext)
         snapshot.apply(to: record)
         do {
-            if let replyMetadata {
+            if let forwardEnvelope {
+                record.replyEnvelopeData = try forwardEnvelope.encoded()
+            } else if let replyMetadata {
                 record.replyEnvelopeData = try JSONEncoder().encode(StoredReplyEnvelope(replyMetadata))
                 if let conversationID = snapshot.conversationID {
                     try draftStore.remove(conversationID: conversationID)

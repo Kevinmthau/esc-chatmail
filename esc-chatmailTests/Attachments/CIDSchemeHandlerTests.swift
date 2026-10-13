@@ -30,6 +30,32 @@ final class CIDSchemeHandlerTests: XCTestCase {
         )
     }
 
+    func testDraftLocalResourceResolvesCIDWithoutMessageOrNetwork() async throws {
+        AttachmentPaths.setupDirectories()
+        let path = AttachmentPaths.originalPath(idOrUUID: "local_\(UUID().uuidString)", ext: "png")
+        let imageData = Data([0x89, 0x50, 0x4E, 0x47, 0x10])
+        XCTAssertTrue(AttachmentPaths.saveData(imageData, to: path))
+        defer { AttachmentPaths.deleteFile(at: path) }
+        let apiClient = MockGmailAPIClient()
+        let handler = CIDSchemeHandler(
+            message: nil,
+            localResources: [.init(contentID: "Logo@Example.COM", localURL: path, mimeType: "image/png")],
+            apiClient: apiClient
+        )
+        let finished = expectation(description: "draft inline image resolved")
+        let task = MockURLSchemeTask(url: try XCTUnwrap(URL(string: "cid:logo@example.com"))) {
+            finished.fulfill()
+        }
+
+        handler.webView(WKWebView(), start: task)
+
+        await fulfillment(of: [finished], timeout: 2.0)
+        XCTAssertNil(task.error)
+        XCTAssertEqual(task.response?.mimeType, "image/png")
+        XCTAssertEqual(task.receivedData, imageData)
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 0)
+    }
+
     func testMissingCIDAttachmentRendersFallbackUntilAttachmentPersistsLocally() async throws {
         AttachmentPaths.setupDirectories()
         let message = MessageBuilder()

@@ -150,6 +150,71 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertNotEqual(darkPreview, lightPreview)
     }
 
+    func testForwardSetupCopiesInlineResourcesAndDiscardDeletesOnlyDraftCopies() throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        AttachmentPaths.setupDirectories()
+        let sourcePath = AttachmentPaths.originalPath(idOrUUID: UUID().uuidString, ext: "png")
+        let sourceData = Data([0x89, 0x50, 0x4E, 0x47])
+        XCTAssertTrue(AttachmentPaths.saveData(sourceData, to: sourcePath))
+        defer { AttachmentPaths.deleteFile(at: sourcePath) }
+        let viewModel = ComposeViewModel(
+            mode: .forward(.init(
+                id: UUID().uuidString,
+                initialSubject: "Fwd: Image",
+                forwardedPlainTextBody: "Image body",
+                forwardedHTMLBody: "<img src=\"cid:logo@example.com\">",
+                forwardedInlineAttachmentInfos: [.init(localURL: sourcePath, filename: "logo.png", mimeType: "image/png", contentId: "logo@example.com")],
+                forwardedRegularAttachments: [],
+                initialRecipientEmails: ["friend@example.com"],
+                initialBody: "My note"
+            )),
+            dependencies: deps.makeComposeDependencies()
+        )
+        defer { viewModel.discard() }
+        XCTAssertFalse(viewModel.canSend)
+
+        viewModel.setupForMode()
+
+        XCTAssertTrue(viewModel.canSend)
+        XCTAssertEqual(viewModel.body, "My note")
+        let resource = try XCTUnwrap(viewModel.forwardedPreviewInlineResources.first)
+        XCTAssertNotEqual(resource.localURL, sourcePath)
+        XCTAssertEqual(AttachmentPaths.loadData(from: resource.localURL), sourceData)
+
+        viewModel.presentationDidDisappear(isPresented: true)
+        XCTAssertTrue(viewModel.canSend, "A nested picker covering the composer must preserve the draft")
+        XCTAssertEqual(AttachmentPaths.loadData(from: resource.localURL), sourceData)
+
+        viewModel.presentationDidDisappear(isPresented: false)
+
+        XCTAssertNil(AttachmentPaths.loadData(from: resource.localURL))
+        XCTAssertEqual(AttachmentPaths.loadData(from: sourcePath), sourceData)
+        XCTAssertTrue(viewModel.attachmentManager.inlineAttachments.isEmpty)
+        XCTAssertFalse(viewModel.canSend, "A discarded composer cannot submit a previously queued send")
+    }
+
+    func testForwardSetupMissingInlineAttachmentBlocksSending() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let viewModel = ComposeViewModel(
+            mode: .forward(.init(
+                id: UUID().uuidString,
+                initialSubject: "Fwd: Image",
+                forwardedPlainTextBody: "Image body",
+                forwardedHTMLBody: "<img src=\"cid:logo@example.com\">",
+                forwardedInlineAttachmentInfos: [.init(localURL: "Attachments/\(UUID().uuidString).png", filename: "logo.png", mimeType: "image/png", contentId: "logo@example.com")],
+                forwardedRegularAttachments: [],
+                initialRecipientEmails: ["friend@example.com"]
+            )),
+            dependencies: deps.makeComposeDependencies()
+        )
+
+        viewModel.setupForMode()
+
+        XCTAssertFalse(viewModel.canSend)
+        XCTAssertNotNil(viewModel.errorAlert)
+        XCTAssertTrue(viewModel.attachmentManager.inlineAttachments.isEmpty)
+    }
+
     func testSend_newMessageBuildsParticipantHashOptimisticConversationContext() async {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let coordinator = MockOutboundMessageCoordinator()
@@ -229,6 +294,8 @@ final class ComposeViewModelTests: XCTestCase {
         defer { viewModel.attachmentManager.clear() }
         viewModel.setupForMode()
         viewModel.addRecipient(email: "friend@example.com")
+        let draftPaths = (viewModel.attachments + viewModel.attachmentManager.inlineAttachments).compactMap(\.localURL)
+        defer { draftPaths.forEach { AttachmentPaths.deleteFile(at: $0) } }
 
         XCTAssertTrue(viewModel.canSend)
         let didSendOverBudget = await viewModel.send()
@@ -257,6 +324,63 @@ final class ComposeViewModelTests: XCTestCase {
         }
         XCTAssertEqual(request.attachments.map(\.info.filename), ["report.pdf"])
         XCTAssertEqual(request.forwardedInlineAttachmentInfos.map(\.contentId), ["inline@example.com"])
+        XCTAssertEqual(request.inlineAttachments.count, 1)
+    }
+
+    func testForwardRemovingRegularAttachmentAllowsRetryAfterCombinedSizeError() async throws {
+        let coordinator = MockOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com"),
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        AttachmentPaths.setupDirectories()
+        let inlinePath = AttachmentPaths.originalPath(idOrUUID: UUID().uuidString, ext: "png")
+        let regularPath = AttachmentPaths.originalPath(idOrUUID: UUID().uuidString, ext: "pdf")
+        defer {
+            AttachmentPaths.deleteFile(at: inlinePath)
+            AttachmentPaths.deleteFile(at: regularPath)
+        }
+        for path in [inlinePath, regularPath] {
+            XCTAssertTrue(AttachmentPaths.saveData(Data(), to: path))
+            let file = try FileHandle(forWritingTo: XCTUnwrap(AttachmentPaths.fullURL(for: path)))
+            try file.truncate(atOffset: 13 * 1024 * 1024)
+            try file.close()
+        }
+        let viewModel = ComposeViewModel(
+            mode: .forward(.init(
+                id: UUID().uuidString,
+                initialSubject: "Fwd: Files",
+                forwardedPlainTextBody: "Forwarded body",
+                forwardedHTMLBody: "<img src=\"cid:logo@example.com\">",
+                forwardedInlineAttachmentInfos: [.init(localURL: inlinePath, filename: "logo.png", mimeType: "image/png", contentId: "logo@example.com")],
+                forwardedRegularAttachments: [.init(filename: "report.pdf", mimeType: "application/pdf", byteSize: 0, localURL: regularPath, previewURL: nil, width: 0, height: 0, pageCount: 0)],
+                initialRecipientEmails: ["friend@example.com"]
+            )),
+            dependencies: deps.makeComposeDependencies()
+        )
+        viewModel.setupForMode()
+        let inlineCopy = try XCTUnwrap(viewModel.forwardedPreviewInlineResources.first)
+        defer {
+            viewModel.discard()
+            AttachmentPaths.deleteFile(at: inlineCopy.localURL)
+        }
+
+        let failedSend = await viewModel.send()
+        XCTAssertFalse(failedSend)
+        let attachment = try XCTUnwrap(viewModel.attachments.first)
+        viewModel.removeAttachment(attachment)
+        let successfulSend = await viewModel.send()
+
+        XCTAssertTrue(successfulSend)
+        guard case .forward(let request)? = coordinator.lastRequest else { return XCTFail("Expected forward request") }
+        XCTAssertTrue(request.attachments.isEmpty)
+        XCTAssertEqual(request.inlineAttachments.count, 1)
+        XCTAssertEqual(request.forwardedInlineAttachmentInfos.first?.localURL, inlineCopy.localURL)
+        viewModel.discard()
+        XCTAssertNotNil(AttachmentPaths.loadData(from: inlineCopy.localURL), "Successful send handed the file to the optimistic message")
     }
 
     func testSend_waitsForAttachmentImportFinalizationBeforeInvokingCoordinator() async {
@@ -388,6 +512,31 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.errorAlert?.message, TestSendError.failed.localizedDescription)
     }
 
+    func testSuccessfulForwardCannotSubmitASecondQueuedSend() async {
+        let coordinator = MockOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com"),
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let viewModel = ComposeViewModel(mode: .forward(.init(
+            id: "queued-forward", initialSubject: "Fwd: Subject",
+            forwardedPlainTextBody: "Original body", forwardedHTMLBody: nil,
+            forwardedInlineAttachmentInfos: [], forwardedRegularAttachments: [],
+            initialRecipientEmails: ["friend@example.com"]
+        )), dependencies: deps.makeComposeDependencies())
+        viewModel.setupForMode()
+
+        let firstResult = await viewModel.send()
+        let secondResult = await viewModel.send()
+
+        XCTAssertTrue(firstResult)
+        XCTAssertFalse(secondResult)
+        XCTAssertEqual(coordinator.sendCount, 1)
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         file: StaticString = #filePath,
@@ -407,6 +556,7 @@ final class ComposeViewModelTests: XCTestCase {
 private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating {
     private let coreDataStack: TestCoreDataStack
     private(set) var lastRequest: OutboundMessageRequest?
+    private(set) var sendCount = 0
     var suspendsSend = false
     var errorToThrow: Error?
     private var sendContinuation: CheckedContinuation<Void, Never>?
@@ -420,6 +570,7 @@ private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating 
         reconciliationHooks: OutboundMessageReconciliationHooks,
         onOptimisticMessagePersisted: (@MainActor (OutboundMessageResult) -> Void)?
     ) async throws -> OutboundMessageResult? {
+        sendCount += 1
         let request = try await requestBuilder()
         lastRequest = request
         if let errorToThrow {

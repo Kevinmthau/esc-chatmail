@@ -25,15 +25,7 @@ extension DatabaseMaintenanceService {
 
         let succeeded = await context.perform {
             do {
-                // Cleanup orphaned attachments that may remain from older bugs or interrupted deletes.
-                let orphanedAttachmentRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Attachment")
-                orphanedAttachmentRequest.predicate = AttachmentPredicates.orphaned
-
-                let deleteOrphaned = NSBatchDeleteRequest(fetchRequest: orphanedAttachmentRequest)
-                deleteOrphaned.resultType = .resultTypeObjectIDs
-
-                let orphanedResult = try context.execute(deleteOrphaned) as? NSBatchDeleteResult
-                let deletedIDs = orphanedResult?.result as? [NSManagedObjectID] ?? []
+                let deletedIDs = try Self.deleteOrphanedAttachments(in: context)
                 Log.debug("Deleted \(deletedIDs.count) orphaned attachments", category: .coreData)
 
                 if !deletedIDs.isEmpty {
@@ -80,6 +72,26 @@ extension DatabaseMaintenanceService {
         )
         await AttachmentDownloader.shared.cleanupOrphanedFiles()
         return true
+    }
+
+    /// Live compose attachments have not yet been handed to a message. Hold
+    /// their lease through the batch delete so a new draft cannot race the
+    /// orphan predicate between resource capture and deletion.
+    nonisolated static func deleteOrphanedAttachments(
+        in context: NSManagedObjectContext,
+        leases: ComposeAttachmentLeaseRegistry = .shared
+    ) throws -> [NSManagedObjectID] {
+        try leases.withProtectedResources { resources in
+            let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Attachment")
+            request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                AttachmentPredicates.orphaned,
+                NSPredicate(format: "id == nil OR NOT (id IN %@)", Array(resources.attachmentIDs))
+            ])
+            let deletion = NSBatchDeleteRequest(fetchRequest: request)
+            deletion.resultType = .resultTypeObjectIDs
+            let result = try context.execute(deletion) as? NSBatchDeleteResult
+            return result?.result as? [NSManagedObjectID] ?? []
+        }
     }
 
     /// A failed ID read cannot prove that any body is orphaned. Keep the

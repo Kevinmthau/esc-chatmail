@@ -182,6 +182,37 @@ struct ChatReplyDraftStore {
         }
     }
 
+    /// Opens a failed forward without consuming its durable graph. Compose
+    /// copies these attachments; Cancel and process death leave this recovery
+    /// source available until a replacement send reaches admission.
+    func forwardRecoveryContext(_ message: Message, conversation: Conversation) throws -> ComposeForwardModeContext? {
+        guard message.conversation == conversation,
+              OutboundSendDeliveryState.resolve(for: message) == .notSent else {
+            throw RecoveryError.notDefinitelyUnsent
+        }
+        let request = OutboundSendMutationRecord.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", message.id)
+        request.fetchLimit = 1
+        guard let record = try context.fetch(request).first,
+              let forward = try StoredForwardEnvelope.decode(from: record.replyEnvelopeData) else {
+            return nil
+        }
+        return ComposeForwardModeContext(
+            id: "recovered-forward-\(message.id)",
+            initialSubject: forward.subject,
+            forwardedPlainTextBody: forward.forwardedPlainTextBody,
+            forwardedHTMLBody: forward.forwardedHTMLBody,
+            forwardedInlineAttachmentInfos: [],
+            forwardedRegularAttachments: [],
+            initialRecipientEmails: forward.recipientEmails,
+            initialBody: forward.authoredBody,
+            recoveredAttachmentReferences: message.attachmentsArray.map {
+                LocalAttachmentReference(objectID: $0.objectID)
+            },
+            recoveredMessageID: message.id
+        )
+    }
+
     func recover(_ message: Message, conversation: Conversation, currentUserEmail: String) throws -> (StoredChatReplyDraft, [Attachment]) {
         guard message.conversation == conversation,
               OutboundSendDeliveryState.resolve(for: message) == .notSent else {

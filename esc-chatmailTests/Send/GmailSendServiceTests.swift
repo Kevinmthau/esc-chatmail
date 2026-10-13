@@ -1150,6 +1150,32 @@ final class GmailSendServiceTests: XCTestCase {
         XCTAssertEqual(apiClient.sendMessageCallCount, 0)
     }
 
+    func testSendNew_missingRequiredInlineAttachmentDoesNotCrossTransmissionBarrier() async {
+        let probe = TransmissionBarrierProbe()
+        do {
+            _ = try await sendService.sendNew(
+                to: ["to@example.com"],
+                body: "Forwarded photo",
+                htmlBody: "<html><body><img src=\"cid:photo@example.com\"></body></html>",
+                inlineAttachmentInfos: [
+                    .init(
+                        localURL: "Attachments/missing-inline-\(UUID().uuidString).png",
+                        filename: "photo.png",
+                        mimeType: "image/png",
+                        contentId: "photo@example.com"
+                    )
+                ],
+                beforeTransmission: { await probe.record() }
+            )
+            XCTFail("A missing CID part must not be silently omitted")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("photo.png"))
+        }
+        let barrierCallCount = await probe.callCount()
+        XCTAssertEqual(barrierCallCount, 0)
+        XCTAssertEqual(apiClient.sendMessageCallCount, 0)
+    }
+
     func testSendNew_transmissionBarrierFailurePreventsAPIRequest() async {
         let probe = TransmissionBarrierProbe()
 

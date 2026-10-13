@@ -1167,7 +1167,7 @@ final class ChatViewModelTests: XCTestCase {
             ext: "pdf"
         )
         XCTAssertTrue(AttachmentPaths.saveData(Data("regular".utf8), to: firstRegularPath))
-        XCTAssertTrue(AttachmentPaths.saveData(Data("regular".utf8), to: secondRegularPath))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("changed".utf8), to: secondRegularPath))
         defer {
             AttachmentPaths.deleteFile(at: firstRegularPath)
             AttachmentPaths.deleteFile(at: secondRegularPath)
@@ -1229,13 +1229,10 @@ final class ChatViewModelTests: XCTestCase {
             context.forwardedInlineAttachmentInfos.first?.localURL,
             inlinePath
         )
-        XCTAssertEqual(context.forwardedRegularAttachments.count, 1)
-        XCTAssertEqual(context.forwardedRegularAttachments.first?.filename, "report.pdf")
-        XCTAssertTrue(
-            [firstRegularPath, secondRegularPath].contains(
-                context.forwardedRegularAttachments.first?.localURL ?? ""
-            )
-        )
+        XCTAssertEqual(context.forwardedRegularAttachments.count, 2)
+        XCTAssertEqual(context.forwardedRegularAttachments.map(\.filename), ["report.pdf", "report.pdf"])
+        XCTAssertEqual(Set(context.forwardedRegularAttachments.compactMap(\.localURL)),
+                       Set([firstRegularPath, secondRegularPath]))
     }
 
     func testSetMessageToForward_rejectsUnreadableInlineAttachmentWithVisibleError() {
@@ -2355,6 +2352,40 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.initializeReplyingTo(lastMessage: fixture.newest)
         XCTAssertEqual(viewModel.composerState.replyAnchor, fixture.newest)
         XCTAssertNil(viewModel.composerState.recoveredReplyEnvelope)
+    }
+
+    func testRecoverFailedForwardOpensForwardComposeAndPreservesChatReplyDraft() async throws {
+        let fixture = try makeListReplyFixture()
+        let viewModel = fixture.viewModel
+        let context = fixture.dependencies.viewContext
+        viewModel.replyText = "A separate reply draft"
+        let envelope = StoredForwardEnvelope(
+            recipientEmails: ["forward-to@example.com"], subject: "Fwd: Original",
+            authoredBody: "Please review", forwardedPlainTextBody: "Original body",
+            forwardedHTMLBody: "<html><body>Original HTML</body></html>",
+            replacingUnsentMessageID: nil
+        )
+        let service = GmailSendService(viewContext: context)
+        let handle = try await service.createOptimisticMessage(
+            to: envelope.recipientEmails, body: "Please review\n\nOriginal body", subject: envelope.subject,
+            optimisticConversation: .existingConversation(.init(objectID: viewModel.conversation.objectID)),
+            forwardEnvelope: envelope
+        )
+        service.retainDefinitelyUnsentOptimisticMessage(byID: handle.optimisticMessageID, fallbackAttachmentReferences: [])
+
+        XCTAssertTrue(viewModel.editFailedReply(messageObjectID: handle.optimisticMessageObjectID))
+
+        guard case .forwardCompose(let recovery) = viewModel.destination else {
+            return XCTFail("A failed forward must reopen its own compose sheet")
+        }
+        XCTAssertEqual(recovery.initialRecipientEmails, envelope.recipientEmails)
+        XCTAssertEqual(recovery.initialSubject, envelope.subject)
+        XCTAssertEqual(recovery.initialBody, envelope.authoredBody)
+        XCTAssertEqual(recovery.forwardedHTMLBody, envelope.forwardedHTMLBody)
+        XCTAssertEqual(viewModel.replyText, "A separate reply draft")
+        XCTAssertNil(viewModel.composerState.recoveredReplyEnvelope)
+        XCTAssertNotNil(service.fetchMessageSync(byID: handle.optimisticMessageID))
+        viewModel.discardReplyDraft()
     }
 
     func testRestoredMissingTargetBlocksSendInsteadOfChangingThreads() async throws {

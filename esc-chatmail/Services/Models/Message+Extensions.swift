@@ -349,7 +349,22 @@ extension Message {
     }
 
     var attachmentsForForwarding: [Attachment] {
-        AttachmentDisplayFilter.deduplicatedAttachments(in: attachmentsArray)
+        // Display fingerprints are deliberately lossy: two different MIME
+        // parts can have the same name, media type and size. Preserve every
+        // source attachment when forwarding, collapsing only repeated rows
+        // with the same message-scoped attachment ID.
+        var seenIDs = Set<String>()
+        return attachmentsArray.sorted {
+            let firstID = $0.id ?? $0.objectID.uriRepresentation().absoluteString
+            let secondID = $1.id ?? $1.objectID.uriRepresentation().absoluteString
+            if firstID == secondID {
+                return $0.readableLocalURLValue != nil && $1.readableLocalURLValue == nil
+            }
+            return firstID < secondID
+        }.filter { attachment in
+            guard let id = attachment.id, !id.isEmpty else { return true }
+            return seenIDs.insert(id).inserted
+        }
     }
 
     /// Type-safe accessor for bodyText (alias for consistency)

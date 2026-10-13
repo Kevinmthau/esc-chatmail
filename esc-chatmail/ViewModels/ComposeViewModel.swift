@@ -35,6 +35,9 @@ final class ComposeViewModel: ObservableObject {
     @Published private(set) var forwardedPreviewHTML: String?
     private(set) var lastSentConversationReference: ConversationReference?
     private var hasSetupMode = false
+    private var forwardSetupFailed = false
+    private var discardAfterSend = false
+    private var hasDiscarded = false
     private var forwardedPreviewIsDarkMode: Bool?
 
     private var cancellables = Set<AnyCancellable>()
@@ -46,9 +49,6 @@ final class ComposeViewModel: ObservableObject {
 
     /// Plain text body of the forwarded message (used for MIME text part)
     private var forwardedPlainTextBody: String = ""
-
-    /// Inline attachment infos from the forwarded message (images referenced by cid: URLs)
-    private var forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo] = []
 
     // MARK: - Composed Services
 
@@ -83,10 +83,17 @@ final class ComposeViewModel: ObservableObject {
         return false
     }
     var forwardedPreviewText: String { forwardedPlainTextBody }
+    var forwardedPreviewInlineResources: [CIDSchemeHandler.LocalResource] {
+        attachmentManager.inlineAttachments.compactMap { attachment in
+            guard let contentID = attachment.contentId, let localURL = attachment.readableLocalURLValue else { return nil }
+            return .init(contentID: contentID, localURL: localURL, mimeType: attachment.mimeTypeValue)
+        }
+    }
 
     var canSend: Bool {
         let hasValidRecipients = !recipients.isEmpty && recipients.allSatisfy { $0.isValid }
         guard hasValidRecipients,
+              !hasDiscarded,
               !isSending,
               !isImportingAttachments,
               attachments.allSatisfy(Self.isAttachmentReadyToSend) else {
@@ -95,7 +102,7 @@ final class ComposeViewModel: ObservableObject {
 
         switch mode {
         case .forward:
-            return true
+            return hasSetupMode && !forwardSetupFailed
         case .newMessage, .newEmail:
             return !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -141,15 +148,23 @@ final class ComposeViewModel: ObservableObject {
 
         switch mode {
         case .forward(let context):
-            body = ""
+            body = context.initialBody
             subject = context.initialSubject ?? ""
+            context.initialRecipientEmails.forEach { recipientManager.addRecipient(email: $0) }
 
             // Store HTML content for forwarding
             forwardedHTMLBody = context.forwardedHTMLBody
             forwardedPlainTextBody = context.forwardedPlainTextBody
 
-            // Store inline attachments for forwarding (these will be included in multipart/related)
-            forwardedInlineAttachmentInfos = context.forwardedInlineAttachmentInfos
+            do {
+                try attachmentManager.copyInlineAttachmentsForForward(context.forwardedInlineAttachmentInfos)
+                try attachmentManager.copyRecoveredAttachments(context.recoveredAttachmentReferences)
+            } catch {
+                attachmentManager.clear()
+                forwardSetupFailed = true
+                errorAlert = ComposeErrorAlert(message: error.localizedDescription)
+                return
+            }
 
             // Copy regular attachments from original message
             var skipped = 0
@@ -247,11 +262,33 @@ final class ComposeViewModel: ObservableObject {
 
     // MARK: - Send Message
 
+    func presentationDidDisappear(isPresented: Bool) {
+        // A nested picker can cover the composer while its own sheet remains presented.
+        guard !isPresented else { return }
+        discard()
+    }
+
+    func discard() {
+        if isSending {
+            discardAfterSend = true
+        } else {
+            hasDiscarded = true
+            attachmentManager.clear()
+        }
+    }
+
     func send() async -> Bool {
         lastSentConversationReference = nil
         guard canSend else { return false }
 
         isSending = true
+        defer {
+            isSending = false
+            if discardAfterSend {
+                hasDiscarded = true
+                attachmentManager.clear()
+            }
+        }
         errorAlert = nil
 
         let result: OutboundMessageResult?
@@ -267,16 +304,15 @@ final class ComposeViewModel: ObservableObject {
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)
             errorAlert = ComposeErrorAlert(message: error.localizedDescription)
-            isSending = false
             return false
         }
         guard let result else {
-            isSending = false
             return false
         }
 
         lastSentConversationReference = result.conversationReference
-        isSending = false
+        hasDiscarded = true
+        attachmentManager.relinquishAttachmentsAfterSend()
         return true
     }
 
@@ -293,7 +329,10 @@ final class ComposeViewModel: ObservableObject {
                 )
             )
 
-        case .forward:
+        case .forward(let context):
+            let inlineInfos = try outboundAttachmentContextBuilder.buildInlineAttachmentInfos(
+                from: attachmentManager.inlineAttachments
+            )
             return .forward(
                 .init(
                     recipientEmails: recipientEmails,
@@ -301,12 +340,16 @@ final class ComposeViewModel: ObservableObject {
                     body: body,
                     attachments: try outboundAttachmentContextBuilder.buildSendAttachments(
                         from: attachments,
-                        including: forwardedInlineAttachmentInfos
+                        including: inlineInfos
                     ),
                     forwardedPlainTextBody: forwardedPlainTextBody,
                     forwardedHTMLBody: forwardedHTMLBody,
-                    forwardedInlineAttachmentInfos: forwardedInlineAttachmentInfos,
-                    optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails, myAliases: myAliases)
+                    forwardedInlineAttachmentInfos: inlineInfos,
+                    optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails, myAliases: myAliases),
+                    inlineAttachments: try outboundAttachmentContextBuilder.buildSendAttachments(
+                        from: attachmentManager.inlineAttachments
+                    ),
+                    recoveredMessageID: context.recoveredMessageID
                 )
             )
 
