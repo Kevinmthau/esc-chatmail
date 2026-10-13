@@ -366,8 +366,10 @@ class MessageProcessor: @unchecked Sendable {
                     processedHeaders.isFromMe = myAliases.contains(normalizedEmail(email))
                 }
             case "to":
+                processedHeaders.rawToHeader = header.value
                 processedHeaders.to = parseEmailAddresses(from: header.value)
             case "cc":
+                processedHeaders.rawCcHeader = header.value
                 processedHeaders.cc = parseEmailAddresses(from: header.value)
             case "bcc":
                 processedHeaders.bcc = parseEmailAddresses(from: header.value)
@@ -1234,6 +1236,8 @@ struct ProcessedHeaders: Sendable {
     var replyTo: String?
     var to: [EmailAddress] = []
     var cc: [EmailAddress] = []
+    var rawToHeader: String?
+    var rawCcHeader: String?
     var bcc: [EmailAddress] = []
     var deliveredToAddress: String?
     var replyFromAddress: String?

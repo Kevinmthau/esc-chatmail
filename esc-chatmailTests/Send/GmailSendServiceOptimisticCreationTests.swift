@@ -78,6 +78,23 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
     }
 
+    func testCreateOptimisticMessage_preservesRecipientMailboxBeforeSync() async throws {
+        let recipients = ["my.name+tag@gmail.com", "Other <other@example.com>"]
+        let handle = try await sendService.createOptimisticMessage(
+            to: recipients,
+            body: "hello",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: recipients.map(normalizedEmail))
+            )
+        )
+
+        viewContext.reset()
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(message.rawToHeader, recipients.joined(separator: ", "))
+        XCTAssertEqual(message.rawCcHeader, "")
+        XCTAssertTrue(message.participants?.contains { $0.person?.email == "myname@gmail.com" } == true)
+    }
+
     func testCreateOptimisticMessage_mirrorsSessionSenderIdentityByDefault() async throws {
         let authSession = makeTestAuthSession(
             userEmail: "me@example.com",

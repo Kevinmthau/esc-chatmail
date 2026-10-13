@@ -1452,21 +1452,39 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func makeForwardSource(_ message: Message) -> MessageFormatBuilder.ForwardSource {
-        MessageFormatBuilder.ForwardSource(
+        func participants(of kind: ParticipantKind) -> [MessageFormatBuilder.ForwardSource.Participant] {
+            // Older cached messages have no original recipient headers until refetched.
+            return Array(message.participants ?? [])
+                .filter { $0.kind == kind.rawValue }
+                .compactMap { participant in
+                    guard let person = participant.person else { return nil }
+                    return .init(email: person.email, displayName: person.displayName)
+                }
+                .sorted { $0.email.localizedCaseInsensitiveCompare($1.email) == .orderedAscending }
+        }
+
+        let fromParticipant = participants(of: .from).first
+        let storedSenderEmail = MessagePreviewText.nonEmpty(message.senderEmailValue)
+        let senderEmail = storedSenderEmail ?? fromParticipant?.email
+        let senderName = storedSenderEmail == nil
+            ? MessagePreviewText.nonEmpty(message.senderNameValue) ?? fromParticipant?.displayName
+            : MessagePreviewText.nonEmpty(message.senderNameValue)
+        let sender: MessageFormatBuilder.ForwardSource.Participant? = senderEmail != nil || senderName != nil
+            ? .init(email: senderEmail ?? "", displayName: senderName)
+            : nil
+
+        return MessageFormatBuilder.ForwardSource(
             id: message.id,
             subject: message.subject,
             internalDate: message.internalDate,
-            isFromMe: message.isFromMe,
+            sender: sender,
             bodyText: message.bodyTextValue,
             snippet: message.snippet,
             originalHTML: loadOriginalHTML(for: message),
-            participants: Array(message.conversation?.participants ?? []).compactMap { participant in
-                guard let person = participant.person else { return nil }
-                return .init(
-                    email: person.email,
-                    displayName: person.displayName
-                )
-            }
+            to: message.rawToHeader == nil ? participants(of: .to) : [],
+            cc: message.rawCcHeader == nil ? participants(of: .cc) : [],
+            rawToHeader: message.rawToHeader,
+            rawCcHeader: message.rawCcHeader
         )
     }
 

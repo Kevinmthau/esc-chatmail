@@ -295,7 +295,7 @@ enum ForwardedMessageDisplayParser {
     private static func resolvedParticipant(
         from rawValue: String?
     ) -> (displayName: String?, email: String?) {
-        guard let rawValue = cleanedHeaderValue(rawValue) else {
+        guard let rawValue = trimmed(normalized(rawValue)) else {
             return (nil, nil)
         }
 
@@ -310,7 +310,7 @@ enum ForwardedMessageDisplayParser {
                 forEmail: email
             )
         } else {
-            sanitizedDisplayName = trimmed(displayName) ?? trimmed(rawValue)
+            sanitizedDisplayName = trimmed(displayName) ?? cleanedHeaderValue(rawValue)
         }
 
         return (
@@ -320,12 +320,12 @@ enum ForwardedMessageDisplayParser {
     }
 
     private static func resolvedRecipientSummary(from rawValue: String?) -> String? {
-        guard let rawValue = cleanedHeaderValue(rawValue) else {
+        guard let rawValue = trimmed(normalized(rawValue)) else {
             return nil
         }
 
-        let recipients = splitAddressList(rawValue)
-            .map { resolvedParticipant(from: $0).displayName ?? $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let recipients = EmailAddressListParser.addressTokens(from: rawValue)
+            .map { resolvedParticipant(from: $0).displayName ?? cleanedHeaderValue($0) }
             .compactMap(trimmed)
 
         guard let firstRecipient = recipients.first else {
@@ -451,7 +451,7 @@ enum ForwardedMessageDisplayParser {
     private static func splitTrailingBodyFromRecipientList(
         _ rawValue: String
     ) -> (headerValue: String, body: String) {
-        let tokens = splitAddressList(rawValue)
+        let tokens = EmailAddressListParser.addressTokens(from: rawValue)
         guard !tokens.isEmpty else {
             return (rawValue, "")
         }
@@ -477,55 +477,6 @@ enum ForwardedMessageDisplayParser {
         }
 
         return (recipients.joined(separator: ", "), "")
-    }
-
-    private static func splitAddressList(_ value: String) -> [String] {
-        var tokens: [String] = []
-        var currentToken = ""
-        var isInsideQuotes = false
-        var isEscaped = false
-        var angleBracketDepth = 0
-
-        for character in value {
-            switch character {
-            case "\"":
-                if !isEscaped {
-                    isInsideQuotes.toggle()
-                }
-                currentToken.append(character)
-                isEscaped = false
-            case "\\":
-                currentToken.append(character)
-                isEscaped.toggle()
-            case "<":
-                angleBracketDepth += 1
-                currentToken.append(character)
-                isEscaped = false
-            case ">":
-                angleBracketDepth = max(0, angleBracketDepth - 1)
-                currentToken.append(character)
-                isEscaped = false
-            case ",":
-                if isInsideQuotes || angleBracketDepth > 0 {
-                    currentToken.append(character)
-                } else if let token = trimmed(currentToken) {
-                    tokens.append(token)
-                    currentToken.removeAll(keepingCapacity: true)
-                } else {
-                    currentToken.removeAll(keepingCapacity: true)
-                }
-                isEscaped = false
-            default:
-                currentToken.append(character)
-                isEscaped = false
-            }
-        }
-
-        if let token = trimmed(currentToken) {
-            tokens.append(token)
-        }
-
-        return tokens
     }
 
     private static func parseRecipientToken(
@@ -578,7 +529,9 @@ enum ForwardedMessageDisplayParser {
                 continue
             }
 
+            let parsedHeader = parseHeaderLine(rawLine)
             if let currentHeaderName,
+               parsedHeader == nil,
                rawLine.hasPrefix(" ") || rawLine.hasPrefix("\t") {
                 let previousValue = headers[currentHeaderName] ?? ""
                 headers[currentHeaderName] = previousValue + " " + trimmedLine
@@ -586,7 +539,7 @@ enum ForwardedMessageDisplayParser {
                 continue
             }
 
-            guard let parsedHeader = parseHeaderLine(rawLine) else {
+            guard let parsedHeader else {
                 break
             }
 

@@ -286,6 +286,12 @@ extension MessagePersister {
             }
             existingMessage.deliveredToAddress = processedMessage.headers.deliveredToAddress
             existingMessage.replyFromAddress = processedMessage.headers.replyFromAddress
+            if let rawToHeader = processedMessage.headers.rawToHeader {
+                existingMessage.rawToHeader = rawToHeader
+            }
+            if let rawCcHeader = processedMessage.headers.rawCcHeader {
+                existingMessage.rawCcHeader = rawCcHeader
+            }
             if let replyTo = processedMessage.headers.replyTo,
                !replyTo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 existingMessage.replyTo = replyTo

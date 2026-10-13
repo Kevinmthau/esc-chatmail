@@ -96,6 +96,8 @@ extension MessagePersister {
             message.deliveredToAddress = processedMessage.headers.deliveredToAddress
             message.replyFromAddress = processedMessage.headers.replyFromAddress
             message.replyTo = processedMessage.headers.replyTo
+            message.rawToHeader = processedMessage.headers.rawToHeader
+            message.rawCcHeader = processedMessage.headers.rawCcHeader
             message.conversation = conversation
             message.internalDate = processedMessage.internalDate
             message.subject = processedMessage.headers.subject

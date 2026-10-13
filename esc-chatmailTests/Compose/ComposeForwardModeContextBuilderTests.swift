@@ -29,14 +29,12 @@ final class ComposeForwardModeContextBuilderTests: XCTestCase {
                     id: "forward-source-message",
                     subject: "Original Subject",
                     internalDate: Date(timeIntervalSince1970: 1_704_326_400),
-                    isFromMe: false,
+                    sender: .init(email: "friend@example.com", displayName: "Friend"),
                     bodyText: "Original message body",
                     snippet: nil,
                     originalHTML: "<html><body><p>Forwarded HTML body</p></body></html>",
-                    participants: [
-                        .init(email: "me@example.com", displayName: "Me"),
-                        .init(email: "friend@example.com", displayName: "Friend")
-                    ]
+                    to: [.init(email: "me@example.com", displayName: "Me")],
+                    cc: []
                 ),
                 forwardedInlineAttachmentInfos: [
                     .init(
@@ -65,7 +63,8 @@ final class ComposeForwardModeContextBuilderTests: XCTestCase {
         XCTAssertEqual(result.initialSubject, "Fwd: Original Subject")
         XCTAssertTrue(result.forwardedPlainTextBody.contains("---------- Forwarded message ---------"))
         XCTAssertTrue(result.forwardedPlainTextBody.contains("Original message body"))
-        XCTAssertTrue(result.forwardedPlainTextBody.contains("To: friend@example.com"))
+        XCTAssertTrue(result.forwardedPlainTextBody.contains("From: Friend <friend@example.com>\n"))
+        XCTAssertTrue(result.forwardedPlainTextBody.contains("To: Me <me@example.com>\n"))
         XCTAssertTrue(result.forwardedHTMLBody?.contains("Forwarded HTML body") == true)
         XCTAssertEqual(result.forwardedInlineAttachmentInfos.count, 1)
         XCTAssertEqual(result.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
@@ -98,11 +97,12 @@ final class ComposeForwardModeContextBuilderTests: XCTestCase {
                     id: "unsafe-inline-forward",
                     subject: "Original Subject",
                     internalDate: Date(timeIntervalSince1970: 1_704_326_400),
-                    isFromMe: false,
+                    sender: nil,
                     bodyText: "Original message body",
                     snippet: nil,
                     originalHTML: "<html><body><img src=\"cid:real%3E%3Cevil@attacker\"></body></html>",
-                    participants: []
+                    to: [],
+                    cc: []
                 ),
                 forwardedInlineAttachmentInfos: [
                     .init(

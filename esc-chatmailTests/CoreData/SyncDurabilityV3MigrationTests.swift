@@ -44,7 +44,7 @@ final class SyncDurabilityV3MigrationTests: XCTestCase {
     func testAllModelVersionsRemainBundled() throws {
         let momd = try modelDirectory()
         let versions = [
-            "ESCChatmail", "ESCChatmail 2", "ESCChatmail 3", "ESCChatmail 4", "ESCChatmail 5"
+            "ESCChatmail", "ESCChatmail 2", "ESCChatmail 3", "ESCChatmail 4", "ESCChatmail 5", "ESCChatmail 6"
         ]
         for version in versions {
             let url = momd.appendingPathComponent(version).appendingPathExtension("mom")
