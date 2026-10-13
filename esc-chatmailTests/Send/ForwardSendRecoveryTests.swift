@@ -159,6 +159,48 @@ final class ForwardSendRecoveryTests: XCTestCase {
         XCTAssertNil(try mutation(retryID)?.remoteCommittedMessageId)
     }
 
+    func testAdmissionIntoDifferentConversationRestoresArchivedSourceState() async throws {
+        let archivedAt = Date(timeIntervalSince1970: 100)
+        let previousDate = Date(timeIntervalSince1970: 50)
+        let recipients = ["first@example.com", "second@example.com"]
+        let participantHash = calculateParticipantHash(from: recipients)
+        conversation.participantHash = participantHash
+        conversation.archivedAt = archivedAt
+        conversation.hidden = true
+        conversation.hasInbox = false
+        let sentLabel = LabelBuilder().withId("SENT").withName("Sent").build(in: context)
+        let previousMessage = MessageBuilder().fromMe().withDate(previousDate)
+            .withSnippet("Previous sent message").inConversation(conversation).build(in: context)
+        previousMessage.addToLabels(sentLabel)
+        try context.save()
+        let sourceConversationID = conversation.objectID
+
+        let original = try await createForward(optimisticConversation: .participantHash(participantHash))
+        service.retainDefinitelyUnsentOptimisticMessage(byID: original.optimisticMessageID, fallbackAttachmentReferences: [])
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertFalse(conversation.hidden)
+        let retry = try await createForward(
+            replacing: original.optimisticMessageID,
+            recipients: ["changed@example.com"],
+            optimisticConversation: .participantHash(calculateParticipantHash(from: ["changed@example.com"]))
+        )
+
+        try service.recordRemoteSendAdmission(optimisticMessageID: retry.optimisticMessageID)
+
+        context.reset()
+        let source = try XCTUnwrap(context.existingObject(with: sourceConversationID) as? Conversation)
+        XCTAssertEqual(source.archivedAt, archivedAt)
+        XCTAssertTrue(source.hidden)
+        XCTAssertFalse(source.hasInbox)
+        XCTAssertEqual(source.lastMessageDate, previousDate)
+        XCTAssertEqual(source.snippet, "Previous sent message")
+        XCTAssertNil(service.fetchMessageSync(byID: original.optimisticMessageID))
+        let replacement = try XCTUnwrap(service.fetchMessageSync(byID: retry.optimisticMessageID))
+        XCTAssertNotEqual(replacement.conversation?.objectID, source.objectID)
+        XCTAssertNil(replacement.conversation?.archivedAt)
+        XCTAssertEqual(replacement.conversation?.hidden, false)
+    }
+
     func testRecoveryAdmissionRefusesOriginalWithUnknownDelivery() async throws {
         let original = try await createForward()
         service.retainDefinitelyUnsentOptimisticMessage(byID: original.optimisticMessageID, fallbackAttachmentReferences: [])
@@ -206,6 +248,286 @@ final class ForwardSendRecoveryTests: XCTestCase {
         XCTAssertEqual(try mutation(retry.optimisticMessageID)?.remoteCommittedMessageId, OutboundSendRemoteState.inFlightMessageID)
     }
 
+    func testColdRecoveryOfOriginalPreservesAbandonedReplacementAsIndependentForward() async throws {
+        let original = try await createForward()
+        service.retainDefinitelyUnsentOptimisticMessage(byID: original.optimisticMessageID, fallbackAttachmentReferences: [])
+        let addedAttachment = try makeAttachment(filename: "extra-notes.txt")
+        let abandonedRetry = try await createForward(
+            attachments: [addedAttachment], replacing: original.optimisticMessageID,
+            authoredBody: "Unique edits made in the abandoned replacement"
+        )
+        let addedAttachmentID = addedAttachment.objectID
+        let conversationID = conversation.objectID
+        context.reset()
+        conversation = try context.existingObject(with: conversationID) as? Conversation
+        service.reconcileAbandonedOptimisticSendMutations()
+        XCTAssertEqual(
+            try mutation(abandonedRetry.optimisticMessageID)?.remoteCommittedMessageId,
+            OutboundSendRemoteState.notSentMessageID
+        )
+        let retry = try await createForward(replacing: original.optimisticMessageID)
+
+        try service.recordRemoteSendAdmission(optimisticMessageID: retry.optimisticMessageID)
+
+        XCTAssertNil(service.fetchMessageSync(byID: original.optimisticMessageID))
+        XCTAssertNil(try mutation(original.optimisticMessageID))
+        XCTAssertEqual(try mutation(retry.optimisticMessageID)?.remoteCommittedMessageId, OutboundSendRemoteState.inFlightMessageID)
+
+        let retained = try XCTUnwrap(service.fetchMessageSync(byID: abandonedRetry.optimisticMessageID))
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: retained), .notSent)
+        XCTAssertEqual(retained.attachmentsArray.map(\.objectID), [addedAttachmentID])
+        XCTAssertNotNil(AttachmentPaths.loadData(from: retained.attachmentsArray.first?.readableLocalURLValue))
+        let retainedEnvelope = try XCTUnwrap(StoredForwardEnvelope.decode(from: mutation(abandonedRetry.optimisticMessageID)?.replyEnvelopeData))
+        XCTAssertEqual(retainedEnvelope.authoredBody, "Unique edits made in the abandoned replacement")
+        XCTAssertNil(retainedEnvelope.replacingUnsentMessageID)
+        let recovery = try XCTUnwrap(ChatReplyDraftStore(context: context).forwardRecoveryContext(retained, conversation: conversation))
+        XCTAssertEqual(recovery.initialBody, retainedEnvelope.authoredBody)
+        XCTAssertEqual(recovery.recoveredAttachmentReferences.count, 1)
+
+        let copiedAttachment = try makeAttachment(filename: "extra-notes.txt")
+        let nextRetry = try await createForward(
+            attachments: [copiedAttachment], replacing: abandonedRetry.optimisticMessageID,
+            authoredBody: recovery.initialBody
+        )
+        XCTAssertNoThrow(try service.recordRemoteSendAdmission(optimisticMessageID: nextRetry.optimisticMessageID))
+        XCTAssertNil(service.fetchMessageSync(byID: abandonedRetry.optimisticMessageID))
+        XCTAssertEqual(try mutation(nextRetry.optimisticMessageID)?.remoteCommittedMessageId, OutboundSendRemoteState.inFlightMessageID)
+        XCTAssertEqual(copiedAttachment.message?.id, nextRetry.optimisticMessageID)
+    }
+
+    func testCompetingPreAdmissionRetryRestoresArchivedSourceAfterWinnerMovesConversation() async throws {
+        let archivedAt = Date(timeIntervalSince1970: 100)
+        let previousDate = Date(timeIntervalSince1970: 50)
+        let participantHash = calculateParticipantHash(from: ["first@example.com", "second@example.com"])
+        conversation.participantHash = participantHash
+        conversation.archivedAt = archivedAt
+        conversation.hidden = true
+        conversation.hasInbox = false
+        let sentLabel = LabelBuilder().withId("SENT").withName("Sent").build(in: context)
+        let previousMessage = MessageBuilder().fromMe().withDate(previousDate)
+            .withSnippet("Previous sent message").inConversation(conversation).build(in: context)
+        previousMessage.addToLabels(sentLabel)
+        try context.save()
+        let sourceConversationID = conversation.objectID
+
+        let original = try await createForward(optimisticConversation: .participantHash(participantHash))
+        service.retainDefinitelyUnsentOptimisticMessage(byID: original.optimisticMessageID, fallbackAttachmentReferences: [])
+        let competingRetry = try await createForward(replacing: original.optimisticMessageID)
+        let winningRetry = try await createForward(
+            replacing: original.optimisticMessageID,
+            recipients: ["changed@example.com"],
+            optimisticConversation: .participantHash(calculateParticipantHash(from: ["changed@example.com"]))
+        )
+
+        try service.recordRemoteSendAdmission(optimisticMessageID: winningRetry.optimisticMessageID)
+
+        XCTAssertNotNil(service.fetchMessageSync(byID: competingRetry.optimisticMessageID))
+        XCTAssertNil(try mutation(competingRetry.optimisticMessageID)?.remoteCommittedMessageId)
+        XCTAssertEqual(
+            try StoredForwardEnvelope.decode(from: mutation(competingRetry.optimisticMessageID)?.replyEnvelopeData)?.replacingUnsentMessageID,
+            original.optimisticMessageID
+        )
+        XCTAssertThrowsError(try service.recordRemoteSendAdmission(optimisticMessageID: competingRetry.optimisticMessageID))
+        XCTAssertEqual(service.rollbackOptimisticMessageBeforeTransmission(
+            byID: competingRetry.optimisticMessageID, fallbackAttachmentReferences: []
+        ), .rolledBack)
+
+        context.reset()
+        let source = try XCTUnwrap(context.existingObject(with: sourceConversationID) as? Conversation)
+        XCTAssertEqual(source.archivedAt, archivedAt)
+        XCTAssertTrue(source.hidden)
+        XCTAssertEqual(source.lastMessageDate, previousDate)
+        XCTAssertEqual(source.snippet, "Previous sent message")
+        XCTAssertNil(service.fetchMessageSync(byID: original.optimisticMessageID))
+        XCTAssertNil(service.fetchMessageSync(byID: competingRetry.optimisticMessageID))
+        let winner = try XCTUnwrap(service.fetchMessageSync(byID: winningRetry.optimisticMessageID))
+        XCTAssertNotEqual(winner.conversation?.objectID, sourceConversationID)
+        XCTAssertNil(winner.conversation?.archivedAt)
+        XCTAssertEqual(winner.conversation?.hidden, false)
+        XCTAssertEqual(try mutation(winningRetry.optimisticMessageID)?.remoteCommittedMessageId, OutboundSendRemoteState.inFlightMessageID)
+    }
+
+    func testRejectedSameConversationReplacementRetainsOriginalArchivedBaseline() async throws {
+        let archivedAt = Date(timeIntervalSince1970: 100)
+        let previousDate = Date(timeIntervalSince1970: 50)
+        let participantHash = calculateParticipantHash(from: ["first@example.com", "second@example.com"])
+        conversation.participantHash = participantHash
+        conversation.archivedAt = archivedAt
+        conversation.hidden = true
+        conversation.hasInbox = false
+        let sentLabel = LabelBuilder().withId("SENT").withName("Sent").build(in: context)
+        let previousMessage = MessageBuilder().fromMe().withDate(previousDate)
+            .withSnippet("Previous sent message").inConversation(conversation).build(in: context)
+        previousMessage.addToLabels(sentLabel)
+        try context.save()
+        let sourceConversationID = conversation.objectID
+
+        let original = try await createForward(optimisticConversation: .participantHash(participantHash))
+        service.retainDefinitelyUnsentOptimisticMessage(byID: original.optimisticMessageID, fallbackAttachmentReferences: [])
+        let rejectedRetry = try await createForward(replacing: original.optimisticMessageID)
+        try service.recordRemoteSendAdmission(optimisticMessageID: rejectedRetry.optimisticMessageID)
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertFalse(conversation.hidden)
+        service.retainDefinitelyUnsentOptimisticMessage(byID: rejectedRetry.optimisticMessageID, fallbackAttachmentReferences: [])
+
+        let finalRetry = try await createForward(
+            replacing: rejectedRetry.optimisticMessageID,
+            recipients: ["changed@example.com"],
+            optimisticConversation: .participantHash(calculateParticipantHash(from: ["changed@example.com"]))
+        )
+        try service.recordRemoteSendAdmission(optimisticMessageID: finalRetry.optimisticMessageID)
+
+        context.reset()
+        let source = try XCTUnwrap(context.existingObject(with: sourceConversationID) as? Conversation)
+        XCTAssertEqual(source.archivedAt, archivedAt)
+        XCTAssertTrue(source.hidden)
+        XCTAssertEqual(source.lastMessageDate, previousDate)
+        XCTAssertEqual(source.snippet, "Previous sent message")
+        XCTAssertNil(service.fetchMessageSync(byID: original.optimisticMessageID))
+        XCTAssertNil(service.fetchMessageSync(byID: rejectedRetry.optimisticMessageID))
+        let replacement = try XCTUnwrap(service.fetchMessageSync(byID: finalRetry.optimisticMessageID))
+        XCTAssertNotEqual(replacement.conversation?.objectID, sourceConversationID)
+        XCTAssertNil(replacement.conversation?.archivedAt)
+        XCTAssertEqual(replacement.conversation?.hidden, false)
+    }
+
+    func testReplacementPreservesExplicitUserArchiveMadeBetweenAttempts() async throws {
+        let explicitArchiveDate = Date(timeIntervalSince1970: 100)
+        let previousDate = Date(timeIntervalSince1970: 50)
+        let participantHash = calculateParticipantHash(from: ["first@example.com", "second@example.com"])
+        conversation.participantHash = participantHash
+        let sentLabel = LabelBuilder().withId("SENT").withName("Sent").build(in: context)
+        let previousMessage = MessageBuilder().fromMe().withDate(previousDate)
+            .withSnippet("Previous sent message").inConversation(conversation).build(in: context)
+        previousMessage.addToLabels(sentLabel)
+        try context.save()
+        let sourceConversationID = conversation.objectID
+
+        let original = try await createForward(optimisticConversation: .participantHash(participantHash))
+        service.retainDefinitelyUnsentOptimisticMessage(byID: original.optimisticMessageID, fallbackAttachmentReferences: [])
+        XCTAssertNil(try mutation(original.optimisticMessageID)?.archivedAt)
+        conversation.archivedAt = explicitArchiveDate
+        conversation.hidden = true
+        try context.save()
+
+        let rejectedRetry = try await createForward(
+            replacing: original.optimisticMessageID,
+            optimisticConversation: .participantHash(participantHash)
+        )
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertFalse(conversation.hidden)
+        try service.recordRemoteSendAdmission(optimisticMessageID: rejectedRetry.optimisticMessageID)
+        service.retainDefinitelyUnsentOptimisticMessage(byID: rejectedRetry.optimisticMessageID, fallbackAttachmentReferences: [])
+
+        let finalRetry = try await createForward(
+            replacing: rejectedRetry.optimisticMessageID,
+            recipients: ["changed@example.com"],
+            optimisticConversation: .participantHash(calculateParticipantHash(from: ["changed@example.com"]))
+        )
+        try service.recordRemoteSendAdmission(optimisticMessageID: finalRetry.optimisticMessageID)
+
+        context.reset()
+        let source = try XCTUnwrap(context.existingObject(with: sourceConversationID) as? Conversation)
+        XCTAssertEqual(source.archivedAt, explicitArchiveDate)
+        XCTAssertTrue(source.hidden)
+        XCTAssertEqual(source.lastMessageDate, previousDate)
+        XCTAssertEqual(source.snippet, "Previous sent message")
+        XCTAssertNil(service.fetchMessageSync(byID: original.optimisticMessageID))
+        XCTAssertNil(service.fetchMessageSync(byID: rejectedRetry.optimisticMessageID))
+        let replacement = try XCTUnwrap(service.fetchMessageSync(byID: finalRetry.optimisticMessageID))
+        XCTAssertNotEqual(replacement.conversation?.objectID, sourceConversationID)
+        XCTAssertNil(replacement.conversation?.archivedAt)
+        XCTAssertEqual(replacement.conversation?.hidden, false)
+    }
+
+    func testColdRecoveryDetachesLosingLiveRetryFromConsumedSource() async throws {
+        let original = try await createForward()
+        service.retainDefinitelyUnsentOptimisticMessage(byID: original.optimisticMessageID, fallbackAttachmentReferences: [])
+        let losingRetry = try await createForward(
+            replacing: original.optimisticMessageID,
+            authoredBody: "Unique note in the interrupted losing retry"
+        )
+        let winningRetry = try await createForward(replacing: original.optimisticMessageID)
+        try service.recordRemoteSendAdmission(optimisticMessageID: winningRetry.optimisticMessageID)
+        XCTAssertNil(try mutation(losingRetry.optimisticMessageID)?.remoteCommittedMessageId)
+        let conversationID = conversation.objectID
+
+        context.reset()
+        conversation = try context.existingObject(with: conversationID) as? Conversation
+        service.reconcileAbandonedOptimisticSendMutations()
+
+        let retained = try XCTUnwrap(service.fetchMessageSync(byID: losingRetry.optimisticMessageID))
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: retained), .notSent)
+        let envelope = try XCTUnwrap(StoredForwardEnvelope.decode(from: mutation(losingRetry.optimisticMessageID)?.replyEnvelopeData))
+        XCTAssertNil(envelope.replacingUnsentMessageID)
+        XCTAssertEqual(envelope.authoredBody, "Unique note in the interrupted losing retry")
+        let recovery = try XCTUnwrap(ChatReplyDraftStore(context: context).forwardRecoveryContext(retained, conversation: conversation))
+        XCTAssertEqual(recovery.initialBody, envelope.authoredBody)
+        XCTAssertEqual(
+            try mutation(winningRetry.optimisticMessageID)?.remoteCommittedMessageId,
+            OutboundSendRemoteState.ambiguousMessageID
+        )
+
+        let nextRetry = try await createForward(
+            replacing: losingRetry.optimisticMessageID,
+            authoredBody: recovery.initialBody
+        )
+        XCTAssertNoThrow(try service.recordRemoteSendAdmission(optimisticMessageID: nextRetry.optimisticMessageID))
+        XCTAssertNil(service.fetchMessageSync(byID: losingRetry.optimisticMessageID))
+        XCTAssertEqual(try mutation(nextRetry.optimisticMessageID)?.remoteCommittedMessageId, OutboundSendRemoteState.inFlightMessageID)
+    }
+
+    func testColdReplacementChainPreservesExplicitUserArchiveMadeBetweenAttempts() async throws {
+        let explicitArchiveDate = Date(timeIntervalSince1970: 100)
+        let previousDate = Date(timeIntervalSince1970: 50)
+        let participantHash = calculateParticipantHash(from: ["first@example.com", "second@example.com"])
+        conversation.participantHash = participantHash
+        let sentLabel = LabelBuilder().withId("SENT").withName("Sent").build(in: context)
+        let previousMessage = MessageBuilder().fromMe().withDate(previousDate)
+            .withSnippet("Previous sent message").inConversation(conversation).build(in: context)
+        previousMessage.addToLabels(sentLabel)
+        try context.save()
+        let sourceConversationID = conversation.objectID
+
+        let original = try await createForward(optimisticConversation: .participantHash(participantHash))
+        service.retainDefinitelyUnsentOptimisticMessage(byID: original.optimisticMessageID, fallbackAttachmentReferences: [])
+        conversation.archivedAt = explicitArchiveDate
+        conversation.hidden = true
+        try context.save()
+        let abandonedRetry = try await createForward(
+            replacing: original.optimisticMessageID,
+            optimisticConversation: .participantHash(participantHash)
+        )
+        XCTAssertNil(conversation.archivedAt)
+        context.reset()
+        conversation = try context.existingObject(with: sourceConversationID) as? Conversation
+        service.reconcileAbandonedOptimisticSendMutations()
+        XCTAssertEqual(
+            try mutation(abandonedRetry.optimisticMessageID)?.remoteCommittedMessageId,
+            OutboundSendRemoteState.notSentMessageID
+        )
+
+        let finalRetry = try await createForward(
+            replacing: abandonedRetry.optimisticMessageID,
+            recipients: ["changed@example.com"],
+            optimisticConversation: .participantHash(calculateParticipantHash(from: ["changed@example.com"]))
+        )
+        try service.recordRemoteSendAdmission(optimisticMessageID: finalRetry.optimisticMessageID)
+
+        context.reset()
+        let source = try XCTUnwrap(context.existingObject(with: sourceConversationID) as? Conversation)
+        XCTAssertEqual(source.archivedAt, explicitArchiveDate)
+        XCTAssertTrue(source.hidden)
+        XCTAssertEqual(source.lastMessageDate, previousDate)
+        XCTAssertEqual(source.snippet, "Previous sent message")
+        XCTAssertNil(service.fetchMessageSync(byID: original.optimisticMessageID))
+        XCTAssertNil(service.fetchMessageSync(byID: abandonedRetry.optimisticMessageID))
+        let replacement = try XCTUnwrap(service.fetchMessageSync(byID: finalRetry.optimisticMessageID))
+        XCTAssertNotEqual(replacement.conversation?.objectID, sourceConversationID)
+        XCTAssertNil(replacement.conversation?.archivedAt)
+        XCTAssertEqual(replacement.conversation?.hidden, false)
+    }
+
     private func makeCoordinator() -> OutboundMessageCoordinator {
         OutboundMessageCoordinator(
             sendService: service,
@@ -237,18 +559,25 @@ final class ForwardSendRecoveryTests: XCTestCase {
         ))
     }
 
-    private func createForward(attachments: [Attachment] = [], replacing replacedID: String? = nil) async throws -> OptimisticSendHandle {
+    private func createForward(
+        attachments: [Attachment] = [],
+        replacing replacedID: String? = nil,
+        authoredBody: String = "My note",
+        recipients: [String] = ["first@example.com", "second@example.com"],
+        optimisticConversation: OptimisticConversationReference? = nil
+    ) async throws -> OptimisticSendHandle {
         let envelope = StoredForwardEnvelope(
-            recipientEmails: ["first@example.com", "second@example.com"], subject: "Fwd: Original subject",
-            authoredBody: "My note", forwardedPlainTextBody: "Original forwarded text",
+            recipientEmails: recipients, subject: "Fwd: Original subject",
+            authoredBody: authoredBody, forwardedPlainTextBody: "Original forwarded text",
             forwardedHTMLBody: "<html><body><img src=\"cid:photo@example.com\"></body></html>",
             replacingUnsentMessageID: replacedID
         )
         return try await service.createOptimisticMessage(
             to: envelope.recipientEmails,
-            body: "My note\n\nOriginal forwarded text", subject: envelope.subject,
+            body: "\(authoredBody)\n\nOriginal forwarded text", subject: envelope.subject,
             attachments: OutboundAttachmentContextBuilder(viewContext: context).buildSendAttachments(from: attachments),
-            optimisticConversation: .existingConversation(ConversationReference(objectID: conversation.objectID)),
+            optimisticConversation: optimisticConversation
+                ?? .existingConversation(ConversationReference(objectID: conversation.objectID)),
             forwardEnvelope: envelope
         )
     }

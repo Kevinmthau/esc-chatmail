@@ -9,6 +9,9 @@ struct StoredForwardEnvelope: Codable, Equatable, Sendable {
     let forwardedPlainTextBody: String
     let forwardedHTMLBody: String?
     let replacingUnsentMessageID: String?
+    /// A live competing attempt must still refuse admission. If it is later
+    /// recovered as definitely unsent, its preserved edits become independent.
+    var recoverySourceWasConsumed: Bool? = nil
 
     private struct Record: Codable {
         let version: Int
@@ -28,6 +31,12 @@ struct StoredForwardEnvelope: Codable, Equatable, Sendable {
         Self(recipientEmails: recipientEmails, subject: subject, authoredBody: authoredBody,
              forwardedPlainTextBody: forwardedPlainTextBody, forwardedHTMLBody: forwardedHTMLBody,
              replacingUnsentMessageID: nil)
+    }
+
+    func withConsumedRecoverySource() -> Self {
+        var envelope = self
+        envelope.recoverySourceWasConsumed = true
+        return envelope
     }
 
     static func decode(from data: Data?) throws -> Self? {
