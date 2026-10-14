@@ -7,7 +7,8 @@ struct EmailPreviewClassifier {
         extractedText: String? = nil,
         senderEmail: String?,
         subject: String? = nil,
-        includeTestFlightAvailabilitySignal: Bool = true
+        includeTestFlightAvailabilitySignal: Bool = true,
+        includeDeveloperProgramNoticeSignal: Bool = true
     ) -> EmailPreviewClassification {
         classify(
             parsedEmail: nil,
@@ -16,10 +17,15 @@ struct EmailPreviewClassifier {
             extractedText: extractedText,
             senderEmail: senderEmail,
             subject: subject,
-            includeTestFlightAvailabilitySignal: includeTestFlightAvailabilitySignal
+            includeTestFlightAvailabilitySignal: includeTestFlightAvailabilitySignal,
+            includeDeveloperProgramNoticeSignal: includeDeveloperProgramNoticeSignal
         )
     }
 
+    /// `includeTestFlightAvailabilitySignal` and `includeDeveloperProgramNoticeSignal`
+    /// are preview-card routing signals: the render-quality evaluator passes
+    /// `false` for both so a card-only verdict does not also tilt the full
+    /// message toward the plain-text fallback.
     func classify(
         parsedEmail: ParsedEmail?,
         canonicalHTML: String,
@@ -27,7 +33,8 @@ struct EmailPreviewClassifier {
         extractedText: String? = nil,
         senderEmail: String?,
         subject: String? = nil,
-        includeTestFlightAvailabilitySignal: Bool = true
+        includeTestFlightAvailabilitySignal: Bool = true,
+        includeDeveloperProgramNoticeSignal: Bool = true
     ) -> EmailPreviewClassification {
         let lowercasedHTML = canonicalHTML.lowercased()
         let previewText = normalizedBodyText(bodyText)
@@ -130,6 +137,17 @@ struct EmailPreviewClassifier {
             addSignal(.transactionalKeywords)
         }
 
+        let isDeveloperProgramNotice = includeDeveloperProgramNoticeSignal &&
+            AppStoreNotificationPreviewExtractor.isDeveloperProgramAgreementNotice(
+                senderEmail: senderEmail,
+                sourceDomain: nil,
+                subject: lowercasedSubject
+            )
+        if isDeveloperProgramNotice {
+            transactionalScore += 32
+            addSignal(.developerProgramNotice)
+        }
+
         if containsAny(noReplySenderPatterns, in: lowercasedSender) {
             transactionalScore += 12
             addSignal(.senderNoReply)
@@ -168,7 +186,14 @@ struct EmailPreviewClassifier {
         transactionalScore = max(transactionalScore, 0)
 
         let kind: EmailPreviewKind
-        if newsletterScore >= 55 && newsletterScore >= transactionalScore + 10 {
+        if isDeveloperProgramNotice {
+            // Apple's agreement notices ship with the same unsubscribe /
+            // "update your email preferences" / "All Rights Reserved" footer as
+            // its marketing mail, which alone outscores the 32-point notice
+            // signal and would route the card through the newsletter builder.
+            // The signal is sender- and subject-anchored, so it wins outright.
+            kind = .transactional
+        } else if newsletterScore >= 55 && newsletterScore >= transactionalScore + 10 {
             kind = .newsletter
         } else if transactionalScore >= 30 {
             kind = .transactional

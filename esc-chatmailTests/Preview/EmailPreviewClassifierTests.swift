@@ -373,4 +373,92 @@ final class EmailPreviewClassifierTests: XCTestCase {
         XCTAssertTrue(result.signals.contains(.largeHTMLBody))
         XCTAssertTrue(result.signals.contains(.marketingFooter))
     }
+
+    func testClassifyAppleDeveloperProgramAgreementEmail_returnsTransactionalDespiteMarketingFooter() {
+        // The real notice carries Apple's full marketing footer (unsubscribe,
+        // email preferences, "All Rights Reserved") and five tables, which score
+        // it as a newsletter; without the sender- and subject-anchored notice
+        // override it fell through to the rendered-HTML snapshot card.
+        // Revert-check: removing the `isDeveloperProgramNotice` override in
+        // `EmailPreviewClassifier.classify` makes this fail (kind == .newsletter).
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><img src="https://www.apple.com/images/apple-logo.png" width="40" height="40" alt="Apple"></td></tr></table>
+            <table><tr><td><p>The <a href="https://developer.apple.com/support/terms/">Apple Developer Program License Agreement</a> has been updated and is now available. In order to update your existing apps, create new in-app purchases, and submit new apps to the App Store, the Account Holder must review and accept the updated agreement by <a href="https://developer.apple.com/account">sign in to your account</a> on the Apple Developer website.</p></td></tr></table>
+            <table><tr><td><p>If you have any questions, <a href="https://developer.apple.com/contact/">contact us</a>.</p><p>Best regards,<br>Apple Developer Relations</p></td></tr></table>
+            <table><tr><td><p>If you prefer not to receive commercial email from Apple, or if you've changed your email address, please <a href="https://developer.apple.com/account/preferences">update your email preferences</a> or <a href="https://developer.apple.com/unsubscribe">unsubscribe</a>.</p></td></tr></table>
+            <table><tr><td><p>TM and &copy; 2026 Apple Inc. One Apple Park Way, MS 96-DM, Cupertino, CA 95014.</p><p><a href="https://www.apple.com/legal/privacy/">Privacy Policy</a> | <a href="https://appleid.apple.com">My Apple Account</a> | All Rights Reserved</p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "Apple Developer <developer@insideapple.apple.com>",
+            subject: "Updated Apple Developer Program License Agreement Now Available"
+        )
+
+        XCTAssertEqual(result.kind, .transactional)
+        XCTAssertTrue(result.signals.contains(.developerProgramNotice))
+        XCTAssertTrue(result.signals.contains(.unsubscribeFooter))
+        XCTAssertGreaterThanOrEqual(result.newsletterScore, 55)
+    }
+
+    func testClassifyAppleDeveloperProgramAgreementEmail_fromNonAppleSenderDoesNotForceTransactional() {
+        // Identical content from a non-Apple domain must not take the notice
+        // override: the sender gate is what keeps lookalike mail out of it.
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><img src="https://www.apple.com/images/apple-logo.png" width="40" height="40" alt="Apple"></td></tr></table>
+            <table><tr><td><p>The <a href="https://developer.apple.com/support/terms/">Apple Developer Program License Agreement</a> has been updated and is now available. In order to update your existing apps, create new in-app purchases, and submit new apps to the App Store, the Account Holder must review and accept the updated agreement by <a href="https://developer.apple.com/account">sign in to your account</a> on the Apple Developer website.</p></td></tr></table>
+            <table><tr><td><p>If you have any questions, <a href="https://developer.apple.com/contact/">contact us</a>.</p><p>Best regards,<br>Apple Developer Relations</p></td></tr></table>
+            <table><tr><td><p>If you prefer not to receive commercial email from Apple, or if you've changed your email address, please <a href="https://developer.apple.com/account/preferences">update your email preferences</a> or <a href="https://developer.apple.com/unsubscribe">unsubscribe</a>.</p></td></tr></table>
+            <table><tr><td><p>TM and &copy; 2026 Apple Inc. One Apple Park Way, MS 96-DM, Cupertino, CA 95014.</p><p><a href="https://www.apple.com/legal/privacy/">Privacy Policy</a> | <a href="https://appleid.apple.com">My Apple Account</a> | All Rights Reserved</p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "Apple Developer <developer@insideapple.apple.com.evil.example>",
+            subject: "Updated Apple Developer Program License Agreement Now Available"
+        )
+
+        XCTAssertNotEqual(result.kind, .transactional)
+        XCTAssertFalse(result.signals.contains(.developerProgramNotice))
+    }
+
+    func testClassifyAppleDeveloperProgramAgreementEmail_withoutPreviewSignalDoesNotForceTransactional() {
+        // The render-quality evaluator opts out of the preview-only notice signal
+        // so the card verdict does not tilt the full message toward plain text.
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><img src="https://www.apple.com/images/apple-logo.png" width="40" height="40" alt="Apple"></td></tr></table>
+            <table><tr><td><p>The <a href="https://developer.apple.com/support/terms/">Apple Developer Program License Agreement</a> has been updated and is now available. In order to update your existing apps, create new in-app purchases, and submit new apps to the App Store, the Account Holder must review and accept the updated agreement by <a href="https://developer.apple.com/account">sign in to your account</a> on the Apple Developer website.</p></td></tr></table>
+            <table><tr><td><p>If you have any questions, <a href="https://developer.apple.com/contact/">contact us</a>.</p><p>Best regards,<br>Apple Developer Relations</p></td></tr></table>
+            <table><tr><td><p>If you prefer not to receive commercial email from Apple, or if you've changed your email address, please <a href="https://developer.apple.com/account/preferences">update your email preferences</a> or <a href="https://developer.apple.com/unsubscribe">unsubscribe</a>.</p></td></tr></table>
+            <table><tr><td><p>TM and &copy; 2026 Apple Inc. One Apple Park Way, MS 96-DM, Cupertino, CA 95014.</p><p><a href="https://www.apple.com/legal/privacy/">Privacy Policy</a> | <a href="https://appleid.apple.com">My Apple Account</a> | All Rights Reserved</p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "developer@insideapple.apple.com",
+            subject: "Updated Apple Developer Program License Agreement Now Available",
+            includeDeveloperProgramNoticeSignal: false
+        )
+
+        XCTAssertNotEqual(result.kind, .transactional)
+        XCTAssertFalse(result.signals.contains(.developerProgramNotice))
+    }
 }

@@ -53,7 +53,8 @@ struct EmailRenderQualityEvaluator {
             bodyText: plainText,
             senderEmail: senderEmail,
             subject: subject,
-            includeTestFlightAvailabilitySignal: false
+            includeTestFlightAvailabilitySignal: false,
+            includeDeveloperProgramNoticeSignal: false
         )
 
         let parsedRenderQuality: ParsedEmailRenderQualityFacts?

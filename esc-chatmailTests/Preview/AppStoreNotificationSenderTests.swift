@@ -43,4 +43,36 @@ final class AppStoreNotificationSenderTests: XCTestCase {
             sourceDomain: nil
         ))
     }
+
+    func testIsDeveloperProgramAgreementNotice_requiresAppleSenderAndNoticeSubject() {
+        XCTAssertTrue(AppStoreNotificationPreviewExtractor.isDeveloperProgramAgreementNotice(
+            senderEmail: "developer@insideapple.apple.com",
+            sourceDomain: nil,
+            subject: "Updated Apple Developer Program License Agreement Now Available"
+        ))
+        XCTAssertTrue(AppStoreNotificationPreviewExtractor.isDeveloperProgramAgreementNotice(
+            senderEmail: "no_reply@email.apple.com",
+            sourceDomain: nil,
+            subject: "Action Required: Review the updated Paid Applications Agreement"
+        ))
+
+        // Subject-anchored on purpose: Apple's developer digests mention
+        // agreement updates in the body, and a body-only match would route
+        // those newsletters into the transactional card.
+        XCTAssertFalse(AppStoreNotificationPreviewExtractor.isDeveloperProgramAgreementNotice(
+            senderEmail: "developer@insideapple.apple.com",
+            sourceDomain: nil,
+            subject: "Hello Developer: October edition"
+        ))
+        XCTAssertFalse(AppStoreNotificationPreviewExtractor.isDeveloperProgramAgreementNotice(
+            senderEmail: "developer@insideapple.apple.com",
+            sourceDomain: nil,
+            subject: "Apple Developer Program License Agreement"
+        ))
+        XCTAssertFalse(AppStoreNotificationPreviewExtractor.isDeveloperProgramAgreementNotice(
+            senderEmail: "developer@insideapple.apple.com.evil.example",
+            sourceDomain: nil,
+            subject: "Updated Apple Developer Program License Agreement Now Available"
+        ))
+    }
 }

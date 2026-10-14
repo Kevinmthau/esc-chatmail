@@ -98,7 +98,8 @@ struct TransactionalPreviewBuilder {
             subject: subject,
             senderEmail: senderEmail,
             sourceDomain: sourceDomain,
-            lines: lines
+            lines: lines,
+            actionLinkTexts: htmlSummary.actionLinkTexts
         )
         let sourceLabel = appleDeveloperNotification?.sourceLabel ?? inferredSourceLabel
         let detailFields = detailFields(from: lines)
@@ -130,7 +131,7 @@ struct TransactionalPreviewBuilder {
                 excluding: [title, subtitle, amount, sourceLabel, sourceDomain]
             )
             : nil
-        let actionLabel = resolvedActionLabel(from: htmlSummary)
+        let actionLabel = appleDeveloperNotification?.actionLabel ?? resolvedActionLabel(from: htmlSummary)
         let imageSelector = TransactionalImageSelector(
             promotionalPatterns: transactionalPromotionalPatterns,
             blockedImageHints: blockedTransactionalImageHints

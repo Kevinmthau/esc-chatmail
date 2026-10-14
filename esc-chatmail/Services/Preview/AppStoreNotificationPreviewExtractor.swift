@@ -1,18 +1,22 @@
 import Foundation
 
 /// Preview metadata matched from an Apple developer notification email
-/// (App Store Connect build processing, or TestFlight availability).
+/// (App Store Connect build processing, TestFlight availability, or an Apple
+/// Developer Program agreement notice).
 struct AppleDeveloperNotification {
     let title: String?
     let metadataLine: String?
     let status: String?
+    /// Call-to-action label the notification resolved itself; `nil` defers to
+    /// the builder's generic action-link matching.
+    let actionLabel: String?
     let sourceLabel: String
     let suppressesAmountExtraction: Bool
 }
 
 /// Detects Apple developer notification emails and extracts their preview
-/// metadata (App Store Connect build-processing updates and TestFlight build
-/// availability).
+/// metadata (App Store Connect build-processing updates, TestFlight build
+/// availability, and Apple Developer Program agreement notices).
 ///
 /// Extracted from `TransactionalPreviewBuilder` so the Apple-specific detection
 /// and parsing rules live in one focused, independently testable unit. The
@@ -45,14 +49,15 @@ struct AppStoreNotificationPreviewExtractor {
     }
 
     /// Returns an Apple developer notification preview when the email matches an
-    /// App Store Connect build-processing or TestFlight availability message,
-    /// otherwise `nil`.
+    /// App Store Connect build-processing, TestFlight availability, or Apple
+    /// Developer Program agreement message, otherwise `nil`.
     func notification(
         canonicalHTML: String,
         subject: String?,
         senderEmail: String?,
         sourceDomain: String?,
-        lines: [String]
+        lines: [String],
+        actionLinkTexts: [String] = []
     ) -> AppleDeveloperNotification? {
         appStoreConnectBuildNotification(
             canonicalHTML: canonicalHTML,
@@ -66,7 +71,115 @@ struct AppStoreNotificationPreviewExtractor {
             senderEmail: senderEmail,
             sourceDomain: sourceDomain,
             lines: lines
+        ) ?? developerProgramAgreementNotification(
+            canonicalHTML: canonicalHTML,
+            subject: subject,
+            senderEmail: senderEmail,
+            sourceDomain: sourceDomain,
+            lines: lines,
+            actionLinkTexts: actionLinkTexts
         )
+    }
+
+    /// Apple Developer Program agreement notices ("Updated Apple Developer
+    /// Program License Agreement Now Available", a Paid Applications Agreement
+    /// update) are legal service messages, but they carry Apple's full
+    /// marketing footer and almost no body text, so the preview classifier never
+    /// scored them transactional and the chat showed the rendered-HTML
+    /// snapshot: an Apple logo over a mostly blank card. The
+    /// signal is anchored on the sender domain *and* the subject line, not the
+    /// body: Apple's developer digests mention agreement updates as one story
+    /// among many, and a body-only match would route those newsletters into the
+    /// transactional card.
+    static func isDeveloperProgramAgreementNotice(
+        senderEmail: String?,
+        sourceDomain: String?,
+        subject: String
+    ) -> Bool {
+        guard isAppleDeveloperSender(senderEmail: senderEmail, sourceDomain: sourceDomain) else {
+            return false
+        }
+
+        let lowercasedSubject = subject.lowercased()
+        let mentionsAgreement = lowercasedSubject.contains("agreement")
+        let hasNoticeSignal = developerAgreementNoticeSubjectPatterns.contains(where: lowercasedSubject.contains)
+        return mentionsAgreement && hasNoticeSignal
+    }
+
+    private func developerProgramAgreementNotification(
+        canonicalHTML: String,
+        subject: String?,
+        senderEmail: String?,
+        sourceDomain: String?,
+        lines: [String],
+        actionLinkTexts: [String]
+    ) -> AppleDeveloperNotification? {
+        let normalizedSubject = PreviewTextUtilities.normalizedText(subject)
+        guard Self.isDeveloperProgramAgreementNotice(
+            senderEmail: senderEmail,
+            sourceDomain: sourceDomain,
+            subject: normalizedSubject
+        ) else {
+            return nil
+        }
+
+        let lineText = lines.joined(separator: "\n")
+        let lowercasedText = [normalizedSubject, lineText, canonicalHTML]
+            .joined(separator: "\n")
+            .lowercased()
+        let agreementName = developerAgreementName(in: lowercasedText)
+        let requiresAcceptance = developerAgreementAcceptancePatterns.contains(where: lowercasedText.contains)
+
+        let title = sanitizeTitle(normalizedSubject)
+            ?? (!normalizedSubject.isEmpty ? lineProcessor.truncate(normalizedSubject, limit: 90) : nil)
+            ?? "\(agreementName ?? "Apple Developer agreement") updated"
+
+        // The subject usually names the agreement already; repeating it under the
+        // title wastes the subtitle, so it carries the required action instead.
+        let metadataLine: String?
+        if let agreementName,
+           !normalizedSubject.lowercased().contains(agreementName.lowercased()) {
+            metadataLine = agreementName
+        } else if requiresAcceptance {
+            metadataLine = lowercasedText.contains("account holder")
+                ? "Account Holder must review and accept"
+                : "Review and accept the updated agreement"
+        } else {
+            metadataLine = nil
+        }
+
+        return AppleDeveloperNotification(
+            title: title,
+            metadataLine: metadataLine,
+            status: requiresAcceptance ? "Action Required" : "Updated",
+            actionLabel: developerAgreementActionLabel(from: actionLinkTexts),
+            sourceLabel: "Apple Developer",
+            suppressesAmountExtraction: true
+        )
+    }
+
+    private func developerAgreementName(in lowercasedText: String) -> String? {
+        knownDeveloperAgreementNames.first { lowercasedText.contains($0.lowercased()) }
+    }
+
+    /// The notice's only real call to action is the sign-in / review link, so
+    /// prefer that link's own text over the builder's generic action patterns,
+    /// which know nothing about agreements. The agreement's name is itself a
+    /// link in these emails and must not be mistaken for the action.
+    private func developerAgreementActionLabel(from actionLinkTexts: [String]) -> String? {
+        for linkText in actionLinkTexts {
+            let normalized = PreviewTextUtilities.normalizedText(linkText)
+            let lowercased = normalized.lowercased()
+            guard !normalized.isEmpty,
+                  normalized.count <= 40,
+                  developerAgreementActionLinkPatterns.contains(where: lowercased.hasPrefix) else {
+                continue
+            }
+
+            return lineProcessor.truncate(normalized.prefix(1).uppercased() + normalized.dropFirst(), limit: 32)
+        }
+
+        return nil
     }
 
     private func appStoreConnectBuildNotification(
@@ -121,6 +234,7 @@ struct AppStoreNotificationPreviewExtractor {
             title: title,
             metadataLine: metadataLine,
             status: appStoreProcessingStatus(from: lowercasedText + "\n" + lowercasedHTML),
+            actionLabel: nil,
             sourceLabel: "App Store Connect",
             suppressesAmountExtraction: false
         )
@@ -179,6 +293,7 @@ struct AppStoreNotificationPreviewExtractor {
             title: title,
             metadataLine: metadataLine,
             status: "Ready",
+            actionLabel: nil,
             sourceLabel: "TestFlight",
             suppressesAmountExtraction: true
         )
@@ -389,3 +504,50 @@ private struct TestFlightBuildInfo {
     let buildNumber: String?
     let platform: String?
 }
+
+/// Subject-line phrasing Apple uses for agreement notices; any one of these next
+/// to "agreement" on an Apple sender marks the email as a program notice.
+private let developerAgreementNoticeSubjectPatterns = [
+    "updated",
+    "update",
+    "now available",
+    "review",
+    "accept",
+    "action required",
+    "action needed",
+    "reminder"
+]
+
+/// Body phrasing that turns a plain "updated" notice into one the Account
+/// Holder has to act on.
+private let developerAgreementAcceptancePatterns = [
+    "review and accept",
+    "review and agree",
+    "must accept",
+    "must review",
+    "accept the updated",
+    "accept the new",
+    "agree to the updated",
+    "agree to the new"
+]
+
+/// Display names for the agreements Apple sends program notices about, matched
+/// case-insensitively and longest first so the Enterprise variant is not
+/// reported as the plain Program agreement.
+private let knownDeveloperAgreementNames = [
+    "Apple Developer Enterprise Program License Agreement",
+    "Apple Developer Program License Agreement",
+    "Xcode and Apple SDKs Agreement",
+    "Paid Applications Agreement",
+    "Paid Applications Schedule",
+    "Paid Apps Agreement",
+    "Apple Developer Agreement"
+]
+
+private let developerAgreementActionLinkPatterns = [
+    "sign in",
+    "log in",
+    "review",
+    "accept",
+    "view agreement"
+]
