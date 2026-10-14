@@ -824,7 +824,12 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         )
 
         XCTAssertEqual(result?.status, "Updated")
-        XCTAssertNil(result?.subtitle)
+        // A notice without a required action has no notice subtitle; the
+        // builder then falls back to its generic subtitle, as it does for the
+        // App Store Connect and TestFlight notices. What must not appear is
+        // the acceptance line.
+        XCTAssertNotEqual(result?.subtitle, "Account Holder must review and accept")
+        XCTAssertNotEqual(result?.subtitle, "Review and accept the updated agreement")
         XCTAssertEqual(result?.actionLabel, "View Agreement")
         XCTAssertEqual(result?.sourceLabel, "Apple Developer")
     }
