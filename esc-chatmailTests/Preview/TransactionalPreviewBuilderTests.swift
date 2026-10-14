@@ -684,4 +684,180 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.amount, "$24.20")
         XCTAssertEqual(result?.actionLabel, "View receipt")
     }
+
+    func testBuildPreview_extractsAppleDeveloperProgramAgreementNotice() {
+        // Revert-check: removing `developerProgramAgreementNotification` from
+        // `AppStoreNotificationPreviewExtractor.notification` makes this fail —
+        // the generic path has no "Apple Developer" label, "Action Required"
+        // status, or sign-in action, and it fills `detailLine` from body prose.
+        // The action label is the email's own link text, resolved by the
+        // builder's shared `resolvedActionLabel` through the notification's
+        // `preferredActionPatterns`; the agreement's name link, "contact us"
+        // and the footer links must not be taken for it.
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><img src="https://www.apple.com/images/apple-logo.png" width="40" height="40" alt="Apple"></td></tr></table>
+            <table><tr><td><p>The <a href="https://developer.apple.com/support/terms/">Apple Developer Program License Agreement</a> has been updated and is now available. In order to update your existing apps, create new in-app purchases, and submit new apps to the App Store, the Account Holder must review and accept the updated agreement by <a href="https://developer.apple.com/account">sign in to your account</a> on the Apple Developer website.</p></td></tr></table>
+            <table><tr><td><p>If you have any questions, <a href="https://developer.apple.com/contact/">contact us</a>.</p><p>Best regards,<br>Apple Developer Relations</p></td></tr></table>
+            <table><tr><td><p>If you prefer not to receive commercial email from Apple, or if you've changed your email address, please <a href="https://developer.apple.com/account/preferences">update your email preferences</a> or <a href="https://developer.apple.com/unsubscribe">unsubscribe</a>.</p></td></tr></table>
+            <table><tr><td><p>TM and &copy; 2026 Apple Inc. One Apple Park Way, MS 96-DM, Cupertino, CA 95014.</p><p><a href="https://www.apple.com/legal/privacy/">Privacy Policy</a> | <a href="https://appleid.apple.com">My Apple Account</a> | All Rights Reserved</p></td></tr></table>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        The Apple Developer Program License Agreement has been updated and is now available. In order to update your existing apps, create new in-app purchases, and submit new apps to the App Store, the Account Holder must review and accept the updated agreement by signing in to your account on the Apple Developer website.
+
+        If you have any questions, contact us.
+
+        Best regards,
+        Apple Developer Relations
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            cleanedSnippet: "The Apple Developer Program License Agreement has been updated and is now available.",
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com",
+            subject: "Updated Apple Developer Program License Agreement Now Available"
+        )
+
+        XCTAssertEqual(result?.title, "Updated Apple Developer Program License Agreement Now Available")
+        XCTAssertEqual(result?.subtitle, "Account Holder must review and accept")
+        XCTAssertEqual(result?.status, "Action Required")
+        XCTAssertEqual(result?.actionLabel, "sign in to your account")
+        XCTAssertEqual(result?.sourceLabel, "Apple Developer")
+        XCTAssertEqual(result?.sourceDomain, "insideapple.apple.com")
+        XCTAssertNil(result?.detailLine)
+        XCTAssertNil(result?.amount)
+        XCTAssertNil(result?.imageURL)
+    }
+
+    func testBuildPreview_namesAgreementInSubtitleWhenSubjectDoesNotCarryIt() {
+        // The subject names no agreement, so the body's name becomes the
+        // subtitle; the sender display name ("App Store Connect") is what
+        // admits this subject through the developer-program gate.
+        // Revert-check: `knownDeveloperAgreementName(in:)` over the body in
+        // `developerProgramAgreementNotification` produces the subtitle.
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><p>The Paid Applications Agreement has been updated. The Account Holder must review and accept the updated agreement in App Store Connect.</p></td></tr></table>
+            <table><tr><td><p><a href="https://appstoreconnect.apple.com/agreements">Review Agreement</a></p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "App Store Connect",
+            senderEmail: "no_reply@email.apple.com",
+            subject: "Action Required: Updated agreement now available"
+        )
+
+        XCTAssertEqual(result?.title, "Action Required: Updated agreement now available")
+        XCTAssertEqual(result?.subtitle, "Paid Applications Agreement")
+        XCTAssertEqual(result?.status, "Action Required")
+        XCTAssertEqual(result?.actionLabel, "Review Agreement")
+        XCTAssertEqual(result?.sourceLabel, "Apple Developer")
+    }
+
+    func testBuildPreview_subjectAgreementWinsOverBodyBoilerplateNamingAnotherAgreement() {
+        // Apple's footer boilerplate cites the Program License Agreement on
+        // every notice. A body-first scan named it on a Paid Applications
+        // notice and dropped the acceptance line from the subtitle.
+        // Revert-check: scanning the body before the subject in
+        // `developerProgramAgreementNotification` makes the subtitle
+        // "Apple Developer Program License Agreement".
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><p>The Paid Applications Agreement has been updated. The Account Holder must review and accept the updated agreement in App Store Connect.</p></td></tr></table>
+            <table><tr><td><p><a href="https://appstoreconnect.apple.com/agreements">Review Agreement</a></p></td></tr></table>
+            <table><tr><td><p>Your use of the developer tools remains subject to the Apple Developer Program License Agreement. <a href="https://developer.apple.com/support/terms/">Review Guidelines</a> | <a href="https://developer.apple.com/aup">Acceptable Use Policy</a></p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "App Store Connect",
+            senderEmail: "no_reply@email.apple.com",
+            subject: "Updated Paid Applications Agreement now available"
+        )
+
+        XCTAssertEqual(result?.title, "Updated Paid Applications Agreement now available")
+        XCTAssertEqual(result?.subtitle, "Account Holder must review and accept")
+        XCTAssertEqual(result?.status, "Action Required")
+        XCTAssertEqual(result?.actionLabel, "Review Agreement")
+        XCTAssertEqual(result?.sourceLabel, "Apple Developer")
+    }
+
+    func testBuildPreview_negatedAcceptanceLanguageDoesNotReportActionRequired() {
+        // "you do not need to review and accept" contains the acceptance
+        // phrase; the notice says the opposite of "Action Required".
+        // Revert-check: `requiresAgreementAcceptance` ignoring
+        // `developerAgreementNoActionPatterns` turns the status back into
+        // "Action Required" with the acceptance subtitle.
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><p>The Apple Developer Program License Agreement has been updated. Because the changes are clarifications only, you do not need to review and accept the updated agreement; no action is required on your part.</p></td></tr></table>
+            <table><tr><td><p><a href="https://developer.apple.com/support/terms/">View Agreement</a></p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com",
+            subject: "Updated Apple Developer Program License Agreement Now Available"
+        )
+
+        XCTAssertEqual(result?.status, "Updated")
+        // A notice without a required action has no notice subtitle; the
+        // builder then falls back to its generic subtitle, as it does for the
+        // App Store Connect and TestFlight notices. What must not appear is
+        // the acceptance line.
+        XCTAssertNotEqual(result?.subtitle, "Account Holder must review and accept")
+        XCTAssertNotEqual(result?.subtitle, "Review and accept the updated agreement")
+        XCTAssertEqual(result?.actionLabel, "View Agreement")
+        XCTAssertEqual(result?.sourceLabel, "Apple Developer")
+    }
+
+    func testBuildPreview_doesNotTreatAgreementNoticeFromNonAppleSenderAsDeveloperNotification() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><img src="https://www.apple.com/images/apple-logo.png" width="40" height="40" alt="Apple"></td></tr></table>
+            <table><tr><td><p>The <a href="https://developer.apple.com/support/terms/">Apple Developer Program License Agreement</a> has been updated and is now available. In order to update your existing apps, create new in-app purchases, and submit new apps to the App Store, the Account Holder must review and accept the updated agreement by <a href="https://developer.apple.com/account">sign in to your account</a> on the Apple Developer website.</p></td></tr></table>
+            <table><tr><td><p>If you have any questions, <a href="https://developer.apple.com/contact/">contact us</a>.</p><p>Best regards,<br>Apple Developer Relations</p></td></tr></table>
+            <table><tr><td><p>If you prefer not to receive commercial email from Apple, or if you've changed your email address, please <a href="https://developer.apple.com/account/preferences">update your email preferences</a> or <a href="https://developer.apple.com/unsubscribe">unsubscribe</a>.</p></td></tr></table>
+            <table><tr><td><p>TM and &copy; 2026 Apple Inc. One Apple Park Way, MS 96-DM, Cupertino, CA 95014.</p><p><a href="https://www.apple.com/legal/privacy/">Privacy Policy</a> | <a href="https://appleid.apple.com">My Apple Account</a> | All Rights Reserved</p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Spoofed Sender",
+            senderEmail: "developer@insideapple.apple.com.evil.example",
+            subject: "Updated Apple Developer Program License Agreement Now Available"
+        )
+
+        XCTAssertNotEqual(result?.sourceLabel, "Apple Developer")
+        XCTAssertNotEqual(result?.status, "Action Required")
+        XCTAssertNotEqual(result?.subtitle, "Account Holder must review and accept")
+    }
 }

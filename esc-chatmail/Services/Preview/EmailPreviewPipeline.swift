@@ -161,7 +161,13 @@ final class EmailPreviewPipeline: @unchecked Sendable {
         for route in Self.nativePreviewCardRoutes(
             isNewsletter: request.isNewsletter,
             isForwardedEmail: request.isForwardedEmail,
-            classificationKind: classification.kind
+            classificationKind: classification.kind,
+            isDeveloperProgramNotice: Self.routesDeveloperProgramNoticeToTransactionalCard(
+                senderName: request.senderName,
+                senderEmail: request.senderEmail,
+                subject: request.subject,
+                classification: classification
+            )
         ) {
             switch route {
             case .newsletter:
@@ -258,14 +264,47 @@ final class EmailPreviewPipeline: @unchecked Sendable {
         !isForwardedEmail
     }
 
+    /// Apple's Developer Program agreement notices never classify transactional:
+    /// they ship with Apple's unsubscribe / email-preferences footer, which the
+    /// scorer reads as a newsletter, and the chat showed the rendered-HTML
+    /// snapshot (an Apple logo over a blank card). The notice is decided here,
+    /// beside the other deterministic card routes, rather than as a classifier
+    /// override: the classifier also feeds `MessageProcessor`'s newsletter flag
+    /// and the render-quality evaluator, which a card-routing verdict must not
+    /// tilt. A human thread from an Apple address about the agreement keeps
+    /// the classifier's conversational demotion, which a forced kind bypassed.
+    static func routesDeveloperProgramNoticeToTransactionalCard(
+        senderName: String?,
+        senderEmail: String?,
+        subject: String?,
+        classification: EmailPreviewClassification
+    ) -> Bool {
+        guard AppStoreNotificationPreviewExtractor.isDeveloperProgramAgreementNotice(
+            senderName: senderName,
+            senderEmail: senderEmail,
+            sourceDomain: nil,
+            subject: subject ?? ""
+        ) else {
+            return false
+        }
+
+        return !classification.signals.contains(.replyChainMarkers) &&
+            !classification.signals.contains(.conversationalGreeting)
+    }
+
+    /// `isDeveloperProgramNotice` routes the transactional card ahead of the
+    /// classifier's verdict (see `routesDeveloperProgramNoticeToTransactionalCard`);
+    /// the builder still has to produce a model, and the newsletter route stays
+    /// behind it as the fallback the verdict would have chosen.
     static func nativePreviewCardRoutes(
         isNewsletter: Bool,
         isForwardedEmail: Bool,
-        classificationKind: EmailPreviewKind
+        classificationKind: EmailPreviewKind,
+        isDeveloperProgramNotice: Bool = false
     ) -> [NativePreviewCardRoute] {
         var routes: [NativePreviewCardRoute] = []
 
-        if classificationKind == .transactional,
+        if classificationKind == .transactional || isDeveloperProgramNotice,
            shouldUseTransactionalPreviewCard(isForwardedEmail: isForwardedEmail) {
             routes.append(.transactional)
         }

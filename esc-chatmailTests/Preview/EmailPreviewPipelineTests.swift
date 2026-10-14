@@ -128,6 +128,90 @@ final class EmailPreviewPipelineTests: XCTestCase {
         XCTAssertEqual(routes, [])
     }
 
+    func testNativePreviewCardRoutes_developerProgramNoticeRoutesTransactionalAheadOfNewsletterVerdict() {
+        // Revert-check: dropping `isDeveloperProgramNotice` from
+        // `EmailPreviewPipeline.nativePreviewCardRoutes` leaves only the
+        // newsletter route the classifier's verdict chose.
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: true,
+            isForwardedEmail: false,
+            classificationKind: .newsletter,
+            isDeveloperProgramNotice: true
+        )
+
+        XCTAssertEqual(routes, [.transactional, .newsletter])
+    }
+
+    func testNativePreviewCardRoutes_developerProgramNoticeRoutesTransactionalForPersonToPersonVerdict() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: false,
+            isForwardedEmail: false,
+            classificationKind: .personToPerson,
+            isDeveloperProgramNotice: true
+        )
+
+        XCTAssertEqual(routes, [.transactional])
+    }
+
+    func testNativePreviewCardRoutes_forwardedDeveloperProgramNoticeFallsThroughToHTML() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: false,
+            isForwardedEmail: true,
+            classificationKind: .personToPerson,
+            isDeveloperProgramNotice: true
+        )
+
+        XCTAssertEqual(routes, [])
+    }
+
+    func testRoutesDeveloperProgramNoticeToTransactionalCard_requiresNoticeAndKeepsConversationalDemotion() {
+        // Revert-check: `EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard`
+        // consults the classifier's `replyChainMarkers` / `conversationalGreeting`
+        // signals; a forced kind inside the classifier bypassed them, so a
+        // developer-support reply about the agreement rendered as an
+        // "Apple Developer / Action Required" card.
+        let subject = "Updated Apple Developer Program License Agreement Now Available"
+        let noticeClassification = EmailPreviewClassification(
+            kind: .newsletter,
+            newsletterScore: 77,
+            transactionalScore: 6,
+            signals: [.unsubscribeFooter, .marketingFooter, .manyTables]
+        )
+
+        XCTAssertTrue(EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard(
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com",
+            subject: subject,
+            classification: noticeClassification
+        ))
+        XCTAssertFalse(EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard(
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com.evil.example",
+            subject: subject,
+            classification: noticeClassification
+        ))
+        XCTAssertFalse(EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard(
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com",
+            subject: "Hello Developer: October edition",
+            classification: noticeClassification
+        ))
+
+        for demotion in [EmailPreviewClassificationSignal.replyChainMarkers, .conversationalGreeting] {
+            XCTAssertFalse(EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard(
+                senderName: "Developer Programs",
+                senderEmail: "devprograms@apple.com",
+                subject: subject,
+                classification: EmailPreviewClassification(
+                    kind: .personToPerson,
+                    newsletterScore: 0,
+                    transactionalScore: 0,
+                    signals: [demotion]
+                )
+            ), "\(demotion)")
+        }
+    }
+
     func testLoadPreview_buildsNewsletterCardFromCanonicalHTML() async throws {
         let messageId = "preview-pipeline-newsletter-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
@@ -311,6 +395,72 @@ final class EmailPreviewPipelineTests: XCTestCase {
         XCTAssertEqual(model.status, "Approved")
         XCTAssertEqual(model.sourceLabel, "App Store Connect")
         XCTAssertEqual(model.sourceDomain, "email.apple.com")
+    }
+
+    func testLoadPreview_buildsTransactionalCardForAppleDeveloperProgramAgreementEmail() async throws {
+        // End-to-end: the classifier scores the stored HTML as a newsletter
+        // (Apple's unsubscribe footer, five tables), and sync flags the row the
+        // same way, yet the pipeline must route the native transactional card
+        // instead of the newsletter card or the rendered-HTML snapshot the chat
+        // showed as an Apple logo over a blank card.
+        // Revert-check: `EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard`
+        // feeding `nativePreviewCardRoutes` is what puts `.transactional` ahead
+        // of the newsletter route; without it this returns `.newsletter`.
+        let messageId = "preview-pipeline-apple-developer-agreement-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let subject = "Updated Apple Developer Program License Agreement Now Available"
+        _ = contentHandler.saveHTML(
+            """
+              <!DOCTYPE html>
+              <html>
+              <body>
+                  <table><tr><td><img src="https://www.apple.com/images/apple-logo.png" width="40" height="40" alt="Apple"></td></tr></table>
+                  <table><tr><td><p>The <a href="https://developer.apple.com/support/terms/">Apple Developer Program License Agreement</a> has been updated and is now available. In order to update your existing apps, create new in-app purchases, and submit new apps to the App Store, the Account Holder must review and accept the updated agreement by <a href="https://developer.apple.com/account">sign in to your account</a> on the Apple Developer website.</p></td></tr></table>
+                  <table><tr><td><p>If you have any questions, <a href="https://developer.apple.com/contact/">contact us</a>.</p><p>Best regards,<br>Apple Developer Relations</p></td></tr></table>
+                  <table><tr><td><p>If you prefer not to receive commercial email from Apple, or if you've changed your email address, please <a href="https://developer.apple.com/account/preferences">update your email preferences</a> or <a href="https://developer.apple.com/unsubscribe">unsubscribe</a>.</p></td></tr></table>
+                  <table><tr><td><p>TM and &copy; 2026 Apple Inc. One Apple Park Way, MS 96-DM, Cupertino, CA 95014.</p><p><a href="https://www.apple.com/legal/privacy/">Privacy Policy</a> | <a href="https://appleid.apple.com">My Apple Account</a> | All Rights Reserved</p></td></tr></table>
+              </body>
+              </html>
+            """,
+            for: messageId
+        )
+
+        let loadedPreview = await pipeline.loadPreview(
+            request: EmailPreviewPipelineRequest(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: """
+                The Apple Developer Program License Agreement has been updated and is now available. In order to update your existing apps, create new in-app purchases, and submit new apps to the App Store, the Account Holder must review and accept the updated agreement by signing in to your account on the Apple Developer website.
+
+                If you have any questions, contact us.
+
+                Best regards,
+                Apple Developer Relations
+                """,
+                cleanedSnippet: "The Apple Developer Program License Agreement has been updated and is now available.",
+                senderName: "Apple Developer",
+                senderEmail: "developer@insideapple.apple.com",
+                subject: subject,
+                isNewsletter: true,
+                isForwardedEmail: false,
+                cleanupMode: .none,
+                isDarkMode: false
+            )
+        )
+        let preview = try XCTUnwrap(loadedPreview)
+
+        guard case .transactional(let model) = preview else {
+            XCTFail("Expected transactional preview, got \(preview)")
+            return
+        }
+
+        XCTAssertEqual(model.title, subject)
+        XCTAssertEqual(model.subtitle, "Account Holder must review and accept")
+        XCTAssertEqual(model.status, "Action Required")
+        XCTAssertEqual(model.actionLabel, "sign in to your account")
+        XCTAssertEqual(model.sourceLabel, "Apple Developer")
+        XCTAssertEqual(model.sourceDomain, "insideapple.apple.com")
     }
 
     func testLoadPreview_longTailRichHTMLReturnsSnapshotHTMLPayload() async throws {
