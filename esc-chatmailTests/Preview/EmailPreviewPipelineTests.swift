@@ -128,6 +128,90 @@ final class EmailPreviewPipelineTests: XCTestCase {
         XCTAssertEqual(routes, [])
     }
 
+    func testNativePreviewCardRoutes_developerProgramNoticeRoutesTransactionalAheadOfNewsletterVerdict() {
+        // Revert-check: dropping `isDeveloperProgramNotice` from
+        // `EmailPreviewPipeline.nativePreviewCardRoutes` leaves only the
+        // newsletter route the classifier's verdict chose.
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: true,
+            isForwardedEmail: false,
+            classificationKind: .newsletter,
+            isDeveloperProgramNotice: true
+        )
+
+        XCTAssertEqual(routes, [.transactional, .newsletter])
+    }
+
+    func testNativePreviewCardRoutes_developerProgramNoticeRoutesTransactionalForPersonToPersonVerdict() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: false,
+            isForwardedEmail: false,
+            classificationKind: .personToPerson,
+            isDeveloperProgramNotice: true
+        )
+
+        XCTAssertEqual(routes, [.transactional])
+    }
+
+    func testNativePreviewCardRoutes_forwardedDeveloperProgramNoticeFallsThroughToHTML() {
+        let routes = EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: false,
+            isForwardedEmail: true,
+            classificationKind: .personToPerson,
+            isDeveloperProgramNotice: true
+        )
+
+        XCTAssertEqual(routes, [])
+    }
+
+    func testRoutesDeveloperProgramNoticeToTransactionalCard_requiresNoticeAndKeepsConversationalDemotion() {
+        // Revert-check: `EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard`
+        // consults the classifier's `replyChainMarkers` / `conversationalGreeting`
+        // signals; a forced kind inside the classifier bypassed them, so a
+        // developer-support reply about the agreement rendered as an
+        // "Apple Developer / Action Required" card.
+        let subject = "Updated Apple Developer Program License Agreement Now Available"
+        let noticeClassification = EmailPreviewClassification(
+            kind: .newsletter,
+            newsletterScore: 77,
+            transactionalScore: 6,
+            signals: [.unsubscribeFooter, .marketingFooter, .manyTables]
+        )
+
+        XCTAssertTrue(EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard(
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com",
+            subject: subject,
+            classification: noticeClassification
+        ))
+        XCTAssertFalse(EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard(
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com.evil.example",
+            subject: subject,
+            classification: noticeClassification
+        ))
+        XCTAssertFalse(EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard(
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com",
+            subject: "Hello Developer: October edition",
+            classification: noticeClassification
+        ))
+
+        for demotion in [EmailPreviewClassificationSignal.replyChainMarkers, .conversationalGreeting] {
+            XCTAssertFalse(EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard(
+                senderName: "Developer Programs",
+                senderEmail: "devprograms@apple.com",
+                subject: subject,
+                classification: EmailPreviewClassification(
+                    kind: .personToPerson,
+                    newsletterScore: 0,
+                    transactionalScore: 0,
+                    signals: [demotion]
+                )
+            ), "\(demotion)")
+        }
+    }
+
     func testLoadPreview_buildsNewsletterCardFromCanonicalHTML() async throws {
         let messageId = "preview-pipeline-newsletter-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
@@ -314,10 +398,14 @@ final class EmailPreviewPipelineTests: XCTestCase {
     }
 
     func testLoadPreview_buildsTransactionalCardForAppleDeveloperProgramAgreementEmail() async throws {
-        // End-to-end: the stored HTML must classify as transactional (not
-        // newsletter, despite Apple's unsubscribe footer) and route to the
-        // native card instead of the rendered-HTML snapshot the chat showed as
-        // an Apple logo over a blank card.
+        // End-to-end: the classifier scores the stored HTML as a newsletter
+        // (Apple's unsubscribe footer, five tables), and sync flags the row the
+        // same way, yet the pipeline must route the native transactional card
+        // instead of the newsletter card or the rendered-HTML snapshot the chat
+        // showed as an Apple logo over a blank card.
+        // Revert-check: `EmailPreviewPipeline.routesDeveloperProgramNoticeToTransactionalCard`
+        // feeding `nativePreviewCardRoutes` is what puts `.transactional` ahead
+        // of the newsletter route; without it this returns `.newsletter`.
         let messageId = "preview-pipeline-apple-developer-agreement-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
 
@@ -354,7 +442,7 @@ final class EmailPreviewPipelineTests: XCTestCase {
                 senderName: "Apple Developer",
                 senderEmail: "developer@insideapple.apple.com",
                 subject: subject,
-                isNewsletter: false,
+                isNewsletter: true,
                 isForwardedEmail: false,
                 cleanupMode: .none,
                 isDarkMode: false
@@ -370,7 +458,7 @@ final class EmailPreviewPipelineTests: XCTestCase {
         XCTAssertEqual(model.title, subject)
         XCTAssertEqual(model.subtitle, "Account Holder must review and accept")
         XCTAssertEqual(model.status, "Action Required")
-        XCTAssertEqual(model.actionLabel, "Sign in to your account")
+        XCTAssertEqual(model.actionLabel, "sign in to your account")
         XCTAssertEqual(model.sourceLabel, "Apple Developer")
         XCTAssertEqual(model.sourceDomain, "insideapple.apple.com")
     }

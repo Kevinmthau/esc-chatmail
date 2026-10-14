@@ -690,6 +690,10 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         // `AppStoreNotificationPreviewExtractor.notification` makes this fail —
         // the generic path has no "Apple Developer" label, "Action Required"
         // status, or sign-in action, and it fills `detailLine` from body prose.
+        // The action label is the email's own link text, resolved by the
+        // builder's shared `resolvedActionLabel` through the notification's
+        // `preferredActionPatterns`; the agreement's name link, "contact us"
+        // and the footer links must not be taken for it.
         let html = """
         <!DOCTYPE html>
         <html>
@@ -723,7 +727,7 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.title, "Updated Apple Developer Program License Agreement Now Available")
         XCTAssertEqual(result?.subtitle, "Account Holder must review and accept")
         XCTAssertEqual(result?.status, "Action Required")
-        XCTAssertEqual(result?.actionLabel, "Sign in to your account")
+        XCTAssertEqual(result?.actionLabel, "sign in to your account")
         XCTAssertEqual(result?.sourceLabel, "Apple Developer")
         XCTAssertEqual(result?.sourceDomain, "insideapple.apple.com")
         XCTAssertNil(result?.detailLine)
@@ -732,6 +736,11 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
     }
 
     func testBuildPreview_namesAgreementInSubtitleWhenSubjectDoesNotCarryIt() {
+        // The subject names no agreement, so the body's name becomes the
+        // subtitle; the sender display name ("App Store Connect") is what
+        // admits this subject through the developer-program gate.
+        // Revert-check: `knownDeveloperAgreementName(in:)` over the body in
+        // `developerProgramAgreementNotification` produces the subtitle.
         let html = """
         <!DOCTYPE html>
         <html>
@@ -754,6 +763,69 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.subtitle, "Paid Applications Agreement")
         XCTAssertEqual(result?.status, "Action Required")
         XCTAssertEqual(result?.actionLabel, "Review Agreement")
+        XCTAssertEqual(result?.sourceLabel, "Apple Developer")
+    }
+
+    func testBuildPreview_subjectAgreementWinsOverBodyBoilerplateNamingAnotherAgreement() {
+        // Apple's footer boilerplate cites the Program License Agreement on
+        // every notice. A body-first scan named it on a Paid Applications
+        // notice and dropped the acceptance line from the subtitle.
+        // Revert-check: scanning the body before the subject in
+        // `developerProgramAgreementNotification` makes the subtitle
+        // "Apple Developer Program License Agreement".
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><p>The Paid Applications Agreement has been updated. The Account Holder must review and accept the updated agreement in App Store Connect.</p></td></tr></table>
+            <table><tr><td><p><a href="https://appstoreconnect.apple.com/agreements">Review Agreement</a></p></td></tr></table>
+            <table><tr><td><p>Your use of the developer tools remains subject to the Apple Developer Program License Agreement. <a href="https://developer.apple.com/support/terms/">Review Guidelines</a> | <a href="https://developer.apple.com/aup">Acceptable Use Policy</a></p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "App Store Connect",
+            senderEmail: "no_reply@email.apple.com",
+            subject: "Updated Paid Applications Agreement now available"
+        )
+
+        XCTAssertEqual(result?.title, "Updated Paid Applications Agreement now available")
+        XCTAssertEqual(result?.subtitle, "Account Holder must review and accept")
+        XCTAssertEqual(result?.status, "Action Required")
+        XCTAssertEqual(result?.actionLabel, "Review Agreement")
+        XCTAssertEqual(result?.sourceLabel, "Apple Developer")
+    }
+
+    func testBuildPreview_negatedAcceptanceLanguageDoesNotReportActionRequired() {
+        // "you do not need to review and accept" contains the acceptance
+        // phrase; the notice says the opposite of "Action Required".
+        // Revert-check: `requiresAgreementAcceptance` ignoring
+        // `developerAgreementNoActionPatterns` turns the status back into
+        // "Action Required" with the acceptance subtitle.
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td><p>The Apple Developer Program License Agreement has been updated. Because the changes are clarifications only, you do not need to review and accept the updated agreement; no action is required on your part.</p></td></tr></table>
+            <table><tr><td><p><a href="https://developer.apple.com/support/terms/">View Agreement</a></p></td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Apple Developer",
+            senderEmail: "developer@insideapple.apple.com",
+            subject: "Updated Apple Developer Program License Agreement Now Available"
+        )
+
+        XCTAssertEqual(result?.status, "Updated")
+        XCTAssertNil(result?.subtitle)
+        XCTAssertEqual(result?.actionLabel, "View Agreement")
         XCTAssertEqual(result?.sourceLabel, "Apple Developer")
     }
 

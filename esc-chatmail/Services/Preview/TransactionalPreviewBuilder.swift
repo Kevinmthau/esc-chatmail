@@ -96,10 +96,10 @@ struct TransactionalPreviewBuilder {
         let appleDeveloperNotification = appStoreExtractor.notification(
             canonicalHTML: canonicalHTML,
             subject: subject,
+            senderName: senderName,
             senderEmail: senderEmail,
             sourceDomain: sourceDomain,
-            lines: lines,
-            actionLinkTexts: htmlSummary.actionLinkTexts
+            lines: lines
         )
         let sourceLabel = appleDeveloperNotification?.sourceLabel ?? inferredSourceLabel
         let detailFields = detailFields(from: lines)
@@ -131,7 +131,10 @@ struct TransactionalPreviewBuilder {
                 excluding: [title, subtitle, amount, sourceLabel, sourceDomain]
             )
             : nil
-        let actionLabel = appleDeveloperNotification?.actionLabel ?? resolvedActionLabel(from: htmlSummary)
+        let actionLabel = resolvedActionLabel(
+            from: htmlSummary,
+            notificationActionPatterns: appleDeveloperNotification?.preferredActionPatterns ?? []
+        )
         let imageSelector = TransactionalImageSelector(
             promotionalPatterns: transactionalPromotionalPatterns,
             blockedImageHints: blockedTransactionalImageHints
@@ -326,7 +329,15 @@ struct TransactionalPreviewBuilder {
         return nil
     }
 
-    private func resolvedActionLabel(from htmlSummary: EmailPreviewHTMLSummary) -> String? {
+    /// `notificationActionPatterns` are link-text patterns an Apple developer
+    /// notification accepts in addition to the generic transactional ones (the
+    /// agreement notice's sign-in / review link); both sets go through the same
+    /// ignored-pattern screen.
+    private func resolvedActionLabel(
+        from htmlSummary: EmailPreviewHTMLSummary,
+        notificationActionPatterns: [String] = []
+    ) -> String? {
+        let acceptedPatterns = notificationActionPatterns + preferredActionPatterns
         for candidate in htmlSummary.actionLinkTexts {
             guard !candidate.isEmpty else {
                 continue
@@ -337,7 +348,7 @@ struct TransactionalPreviewBuilder {
                 continue
             }
 
-            if preferredActionPatterns.contains(where: lowercased.contains) {
+            if acceptedPatterns.contains(where: lowercased.contains) {
                 return lineProcessor.truncate(candidate, limit: 32)
             }
 
