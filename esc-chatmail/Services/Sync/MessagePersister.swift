@@ -426,10 +426,9 @@ actor MessagePersister {
             )
         }
 
-        // Debug: Log incoming message details
-        let fromHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "from" })?.value ?? "unknown"
-        let subjectHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "subject" })?.value ?? "no subject"
-        Log.debug("Processing: from=\(Log.redact(address: fromHeader)) subjLen=\(subjectHeader.count)", category: .sync)
+        // Debug: Log incoming message details. Both header lookups live inside
+        // the autoclosure so they only run when debug logging is enabled.
+        Log.debug("Processing: from=\(Log.redact(address: gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "from" })?.value ?? "unknown")) subjLen=\((gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "subject" })?.value ?? "no subject").count)", category: .sync)
 
         // Process the Gmail message (may fetch large body parts via API)
         let processedMessage: ProcessedMessage?
