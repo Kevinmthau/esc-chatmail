@@ -124,26 +124,12 @@ struct SingleAvatarView: View {
 }
 
 extension SingleAvatarView {
-    // Compiled once, with no options: the per-call sites passed only
-    // `.regularExpression`, so these stay case-sensitive. They run per
+    // Compiled once, with no options: the per-call site passed only
+    // `.regularExpression`, so this stays case-sensitive. It runs per
     // conversation row body on the main thread.
-    static let whitespaceRunRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"\s+"#)
-    }()
-
     private static let unknownContactsCountRegex: NSRegularExpression? = {
         try? NSRegularExpression(pattern: #"^\d+\s+unknown contacts?$"#)
     }()
-
-    static func replacingMatches(
-        of regex: NSRegularExpression?,
-        in text: String,
-        with template: String
-    ) -> String {
-        guard let regex else { return text }
-        let range = NSRange(location: 0, length: text.utf16.count)
-        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
-    }
 
     enum AvatarContent: Equatable {
         case photo
@@ -185,7 +171,7 @@ extension SingleAvatarView {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        let normalizedWhitespace = replacingMatches(of: whitespaceRunRegex, in: trimmed, with: " ")
+        let normalizedWhitespace = RegexSanitizer.replace(in: trimmed, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
 
         guard !isPlaceholderDisplayName(normalizedWhitespace) else {
             return nil
@@ -365,7 +351,7 @@ extension GroupAvatarView {
     static func resolvedEmptyContent(fallbackDisplayText: String?) -> EmptyGroupContent {
         // "+N" overflow suffixes are counts, not names; drop them before monogramming.
         let strippedOverflow = fallbackDisplayText.map {
-            SingleAvatarView.replacingMatches(of: overflowCountSuffixRegex, in: $0, with: "")
+            RegexSanitizer.replace(in: $0, regex: overflowCountSuffixRegex, with: "")
         }
         guard let initialsSource = SingleAvatarView.usableIdentityText(from: strippedOverflow) else {
             return .placeholderCircle

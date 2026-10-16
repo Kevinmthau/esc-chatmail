@@ -49,10 +49,6 @@ class EmailNormalizer {
         return try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }()
 
-    private static let whitespaceRunRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"\s+"#)
-    }()
-
     static func extractEmail(from string: String) -> String? {
         if let regex = bracketedEmailRegex,
            let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
@@ -325,15 +321,10 @@ class EmailNormalizer {
         .lowercased()
     }
 
-    /// `\s+` → " " through the compiled regex; the same ICU `\s` class the
-    /// per-call `replacingOccurrences(of:options: .regularExpression)` used.
+    /// `\s+` → " " through the shared compiled regex; the same ICU `\s` class
+    /// the per-call `replacingOccurrences(of:options: .regularExpression)` used.
     private static func collapsingWhitespaceRuns(_ value: String) -> String {
-        guard let regex = whitespaceRunRegex else { return value }
-        return regex.stringByReplacingMatches(
-            in: value,
-            range: NSRange(value.startIndex..., in: value),
-            withTemplate: " "
-        )
+        RegexSanitizer.replace(in: value, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
     }
 
     private static func displayNameParts(_ value: String) -> [String] {

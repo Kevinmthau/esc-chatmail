@@ -1034,25 +1034,19 @@ class MessageProcessor: @unchecked Sendable {
         )
     }()
 
-    private static func removingMatches(of regex: NSRegularExpression?, from html: String) -> String {
-        guard let regex else { return html }
-        let range = NSRange(location: 0, length: html.utf16.count)
-        return regex.stringByReplacingMatches(in: html, options: [], range: range, withTemplate: "")
-    }
-
     /// Prepares HTML for snippet extraction by removing metadata and hidden preheaders
     /// that frequently pollute conversation list previews (e.g., title tags, Outlook comments).
     private func prepareHTMLForSnippet(_ html: String) -> String {
         var cleaned = html
 
         // Remove HTML head content (title, meta, style, mso settings, etc.)
-        cleaned = Self.removingMatches(of: Self.snippetHeadElementRegex, from: cleaned)
+        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHeadElementRegex)
 
         // Remove HTML comments, including Outlook conditional blocks.
-        cleaned = Self.removingMatches(of: Self.snippetHTMLCommentRegex, from: cleaned)
+        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHTMLCommentRegex)
 
         // Remove hidden preheader/style-hiding elements.
-        cleaned = Self.removingMatches(of: Self.snippetHiddenElementRegex, from: cleaned)
+        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHiddenElementRegex)
 
         return cleaned
     }

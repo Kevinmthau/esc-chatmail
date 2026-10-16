@@ -28,6 +28,27 @@ struct RegexSanitizer {
         )
     }
 
+    /// The optional-regex form of `replace(in:regex:with:)` for `try?`-compiled
+    /// `static let` patterns: a pattern that failed to compile leaves the input
+    /// unchanged, which is what every per-type private wrapper this replaced did.
+    static func replace(
+        in text: String,
+        regex: NSRegularExpression?,
+        with replacement: String = ""
+    ) -> String {
+        guard let regex else { return text }
+        return replace(in: text, regex: regex, with: replacement)
+    }
+
+    /// `\s+`, compiled once with no options (ICU `\s`, case-sensitive), for the
+    /// whitespace-run collapse that display-name normalization, avatar monogram
+    /// sources, the rich-content classifier and signature-line analysis all
+    /// perform with the literal `" "` template. Shared so those copies cannot
+    /// drift apart.
+    static let whitespaceRunRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\s+"#)
+    }()
+
     /// Applies multiple regex pattern replacements in sequence
     static func applyRules(to text: String, rules: [(pattern: String, replacement: String)]) -> String {
         rules.reduce(text) { result, rule in
