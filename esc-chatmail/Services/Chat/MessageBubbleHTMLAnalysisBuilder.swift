@@ -673,9 +673,11 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     /// `String.range(of:options: .regularExpression, range:)` over a compiled
-    /// pattern. NSRegularExpression's default bounds are opaque and anchoring,
-    /// which is what that search used: `^`/`$` match at the supplied range's
-    /// edges and lookaround cannot see outside it.
+    /// pattern. Both searches run NSRegularExpression with its default bounds,
+    /// so `^`/`$` anchor at the supplied range's edges in each, and an
+    /// empirical check on this toolchain found the two behave identically
+    /// (lookbehind, for one, sees outside the range in both), which is what
+    /// keeps the hoist behavior-preserving.
     private static func firstMatchRange(
         of regex: NSRegularExpression?,
         in string: String,
