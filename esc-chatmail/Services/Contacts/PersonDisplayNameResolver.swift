@@ -4,6 +4,37 @@ enum PersonDisplayNameResolver {
     private static let unknownSenderName = "Unknown Sender"
     private static let unknownContactName = "Unknown Contact"
 
+    // Compiled once, with no options: every per-call site passed only
+    // `.regularExpression`, so these stay case-sensitive. They run per
+    // conversation row body on the main thread.
+    private static let whitespaceRunRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\s+"#)
+    }()
+
+    private static let unknownContactsCountRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"^\d+\s+unknown contacts?$"#)
+    }()
+
+    private static let overflowCountSuffixRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\s*\+\d+\s*$"#)
+    }()
+
+    private static func replacingMatches(
+        of regex: NSRegularExpression?,
+        in text: String,
+        with template: String
+    ) -> String {
+        guard let regex else { return text }
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
+    }
+
+    private static func matches(_ regex: NSRegularExpression?, _ text: String) -> Bool {
+        guard let regex else { return false }
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
+
     static func isRealDisplayName(_ displayName: String?, forEmail email: String) -> Bool {
         sanitizedRealDisplayName(displayName, forEmail: email) != nil
     }
@@ -174,10 +205,13 @@ enum PersonDisplayNameResolver {
 
     private static func normalizedCandidate(_ displayName: String?) -> String? {
         guard let displayName else { return nil }
-        let normalized = displayName
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\"", with: "")
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let normalized = replacingMatches(
+            of: whitespaceRunRegex,
+            in: displayName
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\"", with: ""),
+            with: " "
+        )
 
         guard !normalized.isEmpty,
               !isPlaceholderDisplayName(normalized),
@@ -192,10 +226,7 @@ enum PersonDisplayNameResolver {
     private static func isPlaceholderDisplayName(_ value: String) -> Bool {
         let lowercased = value.lowercased()
         return placeholderDisplayNames.contains(lowercased)
-            || lowercased.range(
-                of: #"^\d+\s+unknown contacts?$"#,
-                options: .regularExpression
-            ) != nil
+            || matches(unknownContactsCountRegex, lowercased)
     }
 
     private static func looksLikeEmailAddress(_ value: String) -> Bool {
@@ -286,11 +317,7 @@ enum PersonDisplayNameResolver {
         // address-joined fallbacks always contain "@" and never survive
         // normalizedCandidate. Trust such titles as name-derived — otherwise
         // every "Daisy +4" whose members use firstname@domain gets rejected.
-        let overflowStripped = displayName.replacingOccurrences(
-            of: #"\s*\+\d+\s*$"#,
-            with: "",
-            options: .regularExpression
-        )
+        let overflowStripped = replacingMatches(of: overflowCountSuffixRegex, in: displayName, with: "")
         if overflowStripped != displayName {
             return false
         }

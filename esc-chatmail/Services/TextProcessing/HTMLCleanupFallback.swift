@@ -21,11 +21,20 @@ enum HTMLCleanupFallback {
         from html: String,
         modes: [HTMLQuoteRemover.RemovalMode]
     ) -> Result {
+        // `hasMeaningfulContent` is a pure function of its input, so a mode
+        // whose output is byte-identical to one already judged non-meaningful
+        // (quoted-only often equals quoted-and-signatures when no signature
+        // was found) cannot come out differently; skip the repeat check.
+        var rejectedOutputs: [String] = []
         for mode in modes {
             let cleaned = HTMLQuoteRemover.removeQuotes(from: html, mode: mode) ?? html
+            if rejectedOutputs.contains(where: { $0.utf8.elementsEqual(cleaned.utf8) }) {
+                continue
+            }
             if HTMLMeaningfulContentChecker.hasMeaningfulContent(cleaned) {
                 return Result(html: cleaned, appliedMode: mode)
             }
+            rejectedOutputs.append(cleaned)
         }
 
         return Result(html: html, appliedMode: nil)

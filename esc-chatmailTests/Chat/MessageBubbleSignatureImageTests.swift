@@ -2246,4 +2246,72 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
         XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
     }
+
+    /// Two sign-offs on adjacent lines ("Thanks,<br>Regards,<br>…") yield two
+    /// standalone sign-off ranges: the loop searches again from the end of
+    /// the previous match, where `^` in the pattern matches the start of the
+    /// supplied range. Only the second sign-off here is corroborated (the
+    /// first sees one line too many for the compact-intro rule), so the
+    /// signature badge after both is signature-owned and the body figure
+    /// before them stays a body image.
+    ///
+    /// Revert-check: the per-iteration `firstMatch(in:range:)` loop in
+    /// `MessageBubbleHTMLAnalysisBuilder.standaloneSignOffRanges`. Replacing
+    /// it with one `matches(in:range:)` pass finds only "Thanks," (the `^`
+    /// alternative never fires mid-string and "<br>" was consumed), leaves
+    /// no corroborated sign-off, and `bodyInlineContentIDs` then reports the
+    /// badge as a body image.
+    ///
+    /// HONEST SCOPE: the `nonDisplayableInlineContentIDs` assertion on the
+    /// badge also holds if the DOM signature remover strips the block, so
+    /// the `bodyInlineContentIDs` assertions carry the revert check.
+    func testHTMLAnalysisAdjacentSignOffsCorroborateSecondSignOffForFollowingBadge() {
+        let html = """
+        <p>Here is the draft.</p>
+        <p><img src="cid:draft-figure" width="600" height="400"></p>
+        <div>Thanks,<br>Regards,<br>John<br>Acme<br>Sales</div>
+        <p><img src="cid:image001.png@outlook"></p>
+        <p>Mobile: +1 555 0100</p>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Here is the draft.",
+            subject: "Draft",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "draft-figure",
+                    filename: "draft.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 120_000,
+                    pageCount: 0,
+                    width: 600,
+                    height: 400
+                ),
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image001.png@outlook",
+                    filename: "image001.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 20_000,
+                    pageCount: 0,
+                    width: 300,
+                    height: 300
+                )
+            ]
+        )
+
+        XCTAssertEqual(analysis.referencedInlineContentIDs, ["draft-figure", "image001.png@outlook"])
+        XCTAssertTrue(analysis.bodyInlineContentIDs.contains("draft-figure"))
+        XCTAssertFalse(analysis.bodyInlineContentIDs.contains("image001.png@outlook"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("draft-figure"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image001.png@outlook"))
+    }
 }

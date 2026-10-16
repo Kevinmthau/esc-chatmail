@@ -41,11 +41,57 @@ struct HTMLSelectorElement {
 }
 
 enum HTMLSelectorMatcher {
+    // MARK: - Compiled patterns
+
+    // Every fixed pattern in this file, compiled once instead of per call, with
+    // the options (`.caseInsensitive` everywhere, plus `.dotMatchesLineSeparators`
+    // on the tag scan) its per-call compile used.
+
+    private static let htmlTagRegex = try? NSRegularExpression(
+        pattern: #"<\s*(/)?\s*([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators]
+    )
+
+    private static let selectorTagNameRegex = try? NSRegularExpression(
+        pattern: #"^(?:[A-Za-z_][A-Za-z0-9_-]*\|)?([A-Za-z][A-Za-z0-9_-]*)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let selectorIDRegex = try? NSRegularExpression(
+        pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let selectorClassRegex = try? NSRegularExpression(
+        pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let classAttributeSelectorRegex = try? NSRegularExpression(
+        pattern: #"\[\s*class\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*(?:[iIsS])?\]"#,
+        options: [.caseInsensitive]
+    )
+
+    /// `attributeValue(named:)` interpolates the attribute name into its
+    /// pattern. The callers ask for a handful of fixed names (per tag, per
+    /// element scan), so those are compiled once; any other name still
+    /// compiles per call with the same pattern and options.
+    private static let knownAttributeValueRegexes: [String: NSRegularExpression] = {
+        var regexes: [String: NSRegularExpression] = [:]
+        for name in ["id", "class", "width", "style"] {
+            if let regex = try? NSRegularExpression(pattern: attributeValuePattern(named: name), options: [.caseInsensitive]) {
+                regexes[name] = regex
+            }
+        }
+        return regexes
+    }()
+
+    private static func attributeValuePattern(named name: String) -> String {
+        #"\b\#(name)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#
+    }
+
     static func htmlSelectorElements(in html: String) -> [HTMLSelectorElement] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"<\s*(/)?\s*([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>"#,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        ) else {
+        guard let regex = htmlTagRegex else {
             return []
         }
 
@@ -117,13 +163,10 @@ enum HTMLSelectorMatcher {
             .last
             .map(String.init) ?? selector
 
-        let tagName = firstRegexCapture(
-            in: compound,
-            pattern: #"^(?:[A-Za-z_][A-Za-z0-9_-]*\|)?([A-Za-z][A-Za-z0-9_-]*)"#
-        )?.lowercased()
-        let id = firstRegexCapture(in: compound, pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#)
+        let tagName = firstRegexCapture(in: compound, regex: selectorTagNameRegex)?.lowercased()
+        let id = firstRegexCapture(in: compound, regex: selectorIDRegex)
         let exactClassAttributeValues = Set(classAttributeSelectorValues(in: compound))
-        let classNames = Set(regexCaptures(in: compound, pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#)
+        let classNames = Set(regexCaptures(in: compound, regex: selectorClassRegex)
             + exactClassAttributeValues.flatMap { $0.split { $0.isWhitespace }.map(String.init) })
 
         guard tagName != nil || id != nil || !classNames.isEmpty || !exactClassAttributeValues.isEmpty else {
@@ -257,9 +300,17 @@ enum HTMLSelectorMatcher {
     }
 
     static func attributeValue(named name: String, in tagHTML: String) -> String? {
-        let pattern = #"\b\#(name)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
+        let regex: NSRegularExpression
+        if let known = knownAttributeValueRegexes[name] {
+            regex = known
+        } else {
+            guard let compiled = try? NSRegularExpression(
+                pattern: attributeValuePattern(named: name),
+                options: [.caseInsensitive]
+            ) else {
+                return nil
+            }
+            regex = compiled
         }
 
         let range = NSRange(tagHTML.startIndex..<tagHTML.endIndex, in: tagHTML)
@@ -524,10 +575,7 @@ enum HTMLSelectorMatcher {
     }
 
     private static func classAttributeSelectorValues(in selector: String) -> [String] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"\[\s*class\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*(?:[iIsS])?\]"#,
-            options: [.caseInsensitive]
-        ) else {
+        guard let regex = classAttributeSelectorRegex else {
             return []
         }
 
@@ -545,12 +593,12 @@ enum HTMLSelectorMatcher {
         }
     }
 
-    private static func firstRegexCapture(in text: String, pattern: String) -> String? {
-        regexCaptures(in: text, pattern: pattern).first
+    private static func firstRegexCapture(in text: String, regex: NSRegularExpression?) -> String? {
+        regexCaptures(in: text, regex: regex).first
     }
 
-    private static func regexCaptures(in text: String, pattern: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+    private static func regexCaptures(in text: String, regex: NSRegularExpression?) -> [String] {
+        guard let regex else {
             return []
         }
 

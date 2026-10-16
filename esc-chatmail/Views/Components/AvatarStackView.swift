@@ -124,6 +124,27 @@ struct SingleAvatarView: View {
 }
 
 extension SingleAvatarView {
+    // Compiled once, with no options: the per-call sites passed only
+    // `.regularExpression`, so these stay case-sensitive. They run per
+    // conversation row body on the main thread.
+    static let whitespaceRunRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\s+"#)
+    }()
+
+    private static let unknownContactsCountRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"^\d+\s+unknown contacts?$"#)
+    }()
+
+    static func replacingMatches(
+        of regex: NSRegularExpression?,
+        in text: String,
+        with template: String
+    ) -> String {
+        guard let regex else { return text }
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
+    }
+
     enum AvatarContent: Equatable {
         case photo
         case initials(String)
@@ -164,11 +185,7 @@ extension SingleAvatarView {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        let normalizedWhitespace = trimmed.replacingOccurrences(
-            of: #"\s+"#,
-            with: " ",
-            options: .regularExpression
-        )
+        let normalizedWhitespace = replacingMatches(of: whitespaceRunRegex, in: trimmed, with: " ")
 
         guard !isPlaceholderDisplayName(normalizedWhitespace) else {
             return nil
@@ -191,11 +208,10 @@ extension SingleAvatarView {
 
     private static func isPlaceholderDisplayName(_ value: String) -> Bool {
         let lowercased = value.lowercased()
-        return placeholderDisplayNames.contains(lowercased)
-            || lowercased.range(
-                of: #"^\d+\s+unknown contacts?$"#,
-                options: .regularExpression
-            ) != nil
+        guard !placeholderDisplayNames.contains(lowercased) else { return true }
+        guard let regex = unknownContactsCountRegex else { return false }
+        let range = NSRange(location: 0, length: lowercased.utf16.count)
+        return regex.firstMatch(in: lowercased, options: [], range: range) != nil
     }
 
     private static let placeholderDisplayNames: Set<String> = [
@@ -333,6 +349,11 @@ struct GroupAvatarView: View {
 }
 
 extension GroupAvatarView {
+    /// No options: the per-call site passed only `.regularExpression`.
+    private static let overflowCountSuffixRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\s*\+\d+\s*$"#)
+    }()
+
     enum EmptyGroupContent: Equatable {
         case initials(String)
         case placeholderCircle
@@ -343,11 +364,9 @@ extension GroupAvatarView {
     /// participant load degrades to initials instead of a blank gray circle.
     static func resolvedEmptyContent(fallbackDisplayText: String?) -> EmptyGroupContent {
         // "+N" overflow suffixes are counts, not names; drop them before monogramming.
-        let strippedOverflow = fallbackDisplayText?.replacingOccurrences(
-            of: #"\s*\+\d+\s*$"#,
-            with: "",
-            options: .regularExpression
-        )
+        let strippedOverflow = fallbackDisplayText.map {
+            SingleAvatarView.replacingMatches(of: overflowCountSuffixRegex, in: $0, with: "")
+        }
         guard let initialsSource = SingleAvatarView.usableIdentityText(from: strippedOverflow) else {
             return .placeholderCircle
         }

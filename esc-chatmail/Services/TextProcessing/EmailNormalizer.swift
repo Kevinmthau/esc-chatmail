@@ -30,11 +30,31 @@ class EmailNormalizer {
         return lowercased.hasSuffix("@gmail.com") || lowercased.hasSuffix("@googlemail.com")
     }
 
+    // Compiled once: these run several times per message on the sync path and
+    // twice per `Log.redact(address:)`. Each keeps the options the per-call
+    // compile used (none here, `.caseInsensitive` for the bare-address form).
+    //
+    // Quoted local parts can contain brackets and escaped quotes. Consume
+    // them as a unit, but never capture an unquoted nested '<' from a name.
+    private static let bracketedEmailRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"<((?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+)>"#)
+    }()
+
+    private static let bareEmailRegex: NSRegularExpression? = {
+        let atom = #"[A-Z0-9!#$%&'*+/=?^_`{|}~-]+"#
+        let localPart = #"\#(atom)(?:\.\#(atom))*"#
+        let domainLabel = #"[A-Z0-9](?:[A-Z0-9\-]{0,61}[A-Z0-9])?"#
+        let domain = #"\#(domainLabel)(?:\.\#(domainLabel))*\.[A-Z]{2,}"#
+        let pattern = #"(?:^|[\s<(\[,;])(\#(localPart)@\#(domain))(?=$|[\s>)\],;.!?])"#
+        return try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+    }()
+
+    private static let whitespaceRunRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\s+"#)
+    }()
+
     static func extractEmail(from string: String) -> String? {
-        // Quoted local parts can contain brackets and escaped quotes. Consume
-        // them as a unit, but never capture an unquoted nested '<' from a name.
-        let pattern = #"<((?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+)>"#
-        if let regex = try? NSRegularExpression(pattern: pattern),
+        if let regex = bracketedEmailRegex,
            let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
            let range = Range(match.range(at: 1), in: string) {
             return String(string[range])
@@ -273,23 +293,18 @@ class EmailNormalizer {
     /// and should be excluded from conversation participant displays.
     static func isHideMyEmailDisplayName(_ displayName: String?) -> Bool {
         guard let displayName else { return false }
-        let normalized = displayName
+        var normalized = displayName
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
             .replacingOccurrences(of: "-", with: " ")
             .replacingOccurrences(of: "_", with: " ")
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        normalized = collapsingWhitespaceRuns(normalized)
 
         return normalized == "hide my email"
     }
 
     private static func firstBareEmailMatch(in string: String) -> (email: String, range: Range<String.Index>)? {
-        let atom = #"[A-Z0-9!#$%&'*+/=?^_`{|}~-]+"#
-        let localPart = #"\#(atom)(?:\.\#(atom))*"#
-        let domainLabel = #"[A-Z0-9](?:[A-Z0-9\-]{0,61}[A-Z0-9])?"#
-        let domain = #"\#(domainLabel)(?:\.\#(domainLabel))*\.[A-Z]{2,}"#
-        let pattern = #"(?:^|[\s<(\[,;])(\#(localPart)@\#(domain))(?=$|[\s>)\],;.!?])"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+        guard let regex = bareEmailRegex,
               let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
               let range = Range(match.range(at: 1), in: string) else {
             return nil
@@ -299,14 +314,26 @@ class EmailNormalizer {
     }
 
     private static func displayNameForComparison(_ value: String) -> String {
-        value
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\"", with: "")
-            .replacingOccurrences(of: ".", with: " ")
-            .replacingOccurrences(of: "_", with: " ")
-            .replacingOccurrences(of: "-", with: " ")
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .lowercased()
+        collapsingWhitespaceRuns(
+            value
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\"", with: "")
+                .replacingOccurrences(of: ".", with: " ")
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+        )
+        .lowercased()
+    }
+
+    /// `\s+` → " " through the compiled regex; the same ICU `\s` class the
+    /// per-call `replacingOccurrences(of:options: .regularExpression)` used.
+    private static func collapsingWhitespaceRuns(_ value: String) -> String {
+        guard let regex = whitespaceRunRegex else { return value }
+        return regex.stringByReplacingMatches(
+            in: value,
+            range: NSRange(value.startIndex..., in: value),
+            withTemplate: " "
+        )
     }
 
     private static func displayNameParts(_ value: String) -> [String] {

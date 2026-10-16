@@ -95,9 +95,14 @@ enum Log {
 
     // MARK: - Core Logging
 
+    /// `message` stays an autoclosure all the way down so a call below the
+    /// configured level (every `Log.debug` in Release, Debug and the test run,
+    /// every `Log.info` in Release) never builds its interpolated string. The
+    /// public entry points forward `message()` into this parameter, which
+    /// wraps the call in a new autoclosure rather than evaluating it.
     private static func log(
         level: LogLevel,
-        message: String,
+        message: @autoclosure () -> String,
         category: LogCategory,
         error: Error?,
         file: String,
@@ -115,7 +120,7 @@ enum Log {
         }
 
         // Build the full message
-        var fullMessage = message
+        var fullMessage = message()
 
         // Add error details if present
         if let error = error {

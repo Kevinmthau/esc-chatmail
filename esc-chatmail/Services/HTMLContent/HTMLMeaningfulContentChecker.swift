@@ -20,6 +20,18 @@ enum HTMLMeaningfulContentChecker {
         }
     }()
 
+    /// Compiled once with `.caseInsensitive`, the option the per-call
+    /// `replacingOccurrences(options: [.regularExpression, .caseInsensitive])`
+    /// in `stripNonRenderableContent` passed. This check runs once per cleanup
+    /// mode on every bubble derivation.
+    private static let htmlCommentRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "<!--[\\s\\S]*?-->", options: [.caseInsensitive])
+    }()
+
+    private static let headElementRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "<head\\b[^>]*>[\\s\\S]*?</head>", options: [.caseInsensitive])
+    }()
+
     private static let invisibleCharacterRegex: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: "[\\u200B\\u200C\\u200D\\uFEFF\\u00A0\\s]+",
@@ -47,22 +59,19 @@ enum HTMLMeaningfulContentChecker {
         return !normalized.isEmpty
     }
 
+    private static func removingMatches(of regex: NSRegularExpression?, from html: String) -> String {
+        guard let regex else { return html }
+        let range = NSRange(location: 0, length: html.utf16.count)
+        return regex.stringByReplacingMatches(in: html, options: [], range: range, withTemplate: "")
+    }
+
     static func renderableHTML(from html: String) -> String {
         stripNonRenderableContent(from: html)
     }
 
     private static func stripNonRenderableContent(from html: String) -> String {
-        var filtered = html
-            .replacingOccurrences(
-                of: "<!--[\\s\\S]*?-->",
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
-            .replacingOccurrences(
-                of: "<head\\b[^>]*>[\\s\\S]*?</head>",
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
+        var filtered = removingMatches(of: htmlCommentRegex, from: html)
+        filtered = removingMatches(of: headElementRegex, from: filtered)
 
         for regex in hiddenElementRegexes {
             for _ in 0..<maxHiddenElementStripPasses {

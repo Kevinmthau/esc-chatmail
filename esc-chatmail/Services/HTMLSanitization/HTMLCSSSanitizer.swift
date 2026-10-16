@@ -15,6 +15,20 @@ struct HTMLCSSSanitizer {
         ("url\\s*\\([^)]*data:text/html[^)]*\\)", "") // Remove url() with data:text/html
     ]
 
+    /// `cssSanitizationRules` compiled once. The string-pattern
+    /// `RegexSanitizer.applyRules(to:rules:)` recompiled all ten per call, and
+    /// `sanitizeCSS` runs once per `style` attribute and `<style>` block.
+    /// `.caseInsensitive` on every rule is load-bearing: it is what the
+    /// per-call path's default options supplied, and without it `JAVASCRIPT:`
+    /// would pass. `sanitizeCSS` falls back to the per-call path if any rule
+    /// failed to compile, so a compile failure cannot drop a rule.
+    private static let compiledCSSSanitizationRules: [(regex: NSRegularExpression, replacement: String)] = {
+        cssSanitizationRules.compactMap { rule in
+            (try? NSRegularExpression(pattern: rule.pattern, options: [.caseInsensitive]))
+                .map { (regex: $0, replacement: rule.replacement) }
+        }
+    }()
+
     // Cached compiled regex patterns for performance
     // Need separate patterns for double-quoted and single-quoted attributes
     // to correctly handle quotes inside the value (e.g., font-family: 'Arial')
@@ -72,6 +86,10 @@ struct HTMLCSSSanitizer {
             let closeTag = String(result[closeTagRange])
 
             let sanitizedCSS = sanitizeCSS(cssContent)
+            // The open and close tags are re-inserted verbatim, so when the CSS
+            // did not change the replacement equals the existing text; skip the
+            // O(n) tail move (and the String's UTF-16 breadcrumb reset) then.
+            guard !sanitizedCSS.utf8.elementsEqual(cssContent.utf8) else { continue }
             result.replaceSubrange(fullRange, with: "\(openTag)\(sanitizedCSS)\(closeTag)")
         }
 
@@ -89,7 +107,12 @@ struct HTMLCSSSanitizer {
                 let styleContent = String(result[range])
                 let sanitizedStyle = sanitizeCSS(styleContent)
                 guard let fullRange = Range(match.range, in: result) else { continue }
-                result.replaceSubrange(fullRange, with: "style=\"\(sanitizedStyle)\"")
+                // Compare the whole replacement, not just the CSS: the rewrite
+                // also normalizes `STYLE=` / `style = "` to `style="`, which
+                // must still happen when the CSS itself is clean.
+                let replacement = "style=\"\(sanitizedStyle)\""
+                guard !result[fullRange].utf8.elementsEqual(replacement.utf8) else { continue }
+                result.replaceSubrange(fullRange, with: replacement)
             }
         }
 
@@ -100,7 +123,11 @@ struct HTMLCSSSanitizer {
                 let styleContent = String(result[range])
                 let sanitizedStyle = sanitizeCSS(styleContent)
                 guard let fullRange = Range(match.range, in: result) else { continue }
-                result.replaceSubrange(fullRange, with: "style=\"\(sanitizedStyle)\"")
+                // A single-quoted attribute always rewrites to double quotes, so
+                // this guard only ever skips when the text already matched.
+                let replacement = "style=\"\(sanitizedStyle)\""
+                guard !result[fullRange].utf8.elementsEqual(replacement.utf8) else { continue }
+                result.replaceSubrange(fullRange, with: replacement)
             }
         }
 
@@ -109,6 +136,9 @@ struct HTMLCSSSanitizer {
 
     /// Sanitizes CSS content
     func sanitizeCSS(_ css: String) -> String {
-        RegexSanitizer.applyRules(to: css, rules: Self.cssSanitizationRules)
+        guard Self.compiledCSSSanitizationRules.count == Self.cssSanitizationRules.count else {
+            return RegexSanitizer.applyRules(to: css, rules: Self.cssSanitizationRules)
+        }
+        return RegexSanitizer.applyRules(to: css, compiledRules: Self.compiledCSSSanitizationRules)
     }
 }

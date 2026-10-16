@@ -34,9 +34,9 @@ enum EmailLayoutDetector {
         )
 
         let candidates = [
-            largestLayoutWidth(in: liveHTML, pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#),
-            largestLayoutWidth(in: layoutCSSHTML, pattern: #"(?:^|[;{"'=])\s*width\s*:\s*([0-9]{3,4})\s*px"#),
-            largestLayoutWidth(in: layoutCSSHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#),
+            largestLayoutWidth(in: liveHTML, regex: tableWidthAttributeRegex),
+            largestLayoutWidth(in: layoutCSSHTML, regex: cssWidthRegex),
+            largestLayoutWidth(in: layoutCSSHTML, regex: cssMinWidthRegex),
             largestTableMaxLayoutWidth(in: layoutCSSHTML)
         ].compactMap { $0 }
 
@@ -148,6 +148,59 @@ enum EmailLayoutDetector {
             .max()
     }
 
+    // MARK: - Compiled patterns
+
+    // Every fixed pattern in this file, compiled once instead of per call (this
+    // runs on every first full-message open). Each keeps the options its
+    // per-call compile used. Patterns interpolating the per-call fixedWidth
+    // (fixedTableSelectorTargets, fixedInlineStyleSelectorTargets' width check,
+    // fixedCSSSelectorTargets) are still built once per call, as before.
+
+    private static let tableWidthAttributeRegex = try? NSRegularExpression(
+        pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators]
+    )
+
+    private static let cssWidthRegex = try? NSRegularExpression(
+        pattern: #"(?:^|[;{"'=])\s*width\s*:\s*([0-9]{3,4})\s*px"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators]
+    )
+
+    private static let cssMinWidthRegex = try? NSRegularExpression(
+        pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators]
+    )
+
+    private static let tableMaxWidthRuleRegex = try? NSRegularExpression(
+        pattern: #"([^{}@]+)\{[^{}]*(?<!-)\bmax-width\s*:\s*([0-9]{3,4})\s*px\b"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let fluidWidthTableTagRegex = try? NSRegularExpression(
+        pattern: #"<table\b(?=[^>]*?\bwidth\s*=)[^>]*>"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators]
+    )
+
+    private static let styledTagRegex = try? NSRegularExpression(
+        pattern: #"<([A-Za-z][A-Za-z0-9:-]*)\b(?=[^>]*?\bstyle\s*=)[^>]*>"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators]
+    )
+
+    private static let widthDeclarationRegex = try? NSRegularExpression(
+        pattern: #"(?<!-)\bwidth\s*:\s*([^;{}]+)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let fluidWidthValueRegex = try? NSRegularExpression(
+        pattern: #"^100\s*%$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let htmlCommentRegex = try? NSRegularExpression(
+        pattern: #"<!--[\s\S]*?-->"#,
+        options: []
+    )
+
     private static let styleBlockRegex = try? NSRegularExpression(
         // An unclosed `<style>` captures to end-of-input (browsers treat the remainder as CSS),
         // matching the previous full-document scan for that malformed case.
@@ -185,10 +238,7 @@ enum EmailLayoutDetector {
         in html: String,
         fixedWidth: Int?
     ) -> [(width: Int, target: LayoutSelectorTarget)] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"([^{}@]+)\{[^{}]*(?<!-)\bmax-width\s*:\s*([0-9]{3,4})\s*px\b"#,
-            options: [.caseInsensitive]
-        ) else {
+        guard let regex = tableMaxWidthRuleRegex else {
             return []
         }
 
@@ -266,10 +316,7 @@ enum EmailLayoutDetector {
     }
 
     private static func fluidWidthTableTargets(in html: String) -> [LayoutSelectorTarget] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"<table\b(?=[^>]*?\bwidth\s*=)[^>]*>"#,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        ) else {
+        guard let regex = fluidWidthTableTagRegex else {
             return []
         }
 
@@ -323,10 +370,7 @@ enum EmailLayoutDetector {
     }
 
     private static func fixedInlineStyleSelectorTargets(in html: String, fixedWidth: Int) -> [LayoutSelectorTarget] {
-        guard let tagRegex = try? NSRegularExpression(
-            pattern: #"<([A-Za-z][A-Za-z0-9:-]*)\b(?=[^>]*?\bstyle\s*=)[^>]*>"#,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        ),
+        guard let tagRegex = styledTagRegex,
         let widthRegex = try? NSRegularExpression(
             pattern: #"(?<!-)\b(?:width|min-width)\s*:\s*\#(fixedWidth)\s*px\b"#,
             options: [.caseInsensitive]
@@ -476,10 +520,7 @@ enum EmailLayoutDetector {
     }
 
     private static func widthStates(in declarationBody: String) -> [(state: LayoutWidthState, isImportant: Bool)] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"(?<!-)\bwidth\s*:\s*([^;{}]+)"#,
-            options: [.caseInsensitive]
-        ) else {
+        guard let regex = widthDeclarationRegex else {
             return []
         }
 
@@ -502,10 +543,7 @@ enum EmailLayoutDetector {
             .replacingOccurrences(of: "!important", with: "", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard let regex = try? NSRegularExpression(
-            pattern: #"^100\s*%$"#,
-            options: [.caseInsensitive]
-        ) else {
+        guard let regex = fluidWidthValueRegex else {
             return false
         }
 
@@ -549,10 +587,7 @@ enum EmailLayoutDetector {
     }
 
     private static func removingHTMLComments(from html: String) -> String {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"<!--[\s\S]*?-->"#,
-            options: []
-        ) else {
+        guard let regex = htmlCommentRegex else {
             return html
         }
 
@@ -560,11 +595,8 @@ enum EmailLayoutDetector {
         return regex.stringByReplacingMatches(in: html, range: range, withTemplate: "")
     }
 
-    private static func largestLayoutWidth(in html: String, pattern: String) -> Int? {
-        guard let regex = try? NSRegularExpression(
-            pattern: pattern,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        ) else {
+    private static func largestLayoutWidth(in html: String, regex: NSRegularExpression?) -> Int? {
+        guard let regex else {
             return nil
         }
 

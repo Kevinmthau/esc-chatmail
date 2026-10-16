@@ -88,6 +88,14 @@ struct HTMLTrackingRemover {
 
     /// Removes tracking pixels from HTML content
     func removeTrackingPixels(_ html: String) -> String {
+        // Every pattern below (the two pixel regexes and the three pattern
+        // families) begins with a literal "<img" under .caseInsensitive, so a
+        // document with no "<img" in any casing matches none of them and all
+        // ~30 full-document passes would hand back the input. Skip them.
+        guard html.range(of: "<img", options: .caseInsensitive) != nil else {
+            return html
+        }
+
         var result = html
 
         // Remove 1x1 images by width/height attributes

@@ -574,17 +574,57 @@ enum CSSParser {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // Specificity counting patterns, compiled once with the `.caseInsensitive`
+    // `regexMatchCount(in:pattern:)` applied per call. cssSelectorSpecificity
+    // runs per selector per width declaration in a media block.
+    private static let specificityIDRegex = try? NSRegularExpression(
+        pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let specificityClassRegex = try? NSRegularExpression(
+        pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let specificityAttributeRegex = try? NSRegularExpression(
+        pattern: #"\[[^\]]+\]"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let specificityPseudoClassRegex = try? NSRegularExpression(
+        pattern: #":(?!:)[A-Za-z_-][A-Za-z0-9_-]*(?:\([^)]*\))?"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let specificityElementRegex = try? NSRegularExpression(
+        pattern: #"(?:(?<=^)|(?<=[\s>+~]))(?:[A-Za-z_][A-Za-z0-9_-]*\|)?[A-Za-z][A-Za-z0-9_-]*(?=$|[#.\[:\s>+~])"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let pseudoElementSuffixRegex = try? NSRegularExpression(
+        pattern: #"::[A-Za-z_-][A-Za-z0-9_-]*(?:\([^)]*\))?"#,
+        options: []
+    )
+
+    private static let mediaWidthBoundRegex = try? NSRegularExpression(
+        pattern: #"\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em|rem)\s*\)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let mediaExactWidthRegex = try? NSRegularExpression(
+        pattern: #"\(\s*(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em|rem)\s*\)"#,
+        options: [.caseInsensitive]
+    )
+
     static func cssSelectorSpecificity(in selector: String) -> CSSSelectorSpecificity {
         let sanitizedSelector = removingSelectorPseudoElementSuffixes(from: selector)
-        let idCount = regexMatchCount(in: sanitizedSelector, pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#)
+        let idCount = regexMatchCount(in: sanitizedSelector, regex: specificityIDRegex)
         let classLikeCount =
-            regexMatchCount(in: sanitizedSelector, pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#)
-            + regexMatchCount(in: sanitizedSelector, pattern: #"\[[^\]]+\]"#)
-            + regexMatchCount(in: sanitizedSelector, pattern: #":(?!:)[A-Za-z_-][A-Za-z0-9_-]*(?:\([^)]*\))?"#)
-        let elementCount = regexMatchCount(
-            in: sanitizedSelector,
-            pattern: #"(?:(?<=^)|(?<=[\s>+~]))(?:[A-Za-z_][A-Za-z0-9_-]*\|)?[A-Za-z][A-Za-z0-9_-]*(?=$|[#.\[:\s>+~])"#
-        )
+            regexMatchCount(in: sanitizedSelector, regex: specificityClassRegex)
+            + regexMatchCount(in: sanitizedSelector, regex: specificityAttributeRegex)
+            + regexMatchCount(in: sanitizedSelector, regex: specificityPseudoClassRegex)
+        let elementCount = regexMatchCount(in: sanitizedSelector, regex: specificityElementRegex)
 
         return CSSSelectorSpecificity(
             idCount: idCount,
@@ -594,10 +634,7 @@ enum CSSParser {
     }
 
     static func removingSelectorPseudoElementSuffixes(from selector: String) -> String {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"::[A-Za-z_-][A-Za-z0-9_-]*(?:\([^)]*\))?"#,
-            options: []
-        ) else {
+        guard let regex = pseudoElementSuffixRegex else {
             return selector
         }
 
@@ -687,10 +724,7 @@ enum CSSParser {
         var maximum: Int?
         var foundWidthConstraint = false
 
-        if let widthBoundRegex = try? NSRegularExpression(
-            pattern: #"\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em|rem)\s*\)"#,
-            options: [.caseInsensitive]
-        ) {
+        if let widthBoundRegex = mediaWidthBoundRegex {
             let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
             for match in widthBoundRegex.matches(in: normalized, range: range) {
                 guard let boundRange = Range(match.range(at: 1), in: normalized),
@@ -717,10 +751,7 @@ enum CSSParser {
             }
         }
 
-        if let exactWidthRegex = try? NSRegularExpression(
-            pattern: #"\(\s*(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em|rem)\s*\)"#,
-            options: [.caseInsensitive]
-        ) {
+        if let exactWidthRegex = mediaExactWidthRegex {
             let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
             for match in exactWidthRegex.matches(in: normalized, range: range) {
                 guard let widthRange = Range(match.range(at: 1), in: normalized),
@@ -827,7 +858,16 @@ enum CSSParser {
     }
 
     static func regexMatchCount(in text: String, pattern: String) -> Int {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+        regexMatchCount(
+            in: text,
+            regex: try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        )
+    }
+
+    /// The precompiled form of `regexMatchCount(in:pattern:)`; nil counts as
+    /// zero matches, as a pattern that failed to compile did.
+    static func regexMatchCount(in text: String, regex: NSRegularExpression?) -> Int {
+        guard let regex else {
             return 0
         }
 
