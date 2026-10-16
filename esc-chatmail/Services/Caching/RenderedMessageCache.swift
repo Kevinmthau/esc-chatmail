@@ -116,9 +116,12 @@ actor RenderedMessageCache: MemoryWarningHandler {
     private let memoryLimitBytes: Int
     private let memoryObserver = MemoryWarningObserver()
     private var entries: [RenderedMessageKey: RenderedMessageCacheEntry] = [:]
-    /// Running sum of `entries[*].estimatedSizeBytes`, maintained by the only
-    /// two mutation sites (`storeValue` and `remove`) so `enforceLimits()`,
-    /// which runs on every store, does not reduce over every entry.
+    /// Running sum of `entries[*].estimatedSizeBytes`, maintained at the two
+    /// sites that change an entry's size (`storeValue` and `remove`) so
+    /// `enforceLimits()`, which runs on every store, does not reduce over
+    /// every entry. `touch()` also rewrites an entry, but at equal size, so it
+    /// leaves the total alone; a change to `touch()` that alters
+    /// `estimatedSizeBytes` must update the total too.
     private var totalEstimatedSizeBytes = 0
     private var keysByMessageId: [String: Set<RenderedMessageKey>] = [:]
     private var inFlight: [RenderedMessageInFlightKey: RenderedMessageInFlightWork] = [:]

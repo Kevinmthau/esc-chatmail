@@ -2013,6 +2013,52 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(existingConversation.snippet, "Old row preview")
     }
 
+    /// A star or read-state refresh of the newest message re-derives the same
+    /// `lastMessageDate` and `snippet`; assigning them again would mark the
+    /// conversation row updated and fan it through the list's sibling-save
+    /// handling for no visible change.
+    ///
+    /// Revert-check: the `existingLastDate != message.internalDate` and
+    /// `conversation.snippet != previewText` guards in
+    /// `MessagePersister.applyFastConversationListUpdateForExistingMessage`;
+    /// removing either leaves `hasChanges` true after the call.
+    func testApplyFastConversationListUpdateForExistingMessage_unchangedNewestMessage_leavesConversationClean() throws {
+        let messageDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let conversation = ConversationBuilder()
+            .visible()
+            .hasInboxMessages(true)
+            .withUnreadCount(0)
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("fast-list-unchanged-newest")
+            .withDate(messageDate)
+            .withSnippet("Newest preview")
+            .read()
+            .inConversation(conversation)
+            .build(in: context)
+        let previewText = try XCTUnwrap(message.conversationPreviewText)
+        conversation.lastMessageDate = messageDate
+        conversation.latestInboxDate = messageDate
+        conversation.snippet = previewText
+        try testStack.saveViewContext()
+        XCTAssertFalse(context.hasChanges)
+
+        persister.applyFastConversationListUpdateForExistingMessage(
+            message,
+            in: conversation,
+            previousHadInboxLabel: true,
+            previousWasUnread: false,
+            currentHasInboxLabel: true,
+            currentIsUnread: false
+        )
+
+        XCTAssertEqual(conversation.lastMessageDate, messageDate)
+        XCTAssertEqual(conversation.snippet, previewText)
+        XCTAssertFalse(conversation.hasChanges)
+        XCTAssertTrue(conversation.changedValues().isEmpty)
+        XCTAssertFalse(context.hasChanges)
+    }
+
     func testUpdateExistingMessage_preservesPendingLocalMailboxStateWhileRefreshingCanonicalMetadata() async throws {
         let inboxLabel = LabelBuilder.inboxLabel(in: context)
         let unreadLabel = LabelBuilder.unreadLabel(in: context)

@@ -34,8 +34,15 @@ struct ConversationRoutingPolicy: Sendable {
         shouldReactivate: Bool
     ) {
         guard shouldReactivate, conversation.archivedAt != nil || conversation.hidden else { return }
-        conversation.archivedAt = nil
-        conversation.hidden = false
+        // Guard each field on its own: a conversation that is archived but not
+        // hidden (or the reverse) would otherwise take an equal-value write on
+        // the other field, which Core Data still records as an update.
+        if conversation.archivedAt != nil {
+            conversation.archivedAt = nil
+        }
+        if conversation.hidden {
+            conversation.hidden = false
+        }
     }
 
     /// Every write here is skipped when the value is unchanged. Core Data

@@ -696,16 +696,23 @@ extension MessagePersister {
             refreshConversationInboxIndicators(conversation)
         }
 
+        // Guarded like `hasInbox` above: an update to the newest message (a
+        // star or read flip) re-derives the same date and preview, and an
+        // equal-value write would still mark the conversation row updated.
         if let existingLastDate = conversation.lastMessageDate {
             if message.internalDate >= existingLastDate {
-                conversation.lastMessageDate = message.internalDate
-                if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText) {
+                if existingLastDate != message.internalDate {
+                    conversation.lastMessageDate = message.internalDate
+                }
+                if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText),
+                   conversation.snippet != previewText {
                     conversation.snippet = previewText
                 }
             }
         } else {
             conversation.lastMessageDate = message.internalDate
-            if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText) {
+            if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText),
+               conversation.snippet != previewText {
                 conversation.snippet = previewText
             }
         }
