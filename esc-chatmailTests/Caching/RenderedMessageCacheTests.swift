@@ -253,6 +253,53 @@ final class RenderedMessageCacheTests: XCTestCase {
         XCTAssertEqual(statistics.invalidations, 1)
     }
 
+    /// `enforceLimits()` reads a running size total that `storeValue`
+    /// maintains (subtract the replaced entry, add the new one) and `remove`
+    /// maintains (subtract). Either sign wrong evicts here: counting the
+    /// replaced A twice puts A' + B over the limit before C arrives, and not
+    /// subtracting the evicted B keeps the total over the limit so A' goes
+    /// too.
+    ///
+    /// Revert-check: the `totalEstimatedSizeBytes` bookkeeping in
+    /// `RenderedMessageCache.storeValue` / `remove`.
+    func testStoreValue_replacingEntryUnderMemoryLimit_evictsByRunningTotal() async throws {
+        // An entry's size is its payload's UTF-8 count plus a fixed overhead
+        // of under 200 bytes; the limit leaves ~750 bytes of slack for it.
+        let payload = String(repeating: "x", count: 4_000)
+        let cache = RenderedMessageCache(countLimit: 100, memoryLimitBytes: 13_000)
+        let variantKey = RenderedMessageVariantKey("running-total")
+
+        _ = await cache.canonicalPlainText(messageId: "message-a", sourceSignature: "source") { payload }
+        _ = await cache.canonicalPlainText(messageId: "message-b", sourceSignature: "source") { payload }
+        // Replace A's entry with a larger one: A' (~8k) + B (~4k) fits, while
+        // A + A' + B (~16k) would not.
+        await cache.storeChatBubbleText(
+            RenderedMessageChatBubbleText(plainText: payload, hasRichContent: false),
+            messageId: "message-a",
+            sourceSignature: "source",
+            variantKey: variantKey
+        )
+
+        var statistics = await cache.getStatistics()
+        XCTAssertEqual(statistics.currentEntryCount, 2)
+        XCTAssertEqual(statistics.invalidations, 0)
+
+        // C (~4k) takes the total to ~16k: the least recently used entry, B,
+        // is evicted, after which A' + C (~12k) fits without evicting A'.
+        _ = await cache.canonicalPlainText(messageId: "message-c", sourceSignature: "source") { payload }
+
+        statistics = await cache.getStatistics()
+        XCTAssertEqual(statistics.currentEntryCount, 2)
+        XCTAssertEqual(statistics.invalidations, 1)
+        let aArtifacts = await cache.artifacts(messageId: "message-a", sourceSignature: "source")
+        let bArtifacts = await cache.artifacts(messageId: "message-b", sourceSignature: "source")
+        let cArtifacts = await cache.artifacts(messageId: "message-c", sourceSignature: "source")
+        XCTAssertEqual(aArtifacts?.canonicalPlainText, payload)
+        XCTAssertEqual(aArtifacts?.chatBubbleTextByVariant[variantKey]?.plainText, payload)
+        XCTAssertNil(bArtifacts)
+        XCTAssertEqual(cArtifacts?.canonicalPlainText, payload)
+    }
+
     func testPreviewAndOriginalHTMLVariantsDoNotCollide() async throws {
         let cache = RenderedMessageCache()
         let variantKey = RenderedMessageVariantKey("shared-variant")

@@ -116,6 +116,10 @@ actor RenderedMessageCache: MemoryWarningHandler {
     private let memoryLimitBytes: Int
     private let memoryObserver = MemoryWarningObserver()
     private var entries: [RenderedMessageKey: RenderedMessageCacheEntry] = [:]
+    /// Running sum of `entries[*].estimatedSizeBytes`, maintained by the only
+    /// two mutation sites (`storeValue` and `remove`) so `enforceLimits()`,
+    /// which runs on every store, does not reduce over every entry.
+    private var totalEstimatedSizeBytes = 0
     private var keysByMessageId: [String: Set<RenderedMessageKey>] = [:]
     private var inFlight: [RenderedMessageInFlightKey: RenderedMessageInFlightWork] = [:]
     private var globalInvalidationGeneration: UInt64 = 0
@@ -730,11 +734,15 @@ actor RenderedMessageCache: MemoryWarningHandler {
         store(&artifacts, value)
 
         accessSequence &+= 1
-        entries[key] = RenderedMessageCacheEntry(
+        let entry = RenderedMessageCacheEntry(
             artifacts: artifacts,
             accessSequence: accessSequence,
             estimatedSizeBytes: Self.estimatedSizeBytes(for: artifacts)
         )
+        if let replaced = entries.updateValue(entry, forKey: key) {
+            totalEstimatedSizeBytes -= replaced.estimatedSizeBytes
+        }
+        totalEstimatedSizeBytes += entry.estimatedSizeBytes
         keysByMessageId[key.messageId, default: []].insert(key)
         enforceLimits()
         log(event: "artifact-produced", key: key, artifactType: artifactType, variantKey: variantKey)
@@ -827,7 +835,8 @@ actor RenderedMessageCache: MemoryWarningHandler {
     ) where S.Element == RenderedMessageKey {
         var removedKeys: [RenderedMessageKey] = []
         for key in keys {
-            if entries.removeValue(forKey: key) != nil {
+            if let removed = entries.removeValue(forKey: key) {
+                totalEstimatedSizeBytes -= removed.estimatedSizeBytes
                 removedKeys.append(key)
                 keysByMessageId[key.messageId]?.remove(key)
                 if keysByMessageId[key.messageId]?.isEmpty == true {
@@ -844,7 +853,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
     }
 
     private func currentEstimatedSizeBytes() -> Int {
-        entries.values.reduce(0) { $0 + $1.estimatedSizeBytes }
+        totalEstimatedSizeBytes
     }
 
     private static func estimatedSizeBytes(for artifacts: RenderedMessageArtifacts) -> Int {
