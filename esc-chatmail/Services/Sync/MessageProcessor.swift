@@ -1014,31 +1014,45 @@ class MessageProcessor: @unchecked Sendable {
         return result.mainText
     }
 
+    // prepareHTMLForSnippet's three patterns, compiled once instead of per
+    // message. Each keeps the options its per-call replacement passed:
+    // .caseInsensitive on the <head> and hidden-element patterns, none on the
+    // comment pattern. The hidden-element pattern's `\1` is a backreference in
+    // the pattern, not the template; every template is "".
+    private static let snippetHeadElementRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "<head\\b[^>]*>[\\s\\S]*?</head>", options: [.caseInsensitive])
+    }()
+
+    private static let snippetHTMLCommentRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "<!--[\\s\\S]*?-->", options: [])
+    }()
+
+    private static let snippetHiddenElementRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "<([a-zA-Z0-9]+)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|max-height\\s*:\\s*0|opacity\\s*:\\s*0|font-size\\s*:\\s*0)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static func removingMatches(of regex: NSRegularExpression?, from html: String) -> String {
+        guard let regex else { return html }
+        let range = NSRange(location: 0, length: html.utf16.count)
+        return regex.stringByReplacingMatches(in: html, options: [], range: range, withTemplate: "")
+    }
+
     /// Prepares HTML for snippet extraction by removing metadata and hidden preheaders
     /// that frequently pollute conversation list previews (e.g., title tags, Outlook comments).
     private func prepareHTMLForSnippet(_ html: String) -> String {
         var cleaned = html
 
         // Remove HTML head content (title, meta, style, mso settings, etc.)
-        cleaned = cleaned.replacingOccurrences(
-            of: "<head\\b[^>]*>[\\s\\S]*?</head>",
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
+        cleaned = Self.removingMatches(of: Self.snippetHeadElementRegex, from: cleaned)
 
         // Remove HTML comments, including Outlook conditional blocks.
-        cleaned = cleaned.replacingOccurrences(
-            of: "<!--[\\s\\S]*?-->",
-            with: "",
-            options: [.regularExpression]
-        )
+        cleaned = Self.removingMatches(of: Self.snippetHTMLCommentRegex, from: cleaned)
 
         // Remove hidden preheader/style-hiding elements.
-        cleaned = cleaned.replacingOccurrences(
-            of: "<([a-zA-Z0-9]+)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|max-height\\s*:\\s*0|opacity\\s*:\\s*0|font-size\\s*:\\s*0)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
+        cleaned = Self.removingMatches(of: Self.snippetHiddenElementRegex, from: cleaned)
 
         return cleaned
     }
