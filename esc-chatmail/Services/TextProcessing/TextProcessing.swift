@@ -49,6 +49,93 @@ enum TextProcessing {
         return recoverPlainTextFromMalformedHTML(from: html)
     }
 
+    private struct ReplacementRule {
+        let regex: NSRegularExpression
+        let template: String
+    }
+
+    /// Compiles an ordered rule list once. A rule that fails to compile is
+    /// dropped, which leaves the text unchanged for that step, as the per-call
+    /// `replacingOccurrences` did with an invalid pattern.
+    private static func compiledRules(
+        _ rules: [(pattern: String, template: String, options: NSRegularExpression.Options)]
+    ) -> [ReplacementRule] {
+        rules.compactMap { rule in
+            (try? NSRegularExpression(pattern: rule.pattern, options: rule.options))
+                .map { ReplacementRule(regex: $0, template: rule.template) }
+        }
+    }
+
+    /// Applies `rules` in order over the full range, the same replacement
+    /// `replacingOccurrences(of:with:options: .regularExpression)` performed.
+    private static func applying(_ rules: [ReplacementRule], to text: String) -> String {
+        rules.reduce(text) { result, rule in
+            rule.regex.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: rule.template
+            )
+        }
+    }
+
+    /// The three whitespace-collapse steps normalizePlainTextInput and
+    /// recoverPlainTextFromMalformedHTML both end with, in that order. The
+    /// per-call replacements passed only `.regularExpression`, so no options.
+    private static let whitespaceNormalizationRules: [ReplacementRule] = compiledRules([
+        ("[ \\t]+", " ", []),
+        ("\\n[ \\t]*\\n", "\n\n", []),
+        ("(\\s*\\n\\s*){2,}", "\n\n", [])
+    ])
+
+    /// recoverPlainTextFromMalformedHTML's structural steps, in its order, up to
+    /// the first non-regex replacement. The <head> and comment patterns keep
+    /// the `.caseInsensitive` their per-call replacements passed; the rest
+    /// passed only `.regularExpression`.
+    private static let malformedHTMLStructureRules: [ReplacementRule] = compiledRules([
+        // Avoid leaking <head> metadata (title tags, MSO conditionals) into bubble text.
+        // Also strip HTML comments entirely; conditional comments often contain Outlook-only XML
+        // that can show up as garbage like "96" in extracted plain text.
+        ("<head\\b[^>]*>[\\s\\S]*?</head>", "", [.caseInsensitive]),
+        ("<!--[\\s\\S]*?-->", "", [.caseInsensitive]),
+        // Remove script and style tags and their content
+        ("<script[^>]*>[\\s\\S]*?</script>", "", []),
+        ("<style[^>]*>[\\s\\S]*?</style>", "", []),
+        // Convert consecutive <br> tags to paragraph breaks, single <br> to space (soft wrap)
+        // First: <br><br> or <br>\s*<br> → paragraph break
+        ("<br[^>]*>\\s*<br[^>]*>", "\n\n", []),
+        // Then: remaining single <br> → newline (let unwrapEmailLineBreaks decide whether to join)
+        ("<br[^>]*>", "\n", []),
+        // Paragraphs and headings get double newlines (actual content breaks)
+        ("</p>", "\n\n", []),
+        ("</h[1-6]>", "\n\n", [])
+    ])
+
+    /// Table cells get a space so text doesn't run together (`.caseInsensitive`, as before).
+    private static let tableCellCloseRule: [ReplacementRule] = compiledRules([
+        ("</t[dh]>", " ", [.caseInsensitive])
+    ])
+
+    /// Tag removal: every remaining tag, then truncated opening tags (e.g. a
+    /// snippet cut in the middle of `<div style="...`).
+    private static let malformedHTMLTagStripRules: [ReplacementRule] = compiledRules([
+        ("<[^>]+>", "", []),
+        ("<[a-zA-Z][^>\\n]*(?=\\n|$)", "", [])
+    ])
+
+    /// `^(https?://|www\.)` with `.caseInsensitive`, the option the per-line
+    /// `range(of:options:)` in unwrapEmailLineBreaks passed; it tested this on
+    /// every non-empty line. A nil regex reads as "not a URL line", which is
+    /// what a nil `range(of:)` result meant there.
+    private static let urlLeadingLineRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"^(https?://|www\.)"#, options: [.caseInsensitive])
+    }()
+
+    private static func startsWithURL(_ line: String) -> Bool {
+        guard let regex = urlLeadingLineRegex else { return false }
+        return regex.firstMatch(in: line, options: [], range: NSRange(line.startIndex..., in: line)) != nil
+    }
+
     private static func normalizePlainTextInput(_ text: String) -> String {
         var normalized = decodeHTMLEntities(text)
 
@@ -56,9 +143,7 @@ enum TextProcessing {
             scalar.value != 0x200B && scalar.value != 0x200C && scalar.value != 0x200D
         }.map { String($0) }.joined()
 
-        normalized = normalized.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
-        normalized = normalized.replacingOccurrences(of: "\\n[ \\t]*\\n", with: "\n\n", options: .regularExpression, range: nil)
-        normalized = normalized.replacingOccurrences(of: "(\\s*\\n\\s*){2,}", with: "\n\n", options: .regularExpression, range: nil)
+        normalized = applying(whitespaceNormalizationRules, to: normalized)
         normalized = normalized.split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .joined(separator: "\n")
@@ -67,37 +152,9 @@ enum TextProcessing {
     }
 
     private static func recoverPlainTextFromMalformedHTML(from html: String) -> String {
-        var text = html
-
-        // Avoid leaking <head> metadata (title tags, MSO conditionals) into bubble text.
-        // Also strip HTML comments entirely; conditional comments often contain Outlook-only XML
-        // that can show up as garbage like "96" in extracted plain text.
-        text = text.replacingOccurrences(
-            of: "<head\\b[^>]*>[\\s\\S]*?</head>",
-            with: "",
-            options: [.regularExpression, .caseInsensitive],
-            range: nil
-        )
-        text = text.replacingOccurrences(
-            of: "<!--[\\s\\S]*?-->",
-            with: "",
-            options: [.regularExpression, .caseInsensitive],
-            range: nil
-        )
-
-        // Remove script and style tags and their content
-        text = text.replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression, range: nil)
-
-        // Convert consecutive <br> tags to paragraph breaks, single <br> to space (soft wrap)
-        // First: <br><br> or <br>\s*<br> → paragraph break
-        text = text.replacingOccurrences(of: "<br[^>]*>\\s*<br[^>]*>", with: "\n\n", options: .regularExpression, range: nil)
-        // Then: remaining single <br> → newline (let unwrapEmailLineBreaks decide whether to join)
-        text = text.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression, range: nil)
-
-        // Paragraphs and headings get double newlines (actual content breaks)
-        text = text.replacingOccurrences(of: "</p>", with: "\n\n", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: "</h[1-6]>", with: "\n\n", options: .regularExpression, range: nil)
+        // Structural cleanup (head, comments, script/style, <br>, paragraph and
+        // heading closes); the rule list carries the step-by-step comments.
+        var text = applying(malformedHTMLStructureRules, to: html)
 
         // Div closures create single newlines - let unwrapEmailLineBreaks decide whether to join
         // Gmail mobile wraps each line in <div>, so using \n allows smart join logic to work
@@ -108,19 +165,12 @@ enum TextProcessing {
 
         // Tables: preserve row boundaries and add spacing between cells so text doesn't run together.
         // This is important for quote removal: Outlook/Apple "From/Sent/To/Subject" quote headers are often rendered in tables.
-        text = text.replacingOccurrences(
-            of: "</t[dh]>",
-            with: " ",
-            options: [.regularExpression, .caseInsensitive],
-            range: nil
-        )
+        text = applying(tableCellCloseRule, to: text)
         text = text.replacingOccurrences(of: "</tr>", with: "\n", options: .caseInsensitive, range: nil)
         text = text.replacingOccurrences(of: "</table>", with: "\n\n", options: .caseInsensitive, range: nil)
 
-        // Remove all HTML tags
-        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
-        // Remove truncated opening tags (e.g., snippet cut in middle of `<div style="...`).
-        text = text.replacingOccurrences(of: "<[a-zA-Z][^>\\n]*(?=\\n|$)", with: "", options: .regularExpression, range: nil)
+        // Remove all HTML tags, then truncated opening tags (e.g., snippet cut in middle of `<div style="...`).
+        text = applying(malformedHTMLTagStripRules, to: text)
 
         // Decode HTML entities in a single pass using the pre-built lookup table
         text = decodeHTMLEntities(text)
@@ -130,12 +180,9 @@ enum TextProcessing {
             scalar.value != 0x200B && scalar.value != 0x200C && scalar.value != 0x200D
         }.map { String($0) }.joined()
 
-        // Clean up whitespace
-        text = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
-        // Collapse whitespace-only lines to single newline
-        text = text.replacingOccurrences(of: "\\n[ \\t]*\\n", with: "\n\n", options: .regularExpression, range: nil)
-        // Collapse any sequence of newlines (with optional whitespace) to max 2 newlines
-        text = text.replacingOccurrences(of: "(\\s*\\n\\s*){2,}", with: "\n\n", options: .regularExpression, range: nil)
+        // Clean up whitespace: collapse runs of spaces/tabs, whitespace-only
+        // lines to a single newline, then any newline sequence to at most two.
+        text = applying(whitespaceNormalizationRules, to: text)
 
         // Trim whitespace from each line to clean up artifacts like " \n" from decoded &nbsp;
         text = text.split(separator: "\n", omittingEmptySubsequences: false)
@@ -495,7 +542,7 @@ enum TextProcessing {
 
                     if !endsWithPunctuation &&
                         !startsWithUppercase &&
-                        nextLine.range(of: #"^(https?://|www\.)"#, options: .caseInsensitive.union(.regularExpression)) == nil &&
+                        !startsWithURL(nextLine) &&
                         !currentIsSignatureDelimiter &&
                         !nextIsSignatureDelimiter {
                         // This is a soft wrap across blank lines - skip the blanks and continue joining
@@ -538,7 +585,7 @@ enum TextProcessing {
                 if !endsWithPunctuation &&
                     !endsWithColon &&
                     !startsWithUppercase &&
-                    trimmedLine.range(of: #"^(https?://|www\.)"#, options: .caseInsensitive.union(.regularExpression)) == nil &&
+                    !startsWithURL(trimmedLine) &&
                     !isListItem &&
                     !currentIsSignatureDelimiter &&
                     !nextIsSignatureDelimiter {
