@@ -59,19 +59,13 @@ enum HTMLMeaningfulContentChecker {
         return !normalized.isEmpty
     }
 
-    private static func removingMatches(of regex: NSRegularExpression?, from html: String) -> String {
-        guard let regex else { return html }
-        let range = NSRange(location: 0, length: html.utf16.count)
-        return regex.stringByReplacingMatches(in: html, options: [], range: range, withTemplate: "")
-    }
-
     static func renderableHTML(from html: String) -> String {
         stripNonRenderableContent(from: html)
     }
 
     private static func stripNonRenderableContent(from html: String) -> String {
-        var filtered = removingMatches(of: htmlCommentRegex, from: html)
-        filtered = removingMatches(of: headElementRegex, from: filtered)
+        var filtered = RegexSanitizer.replace(in: html, regex: htmlCommentRegex)
+        filtered = RegexSanitizer.replace(in: filtered, regex: headElementRegex)
 
         for regex in hiddenElementRegexes {
             for _ in 0..<maxHiddenElementStripPasses {

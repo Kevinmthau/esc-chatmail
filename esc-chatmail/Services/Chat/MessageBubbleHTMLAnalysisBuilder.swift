@@ -673,9 +673,11 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     /// `String.range(of:options: .regularExpression, range:)` over a compiled
-    /// pattern. NSRegularExpression's default bounds are opaque and anchoring,
-    /// which is what that search used: `^`/`$` match at the supplied range's
-    /// edges and lookaround cannot see outside it.
+    /// pattern. Both searches run NSRegularExpression with its default bounds,
+    /// so `^`/`$` anchor at the supplied range's edges in each, and an
+    /// empirical check on this toolchain found the two behave identically
+    /// (lookbehind, for one, sees outside the range in both), which is what
+    /// keeps the hoist behavior-preserving.
     private static func firstMatchRange(
         of regex: NSRegularExpression?,
         in string: String,
@@ -693,30 +695,16 @@ enum MessageBubbleHTMLAnalysisBuilder {
         firstMatchRange(of: regex, in: string) != nil
     }
 
-    private static func replacingMatches(
-        of regex: NSRegularExpression?,
-        in string: String,
-        with template: String
-    ) -> String {
-        guard let regex else { return string }
-        return regex.stringByReplacingMatches(
-            in: string,
-            options: [],
-            range: NSRange(string.startIndex..., in: string),
-            withTemplate: template
-        )
-    }
-
     private static func signatureContactOrRoleLines(in trailingHTML: String) -> [String] {
         let linkAwareHTML = htmlExposingLinkTargets(from: trailingHTML)
-        var lineSeparated = replacingMatches(of: lineBreakingTagRegex, in: linkAwareHTML, with: "\n")
-        lineSeparated = replacingMatches(of: htmlTagRegex, in: lineSeparated, with: " ")
-        lineSeparated = replacingMatches(of: nonBreakingSpaceEntityRegex, in: lineSeparated, with: " ")
+        var lineSeparated = RegexSanitizer.replace(in: linkAwareHTML, regex: lineBreakingTagRegex, with: "\n")
+        lineSeparated = RegexSanitizer.replace(in: lineSeparated, regex: htmlTagRegex, with: " ")
+        lineSeparated = RegexSanitizer.replace(in: lineSeparated, regex: nonBreakingSpaceEntityRegex, with: " ")
 
         return lineSeparated
             .components(separatedBy: .newlines)
             .map { line in
-                replacingMatches(of: whitespaceRunRegex, in: line, with: " ")
+                RegexSanitizer.replace(in: line, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             .filter { !$0.isEmpty }
@@ -1320,10 +1308,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
     private static let nonBreakingSpaceEntityRegex: NSRegularExpression? = {
         try? NSRegularExpression(pattern: #"&nbsp;|&#160;"#)
-    }()
-
-    private static let whitespaceRunRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"\s+"#)
     }()
 
     private static let linkTargetRegex: NSRegularExpression? = {

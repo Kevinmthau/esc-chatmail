@@ -7,10 +7,6 @@ enum PersonDisplayNameResolver {
     // Compiled once, with no options: every per-call site passed only
     // `.regularExpression`, so these stay case-sensitive. They run per
     // conversation row body on the main thread.
-    private static let whitespaceRunRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"\s+"#)
-    }()
-
     private static let unknownContactsCountRegex: NSRegularExpression? = {
         try? NSRegularExpression(pattern: #"^\d+\s+unknown contacts?$"#)
     }()
@@ -18,16 +14,6 @@ enum PersonDisplayNameResolver {
     private static let overflowCountSuffixRegex: NSRegularExpression? = {
         try? NSRegularExpression(pattern: #"\s*\+\d+\s*$"#)
     }()
-
-    private static func replacingMatches(
-        of regex: NSRegularExpression?,
-        in text: String,
-        with template: String
-    ) -> String {
-        guard let regex else { return text }
-        let range = NSRange(location: 0, length: text.utf16.count)
-        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
-    }
 
     private static func matches(_ regex: NSRegularExpression?, _ text: String) -> Bool {
         guard let regex else { return false }
@@ -205,11 +191,11 @@ enum PersonDisplayNameResolver {
 
     private static func normalizedCandidate(_ displayName: String?) -> String? {
         guard let displayName else { return nil }
-        let normalized = replacingMatches(
-            of: whitespaceRunRegex,
+        let normalized = RegexSanitizer.replace(
             in: displayName
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .replacingOccurrences(of: "\"", with: ""),
+            regex: RegexSanitizer.whitespaceRunRegex,
             with: " "
         )
 
@@ -317,7 +303,7 @@ enum PersonDisplayNameResolver {
         // address-joined fallbacks always contain "@" and never survive
         // normalizedCandidate. Trust such titles as name-derived — otherwise
         // every "Daisy +4" whose members use firstname@domain gets rejected.
-        let overflowStripped = replacingMatches(of: overflowCountSuffixRegex, in: displayName, with: "")
+        let overflowStripped = RegexSanitizer.replace(in: displayName, regex: overflowCountSuffixRegex, with: "")
         if overflowStripped != displayName {
             return false
         }

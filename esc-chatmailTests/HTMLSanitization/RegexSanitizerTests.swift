@@ -37,6 +37,33 @@ final class RegexSanitizerTests: XCTestCase {
         XCTAssertEqual(result, "abc N def N")
     }
 
+    // MARK: - replace(regex:) with an optional regex
+
+    func testReplace_optionalCompiledRegex_nil_returnsInputUnchanged() {
+        let regex: NSRegularExpression? = nil
+        XCTAssertEqual(RegexSanitizer.replace(in: "a  b", regex: regex, with: " "), "a  b")
+    }
+
+    func testReplace_optionalCompiledRegex_nonNil_replacesMatches() throws {
+        let regex: NSRegularExpression? = try NSRegularExpression(pattern: "\\d+", options: [])
+        XCTAssertEqual(RegexSanitizer.replace(in: "abc 123 def 456", regex: regex, with: "N"), "abc N def N")
+    }
+
+    // MARK: - whitespaceRunRegex
+
+    /// The shared `\s+` constant replaced five identical per-type copies; it
+    /// must stay options-free (ICU `\s`, case-sensitive) so their callers keep
+    /// collapsing the same characters to the literal " ".
+    func testWhitespaceRunRegex_optionsFree_collapsesICUWhitespaceRunsToSingleSpace() throws {
+        let regex = try XCTUnwrap(RegexSanitizer.whitespaceRunRegex)
+        XCTAssertEqual(regex.pattern, "\\s+")
+        XCTAssertEqual(regex.options, [])
+        XCTAssertEqual(
+            RegexSanitizer.replace(in: "a \t\n\u{00A0}b   c", regex: RegexSanitizer.whitespaceRunRegex, with: " "),
+            "a b c"
+        )
+    }
+
     // MARK: - applyRules
 
     func testApplyRules_stringRules_appliedInOrder() {

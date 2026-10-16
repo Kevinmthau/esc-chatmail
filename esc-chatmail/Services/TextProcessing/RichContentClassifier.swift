@@ -340,33 +340,20 @@ enum RichContentClassifier {
 
     // Compiled once, with no options: the per-call replacements passed only
     // `.regularExpression`, so these stay case-sensitive. Templates are the
-    // same literal " " / "" strings (no `$` or `\`).
+    // same literal " " / "" strings (no `$` or `\`). Whitespace runs collapse
+    // through the shared `RegexSanitizer.whitespaceRunRegex`.
     private static let htmlTagRegex: NSRegularExpression? = {
         try? NSRegularExpression(pattern: "<[^>]+>")
-    }()
-
-    private static let whitespaceRunRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "\\s+")
     }()
 
     private static let simpleFormattingTagRegex: NSRegularExpression? = {
         try? NSRegularExpression(pattern: "</?(?:div|span|br|p|a|b|i|strong|em|font|blockquote)[^>]*>")
     }()
 
-    private static func replacingMatches(
-        of regex: NSRegularExpression?,
-        in text: String,
-        with template: String
-    ) -> String {
-        guard let regex else { return text }
-        let range = NSRange(location: 0, length: text.utf16.count)
-        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
-    }
-
     private static func approximateTextContent(from html: String) -> String {
-        replacingMatches(
-            of: whitespaceRunRegex,
-            in: replacingMatches(of: htmlTagRegex, in: html, with: " "),
+        RegexSanitizer.replace(
+            in: RegexSanitizer.replace(in: html, regex: htmlTagRegex, with: " "),
+            regex: RegexSanitizer.whitespaceRunRegex,
             with: " "
         )
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -424,7 +411,7 @@ enum RichContentClassifier {
 
         // Check if content is predominantly simple div/span wrappers
         // Strip simple formatting tags and count what HTML tags remain
-        let afterSimpleStrip = replacingMatches(of: simpleFormattingTagRegex, in: html, with: "")
+        let afterSimpleStrip = RegexSanitizer.replace(in: html, regex: simpleFormattingTagRegex, with: "")
 
         // Count remaining HTML tags (complex tags that weren't stripped)
         let remainingTagCount = afterSimpleStrip.components(separatedBy: "<").count - 1
