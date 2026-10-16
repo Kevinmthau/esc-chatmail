@@ -63,10 +63,19 @@ enum MessagePreviewText {
         return subjectLower.hasPrefix("fwd:") || subjectLower.hasPrefix("fw:")
     }
 
+    /// Compiled once: `normalizedForwardSubject` compiled this on every pass of
+    /// its loop, per preview derivation. Case-insensitivity is the inline
+    /// `(?i)`, so no option is passed, as before.
+    private static let forwardPrefixPattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"^(?i)\s*(?:fwd|fw)\s*:\s*"#)
+    }()
+
     static func normalizedForwardSubject(from subject: String) -> String {
         var normalized = subject
         while true {
-            guard let regex = try? NSRegularExpression(pattern: #"^(?i)\s*(?:fwd|fw)\s*:\s*"#),
+            // A nil regex breaks out and still falls through to the
+            // trimmed-or-original return below, exactly as a compile failure did.
+            guard let regex = forwardPrefixPattern,
                   let match = regex.firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)),
                   let range = Range(match.range, in: normalized) else {
                 break
