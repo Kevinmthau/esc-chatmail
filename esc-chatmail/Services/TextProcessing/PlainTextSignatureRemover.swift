@@ -506,7 +506,7 @@ enum PlainTextSignatureRemover {
             ) ?? remainder
         }
         remainder = remainder.replacingOccurrences(of: #"[|•│┃¦<>():+.,/\-]+"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        remainder = RegexSanitizer.replace(in: remainder, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return remainder.isEmpty || matchesRegex(standaloneContactLabelPattern, in: remainder) ||
             remainder.range(of: #"^(?:tel|phone|mobile|office|direct|fax|cell)$"#, options: [.regularExpression, .caseInsensitive]) != nil ||

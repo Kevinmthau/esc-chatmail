@@ -799,8 +799,7 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
 
     private func normalizedVisibleTextLength(in html: String) -> Int {
         let text = TextProcessing.extractPlainText(from: html)
-        let normalized = text
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        let normalized = RegexSanitizer.replace(in: text, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return normalized.count
     }
