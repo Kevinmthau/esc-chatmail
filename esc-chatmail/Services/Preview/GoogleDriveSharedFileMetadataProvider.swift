@@ -199,7 +199,7 @@ actor GoogleDriveSharedFileMetadataProvider {
         }
 
         var title = HTMLEntityDecoder.decode(rawTitle)
-        title = title.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        title = RegexSanitizer.replace(in: title, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
         title = title.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let suffixPatterns = [

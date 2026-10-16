@@ -42,7 +42,8 @@ struct RegexSanitizer {
 
     /// `\s+`, compiled once with no options (ICU `\s`, case-sensitive), for the
     /// whitespace-run collapse that display-name normalization, avatar monogram
-    /// sources, the rich-content classifier and signature-line analysis all
+    /// sources, the rich-content classifier, signature-line analysis, the DOM
+    /// and recovered-HTML text extractors and the preview line normalizers all
     /// perform with the literal `" "` template. Shared so those copies cannot
     /// drift apart.
     static let whitespaceRunRegex: NSRegularExpression? = {

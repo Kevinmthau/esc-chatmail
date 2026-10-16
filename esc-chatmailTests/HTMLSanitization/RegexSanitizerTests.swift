@@ -64,6 +64,33 @@ final class RegexSanitizerTests: XCTestCase {
         )
     }
 
+    /// The call sites that swapped `replacingOccurrences(of: "\\s+", with: " ",
+    /// options: .regularExpression)` for the shared constant did so on the
+    /// premise that the two forms are byte-identical: same ICU `\s` class,
+    /// same literal template, full-string range. This pins that premise on
+    /// the C0 whitespace controls, NEL, NBSP, the Unicode space separators and
+    /// the line and paragraph separators, whichever of them ICU's `\s` admits,
+    /// and on a non-`\s` format character (ZWSP) that both forms leave alone.
+    /// HONEST SCOPE: it cannot detect a call site reverting to the per-call
+    /// form, whose output is identical by construction.
+    func testWhitespaceRunRegex_perCallReplacingOccurrencesInput_producesIdenticalOutput() {
+        let input = "a \t\u{000B}\u{000C}\r\n\u{0085}\u{00A0}\u{1680}\u{2000}\u{2007}"
+            + "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}b\u{200B}c \n"
+        let perCall = input.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        let shared = RegexSanitizer.replace(in: input, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
+
+        XCTAssertEqual(shared, perCall)
+        XCTAssertNotEqual(shared, input)
+        XCTAssertEqual(
+            RegexSanitizer.replace(
+                in: "a\u{00A0}\u{2028}\u{2029}\u{3000}b\u{200B}c",
+                regex: RegexSanitizer.whitespaceRunRegex,
+                with: " "
+            ),
+            "a b\u{200B}c"
+        )
+    }
+
     // MARK: - applyRules
 
     func testApplyRules_stringRules_appliedInOrder() {

@@ -154,9 +154,9 @@ struct ReservationPreviewExtractor {
     }
 
     private func normalizedReservationPartyTimeLine(_ line: String) -> String {
-        PreviewTextUtilities.normalizedText(line)
+        let bulletedLine = PreviewTextUtilities.normalizedText(line)
             .replacingOccurrences(of: "⋅", with: " • ")
             .replacingOccurrences(of: "·", with: " • ")
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return RegexSanitizer.replace(in: bulletedLine, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
     }
 }

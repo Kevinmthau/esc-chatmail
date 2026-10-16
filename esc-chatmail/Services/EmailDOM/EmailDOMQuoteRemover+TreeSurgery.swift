@@ -327,9 +327,8 @@ extension EmailDOMQuoteRemover {
     }
 
     private static func normalizedVisibleLineText(_ text: String) -> String {
-        return text
-            .replacingOccurrences(of: "\u{00a0}", with: " ")
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        let spacedText = text.replacingOccurrences(of: "\u{00a0}", with: " ")
+        return RegexSanitizer.replace(in: spacedText, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

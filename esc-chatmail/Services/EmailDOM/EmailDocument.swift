@@ -252,8 +252,7 @@ final class EmailDocument {
         guard !preserveParagraphs else {
             return text
         }
-        return text
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return RegexSanitizer.replace(in: text, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

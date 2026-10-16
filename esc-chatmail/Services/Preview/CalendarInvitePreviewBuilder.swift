@@ -380,10 +380,10 @@ struct CalendarInvitePreviewBuilder {
     }
 
     private func normalizedWhenLine(_ line: String) -> String {
-        normalizedText(line)
+        let bulletedLine = normalizedText(line)
             .replacingOccurrences(of: "⋅", with: " • ")
             .replacingOccurrences(of: "·", with: " • ")
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return RegexSanitizer.replace(in: bulletedLine, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
