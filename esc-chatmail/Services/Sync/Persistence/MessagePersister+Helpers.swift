@@ -696,18 +696,22 @@ extension MessagePersister {
             refreshConversationInboxIndicators(conversation)
         }
 
-        if let existingLastDate = conversation.lastMessageDate {
-            if message.internalDate >= existingLastDate {
-                conversation.lastMessageDate = message.internalDate
-                if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText) {
-                    conversation.snippet = previewText
-                }
-            }
-        } else {
+        if let existingLastDate = conversation.lastMessageDate,
+           message.internalDate < existingLastDate {
+            return
+        }
+        // Guarded like `hasInbox` above: an update to the conversation's
+        // newest message (a star, a read flip) reaches here with both values
+        // already current, and Core Data marks the row updated on an
+        // equal-value assignment, which fanned every such conversation
+        // through the list's sibling-save handling and the view-context
+        // merge for nothing.
+        if conversation.lastMessageDate != message.internalDate {
             conversation.lastMessageDate = message.internalDate
-            if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText) {
-                conversation.snippet = previewText
-            }
+        }
+        if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText),
+           conversation.snippet != previewText {
+            conversation.snippet = previewText
         }
     }
 

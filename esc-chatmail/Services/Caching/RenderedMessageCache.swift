@@ -116,9 +116,12 @@ actor RenderedMessageCache: MemoryWarningHandler {
     private let memoryLimitBytes: Int
     private let memoryObserver = MemoryWarningObserver()
     private var entries: [RenderedMessageKey: RenderedMessageCacheEntry] = [:]
-    /// Running sum of `entries[*].estimatedSizeBytes`, maintained by the only
-    /// two mutation sites (`storeValue` and `remove`) so `enforceLimits()`,
-    /// which runs on every store, does not reduce over every entry.
+    /// Running sum of `entries[*].estimatedSizeBytes`, so `enforceLimits()`,
+    /// which runs on every store, does not reduce over every entry. Three
+    /// sites write `entries`: `storeValue` adds the new entry's size and
+    /// subtracts the replaced one's, `remove` subtracts, and `touch` only
+    /// re-stamps `accessSequence`, so it must leave `estimatedSizeBytes`
+    /// unchanged or this total drifts from the sum.
     private var totalEstimatedSizeBytes = 0
     private var keysByMessageId: [String: Set<RenderedMessageKey>] = [:]
     private var inFlight: [RenderedMessageInFlightKey: RenderedMessageInFlightWork] = [:]
@@ -757,6 +760,9 @@ actor RenderedMessageCache: MemoryWarningHandler {
         guard var entry = entries[key] else { return }
         accessSequence &+= 1
         entry.accessSequence = accessSequence
+        // Same artifacts, same `estimatedSizeBytes`, so
+        // `totalEstimatedSizeBytes` is deliberately left alone here. A
+        // re-estimate belongs in `storeValue`, which maintains the total.
         entries[key] = entry
     }
 
