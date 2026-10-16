@@ -28,6 +28,70 @@ final class ConversationRoutingPolicyTests: XCTestCase {
         XCTAssertFalse(policy.shouldReactivateArchivedConversation(labelIDs: [], isFromMe: false))
     }
 
+    /// Revert-check: the per-field `if conversation.archivedAt != nil` and
+    /// `if conversation.hidden` guards in
+    /// `ConversationRoutingPolicy.reactivateArchivedConversationIfNeeded`.
+    /// Reverting them to the unconditional `archivedAt = nil; hidden = false`
+    /// fails the KVO count: an `@NSManaged` setter notifies on every
+    /// assignment, equal-value or not, so the already-false `hidden` would be
+    /// written again (and Core Data would mark the row updated for it)
+    /// alongside the real `archivedAt` change.
+    ///
+    /// HONEST SCOPE: `changedValues()` cannot carry that revert-check. On this
+    /// runtime an equal-value write marks the row updated (`hasChanges`,
+    /// `isUpdated`, `updatedObjects`, the did-save notification) but is
+    /// filtered out of `changedValues()` and `changedValuesForCurrentEvent()`,
+    /// and `hasChanges` is true either way because the other field really
+    /// changes. The `changedValues()` assertion pins only the positive side.
+    func testReactivateArchivedConversationIfNeeded_archivedButNotHidden_writesOnlyArchivedAt() throws {
+        let conversation = ConversationBuilder()
+            .withParticipantHash("archived-not-hidden")
+            .archivedOn(Date(timeIntervalSince1970: 100))
+            .build(in: context)
+        try testStack.saveViewContext()
+        XCTAssertFalse(conversation.hasChanges)
+        var archivedAtWrites = 0
+        var hiddenWrites = 0
+        let archivedAtObservation = conversation.observe(\.archivedAt, options: []) { _, _ in archivedAtWrites += 1 }
+        let hiddenObservation = conversation.observe(\.hidden, options: []) { _, _ in hiddenWrites += 1 }
+
+        policy.reactivateArchivedConversationIfNeeded(conversation, shouldReactivate: true)
+
+        archivedAtObservation.invalidate()
+        hiddenObservation.invalidate()
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertFalse(conversation.hidden)
+        XCTAssertEqual(archivedAtWrites, 1)
+        XCTAssertEqual(hiddenWrites, 0)
+        XCTAssertEqual(Set(conversation.changedValues().keys), ["archivedAt"])
+    }
+
+    /// Revert-check: the same two guards as above, from the other side; the
+    /// unconditional write would assign the already-nil `archivedAt` again.
+    /// Same HONEST SCOPE as above for the `changedValues()` assertion.
+    func testReactivateArchivedConversationIfNeeded_hiddenButNotArchived_writesOnlyHidden() throws {
+        let conversation = ConversationBuilder()
+            .withParticipantHash("hidden-not-archived")
+            .setHidden()
+            .build(in: context)
+        try testStack.saveViewContext()
+        XCTAssertFalse(conversation.hasChanges)
+        var archivedAtWrites = 0
+        var hiddenWrites = 0
+        let archivedAtObservation = conversation.observe(\.archivedAt, options: []) { _, _ in archivedAtWrites += 1 }
+        let hiddenObservation = conversation.observe(\.hidden, options: []) { _, _ in hiddenWrites += 1 }
+
+        policy.reactivateArchivedConversationIfNeeded(conversation, shouldReactivate: true)
+
+        archivedAtObservation.invalidate()
+        hiddenObservation.invalidate()
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertFalse(conversation.hidden)
+        XCTAssertEqual(archivedAtWrites, 0)
+        XCTAssertEqual(hiddenWrites, 1)
+        XCTAssertEqual(Set(conversation.changedValues().keys), ["hidden"])
+    }
+
     func testSelectParticipantHashConversation_prefersActiveConversation() {
         let participantHash = "same-participant-hash"
         let archivedConversation = ConversationBuilder()
