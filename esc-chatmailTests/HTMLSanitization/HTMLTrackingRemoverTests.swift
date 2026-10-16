@@ -15,6 +15,29 @@ final class HTMLTrackingRemoverTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - removeTrackingPixels: early return without <img>
+
+    /// Tracking-domain text that is not inside an <img> tag was never matched
+    /// (every pattern starts with "<img"), so the document comes back
+    /// byte-identical; an upper-case <IMG> pixel is still removed, which is
+    /// what makes the early return's case-insensitive probe load-bearing.
+    ///
+    /// Revert-check: the `html.range(of: "<img", options: .caseInsensitive)`
+    /// guard in `HTMLTrackingRemover.removeTrackingPixels`; a case-sensitive
+    /// probe would return the <IMG> document unchanged and fail the second
+    /// assertion. HONEST SCOPE: deleting the guard outright leaves both
+    /// outputs the same, so this cannot fail on that revert.
+    func testRemoveTrackingPixels_documentWithoutImages_returnedUnchangedAndUppercaseImgStillRemoved() {
+        let noImages = "<p>Read more at <a href=\"https://www.google-analytics.com/pixel.gif\">analytics</a></p><div style=\"width:1px;height:1px\"></div>"
+        XCTAssertEqual(sut.removeTrackingPixels(noImages), noImages)
+
+        let uppercasePixel = "<p>before</p><IMG SRC=\"https://x.com/p.gif\" WIDTH=\"1\" HEIGHT=\"1\"><p>after</p>"
+        let result = sut.removeTrackingPixels(uppercasePixel)
+        XCTAssertFalse(result.lowercased().contains("<img"))
+        XCTAssertTrue(result.contains("<p>before</p>"))
+        XCTAssertTrue(result.contains("<p>after</p>"))
+    }
+
     // MARK: - removeTrackingPixels: 1x1 images
 
     func testRemoveTrackingPixels_widthHeight1_removed() {
