@@ -75,10 +75,21 @@ struct ConversationRollupSnapshot: Sendable {
         to conversation: Conversation,
         routingPolicy: ConversationRoutingPolicy = ConversationRoutingPolicy()
     ) {
+        // Each write below is skipped when the value is unchanged. Core Data
+        // marks a row updated on an equal-value assignment, so an unguarded
+        // rollup dirtied every active conversation on every run and each one
+        // then fanned through the list's sibling-save handling and the view
+        // context merge for nothing.
         // Draft ownership preserves visibility, not stale mailbox state.
-        conversation.hasInbox = hasInbox
-        conversation.inboxUnreadCount = inboxUnreadCount
-        conversation.latestInboxDate = latestInboxDate
+        if conversation.hasInbox != hasInbox {
+            conversation.hasInbox = hasInbox
+        }
+        if conversation.inboxUnreadCount != inboxUnreadCount {
+            conversation.inboxUnreadCount = inboxUnreadCount
+        }
+        if conversation.latestInboxDate != latestInboxDate {
+            conversation.latestInboxDate = latestInboxDate
+        }
         if lastMessageDate == nil {
             // Sync can drain a conversation after the user starts another reply.
             // Preserve its list entry until that saved draft is sent or discarded.
@@ -93,11 +104,12 @@ struct ConversationRollupSnapshot: Sendable {
                 return
             }
         }
-        conversation.lastMessageDate = lastMessageDate
-        if lastMessageDate == nil {
-            conversation.snippet = nil
-        } else {
-            conversation.snippet = MessagePreviewText.nonEmpty(snippet)
+        if conversation.lastMessageDate != lastMessageDate {
+            conversation.lastMessageDate = lastMessageDate
+        }
+        let newSnippet: String? = lastMessageDate == nil ? nil : MessagePreviewText.nonEmpty(snippet)
+        if conversation.snippet != newSnippet {
+            conversation.snippet = newSnippet
         }
         routingPolicy.applyArchiveState(to: conversation, snapshot: self)
     }

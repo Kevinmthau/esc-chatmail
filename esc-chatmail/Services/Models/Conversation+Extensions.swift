@@ -30,9 +30,18 @@ extension Conversation {
     @NSManaged public var messages: Set<Message>?
     @NSManaged public var participants: Set<ConversationParticipant>?
 
+    /// The setter leaves the attribute alone when the raw value is unchanged:
+    /// Core Data marks the row updated on an equal-value assignment, and the
+    /// migration pass re-asserts every conversation's type on every run. It
+    /// compares the raw string, not the getter's value, so an unknown stored
+    /// raw value is still normalized rather than read back as `.oneToOne`.
     var conversationType: ConversationType {
         get { ConversationType(rawValue: type) ?? .oneToOne }
-        set { type = newValue.rawValue }
+        set {
+            if type != newValue.rawValue {
+                type = newValue.rawValue
+            }
+        }
     }
 
     /// Returns participant emails from this conversation.

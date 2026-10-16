@@ -4718,6 +4718,62 @@ final class VirtualScrollStateTests: XCTestCase {
         )
     }
 
+    /// At rest, every few rows of scroll reach the covered-window branch of
+    /// `updateVisibleMessages` with rows equal to the published ones; an
+    /// unconditional assignment republished them, the chat session forwarded
+    /// the change, and every realized bubble re-evaluated its body.
+    ///
+    /// Revert-check: dropping the `rows != visibleMessages` guard in
+    /// `VirtualScrollState.updateVisibleMessages` (assigning the resolved
+    /// rows unconditionally) publishes once here.
+    func testMarkIndexVisible_withinCoveredWindow_doesNotRepublishIdenticalRows() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 10)
+        // No edge preloads (threshold 0), so only updateVisibleMessages moves
+        // the window.
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 0
+        )
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil { !state.isLoadingMore && !state.visibleMessages.isEmpty }
+        state.markIndexVisible(3)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 2 }
+
+        // Position 6 requests 5..<10, which the dataset end clamps, so the
+        // loaded window 5..<10 covers every later request down to the last
+        // row.
+        state.markIndexVisible(6)
+        let expectedIDs = Array(messages[5..<10]).map(\.objectID)
+        await waitUntil {
+            !state.isLoadingMore && state.visibleMessages.map(\.objectID) == expectedIDs
+        }
+
+        var publishCount = 0
+        let cancellable = state.$visibleMessages.dropFirst().sink { _ in
+            publishCount += 1
+        }
+        defer { cancellable.cancel() }
+
+        // Three rows past the ±2 dead zone, still inside the covered window.
+        state.markIndexVisible(9)
+
+        XCTAssertEqual(state.scrollPosition, 9)
+        XCTAssertFalse(state.isLoadingMore)
+        XCTAssertEqual(publishCount, 0)
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
+    }
+
     /// A replay whose union would exceed the window cap trims only the
     /// overflow, on the side the reader is leaving, instead of collapsing to
     /// the requested range and dropping every row above it at once.

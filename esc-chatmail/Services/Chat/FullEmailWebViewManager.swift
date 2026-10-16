@@ -970,10 +970,12 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
 /// Prepares full original-email HTML while chat bubbles are visible (and when a bubble is tapped),
 /// then hands that HTML to the reader so the open can skip cold sanitization/wrapping.
 ///
-/// Prepared HTML warming is the default safe path. Active off-screen `WKWebView` adoption remains
-/// opt-in for scroll-time visible-row warming through `FullEmailWebViewAdoptionPolicy`. A separate
-/// explicit-open path can start or promote a matching WebView after the user opens the full original
-/// email, making later opens eligible for checkout.
+/// Prepared HTML warming always runs. Active off-screen `WKWebView` adoption for scroll-time
+/// visible-row warming is on by default and governed by `FullEmailWebViewAdoptionPolicy`, whose only
+/// switch is the kill switch (`-ESCDisableFullEmailWebViewAdoption` /
+/// `ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION=1`). A separate explicit-open path can start or promote a
+/// matching WebView after the user opens the full original email, making later opens eligible for
+/// checkout.
 @MainActor
 final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting {
     static let shared = FullEmailWebViewManager()
@@ -1089,9 +1091,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     }
 
     /// Resolves the locally-available wrapped original HTML (no network recovery) and keeps a prepared
-    /// payload ready for the reader. When active WebView adoption is explicitly enabled, also
-    /// pre-renders an off-screen WebView. Cheap to call repeatedly: it no-ops when up-to-date state is
-    /// already warm.
+    /// payload ready for the reader. Unless the adoption kill switch is set
+    /// (`FullEmailWebViewAdoptionPolicy.isEnabled` is false), also pre-renders an off-screen WebView.
+    /// Cheap to call repeatedly: it no-ops when up-to-date state is already warm.
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {
         guard acceptsAccountWork else { return }
         let warmOperationID = UUID()

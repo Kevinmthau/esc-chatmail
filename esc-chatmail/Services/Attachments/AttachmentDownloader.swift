@@ -353,7 +353,11 @@ enum SynthesizedInlineAttachmentRecovery {
 final class AttachmentDownloader: ObservableObject {
     static let shared = AttachmentDownloader()
 
-    @Published private var downloadProgressByKey: [AttachmentDownloadKey: Double] = [:]
+    // Not @Published: nothing renders `downloadProgress(messageId:attachmentId:)`
+    // (views read only `isDownloading`), and publishing the 0.5 / 1.0 progress
+    // writes invalidated every attachment view observing this object for no
+    // rendered change.
+    private var downloadProgressByKey: [AttachmentDownloadKey: Double] = [:]
     @Published private var activeDownloadKeys: Set<AttachmentDownloadKey> = []
 
     private let apiClient: any GmailAPIClientProtocol
@@ -727,7 +731,11 @@ final class AttachmentDownloader: ObservableObject {
         downloadProgressByKey[downloadKey] = 0.0
         defer {
             if !isRetryContinuation {
-                activeDownloadKeys.remove(downloadKey)
+                // `Set.remove` of an absent key still publishes; a cancel may
+                // already have removed it.
+                if activeDownloadKeys.contains(downloadKey) {
+                    activeDownloadKeys.remove(downloadKey)
+                }
                 downloadProgressByKey.removeValue(forKey: downloadKey)
                 let waiters = activeDownloadWaiters
                     .removeValue(forKey: downloadKey)
