@@ -55,6 +55,63 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(existingMessage.isNewsletter)
     }
 
+    /// A star or read flip on a conversation's newest message takes the
+    /// fast list update with `lastMessageDate` and the preview already
+    /// current. An unguarded assignment dirtied the row (Core Data marks it
+    /// updated on an equal-value write), which fanned every such
+    /// conversation through the list's sibling-save handling and the
+    /// view-context merge for nothing.
+    ///
+    /// Revert-check: the `lastMessageDate` / `snippet` equality guards at
+    /// the end of
+    /// `MessagePersister.applyFastConversationListUpdateForExistingMessage`;
+    /// assigning either unconditionally leaves `hasChanges` true after the
+    /// second call.
+    func testApplyFastConversationListUpdateForExistingMessage_unchangedNewestMessage_leavesConversationClean() throws {
+        let staleDate = Date(timeIntervalSince1970: 100)
+        let messageDate = Date(timeIntervalSince1970: 200)
+        let conversation = ConversationBuilder()
+            .withSnippet("Stale preview")
+            .withLastMessageDate(staleDate)
+            .visible()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("message-fast-update-clean")
+            .withDate(messageDate)
+            .withSnippet("Newest preview")
+            .inConversation(conversation)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        // No INBOX membership or unread change on either side, so only the
+        // newest-message block runs, as for a star on a non-INBOX row.
+        persister.applyFastConversationListUpdateForExistingMessage(
+            message,
+            in: conversation,
+            previousHadInboxLabel: false,
+            previousWasUnread: false,
+            currentHasInboxLabel: false,
+            currentIsUnread: false
+        )
+        XCTAssertEqual(conversation.lastMessageDate, messageDate)
+        XCTAssertEqual(conversation.snippet, "Newest preview")
+        try testStack.saveViewContext()
+        XCTAssertFalse(context.hasChanges)
+
+        persister.applyFastConversationListUpdateForExistingMessage(
+            message,
+            in: conversation,
+            previousHadInboxLabel: false,
+            previousWasUnread: false,
+            currentHasInboxLabel: false,
+            currentIsUnread: false
+        )
+
+        XCTAssertFalse(conversation.hasChanges)
+        XCTAssertTrue(conversation.changedValues().isEmpty)
+        XCTAssertFalse(context.hasChanges)
+    }
+
     func testCreateNewMessage_persistsChatPreviewText() async throws {
         var headers = ProcessedHeaders()
         headers.subject = "Chat preview"
@@ -2013,16 +2070,20 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(existingConversation.snippet, "Old row preview")
     }
 
-    /// A star or read-state refresh of the newest message re-derives the same
-    /// `lastMessageDate` and `snippet`; assigning them again would mark the
+    /// The INBOX-path counterpart of the non-INBOX variant near the top of
+    /// this class: a star or read-state refresh of the newest inbox message
+    /// re-derives the same `lastMessageDate`, `snippet`, `hasInbox` and
+    /// `latestInboxDate`, and reaches `reactivateArchivedConversationIfNeeded`
+    /// on a visible row; assigning any of them again would mark the
     /// conversation row updated and fan it through the list's sibling-save
     /// handling for no visible change.
     ///
-    /// Revert-check: the `existingLastDate != message.internalDate` and
-    /// `conversation.snippet != previewText` guards in
-    /// `MessagePersister.applyFastConversationListUpdateForExistingMessage`;
-    /// removing either leaves `hasChanges` true after the call.
-    func testApplyFastConversationListUpdateForExistingMessage_unchangedNewestMessage_leavesConversationClean() throws {
+    /// Revert-check: the `conversation.lastMessageDate != message.internalDate`
+    /// and `conversation.snippet != previewText` guards at the end of
+    /// `MessagePersister.applyFastConversationListUpdateForExistingMessage`,
+    /// plus the `!conversation.hasInbox` guard in its INBOX branch; removing
+    /// any of them leaves `hasChanges` true after the call.
+    func testApplyFastConversationListUpdateForExistingMessage_unchangedNewestInboxMessage_leavesConversationClean() throws {
         let messageDate = Date(timeIntervalSince1970: 1_700_000_000)
         let conversation = ConversationBuilder()
             .visible()
