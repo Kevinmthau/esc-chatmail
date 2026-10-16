@@ -130,7 +130,10 @@ struct ConversationListView: View {
             )
         }
         .onAppear {
-            AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
+            // API and Contacts only; safe to call repeatedly (each runs once per
+            // launch). WebKit is deliberately warmed solely by the post-init task
+            // in esc_chatmailApp.initializeApp(), off the first list layout passes.
+            AppPrewarmer.prewarmAll()
             viewModel.onAppear(in: viewContext)
             // Lookups never prompt on their own, so this is the one deliberate
             // Contacts permission request (no-op after first launch/answer).

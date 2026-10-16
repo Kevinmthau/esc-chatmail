@@ -8,21 +8,28 @@ import Contacts
 /// - OAuth token refresh - ~10 seconds on first API call after app launch
 /// - Contacts framework - ~1 second on first CNContactStore access
 ///
-/// Call early in app lifecycle (e.g., ConversationListView.onAppear).
+/// `prewarmAll()` (ConversationListView.onAppear) warms the API and Contacts
+/// only. WebKit is deliberately warmed solely by the post-init task in
+/// `esc_chatmailApp.initializeApp()`, which calls `prewarmWebKitIfNeeded()`
+/// about two seconds after init: launching the WebContent/GPU/Networking
+/// processes during the first list layout passes contended with the first
+/// sync and the launch repair passes, and warming it from `prewarmAll()`
+/// left that deliberate deferral a no-op on every authenticated launch.
 enum AppPrewarmer {
     private static var hasPrewarmedWebKit = false
     private static var hasPrewarmedAPI = false
     private static var hasPrewarmedContacts = false
 
-    /// Pre-warms all subsystems. Safe to call multiple times.
+    /// Pre-warms the API and Contacts subsystems. Safe to call multiple times.
+    /// WebKit is not included on purpose; see the type doc.
     @MainActor
     static func prewarmAll() {
-        prewarmWebKitIfNeeded()
         prewarmAPIIfNeeded()
         prewarmContactsIfNeeded()
     }
 
-    /// Pre-warms WebKit processes
+    /// Pre-warms WebKit processes. Called only by the post-init task in
+    /// `esc_chatmailApp.initializeApp()`, never from `prewarmAll()`.
     @MainActor
     static func prewarmWebKitIfNeeded() {
         guard !hasPrewarmedWebKit else { return }
