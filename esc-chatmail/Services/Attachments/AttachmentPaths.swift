@@ -278,7 +278,10 @@ struct AttachmentPaths {
         guard let url = fullURL(for: relativePath) else { return false }
         
         do {
-            try data.write(to: url)
+            // Atomic: readers treat file presence as validity (`needsRedownload`,
+            // the local_inline_ confirmation), so an in-place write killed midway
+            // would leave a truncated file nothing ever re-downloads.
+            try data.write(to: url, options: .atomic)
             return true
         } catch {
             Log.error("Failed to save attachment data", category: .attachment, error: error)
