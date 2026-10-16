@@ -574,9 +574,11 @@ enum CSSParser {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    // Specificity counting patterns, compiled once with the `.caseInsensitive`
-    // `regexMatchCount(in:pattern:)` applied per call. cssSelectorSpecificity
-    // runs per selector per width declaration in a media block.
+    // Specificity counting patterns, compiled once. Each keeps the
+    // `.caseInsensitive` option the retired per-call
+    // `regexMatchCount(in:pattern:)` overload compiled with.
+    // cssSelectorSpecificity runs per selector per width declaration in a
+    // media block.
     private static let specificityIDRegex = try? NSRegularExpression(
         pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#,
         options: [.caseInsensitive]
@@ -857,15 +859,9 @@ enum CSSParser {
         return mediaTypes.count == 1 && (mediaTypes[0] == "screen" || mediaTypes[0] == "all")
     }
 
-    static func regexMatchCount(in text: String, pattern: String) -> Int {
-        regexMatchCount(
-            in: text,
-            regex: try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
-        )
-    }
-
-    /// The precompiled form of `regexMatchCount(in:pattern:)`; nil counts as
-    /// zero matches, as a pattern that failed to compile did.
+    /// Counts the matches of a precompiled pattern; nil counts as zero matches,
+    /// as a pattern that failed to compile did under the retired per-call
+    /// `regexMatchCount(in:pattern:)` overload.
     static func regexMatchCount(in text: String, regex: NSRegularExpression?) -> Int {
         guard let regex else {
             return 0
