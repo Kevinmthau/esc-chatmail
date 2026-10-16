@@ -145,6 +145,88 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.snippet, "Latest outgoing")
     }
 
+    /// A rollup over unchanged messages must leave the row clean: Core Data
+    /// marks a row updated on an equal-value assignment, and every dirty
+    /// conversation fans through the list's sibling-save handling and the
+    /// view-context merge.
+    ///
+    /// Revert-check: the equal-value guards in
+    /// `ConversationRollupSnapshot.apply(to:routingPolicy:)` (hasInbox,
+    /// inboxUnreadCount, latestInboxDate, lastMessageDate, snippet) and the
+    /// `archivedAt` / `hidden` guards in the `hasInbox` branch of
+    /// `ConversationRoutingPolicy.applyArchiveState(to:snapshot:)`; removing
+    /// either set leaves `hasChanges` true after the second rollup.
+    func testUpdateRollups_unchangedInboxSnapshot_leavesConversationClean() throws {
+        let inboxDate = Date(timeIntervalSince1970: 200)
+        let conversation = ConversationBuilder()
+            .visible()
+            .build(in: context)
+
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let inboxMessage = MessageBuilder()
+            .withId("rollup-clean-inbox")
+            .withDate(inboxDate)
+            .withSnippet("Inbox preview")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        inboxMessage.addToLabels(inboxLabel)
+        try testStack.saveViewContext()
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+        XCTAssertTrue(conversation.hasInbox)
+        XCTAssertEqual(conversation.inboxUnreadCount, 1)
+        XCTAssertEqual(conversation.latestInboxDate, inboxDate)
+        XCTAssertEqual(conversation.lastMessageDate, inboxDate)
+        XCTAssertEqual(conversation.snippet, "Inbox preview")
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertFalse(conversation.hidden)
+        try testStack.saveViewContext()
+        XCTAssertFalse(context.hasChanges)
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertFalse(conversation.hasChanges)
+        XCTAssertTrue(conversation.changedValues().isEmpty)
+        XCTAssertFalse(context.hasChanges)
+    }
+
+    /// The archived branch is the other steady state every rollup re-asserts
+    /// (`archivedAt` kept, `hidden = true`).
+    ///
+    /// Revert-check: the `!conversation.hidden` guard before `hidden = true`
+    /// in `ConversationRoutingPolicy.applyArchiveState(to:snapshot:)`;
+    /// without it the second rollup dirties the row again.
+    func testUpdateRollups_unchangedArchivedSnapshot_leavesConversationClean() throws {
+        let receivedDate = Date(timeIntervalSince1970: 200)
+        let conversation = ConversationBuilder()
+            .visible()
+            .build(in: context)
+
+        MessageBuilder()
+            .withId("rollup-clean-archived")
+            .withDate(receivedDate)
+            .withSnippet("Archived preview")
+            .inConversation(conversation)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+        XCTAssertFalse(conversation.hasInbox)
+        XCTAssertNotNil(conversation.archivedAt)
+        XCTAssertTrue(conversation.hidden)
+        XCTAssertEqual(conversation.lastMessageDate, receivedDate)
+        XCTAssertEqual(conversation.snippet, "Archived preview")
+        try testStack.saveViewContext()
+        XCTAssertFalse(context.hasChanges)
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertFalse(conversation.hasChanges)
+        XCTAssertTrue(conversation.changedValues().isEmpty)
+        XCTAssertFalse(context.hasChanges)
+    }
+
     func testUpdateRollups_newsletterWithBlankSubjectFallsBackToStoredSnippet() throws {
         let messageDate = Date(timeIntervalSince1970: 200)
         let conversation = ConversationBuilder()

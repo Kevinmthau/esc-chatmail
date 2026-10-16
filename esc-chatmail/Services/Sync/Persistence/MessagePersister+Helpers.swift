@@ -676,7 +676,9 @@ extension MessagePersister {
         }
 
         if currentHasInboxLabel {
-            conversation.hasInbox = true
+            if !conversation.hasInbox {
+                conversation.hasInbox = true
+            }
             if let existingLatestInboxDate = conversation.latestInboxDate {
                 if message.internalDate > existingLatestInboxDate {
                     conversation.latestInboxDate = message.internalDate

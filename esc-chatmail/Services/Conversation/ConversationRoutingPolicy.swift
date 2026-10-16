@@ -38,25 +38,34 @@ struct ConversationRoutingPolicy: Sendable {
         conversation.hidden = false
     }
 
+    /// Every write here is skipped when the value is unchanged. Core Data
+    /// marks a row updated on an equal-value assignment, and this runs after
+    /// every rollup, so an unguarded `archivedAt = nil; hidden = false` kept
+    /// every inbox conversation dirty on every run even once the rollup
+    /// itself wrote nothing.
     func applyArchiveState(
         to conversation: Conversation,
         snapshot: ConversationRollupSnapshot
     ) {
         if snapshot.hasInbox {
-            conversation.archivedAt = nil
-            conversation.hidden = false
+            if conversation.archivedAt != nil {
+                conversation.archivedAt = nil
+            }
+            if conversation.hidden {
+                conversation.hidden = false
+            }
             return
         }
 
         if snapshot.isSentOnlyConversation {
-            if conversation.archivedAt == nil {
+            if conversation.archivedAt == nil, conversation.hidden {
                 conversation.hidden = false
             }
             return
         }
 
         if snapshot.latestVisibleMessageIsOutgoing {
-            if conversation.archivedAt == nil {
+            if conversation.archivedAt == nil, conversation.hidden {
                 conversation.hidden = false
             }
             return
@@ -65,7 +74,9 @@ struct ConversationRoutingPolicy: Sendable {
         if conversation.archivedAt == nil {
             conversation.archivedAt = Date()
         }
-        conversation.hidden = true
+        if !conversation.hidden {
+            conversation.hidden = true
+        }
     }
 
     private func isLessRecentConversation(_ lhs: Conversation, than rhs: Conversation) -> Bool {
