@@ -263,7 +263,16 @@ extension VirtualScrollState {
             // Current window already covers the requested range.
             // Keep rendering the whole window so the user can continue scrolling
             // through the buffered messages without the view pruning rows away.
-            visibleMessages = resolveCachedRows(for: window.messageIDs)
+            // Every few rows of scroll land here through `markIndexVisible`,
+            // and at rest the resolved rows equal the published ones.
+            // Assigning anyway published objectWillChange, which the chat
+            // session forwards, so every realized bubble re-evaluated its
+            // body for nothing. Resolving stays unconditional: it also
+            // resolves IDs the row cache has not seen yet.
+            let rows = resolveCachedRows(for: window.messageIDs)
+            if rows != visibleMessages {
+                visibleMessages = rows
+            }
             return false
         }
 
