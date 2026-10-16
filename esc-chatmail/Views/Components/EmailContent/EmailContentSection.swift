@@ -124,8 +124,8 @@ struct EmailContentSection: View {
 
     /// Warms the wrapped full original-email HTML via `FullEmailWebViewManager` so a tap can skip cold
     /// preparation. Debounced so fast scrolling does not do work for rows that immediately leave; the
-    /// manager bounds total warmed payloads, de-dupes already-warm content, and keeps active WebView
-    /// warming disabled unless adoption is explicitly enabled.
+    /// manager bounds total warmed payloads, de-dupes already-warm content, and skips active WebView
+    /// warming only when the adoption kill switch (`FullEmailWebViewAdoptionPolicy`) is set.
     private func warmFullEmailWebViewIfNeeded() async {
         guard await Task.sleepUnlessCancelled(nanoseconds: 200_000_000) else {
             return
