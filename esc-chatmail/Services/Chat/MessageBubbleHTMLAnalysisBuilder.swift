@@ -99,7 +99,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
         from html: String?,
         parsedEmail: ParsedEmail?,
         attachments: [MessageBubbleAttachmentSnapshot],
-        usesExpandedHeuristics: Bool
+        usesExpandedHeuristics: Bool,
+        signatureBoundaries: SignatureBoundaryOffsets?
     ) -> Set<String> {
         guard let html else { return [] }
 
@@ -126,7 +127,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         )
 
         let likelySignatureInline = extractLikelySignatureInlineContentIDs(
-            from: html,
+            boundaries: signatureBoundaries,
             attachments: attachments,
             usesExpandedHeuristics: usesExpandedHeuristics
         )
@@ -166,28 +167,24 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func extractLikelySignatureInlineContentIDs(
-        from html: String,
+        boundaries: SignatureBoundaryOffsets?,
         attachments: [MessageBubbleAttachmentSnapshot],
         usesExpandedHeuristics: Bool
     ) -> Set<String> {
-        let lowercasedHTML = html.lowercased()
-        guard lowercasedHTML.contains("cid:") else {
+        // nil means the lowercased HTML holds no "cid:" reference, the case
+        // this function's own guard used to return [] for.
+        guard let boundaries else {
             return []
         }
 
-        let hardSignatureBoundaryOffset = firstHardSignatureBoundaryOffset(in: lowercasedHTML)
-        let replyBoundaryOffset = firstReplyBoundaryOffset(in: lowercasedHTML)
-        let trailingSignatureStartOffsets = standaloneTrailingSignatureStartOffsets(
-            in: lowercasedHTML,
-            before: replyBoundaryOffset
-        )
+        let lowercasedHTML = boundaries.lowercasedHTML
+        let hardSignatureBoundaryOffset = boundaries.hardSignatureBoundaryOffset
+        let replyBoundaryOffset = boundaries.replyBoundaryOffset
+        let trailingSignatureStartOffsets = boundaries.trailingSignatureStartOffsets
         // Branding-only evidence still needs an asset-like identity. A sign-off
         // corroborated by contact/role text is strong enough to judge dimensions
         // without guessing which mail client's filename produced the image.
-        let corroboratedOffsets = standaloneSignOffContactOrRoleRanges(
-            in: lowercasedHTML,
-            range: signatureSignalSearchRange(in: lowercasedHTML, before: replyBoundaryOffset)
-        ).map { lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: $0.lowerBound) }
+        let corroboratedOffsets = boundaries.corroboratedSignOffOffsets
 
         let firstSignOffOffset = standaloneSignOffRanges(in: lowercasedHTML).first.map {
             lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: $0.lowerBound)
@@ -277,8 +274,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
         }
 
-        let authoredOffsets = authoredSignatureWrapperPatterns.compactMap { pattern in
-            firstCorroboratedAuthoredSignatureMarkerOffset(matching: pattern, in: lowercasedHTML)
+        let authoredOffsets = authoredSignatureWrapperRegexes.compactMap { regex in
+            firstCorroboratedAuthoredSignatureMarkerOffset(matching: regex, in: lowercasedHTML)
         }
 
         return (trustedOffsets + authoredOffsets).min()
@@ -291,13 +288,13 @@ enum MessageBubbleHTMLAnalysisBuilder {
     // the trailing window, so a stray class name does not suppress every later
     // inline image.
     private static func firstCorroboratedAuthoredSignatureMarkerOffset(
-        matching pattern: String,
+        matching regex: NSRegularExpression,
         in lowercasedHTML: String
     ) -> Int? {
         var searchStart = lowercasedHTML.startIndex
-        while let range = lowercasedHTML.range(
-            of: pattern,
-            options: .regularExpression,
+        while let range = firstMatchRange(
+            of: regex,
+            in: lowercasedHTML,
             range: searchStart..<lowercasedHTML.endIndex
         ) {
             let windowEnd = lowercasedHTML.index(
@@ -326,8 +323,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
     private static func firstReplyBoundaryOffset(in lowercasedHTML: String) -> Int? {
         var candidates: [Int] = []
-        for pattern in replyOnAttributionBoundaryPatterns {
-            for replyAttributionRange in regexRanges(of: pattern, in: lowercasedHTML)
+        for regex in replyOnAttributionBoundaryRegexes {
+            for replyAttributionRange in regexRanges(of: regex, in: lowercasedHTML)
                 where replyOnAttributionHasDateOrEmailSignal(in: lowercasedHTML[replyAttributionRange]) {
                 candidates.append(
                     lowercasedHTML.distance(
@@ -338,8 +335,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
             }
         }
 
-        for pattern in standaloneReplyAttributionBoundaryPatterns {
-            for replyAttributionRange in regexRanges(of: pattern, in: lowercasedHTML) {
+        for regex in standaloneReplyAttributionBoundaryRegexes {
+            for replyAttributionRange in regexRanges(of: regex, in: lowercasedHTML) {
                 candidates.append(
                     lowercasedHTML.distance(
                         from: lowercasedHTML.startIndex,
@@ -349,11 +346,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
             }
         }
 
-        for pattern in replyHeaderBoundaryPatterns {
-            if let replyHeaderRange = lowercasedHTML.range(
-                of: pattern,
-                options: .regularExpression
-            ) {
+        for regex in replyHeaderBoundaryRegexes {
+            if let replyHeaderRange = firstMatchRange(of: regex, in: lowercasedHTML) {
                 let replyHeaderOffset = lowercasedHTML.distance(
                     from: lowercasedHTML.startIndex,
                     to: replyHeaderRange.lowerBound
@@ -366,10 +360,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func replyOnAttributionHasDateOrEmailSignal(in attributionHTML: Substring) -> Bool {
-        attributionHTML.range(
-            of: replyAttributionDateOrEmailSignalPattern,
-            options: .regularExpression
-        ) != nil
+        matches(replyAttributionDateOrEmailSignalRegex, String(attributionHTML))
     }
 
     private static func signatureSignalSearchRange(
@@ -391,18 +382,25 @@ enum MessageBubbleHTMLAnalysisBuilder {
         return startIndex..<endIndex
     }
 
+    /// Both offset sets `extractLikelySignatureInlineContentIDs` keys off, from
+    /// one pass: the contact/role ranges feed `corroboratedSignOffOffsets` as
+    /// well as the sorted union, so that filter runs once instead of twice
+    /// over the same search range.
     private static func standaloneTrailingSignatureStartOffsets(
         in lowercasedHTML: String,
         before offset: Int?
-    ) -> [Int] {
+    ) -> (trailingSignatureStartOffsets: [Int], corroboratedSignOffOffsets: [Int]) {
         let searchRange = signatureSignalSearchRange(in: lowercasedHTML, before: offset)
-        let ranges =
-            standaloneSignOffBrandingRanges(in: lowercasedHTML, range: searchRange) +
-            standaloneSignOffContactOrRoleRanges(in: lowercasedHTML, range: searchRange)
-        let offsets = ranges.map { range in
+        let brandingRanges = standaloneSignOffBrandingRanges(in: lowercasedHTML, range: searchRange)
+        let contactOrRoleRanges = standaloneSignOffContactOrRoleRanges(in: lowercasedHTML, range: searchRange)
+        func startOffset(of range: Range<String.Index>) -> Int {
             lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
         }
-        return Array(Set(offsets)).sorted()
+        let offsets = (brandingRanges + contactOrRoleRanges).map(startOffset(of:))
+        return (
+            trailingSignatureStartOffsets: Array(Set(offsets)).sorted(),
+            corroboratedSignOffOffsets: contactOrRoleRanges.map(startOffset(of:))
+        )
     }
 
     private static func standaloneSignOffBrandingRanges(
@@ -410,7 +408,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         range: Range<String.Index>? = nil
     ) -> [Range<String.Index>] {
         regexRanges(
-            of: standaloneSignOffBeforeBrandingPattern,
+            of: standaloneSignOffBeforeBrandingRegex,
             in: lowercasedHTML,
             range: range
         ).filter { range in
@@ -470,12 +468,11 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return nil
         }
 
-        let postCIDHTML = html[postCIDStart...]
-        guard let nextSignOffRange = postCIDHTML.range(
-            of: standaloneSignOffPattern,
-            options: .regularExpression
-        ) else {
-            return String(postCIDHTML)
+        // A copy, as `Substring.range(of:options:)` searched one: the pattern's
+        // `^` anchors to this slice, not to the enclosing document.
+        let postCIDHTML = String(html[postCIDStart...])
+        guard let nextSignOffRange = firstMatchRange(of: standaloneSignOffRegex, in: postCIDHTML) else {
+            return postCIDHTML
         }
 
         return String(postCIDHTML[..<nextSignOffRange.lowerBound])
@@ -531,10 +528,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func standaloneSignOffIncludesInlineName(_ html: Substring) -> Bool {
-        html.range(
-            of: standaloneSignOffWithInlineNamePattern,
-            options: .regularExpression
-        ) != nil
+        matches(standaloneSignOffWithInlineNameRegex, String(html))
     }
 
     private static func isCompactSignatureIntroLine(_ line: String) -> Bool {
@@ -607,11 +601,10 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return false
         }
 
-        let prefix = html[..<brandingRange.lowerBound]
-        guard let signOffRange = prefix.range(
-            of: standaloneSignOffPattern,
-            options: .regularExpression
-        ) else {
+        // A copy, as `Substring.range(of:options:)` searched one: the pattern's
+        // `^` anchors to this slice, not to the enclosing document.
+        let prefix = String(html[..<brandingRange.lowerBound])
+        guard let signOffRange = firstMatchRange(of: standaloneSignOffRegex, in: prefix) else {
             return false
         }
 
@@ -638,10 +631,14 @@ enum MessageBubbleHTMLAnalysisBuilder {
         let searchRange = range ?? lowercasedHTML.startIndex..<lowercasedHTML.endIndex
         var searchStart = searchRange.lowerBound
 
+        // One search per iteration from the previous match's end, never a
+        // single `matches(in:range:)` pass: `^` in the pattern matches at the
+        // start of the supplied range, so adjacent sign-offs
+        // ("thanks,<br>regards,<br>") yield two ranges here and one there.
         while searchStart < searchRange.upperBound,
-              let range = lowercasedHTML.range(
-                of: standaloneSignOffPattern,
-                options: .regularExpression,
+              let range = firstMatchRange(
+                of: standaloneSignOffRegex,
+                in: lowercasedHTML,
                 range: searchStart..<searchRange.upperBound
               ) {
             ranges.append(range)
@@ -652,7 +649,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func regexRanges(
-        of pattern: String,
+        of regex: NSRegularExpression?,
         in string: String,
         range: Range<String.Index>? = nil
     ) -> [Range<String.Index>] {
@@ -660,10 +657,12 @@ enum MessageBubbleHTMLAnalysisBuilder {
         let searchRange = range ?? string.startIndex..<string.endIndex
         var searchStart = searchRange.lowerBound
 
+        // Same per-iteration search as standaloneSignOffRanges, for the same
+        // `^`-at-range-start reason.
         while searchStart < searchRange.upperBound,
-              let range = string.range(
-                of: pattern,
-                options: .regularExpression,
+              let range = firstMatchRange(
+                of: regex,
+                in: string,
                 range: searchStart..<searchRange.upperBound
               ) {
             ranges.append(range)
@@ -673,41 +672,58 @@ enum MessageBubbleHTMLAnalysisBuilder {
         return ranges
     }
 
+    /// `String.range(of:options: .regularExpression, range:)` over a compiled
+    /// pattern. NSRegularExpression's default bounds are opaque and anchoring,
+    /// which is what that search used: `^`/`$` match at the supplied range's
+    /// edges and lookaround cannot see outside it.
+    private static func firstMatchRange(
+        of regex: NSRegularExpression?,
+        in string: String,
+        range: Range<String.Index>? = nil
+    ) -> Range<String.Index>? {
+        guard let regex else { return nil }
+        let searchRange = NSRange(range ?? string.startIndex..<string.endIndex, in: string)
+        guard let match = regex.firstMatch(in: string, options: [], range: searchRange) else {
+            return nil
+        }
+        return Range(match.range, in: string)
+    }
+
+    private static func matches(_ regex: NSRegularExpression?, _ string: String) -> Bool {
+        firstMatchRange(of: regex, in: string) != nil
+    }
+
+    private static func replacingMatches(
+        of regex: NSRegularExpression?,
+        in string: String,
+        with template: String
+    ) -> String {
+        guard let regex else { return string }
+        return regex.stringByReplacingMatches(
+            in: string,
+            options: [],
+            range: NSRange(string.startIndex..., in: string),
+            withTemplate: template
+        )
+    }
+
     private static func signatureContactOrRoleLines(in trailingHTML: String) -> [String] {
         let linkAwareHTML = htmlExposingLinkTargets(from: trailingHTML)
-        let lineSeparated = linkAwareHTML
-            .replacingOccurrences(
-                of: #"<br\s*/?>|</(?:div|p|td|th|li|tr|table)>"#,
-                with: "\n",
-                options: .regularExpression
-            )
-            .replacingOccurrences(
-                of: #"<[^>]+>"#,
-                with: " ",
-                options: .regularExpression
-            )
-            .replacingOccurrences(
-                of: #"&nbsp;|&#160;"#,
-                with: " ",
-                options: .regularExpression
-            )
+        var lineSeparated = replacingMatches(of: lineBreakingTagRegex, in: linkAwareHTML, with: "\n")
+        lineSeparated = replacingMatches(of: htmlTagRegex, in: lineSeparated, with: " ")
+        lineSeparated = replacingMatches(of: nonBreakingSpaceEntityRegex, in: lineSeparated, with: " ")
 
         return lineSeparated
             .components(separatedBy: .newlines)
             .map { line in
-                line.replacingOccurrences(
-                    of: #"\s+"#,
-                    with: " ",
-                    options: .regularExpression
-                )
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+                replacingMatches(of: whitespaceRunRegex, in: line, with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             .filter { !$0.isEmpty }
     }
 
     private static func htmlExposingLinkTargets(from html: String) -> String {
-        let pattern = #"<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        guard let regex = linkTargetRegex else {
             return html
         }
 
@@ -760,17 +776,11 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return true
         }
 
-        if line.range(
-            of: #"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}"#,
-            options: .regularExpression
-        ) != nil {
+        if matches(emailAddressRegex, line) {
             return true
         }
 
-        if line.range(
-            of: #"\b(?:mobile|phone)\b\s*(?::|\+|[0-9(])|\baddress\s*:"#,
-            options: .regularExpression
-        ) != nil {
+        if matches(phoneOrAddressLabelRegex, line) {
             return true
         }
 
@@ -778,10 +788,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return isUnsubscribeFooterLine(line)
         }
 
-        return line.range(
-            of: #"\b(?:linkedin|instagram|twitter)\b(?:\.com|/|:)"#,
-            options: .regularExpression
-        ) != nil
+        return matches(socialNetworkLinkRegex, line)
     }
 
     private static func hasSignatureContactOrRoleLine(in lines: [String]) -> Bool {
@@ -808,10 +815,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func isPhoneNumberLine(_ line: String) -> Bool {
-        line.range(
-            of: #"^(?:\+|[0-9(])[\d\s().\-]{5,}$"#,
-            options: .regularExpression
-        ) != nil
+        matches(phoneNumberLineRegex, line)
     }
 
     private static func isUnsubscribeFooterLine(_ line: String) -> Bool {
@@ -865,10 +869,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func isBodyContactInstructionLine(_ line: String) -> Bool {
-        line.range(
-            of: #"\bemail\s+[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\s+(?:if|when|so|to|for|about|with)\b"#,
-            options: .regularExpression
-        ) != nil
+        matches(bodyContactInstructionRegex, line)
     }
 
     private static func isSignatureRoleLine(_ line: String) -> Bool {
@@ -883,12 +884,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return false
         }
 
-        return signatureRoleMarkers.contains { marker in
-            line.range(
-                of: "\\b\(NSRegularExpression.escapedPattern(for: marker))\\b",
-                options: .regularExpression
-            ) != nil
-        }
+        return signatureRoleMarkerRegexes.contains { matches($0, line) }
     }
 
     private static func imageDimensions(in html: String, at cidStart: String.Index) -> (width: Int, height: Int)? {
@@ -898,15 +894,15 @@ enum MessageBubbleHTMLAnalysisBuilder {
         let tag = String(html[tagStart...tagEnd])
         guard tag.hasPrefix("<img") else { return nil }
 
-        func dimension(_ name: String) -> Int? {
-            let pattern = #"\s\#(name)\s*=\s*["']?(\d+)(?:["'\s>])"#
-            guard let regex = try? NSRegularExpression(pattern: pattern),
+        func dimension(_ regex: NSRegularExpression?) -> Int? {
+            guard let regex,
                   let match = regex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
                   let range = Range(match.range(at: 1), in: tag),
                   let value = Int(tag[range]), value > 0 else { return nil }
             return value
         }
-        guard let width = dimension("width"), let height = dimension("height") else { return nil }
+        guard let width = dimension(imageWidthAttributeRegex),
+              let height = dimension(imageHeightAttributeRegex) else { return nil }
         return (width, height)
     }
 
@@ -931,12 +927,12 @@ enum MessageBubbleHTMLAnalysisBuilder {
         let identity = [filename, contentID, contentIDLocalPart].joined(separator: " ")
         let hasSignatureKeyword = signatureImageIdentityMarkers.contains { identity.contains($0) }
         let isGenerated = [filename, contentIDLocalPart].contains {
-            $0.range(of: generatedInlineAssetPattern, options: .regularExpression) != nil
+            matches(generatedInlineAssetRegex, $0)
         }
         if !usesExpandedHeuristics {
             let hasRegion = hasCorroboratedRegion || hasBrandingRegion
             let wasGenerated = [filename, contentIDLocalPart].contains {
-                $0.range(of: #"^(?:image|img|inline|cid)(?=[0-9a-f_-]*[0-9])[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#, options: .regularExpression) != nil
+                matches(sentGeneratedInlineAssetRegex, $0)
             }
             return hasRegion && (hasSignatureKeyword || (wasGenerated &&
                 attachment.width > 0 && attachment.height > 0 &&
@@ -968,11 +964,16 @@ enum MessageBubbleHTMLAnalysisBuilder {
     /// Presentation may compact a surviving signature candidate, but ordinary
     /// pasted photos (including a bare thanks/name with no signature evidence)
     /// retain their existing size and chrome.
-    private static func bodyInlineContentIDs(in html: String) -> Set<String> {
-        let lowercasedHTML = html.lowercased()
-        let replyOffset = firstReplyBoundaryOffset(in: lowercasedHTML)
-        let boundaries = [firstHardSignatureBoundaryOffset(in: lowercasedHTML), replyOffset] +
-            standaloneTrailingSignatureStartOffsets(in: lowercasedHTML, before: replyOffset).map(Optional.some)
+    private static func bodyInlineContentIDs(boundaries signatureBoundaries: SignatureBoundaryOffsets?) -> Set<String> {
+        // Without a "cid:" reference `referencedContentIDs` is empty and the
+        // scan below never fires, so the answer is the empty set.
+        guard let signatureBoundaries else {
+            return []
+        }
+        let lowercasedHTML = signatureBoundaries.lowercasedHTML
+        let replyOffset = signatureBoundaries.replyBoundaryOffset
+        let boundaries = [signatureBoundaries.hardSignatureBoundaryOffset, replyOffset] +
+            signatureBoundaries.trailingSignatureStartOffsets.map(Optional.some)
         guard let firstBoundary = boundaries.compactMap({ $0 }).min() else {
             return EmailDocument.referencedContentIDs(in: lowercasedHTML)
         }
@@ -984,6 +985,33 @@ enum MessageBubbleHTMLAnalysisBuilder {
             }
         }
         return bodyIDs
+    }
+
+    /// The boundary offsets `extractLikelySignatureInlineContentIDs` and
+    /// `bodyInlineContentIDs` both key off, computed once per build from one
+    /// lowercased copy of the HTML. Each used to lowercase the HTML and run
+    /// the hard-boundary, reply-boundary and trailing-sign-off scans itself.
+    private struct SignatureBoundaryOffsets {
+        let lowercasedHTML: String
+        let hardSignatureBoundaryOffset: Int?
+        let replyBoundaryOffset: Int?
+        /// Sorted, de-duplicated starts of the branding- and contact/role-
+        /// corroborated standalone sign-offs before the reply boundary.
+        let trailingSignatureStartOffsets: [Int]
+        /// Starts of the contact/role-corroborated sign-offs, in match order.
+        let corroboratedSignOffOffsets: [Int]
+    }
+
+    private static func signatureBoundaryOffsets(in lowercasedHTML: String) -> SignatureBoundaryOffsets {
+        let replyBoundaryOffset = firstReplyBoundaryOffset(in: lowercasedHTML)
+        let trailing = standaloneTrailingSignatureStartOffsets(in: lowercasedHTML, before: replyBoundaryOffset)
+        return SignatureBoundaryOffsets(
+            lowercasedHTML: lowercasedHTML,
+            hardSignatureBoundaryOffset: firstHardSignatureBoundaryOffset(in: lowercasedHTML),
+            replyBoundaryOffset: replyBoundaryOffset,
+            trailingSignatureStartOffsets: trailing.trailingSignatureStartOffsets,
+            corroboratedSignOffOffsets: trailing.corroboratedSignOffOffsets
+        )
     }
 
     private static func supportsCalendarInvitePreviewCard(
@@ -1026,6 +1054,14 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return .placeholder(hasHTMLSource: hasHTMLSource)
         }
 
+        // One lowercased copy and one boundary pass serve both the signature
+        // classification and bodyInlineContentIDs. nil when the HTML holds no
+        // "cid:" reference: both consumers answer [] then, as they did.
+        let lowercasedHTML = canonicalHTML.lowercased()
+        let signatureBoundaries = lowercasedHTML.contains("cid:")
+            ? signatureBoundaryOffsets(in: lowercasedHTML)
+            : nil
+
         return MessageBubbleHTMLAnalysis(
             hasHTMLSource: hasHTMLSource,
             referencedInlineContentIDs: extractReferencedContentIDs(
@@ -1036,7 +1072,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
                 from: canonicalHTML,
                 parsedEmail: parsedEmail,
                 attachments: attachmentSnapshots,
-                usesExpandedHeuristics: !isFromMe
+                usesExpandedHeuristics: !isFromMe,
+                signatureBoundaries: signatureBoundaries
             ),
             supportsCalendarInvitePreviewCard: supportsCalendarInvitePreviewCard(
                 canonicalHTML: canonicalHTML,
@@ -1048,7 +1085,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
                 senderEmail: senderEmail,
                 subject: subject
             ),
-            bodyInlineContentIDs: bodyInlineContentIDs(in: canonicalHTML)
+            bodyInlineContentIDs: bodyInlineContentIDs(boundaries: signatureBoundaries)
         )
     }
 
@@ -1207,4 +1244,111 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "social",
         "unsubscribe"
     ]
+
+    // MARK: - Compiled patterns
+
+    // Every pattern above used to compile per call, several inside per-line
+    // and per-match loops, on each attachment-bearing bubble's first content
+    // load. Compiled once here with no options: every call site searched with
+    // `range(of:options: .regularExpression)` or `NSRegularExpression(pattern:)`
+    // without `.caseInsensitive` (the HTML is lowercased first), and the
+    // templates are the same literal strings. NSRegularExpression is immutable
+    // and thread-safe. A nil entry (compile failure) behaves as the per-call
+    // `try?` did: no match, or the input returned unchanged.
+
+    private static let authoredSignatureWrapperRegexes: [NSRegularExpression] =
+        authoredSignatureWrapperPatterns.compactMap { try? NSRegularExpression(pattern: $0) }
+
+    private static let replyOnAttributionBoundaryRegexes: [NSRegularExpression] =
+        replyOnAttributionBoundaryPatterns.compactMap { try? NSRegularExpression(pattern: $0) }
+
+    private static let standaloneReplyAttributionBoundaryRegexes: [NSRegularExpression] =
+        standaloneReplyAttributionBoundaryPatterns.compactMap { try? NSRegularExpression(pattern: $0) }
+
+    private static let replyHeaderBoundaryRegexes: [NSRegularExpression] =
+        replyHeaderBoundaryPatterns.compactMap { try? NSRegularExpression(pattern: $0) }
+
+    private static let replyAttributionDateOrEmailSignalRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: replyAttributionDateOrEmailSignalPattern)
+    }()
+
+    private static let standaloneSignOffBeforeBrandingRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: standaloneSignOffBeforeBrandingPattern)
+    }()
+
+    private static let standaloneSignOffWithInlineNameRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: standaloneSignOffWithInlineNamePattern)
+    }()
+
+    private static let standaloneSignOffRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: standaloneSignOffPattern)
+    }()
+
+    private static let generatedInlineAssetRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: generatedInlineAssetPattern)
+    }()
+
+    /// The narrower generated-asset shape the sent-message (non-expanded)
+    /// identity gate in `isLikelySignatureInlineAttachment` keeps.
+    private static let sentGeneratedInlineAssetRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"^(?:image|img|inline|cid)(?=[0-9a-f_-]*[0-9])[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#
+        )
+    }()
+
+    /// One `\b…\b` regex per `signatureRoleMarkers` entry, as
+    /// `isSignatureRoleLine` built per marker per line.
+    private static let signatureRoleMarkerRegexes: [NSRegularExpression] = signatureRoleMarkers.compactMap { marker in
+        try? NSRegularExpression(pattern: "\\b\(NSRegularExpression.escapedPattern(for: marker))\\b")
+    }
+
+    private static let imageWidthAttributeRegex = imageDimensionAttributeRegex(named: "width")
+
+    private static let imageHeightAttributeRegex = imageDimensionAttributeRegex(named: "height")
+
+    private static func imageDimensionAttributeRegex(named name: String) -> NSRegularExpression? {
+        try? NSRegularExpression(pattern: #"\s\#(name)\s*=\s*["']?(\d+)(?:["'\s>])"#)
+    }
+
+    private static let lineBreakingTagRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"<br\s*/?>|</(?:div|p|td|th|li|tr|table)>"#)
+    }()
+
+    private static let htmlTagRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"<[^>]+>"#)
+    }()
+
+    private static let nonBreakingSpaceEntityRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"&nbsp;|&#160;"#)
+    }()
+
+    private static let whitespaceRunRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\s+"#)
+    }()
+
+    private static let linkTargetRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>"#)
+    }()
+
+    private static let emailAddressRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}"#)
+    }()
+
+    private static let phoneOrAddressLabelRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\b(?:mobile|phone)\b\s*(?::|\+|[0-9(])|\baddress\s*:"#)
+    }()
+
+    private static let socialNetworkLinkRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\b(?:linkedin|instagram|twitter)\b(?:\.com|/|:)"#)
+    }()
+
+    private static let phoneNumberLineRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"^(?:\+|[0-9(])[\d\s().\-]{5,}$"#)
+    }()
+
+    private static let bodyContactInstructionRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"\bemail\s+[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\s+(?:if|when|so|to|for|about|with)\b"#
+        )
+    }()
 }
