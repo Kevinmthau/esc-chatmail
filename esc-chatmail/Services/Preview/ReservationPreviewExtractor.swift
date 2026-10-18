@@ -153,10 +153,15 @@ struct ReservationPreviewExtractor {
         return normalizedReservationPartyTimeLine(String(line[range]))
     }
 
+    /// Both callers pass a regex-matched substring (digits, `\s`, letters and
+    /// a colon), so unlike `CalendarInvitePreviewBuilder.normalizedWhenLine`
+    /// there is no `⋅`/`·` separator to turn into a bullet here; `detailLine`
+    /// joins the segments with " • " itself.
     private func normalizedReservationPartyTimeLine(_ line: String) -> String {
-        let bulletedLine = PreviewTextUtilities.normalizedText(line)
-            .replacingOccurrences(of: "⋅", with: " • ")
-            .replacingOccurrences(of: "·", with: " • ")
-        return RegexSanitizer.replace(in: bulletedLine, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
+        RegexSanitizer.replace(
+            in: PreviewTextUtilities.normalizedText(line),
+            regex: RegexSanitizer.whitespaceRunRegex,
+            with: " "
+        )
     }
 }

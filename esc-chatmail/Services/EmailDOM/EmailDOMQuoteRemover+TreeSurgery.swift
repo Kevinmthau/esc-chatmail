@@ -326,9 +326,9 @@ extension EmailDOMQuoteRemover {
         return normalizedVisibleLineText(text)
     }
 
+    /// ICU `\s` already covers U+00A0, so the collapse needs no NBSP pre-pass.
     private static func normalizedVisibleLineText(_ text: String) -> String {
-        let spacedText = text.replacingOccurrences(of: "\u{00a0}", with: " ")
-        return RegexSanitizer.replace(in: spacedText, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
+        RegexSanitizer.replace(in: text, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

@@ -52,7 +52,7 @@ extension HTMLContentLoader {
 
     private func hasMeaningfulPlainText(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
-        let nonWhitespace = text.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        let nonWhitespace = RegexSanitizer.replace(in: text, regex: RegexSanitizer.whitespaceRunRegex, with: "")
         return !nonWhitespace.isEmpty
     }
 

@@ -74,6 +74,26 @@ final class GoogleDriveSharedFileMetadataProviderTests: XCTestCase {
         XCTAssertNil(metadata)
     }
 
+    /// A served `<title>` can wrap across lines; the blocked-title check must
+    /// still recognise the sign-in page once the run is collapsed to one space.
+    /// Revert-check: removing the `RegexSanitizer.whitespaceRunRegex` collapse
+    /// from `isBlockedDocumentPageTitle` leaves "sign\n\tin - google   accounts"
+    /// outside both the blocked set and the "sign in" prefix, so the page is no
+    /// longer blocked and `normalizedTitle` (which collapses on its own) returns
+    /// the kind's fallback title instead of nil.
+    func testParseMetadata_returnsNilForSignInTitleSplitAcrossWhitespaceRuns() {
+        let link = SharedDocumentLink(
+            id: "SharedDocumentLink.Kind.googleSheet|sheet123",
+            url: URL(string: "https://docs.google.com/spreadsheets/d/sheet123/edit")!,
+            kind: .googleSheet
+        )
+        let html = "<html><head><title>\n  Sign\n\tin -  Google   Accounts\n</title></head></html>"
+
+        let metadata = GoogleDriveSharedFileMetadataProvider.parseMetadata(from: html, link: link)
+
+        XCTAssertNil(metadata)
+    }
+
     func testParseMetadata_preservesApostrophesInDoubleQuotedMetaContent() {
         let link = SharedDocumentLink(
             id: "SharedDocumentLink.Kind.googleDoc|doc456",

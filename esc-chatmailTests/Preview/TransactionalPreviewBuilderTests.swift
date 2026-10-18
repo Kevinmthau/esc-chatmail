@@ -487,6 +487,38 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.sourceDomain, "message.sevenrooms.com")
     }
 
+    /// The party-size and time segments are regex-matched substrings, so the
+    /// `⋅` (U+22C5) separator between them never reaches the segment normalizer
+    /// and the detail line's bullets come from `detailLine`'s own join. An NBSP
+    /// inside a segment is normalized to a space before the match.
+    /// HONEST SCOPE: this output is identical with or without the bullet
+    /// substitutions `normalizedReservationPartyTimeLine` used to carry; it
+    /// pins the premise that they were dead, not their removal.
+    func testBuildPreview_extractsReservationDetailsAroundDotOperatorAndNBSPSeparators() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>El Puma (Maximes)</h1>
+            <p>This reservation has been cancelled. We look forward to assisting you with future reservations.</p>
+            <p>Wednesday, April 29, 2026</p>
+            <p>4&nbsp;guests&nbsp;⋅&nbsp;7:30&nbsp;PM</p>
+            <p>Your reservation number is 3YZ29N45F4PW</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "El Puma (Maximes)",
+            senderEmail: "r+abc@message.sevenrooms.com",
+            subject: "Reservation Cancellation for El Puma (Maximes) | Mr. Kevin Thau on 4/29/26"
+        )
+
+        XCTAssertEqual(result?.detailLine, "Wednesday, April 29, 2026 • 4 guests • 7:30 PM")
+    }
+
     func testBuildPreview_mergesReservationPartySizeAndTimeFromSeparateLines() {
         let html = """
         <!DOCTYPE html>

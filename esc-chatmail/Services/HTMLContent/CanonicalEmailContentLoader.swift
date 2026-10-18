@@ -440,7 +440,7 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
     static func normalizedMeaningfulPlainText(from text: String?) -> String? {
         guard let text, !text.isEmpty else { return nil }
         let normalized = normalizedPlainTextFallback(from: text)
-        let nonWhitespace = normalized.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        let nonWhitespace = RegexSanitizer.replace(in: normalized, regex: RegexSanitizer.whitespaceRunRegex, with: "")
         return nonWhitespace.isEmpty ? nil : normalized
     }
 
