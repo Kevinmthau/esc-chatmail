@@ -247,11 +247,7 @@ actor GoogleDriveSharedFileMetadataProvider {
         }
 
         var normalizedTitle = HTMLEntityDecoder.decode(rawTitle)
-        normalizedTitle = normalizedTitle.replacingOccurrences(
-            of: "\\s+",
-            with: " ",
-            options: .regularExpression
-        )
+        normalizedTitle = RegexSanitizer.replace(in: normalizedTitle, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
         normalizedTitle = normalizedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let lowercasedTitle = normalizedTitle.lowercased()

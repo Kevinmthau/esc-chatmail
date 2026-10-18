@@ -91,6 +91,72 @@ final class RegexSanitizerTests: XCTestCase {
         )
     }
 
+    /// The two plain-text fallbacks (`HTMLContentLoader.hasMeaningfulPlainText`,
+    /// `CanonicalEmailContentLoader.normalizedMeaningfulPlainText`) strip `\s+`
+    /// to `""` to ask whether any non-whitespace survives. They moved from the
+    /// per-call `replacingOccurrences(of: "\\s+", with: "", options:
+    /// .regularExpression)` onto the shared constant on the same premise as the
+    /// `" "` callers: the template is the caller's, the `\s` class is shared.
+    /// This pins that premise with the empty template over the same ICU
+    /// whitespace inventory, including the all-whitespace input those callers
+    /// treat as "no content" and a ZWSP-only input they still count as content.
+    /// HONEST SCOPE: it cannot detect a call site reverting to the per-call
+    /// form, whose output is identical by construction.
+    func testWhitespaceRunRegex_emptyTemplate_perCallReplacingOccurrencesInput_producesIdenticalOutput() {
+        let mixed = "a \t\u{000B}\u{000C}\r\n\u{0085}\u{00A0}\u{1680}\u{2000}\u{2007}"
+            + "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}b\u{200B}c \n"
+        let whitespaceOnly = " \t\u{000B}\u{000C}\r\n\u{0085}\u{00A0}\u{1680}\u{2000}\u{2007}"
+            + "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}"
+
+        for input in [mixed, whitespaceOnly, "\u{200B}", ""] {
+            let perCall = input.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+            let shared = RegexSanitizer.replace(in: input, regex: RegexSanitizer.whitespaceRunRegex, with: "")
+            XCTAssertEqual(shared, perCall, "input: \(input.unicodeScalars.map { String($0.value, radix: 16) })")
+        }
+
+        XCTAssertEqual(RegexSanitizer.replace(in: mixed, regex: RegexSanitizer.whitespaceRunRegex, with: ""), "ab\u{200B}c")
+        XCTAssertEqual(RegexSanitizer.replace(in: whitespaceOnly, regex: RegexSanitizer.whitespaceRunRegex, with: ""), "")
+        XCTAssertEqual(RegexSanitizer.replace(in: "\u{200B}", regex: RegexSanitizer.whitespaceRunRegex, with: ""), "\u{200B}")
+    }
+
+    /// `EmailDOMQuoteRemover.normalizedVisibleLineText` used to swap U+00A0 for
+    /// a space before the collapse. ICU `\s` includes `\p{Z}`, so the NBSP is
+    /// already part of every run the collapse replaces, and the trailing
+    /// `.whitespacesAndNewlines` trim removes a leading or trailing NBSP just
+    /// as it removes the space the pre-pass would have left. This pins that a
+    /// pre-passed input and the raw input collapse (and trim) to the same
+    /// string wherever the NBSP sits: alone, leading, trailing, between words,
+    /// inside a mixed run, or beside a combining mark.
+    /// HONEST SCOPE: re-adding the pre-pass is output-identical by
+    /// construction, so this pins the premise rather than the call site.
+    func testWhitespaceRunRegex_nbspPrePass_isSubsumedByCollapseAndTrim() {
+        let inputs = [
+            "\u{00A0}",
+            "\u{00A0}\u{00A0}a",
+            "a\u{00A0}\u{00A0}",
+            "a\u{00A0}b",
+            "a\u{00A0}\u{00A0}b",
+            "a \u{00A0}\t\n\u{00A0} b",
+            "a\u{00A0}\u{0301}b",
+            "\u{00A0}a\u{00A0}b\u{00A0}",
+        ]
+
+        for input in inputs {
+            let prePassed = input.replacingOccurrences(of: "\u{00a0}", with: " ")
+            let viaPrePass = RegexSanitizer.replace(in: prePassed, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let direct = RegexSanitizer.replace(in: input, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertEqual(direct, viaPrePass, "input: \(input.unicodeScalars.map { String($0.value, radix: 16) })")
+        }
+
+        XCTAssertEqual(
+            RegexSanitizer.replace(in: "\u{00A0}a \u{00A0}\t\u{00A0} b\u{00A0}", regex: RegexSanitizer.whitespaceRunRegex, with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "a b"
+        )
+    }
+
     // MARK: - applyRules
 
     func testApplyRules_stringRules_appliedInOrder() {
