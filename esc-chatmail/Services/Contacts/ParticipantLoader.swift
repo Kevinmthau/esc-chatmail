@@ -269,39 +269,35 @@ final class ParticipantLoader {
         await resolver.resolveParticipants(for: emails)
     }
 
-    /// Resolves one conversation's participant records with the per-email name evidence the
-    /// chat header resolves with (`loadParticipants`): the newest explicit From header names and
-    /// the stored Person names. The Participants sheet uses this. The bare
-    /// `resolveParticipants(for:)` sees only Contacts and the Person cache, and the resolver
-    /// rejects a cached name that restates the address ("Jacob Laycock" for
-    /// jacob.laycock@…), so a sender the header named showed as "Unknown Contact" there.
+    /// Resolves one conversation's participant records from the snapshot the chat header
+    /// resolves with (`loadParticipants`): the alias-aware non-me participant emails, the newest
+    /// explicit From header names and the stored Person names. The Participants sheet uses this.
+    /// The bare `resolveParticipants(for:)` sees only Contacts and the Person cache, and the
+    /// resolver rejects a cached name that restates the address ("Jacob Laycock" for
+    /// jacob.laycock@…), so a sender the header named showed as "Unknown Contact" there. The
+    /// sheet's own email list also excluded only the primary address, so it listed the user's
+    /// send-as aliases, which the header leaves out.
     func resolveParticipants(
-        for emails: [String],
         inConversation conversationObjectID: NSManagedObjectID,
-        context: NSManagedObjectContext
+        context: NSManagedObjectContext,
+        currentUserEmail: String
     ) async -> [ResolvedParticipant] {
-        guard !emails.isEmpty else { return [] }
-
-        let names = await context.perform { () -> (stored: [String: String], header: [String: String]) in
-            guard let conversation = try? context.existingObject(with: conversationObjectID) as? Conversation,
-                  !conversation.isDeleted else {
-                return ([:], [:])
-            }
-
-            return (
-                ConversationParticipantExtractor.participantDisplayNamesByEmail(from: conversation),
-                ConversationParticipantExtractor.headerDisplayNamesByEmail(
-                    in: context,
-                    conversation: conversation,
-                    participantEmails: emails
-                )
-            )
-        }
+        let currentUserAliases = await loadCurrentUserAliases(
+            currentUserEmail: currentUserEmail,
+            context: context
+        )
+        let snapshot = await fetchConversationParticipantSnapshot(
+            conversationObjectID: conversationObjectID,
+            in: context,
+            currentUserEmail: currentUserEmail,
+            currentUserAliases: currentUserAliases,
+            fallbackDisplayName: nil
+        )
 
         return await resolver.resolveParticipants(
-            for: emails,
-            storedDisplayNamesByEmail: names.stored,
-            headerDisplayNamesByEmail: names.header
+            for: snapshot.emails,
+            storedDisplayNamesByEmail: snapshot.storedDisplayNamesByEmail,
+            headerDisplayNamesByEmail: snapshot.headerDisplayNamesByEmail
         )
     }
 

@@ -8,20 +8,25 @@ final class NewContactPrefillPolicyTests: XCTestCase {
 
     private let jacobEmail = "jacob.laycock@studs.com"
 
-    // MARK: - prefill(for:)
+    // MARK: - prefill(for:storedDisplayName:)
 
     /// The reported bug: the Participants row for a sender the header names "Jacob Laycock" must
-    /// open Create New Contact with that name split, not with the email alone.
+    /// open Create New Contact with that name split, not with the email alone, and not with the
+    /// stored Person name, which can hold the address itself.
     ///
     /// Revert-check: returning `Prefill(email:name: nil)` unconditionally from
-    /// `NewContactPrefillPolicy.prefill(for:)` (the email-only prefill the user saw) fails this test.
+    /// `NewContactPrefillPolicy.prefill(for:storedDisplayName:)` (the email-only prefill the user
+    /// saw), or preferring `storedDisplayName` over a real row name there, fails this test.
     func testPrefill_realRowName_prefillsSplitNameAndEmail() {
-        let prefill = NewContactPrefillPolicy.prefill(for: ParticipantLoader.ResolvedParticipant(
-            email: jacobEmail,
-            displayName: "Jacob Laycock",
-            isRealDisplayName: true,
-            contactIdentifier: nil
-        ))
+        let prefill = NewContactPrefillPolicy.prefill(
+            for: ParticipantLoader.ResolvedParticipant(
+                email: jacobEmail,
+                displayName: "Jacob Laycock",
+                isRealDisplayName: true,
+                contactIdentifier: nil
+            ),
+            storedDisplayName: "Jake"
+        )
 
         XCTAssertEqual(prefill, NewContactPrefillPolicy.Prefill(
             email: jacobEmail,
@@ -33,34 +38,63 @@ final class NewContactPrefillPolicyTests: XCTestCase {
     /// become the new contact's given name.
     ///
     /// HONEST SCOPE: two guards reject this placeholder, the `isRealDisplayName` check in
-    /// `NewContactPrefillPolicy.prefill(for:)` and the placeholder list behind
+    /// `NewContactPrefillPolicy.prefill(for:storedDisplayName:)` and the placeholder list behind
     /// `PersonDisplayNameResolver.sanitizedExplicitDisplayName`, so reverting either one alone
     /// leaves this green. `testPrefill_nameTheResolverRejected_prefillsEmailOnly` pins the first.
     func testPrefill_unknownContactRow_prefillsEmailOnly() {
-        let prefill = NewContactPrefillPolicy.prefill(for: ParticipantLoader.ResolvedParticipant(
-            email: jacobEmail,
-            displayName: PersonDisplayNameResolver.fallbackConversationName(),
-            isRealDisplayName: false,
-            contactIdentifier: nil
-        ))
+        let prefill = NewContactPrefillPolicy.prefill(
+            for: ParticipantLoader.ResolvedParticipant(
+                email: jacobEmail,
+                displayName: PersonDisplayNameResolver.fallbackConversationName(),
+                isRealDisplayName: false,
+                contactIdentifier: nil
+            ),
+            storedDisplayName: nil
+        )
 
         XCTAssertEqual(prefill, NewContactPrefillPolicy.Prefill(email: jacobEmail, name: nil))
     }
 
-    /// `isRealDisplayName` is the resolver's verdict; a name it did not accept is not prefilled
-    /// even when it would parse as a name.
+    /// `isRealDisplayName` is the resolver's verdict; a row name it did not accept is not
+    /// prefilled even when it would parse as a name.
     ///
     /// Revert-check: dropping the `participant.isRealDisplayName` check in
-    /// `NewContactPrefillPolicy.prefill(for:)` fails this test.
+    /// `NewContactPrefillPolicy.prefill(for:storedDisplayName:)` (always using the row name)
+    /// fails this test.
     func testPrefill_nameTheResolverRejected_prefillsEmailOnly() {
-        let prefill = NewContactPrefillPolicy.prefill(for: ParticipantLoader.ResolvedParticipant(
-            email: jacobEmail,
-            displayName: "Jacob Laycock",
-            isRealDisplayName: false,
-            contactIdentifier: nil
-        ))
+        let prefill = NewContactPrefillPolicy.prefill(
+            for: ParticipantLoader.ResolvedParticipant(
+                email: jacobEmail,
+                displayName: "Jacob Laycock",
+                isRealDisplayName: false,
+                contactIdentifier: nil
+            ),
+            storedDisplayName: nil
+        )
 
         XCTAssertNil(prefill.name)
+    }
+
+    /// A participant only ever To/Cc'd as "Jacob Laycock" <jacob.laycock@…> has that name stored
+    /// on his Person, which the resolver rejects for the row (it restates the address) but the
+    /// removed Person-based prefill used. The add screen keeps it; an address-shaped stored name
+    /// is still not a name.
+    ///
+    /// Revert-check: replacing `storedDisplayName` with nil in
+    /// `NewContactPrefillPolicy.prefill(for:storedDisplayName:)` fails this test.
+    func testPrefill_unnamedRowWithStoredName_prefillsStoredName() {
+        let unnamedRow = ParticipantLoader.ResolvedParticipant(
+            email: jacobEmail,
+            displayName: PersonDisplayNameResolver.fallbackConversationName(),
+            isRealDisplayName: false,
+            contactIdentifier: nil
+        )
+
+        XCTAssertEqual(
+            NewContactPrefillPolicy.prefill(for: unnamedRow, storedDisplayName: "Jacob Laycock").name,
+            Components(givenName: "Jacob", familyName: "Laycock")
+        )
+        XCTAssertNil(NewContactPrefillPolicy.prefill(for: unnamedRow, storedDisplayName: jacobEmail).name)
     }
 
     // MARK: - nameComponents(forDisplayName:email:)
@@ -145,12 +179,79 @@ final class NewContactPrefillPolicyTests: XCTestCase {
             Components(givenName: "Jacob", familyName: "Laycock")
         )
         XCTAssertEqual(
-            NewContactPrefillPolicy.nameComponents(forDisplayName: "Jacob Laycock [via Google Docs]", email: jacobEmail),
+            NewContactPrefillPolicy.nameComponents(forDisplayName: "Jacob Laycock [Studs NYC]", email: jacobEmail),
             Components(givenName: "Jacob", familyName: "Laycock")
         )
     }
 
-    func testNameComponents_middleNamesAndLowercaseParticles() {
+    /// A relay sender's name belongs to whoever acted through the relay, not the address: a
+    /// contact saved with it would label every later notification from that address with one
+    /// person's name.
+    ///
+    /// Revert-check: removing the `containsRelayMarker` guard in
+    /// `NewContactPrefillPolicy.cleanedDisplayName` fails the two "via" cases.
+    func testNameComponents_relaySenderName_returnsNil() {
+        XCTAssertNil(NewContactPrefillPolicy.nameComponents(
+            forDisplayName: "Jacob Laycock (via Google Drive)",
+            email: "drive-shares@example.com"
+        ))
+        XCTAssertNil(NewContactPrefillPolicy.nameComponents(
+            forDisplayName: "'Jacob Laycock' via Studs Team",
+            email: "team@studs.com"
+        ))
+        // "via" inside a word or capitalized as a name is not a relay marker.
+        XCTAssertEqual(
+            NewContactPrefillPolicy.nameComponents(forDisplayName: "Olivia Smith", email: "olivia@example.com"),
+            Components(givenName: "Olivia", familyName: "Smith")
+        )
+        XCTAssertEqual(
+            NewContactPrefillPolicy.nameComponents(forDisplayName: "Via Smith", email: "via@example.com"),
+            Components(givenName: "Via", familyName: "Smith")
+        )
+    }
+
+    /// Revert-check: removing the `isNoReplyAddress` guard in
+    /// `NewContactPrefillPolicy.cleanedDisplayName` fails this test.
+    func testNameComponents_noReplyAddress_returnsNil() {
+        XCTAssertNil(NewContactPrefillPolicy.nameComponents(
+            forDisplayName: "Jacob Laycock (Google Docs)",
+            email: "comments-noreply@docs.google.com"
+        ))
+        XCTAssertNil(NewContactPrefillPolicy.nameComponents(
+            forDisplayName: "Jacob Laycock",
+            email: "do-not-reply@studs.com"
+        ))
+    }
+
+    /// Revert-check: removing the `isCredentialAcronym` branch in
+    /// `NewContactPrefillPolicy.isCommaSuffix` fails the "MBA" / "R.N." cases (the credential
+    /// swaps into the given name), and peeling only one comma suffix fails "MBA, CPA".
+    func testNameComponents_commaCredentialAfterFullName_goesToSuffix() {
+        let janeEmail = "jane@example.com"
+        XCTAssertEqual(
+            NewContactPrefillPolicy.nameComponents(forDisplayName: "Jane Doe, MBA", email: janeEmail),
+            Components(givenName: "Jane", familyName: "Doe", nameSuffix: "MBA")
+        )
+        XCTAssertEqual(
+            NewContactPrefillPolicy.nameComponents(forDisplayName: "Jane Doe, R.N.", email: janeEmail),
+            Components(givenName: "Jane", familyName: "Doe", nameSuffix: "R.N.")
+        )
+        XCTAssertEqual(
+            NewContactPrefillPolicy.nameComponents(forDisplayName: "Jane Doe, MBA, CPA", email: janeEmail),
+            Components(givenName: "Jane", familyName: "Doe", nameSuffix: "MBA CPA")
+        )
+        // After a lone surname or an all-caps name, a capitalized segment is the given name.
+        XCTAssertEqual(
+            NewContactPrefillPolicy.nameComponents(forDisplayName: "Doe, JJ", email: janeEmail),
+            Components(givenName: "JJ", familyName: "Doe")
+        )
+        XCTAssertEqual(
+            NewContactPrefillPolicy.nameComponents(forDisplayName: "SMITH JONES, JANE", email: janeEmail),
+            Components(givenName: "JANE", familyName: "SMITH JONES")
+        )
+    }
+
+    func testNameComponents_middleNamesAndLowercaseParticles_splitIntoMiddleAndFamilyNames() {
         XCTAssertEqual(
             NewContactPrefillPolicy.nameComponents(forDisplayName: "Mary Ann Smith", email: "mary@example.com"),
             Components(givenName: "Mary", middleName: "Ann", familyName: "Smith")

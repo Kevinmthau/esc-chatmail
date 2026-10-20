@@ -3,17 +3,25 @@ import Foundation
 /// What the Contacts "new contact" screen starts with when the user taps Create New
 /// Contact on a Participants-sheet row.
 ///
-/// The prefilled name is the row's own resolved name (`ParticipantLoader.ResolvedParticipant`),
-/// so the sheet and the add screen never disagree, and only when the resolver accepted it as a
-/// real name: a row reading "Unknown Contact" prefills the email alone. The choice among name
-/// sources (Contacts, then the newest explicit From header name, then the stored Person name)
-/// stays in `PersonDisplayNameResolver.participantDisplayName`; this policy never re-ranks them.
+/// The prefilled name is the row's own resolved name (`ParticipantLoader.ResolvedParticipant`)
+/// whenever the resolver accepted it as a real name, so a named row and the add screen never
+/// disagree. The choice among name sources (Contacts, then the newest explicit From header name,
+/// then the stored Person name) stays in `PersonDisplayNameResolver.participantDisplayName`;
+/// this policy never re-ranks them.
 ///
-/// This used to read `Person.displayName` directly. That is not the name the chat header shows:
-/// the header shows the newest From header name, while the Person row holds the name merged
-/// across every header that ever named the address, and `EmailNormalizer.isBetterDisplayName`
-/// can let an email-address-shaped name ("jacob.laycock@studs.com") replace an address-derived
-/// one ("Jacob Laycock"). The add screen then came up without the name the header showed.
+/// A row the resolver could not name ("Unknown Contact") falls back to the participant's stored
+/// Person name. The resolver rejects a stored name that restates the address because, as a
+/// title, it may have been synthesized from the local part; but a To/Cc header that named the
+/// person ("Jacob Laycock" for jacob.laycock@…) stores exactly that, and the user edits the add
+/// screen before saving. The Person-based prefill this replaced used that name, so a participant
+/// only ever To/Cc'd keeps it. An email-shaped or raw-local-part stored name is still rejected.
+///
+/// The stored name is only the fallback, never the first choice: it is not the name the chat
+/// header shows. The header shows the newest From header name, while the Person row holds the
+/// name merged across every header that ever named the address, and
+/// `EmailNormalizer.isBetterDisplayName` can let an email-address-shaped name
+/// ("jacob.laycock@studs.com") replace an address-derived one ("Jacob Laycock"). Reading it first
+/// is what brought the add screen up without the name the header showed.
 enum NewContactPrefillPolicy {
     /// The `CNMutableContact` name fields to prefill. Empty strings leave a field blank.
     struct NameComponents: Equatable {
@@ -30,21 +38,31 @@ enum NewContactPrefillPolicy {
         let name: NameComponents?
     }
 
-    static func prefill(for participant: ParticipantLoader.ResolvedParticipant) -> Prefill {
-        let name = participant.isRealDisplayName
-            ? nameComponents(forDisplayName: participant.displayName, email: participant.email)
-            : nil
-        return Prefill(email: participant.email, name: name)
+    /// - Parameter storedDisplayName: the participant's stored `Person.displayName`, used only
+    ///   when the resolver could not name the row.
+    static func prefill(
+        for participant: ParticipantLoader.ResolvedParticipant,
+        storedDisplayName: String?
+    ) -> Prefill {
+        let displayName = participant.isRealDisplayName ? participant.displayName : storedDisplayName
+        return Prefill(
+            email: participant.email,
+            name: nameComponents(forDisplayName: displayName, email: participant.email)
+        )
     }
 
     /// Splits a display name into Contacts name fields, or returns nil when the name is not a
     /// person's name to prefill: empty, a placeholder ("Unknown Contact"), an email address used
-    /// as a display name, or the address's raw local part.
+    /// as a display name, the address's raw local part, or a name that belongs to someone other
+    /// than the address's owner (a relay sender's "… (via Google Drive)" or "'…' via Group", or
+    /// any name on a no-reply address).
     ///
     /// Deterministic rules rather than `PersonNameComponentsFormatter`, whose parse depends on
     /// the device locale and OS version:
     /// - wrapping quotes ("…", '…', “…”, ‘…’) and a trailing "(…)" / "[…]" qualifier are dropped;
     /// - "Last, First [Middle]" swaps into given and family name;
+    /// - trailing comma segments that are suffixes (", Jr.", ", PhD", and after a full name a
+    ///   credential acronym, "Jane Doe, MBA") go to the suffix field;
     /// - one token is a given name, except after an honorific ("Dr. Smith"), where it is the
     ///   family name;
     /// - a leading honorific and trailing generational or degree suffixes go to their own fields;
@@ -60,9 +78,9 @@ enum NewContactPrefillPolicy {
             .filter { !$0.isEmpty }
         guard !segments.isEmpty else { return nil }
 
-        var commaSuffix = ""
-        if segments.count > 1, let last = segments.last, isSuffixPhrase(last) {
-            commaSuffix = last
+        var commaSuffixes: [String] = []
+        while segments.count > 1, let last = segments.last, isCommaSuffix(last, afterName: segments[0]) {
+            commaSuffixes.insert(last, at: 0)
             segments.removeLast()
         }
 
@@ -78,19 +96,17 @@ enum NewContactPrefillPolicy {
             components.familyName = segments[0]
         default:
             // Three or more comma segments is not a recognizable person-name shape; keep the
-            // whole name rather than guess at an order.
-            components = NameComponents(givenName: cleaned)
+            // whole name rather than guess at an order (less any peeled suffix, which the suffix
+            // field already holds).
+            components = NameComponents(givenName: segments.joined(separator: ", "))
         }
 
-        if !commaSuffix.isEmpty {
-            components.nameSuffix = [components.nameSuffix, commaSuffix]
+        if !commaSuffixes.isEmpty {
+            components.nameSuffix = ([components.nameSuffix] + commaSuffixes)
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
         }
 
-        guard !(components.givenName.isEmpty && components.familyName.isEmpty) else {
-            return NameComponents(givenName: cleaned)
-        }
         return components
     }
 
@@ -108,17 +124,35 @@ enum NewContactPrefillPolicy {
         try? NSRegularExpression(pattern: #"\s*(\([^()]*\)|\[[^\[\]]*\])\s*$"#)
     }()
 
+    /// The relay marker in "Jacob Laycock (via Google Drive)" and Google Groups'
+    /// "'Jacob Laycock' via Studs Team". Lowercase only, as both write it, and only as a whole
+    /// word, so "Olivia" and a given name "Via" do not match.
+    private static let relayMarkerRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"(?:^|[\s(\[])via\s"#)
+    }()
+
+    private static let noReplyLocalPartMarkers = ["noreply", "no-reply", "donotreply", "do-not-reply"]
+
     private static func cleanedDisplayName(_ displayName: String?, email: String) -> String? {
         guard var candidate = displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !candidate.isEmpty else {
             return nil
         }
 
-        candidate = strippingWrappingQuotes(candidate)
+        // A name on a relay or no-reply address is whoever acted through it, not the address's
+        // owner: prefilling it would name Drive's no-reply address "Jacob Laycock", and once
+        // saved Contacts would label every later Drive notification with his name.
+        // HONEST SCOPE: a relay that writes neither marker nor a no-reply address
+        // ("Jacob Laycock (Google Docs)" from some other service address) reads like a company
+        // qualifier ("(Studs)") and is still prefilled.
+        guard !isNoReplyAddress(email) else { return nil }
 
-        // "Jacob Laycock (Studs)" / "Jacob Laycock (via Google Docs)": the qualifier is not part
-        // of the name. Stripped before the sanitizer so an address inside it does not disqualify
-        // the name in front of it.
+        candidate = strippingWrappingQuotes(candidate)
+        guard !containsRelayMarker(candidate) else { return nil }
+
+        // "Jacob Laycock (Studs)" / "Jacob Laycock [NYC]": the qualifier is not part of the name.
+        // Stripped before the sanitizer so an address inside it does not disqualify the name in
+        // front of it.
         let withoutQualifier = RegexSanitizer.replace(in: candidate, regex: trailingQualifierRegex, with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !withoutQualifier.isEmpty {
@@ -126,6 +160,17 @@ enum NewContactPrefillPolicy {
         }
 
         return PersonDisplayNameResolver.sanitizedExplicitDisplayName(candidate, forEmail: email)
+    }
+
+    private static func isNoReplyAddress(_ email: String) -> Bool {
+        let localPart = email.split(separator: "@", maxSplits: 1).first.map { $0.lowercased() } ?? ""
+        return noReplyLocalPartMarkers.contains { localPart.contains($0) }
+    }
+
+    private static func containsRelayMarker(_ value: String) -> Bool {
+        guard let relayMarkerRegex else { return false }
+        let range = NSRange(location: 0, length: value.utf16.count)
+        return relayMarkerRegex.firstMatch(in: value, options: [], range: range) != nil
     }
 
     private static func strippingWrappingQuotes(_ value: String) -> String {
@@ -169,9 +214,25 @@ enum NewContactPrefillPolicy {
         token.lowercased().filter { $0 != "." && $0 != "," }
     }
 
-    private static func isSuffixPhrase(_ value: String) -> Bool {
-        let parts = tokens(in: value)
-        return !parts.isEmpty && parts.allSatisfy { nameSuffixes.contains(comparisonKey($0)) }
+    /// Whether a trailing comma segment is a suffix rather than a given name: generational or
+    /// degree suffixes ("Jr.", "PhD"), or a credential acronym ("MBA", "R.N.") after a full name
+    /// written given-name first ("Jane Doe, MBA"). After a lone surname ("Doe, JJ") or an all-caps
+    /// name ("SMITH JONES, JANE") a capitalized segment is the given name, so acronyms count only
+    /// after a mixed-case name of two or more words.
+    private static func isCommaSuffix(_ segment: String, afterName leadingSegment: String) -> Bool {
+        let parts = tokens(in: segment)
+        let acceptsCredentialAcronyms = tokens(in: leadingSegment).count >= 2
+            && leadingSegment.contains(where: \.isLowercase)
+        return !parts.isEmpty && parts.allSatisfy { part in
+            nameSuffixes.contains(comparisonKey(part))
+                || (acceptsCredentialAcronyms && isCredentialAcronym(part))
+        }
+    }
+
+    /// Two to five capital letters, optionally dotted: "MBA", "CPA", "R.N.".
+    private static func isCredentialAcronym(_ token: String) -> Bool {
+        let letters = token.filter { $0 != "." }
+        return (2...5).contains(letters.count) && letters.allSatisfy(\.isUppercase)
     }
 
     /// Parses a name written given-name first. With `familyNameKnown` (the right side of

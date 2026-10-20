@@ -65,10 +65,12 @@ final class ChatContactManager: ObservableObject {
         }
     }
 
-    /// Called when user selects "Add to Existing Contact"
-    func addToExistingContact(for person: Person) {
+    /// Called when user selects "Add to Existing Contact". Takes the row's email value rather
+    /// than the `Person`, for the same reason as `createNewContact(_:)`: the sheet stays open
+    /// while a sync may delete the Person.
+    func addToExistingContact(email: String) {
         showingParticipantsList = false
-        pendingEmailToAddToExistingContact = person.email
+        pendingEmailToAddToExistingContact = email
 
         Task { [weak self] in
             guard let self else { return }

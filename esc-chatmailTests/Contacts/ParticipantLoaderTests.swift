@@ -995,7 +995,7 @@ final class ParticipantLoaderTests: XCTestCase {
     /// `resolveParticipants(for:)` the sheet used labeled him "Unknown Contact".
     ///
     /// Revert-check: passing `[:]` for `headerDisplayNamesByEmail` in
-    /// `ParticipantLoader.resolveParticipants(for:inConversation:context:)` fails this test.
+    /// `ParticipantLoader.resolveParticipants(inConversation:context:currentUserEmail:)` fails this test.
     func testResolveParticipantsInConversation_headerNamedSenderWithAddressDerivedStoredName_resolvesHeaderName() async throws {
         let email = "jacob.laycock@studs.com"
         let conversation = ConversationBuilder()
@@ -1011,10 +1011,11 @@ final class ParticipantLoaderTests: XCTestCase {
             .withSender(email: email, name: "Jacob Laycock")
             .inConversation(conversation)
             .build(in: context)
-        try context.save()
+        try stack.saveViewContext()
 
         let loader = ParticipantLoader(
             contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in ["me@example.com"] },
             prefetchDisplayNames: { _ in },
             cachedDisplayNameProvider: { _ in "Jacob Laycock" },
             photoLoader: { _ in [] },
@@ -1023,9 +1024,9 @@ final class ParticipantLoaderTests: XCTestCase {
 
         let bare = await loader.resolveParticipants(for: [email])
         let resolved = await loader.resolveParticipants(
-            for: [email],
             inConversation: conversation.objectID,
-            context: context
+            context: context,
+            currentUserEmail: "me@example.com"
         )
 
         // The pre-fix sheet's view of the same participant.
@@ -1041,6 +1042,47 @@ final class ParticipantLoaderTests: XCTestCase {
         ])
     }
 
+    /// The sheet lists the participants the chat header does: the user's send-as aliases are not
+    /// participants, though the sheet's old email list excluded only the primary address.
+    ///
+    /// Revert-check: passing `[currentUserEmail]` instead of the loaded aliases as
+    /// `currentUserAliases` in `ParticipantLoader.resolveParticipants(inConversation:context:currentUserEmail:)`
+    /// fails this test.
+    func testResolveParticipantsInConversation_sendAsAliasParticipant_isExcluded() async throws {
+        let friendEmail = "friend@example.com"
+        let conversation = ConversationBuilder()
+            .withDisplayName("Friend Name")
+            .build(in: context)
+        let friend = PersonBuilder()
+            .withEmail(friendEmail)
+            .withDisplayName("Friend Name")
+            .build(in: context)
+        let myAlias = PersonBuilder()
+            .withEmail("me.work@example.org")
+            .withDisplayName("Me At Work")
+            .build(in: context)
+        addConversationParticipant(person: friend, to: conversation)
+        addConversationParticipant(person: myAlias, to: conversation)
+        try stack.saveViewContext()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in ["me@example.com", "me.work@example.org"] },
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let resolved = await loader.resolveParticipants(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: "me@example.com"
+        )
+
+        XCTAssertEqual(resolved.map(\.email), [friendEmail])
+    }
+
     /// End to end for the reported bug, from the sheet's resolve to the unsaved `CNMutableContact`
     /// the add screen opens with. The stored Person name here holds the address itself (a To/Cc
     /// header of the form `"jacob.laycock@studs.com" <jacob.laycock@studs.com>` can win
@@ -1049,9 +1091,10 @@ final class ParticipantLoaderTests: XCTestCase {
     /// given-name field and no name anywhere.
     ///
     /// Revert-check: passing `[:]` for `headerDisplayNamesByEmail` in
-    /// `ParticipantLoader.resolveParticipants(for:inConversation:context:)` fails this test.
-    /// HONEST SCOPE: `ParticipantsListView` choosing this resolve and `NewContactPrefillPolicy.prefill(for:)`
-    /// is view glue with no UI test target; this test composes the same three calls the view makes.
+    /// `ParticipantLoader.resolveParticipants(inConversation:context:currentUserEmail:)` fails this test.
+    /// HONEST SCOPE: `ParticipantsListView` choosing this resolve and
+    /// `NewContactPrefillPolicy.prefill(for:storedDisplayName:)` is view glue with no UI test
+    /// target; this test composes the same three calls the view makes.
     func testParticipantsSheetNewContact_headerNamedSenderWithAddressStoredName_prefillsHeaderName() async throws {
         let email = "jacob.laycock@studs.com"
         let conversation = ConversationBuilder()
@@ -1067,10 +1110,11 @@ final class ParticipantLoaderTests: XCTestCase {
             .withSender(email: email, name: "Jacob Laycock")
             .inConversation(conversation)
             .build(in: context)
-        try context.save()
+        try stack.saveViewContext()
 
         let loader = ParticipantLoader(
             contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in ["me@example.com"] },
             prefetchDisplayNames: { _ in },
             cachedDisplayNameProvider: { _ in email },
             photoLoader: { _ in [] },
@@ -1078,12 +1122,15 @@ final class ParticipantLoaderTests: XCTestCase {
         )
 
         let resolved = await loader.resolveParticipants(
-            for: [email],
             inConversation: conversation.objectID,
-            context: context
+            context: context,
+            currentUserEmail: "me@example.com"
         )
         let participant = try XCTUnwrap(resolved.first)
-        let contact = ChatContactManager.newContact(from: NewContactPrefillPolicy.prefill(for: participant))
+        let contact = ChatContactManager.newContact(from: NewContactPrefillPolicy.prefill(
+            for: participant,
+            storedDisplayName: email
+        ))
 
         XCTAssertEqual(participant.displayName, "Jacob Laycock")
         XCTAssertEqual(contact.givenName, "Jacob")
@@ -1091,9 +1138,14 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(contact.emailAddresses.map { $0.value as String }, [email])
     }
 
-    /// No header names the participant and the stored name only restates the address: the row
-    /// stays "Unknown Contact" and the add screen gets the email alone, as before.
-    func testResolveParticipantsInConversation_noHeaderNameAndAddressDerivedStoredName_staysUnnamed() async throws {
+    /// No From header names the participant and the stored name only restates the address (he
+    /// was only ever To/Cc'd as "Jacob Laycock"): the row stays "Unknown Contact", as the
+    /// resolver's title rules require, but the add screen still opens with the stored name.
+    ///
+    /// Revert-check: replacing `storedDisplayName` with nil in
+    /// `NewContactPrefillPolicy.prefill(for:storedDisplayName:)` fails this test.
+    /// HONEST SCOPE: the row half pins existing resolver behavior and survives any revert here.
+    func testResolveParticipantsInConversation_noHeaderNameAndAddressDerivedStoredName_staysUnnamedButPrefillsStoredName() async throws {
         let email = "jacob.laycock@studs.com"
         let conversation = ConversationBuilder()
             .withDisplayName("Jacob Laycock")
@@ -1103,10 +1155,11 @@ final class ParticipantLoaderTests: XCTestCase {
             .withDisplayName("Jacob Laycock")
             .build(in: context)
         addConversationParticipant(person: jacob, to: conversation)
-        try context.save()
+        try stack.saveViewContext()
 
         let loader = ParticipantLoader(
             contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in ["me@example.com"] },
             prefetchDisplayNames: { _ in },
             cachedDisplayNameProvider: { _ in nil },
             photoLoader: { _ in [] },
@@ -1114,14 +1167,17 @@ final class ParticipantLoaderTests: XCTestCase {
         )
 
         let resolved = await loader.resolveParticipants(
-            for: [email],
             inConversation: conversation.objectID,
-            context: context
+            context: context,
+            currentUserEmail: "me@example.com"
         )
         let participant = try XCTUnwrap(resolved.first)
 
         XCTAssertFalse(participant.isRealDisplayName)
-        XCTAssertNil(NewContactPrefillPolicy.prefill(for: participant).name)
+        XCTAssertEqual(
+            NewContactPrefillPolicy.prefill(for: participant, storedDisplayName: "Jacob Laycock").name,
+            NewContactPrefillPolicy.NameComponents(givenName: "Jacob", familyName: "Laycock")
+        )
     }
 
     func testLoadParticipants_usesCachedRollupForRepeatedLoadsOfUnchangedConversation() async throws {
