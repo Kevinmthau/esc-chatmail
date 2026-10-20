@@ -195,10 +195,72 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
 
         await runRepair()
 
-        // Revert-check: the isEmailAddressShapedDisplayName(storedName) guard
-        // in repairAddressShapedPersonDisplayNamesIfNeeded.
+        // Revert-check: the isEmailAddressShapedDisplayName(storedName, forEmail:)
+        // guard in repairAddressShapedPersonDisplayNamesIfNeeded.
         let name = try await storedDisplayName(forEmail: jake)
         XCTAssertEqual(name, "Jake @ Studs")
+    }
+
+    /// A dotless address (`priya@intranet`) is not matched by the bare-address
+    /// pattern, but a `"priya@intranet" <priya@intranet>` header stored it as
+    /// her name all the same, so the selection must recognize the person's own
+    /// address too.
+    func testRepair_storedNameIsOwnDotlessAddress_recoversName() async throws {
+        let alice = self.alice!
+        let priya = "priya.\(UUID().uuidString.prefix(8).lowercased())@intranet"
+        try await seed { context in
+            let person = PersonBuilder().withEmail(priya).withDisplayName(priya).build(in: context)
+            let sender = PersonBuilder().withEmail(alice).withDisplayName("Alice Smith").build(in: context)
+            Self.addMessage(
+                id: "to-priya",
+                date: Date(timeIntervalSince1970: 1_000),
+                senderEmail: alice,
+                senderName: "Alice Smith",
+                rawTo: "Priya Shah <\(priya)>",
+                participants: [(sender, .from), (person, .to)],
+                in: context
+            )
+        }
+
+        await runRepair()
+
+        // Revert-check: the `forEmail:` argument of the storedName guard in
+        // repairAddressShapedPersonDisplayNamesIfNeeded (the bare test skips
+        // the row and it keeps the address).
+        let name = try await storedDisplayName(forEmail: priya)
+        XCTAssertEqual(name, "Priya Shah")
+    }
+
+    /// The only header naming her repeats her dotless address in other
+    /// casing. That is still her address, not a name, so the row keeps what
+    /// it had rather than trading one address for another.
+    ///
+    /// HONEST SCOPE: this also passes with the `forEmail:` argument of the
+    /// recoveredName guard reverted, because `isBetterDisplayName` already
+    /// refuses this variant over the stored address. It fails if both checks
+    /// start accepting the address.
+    func testRepair_onlyHeaderNameIsOwnDotlessAddress_isNotWritten() async throws {
+        let alice = self.alice!
+        let priya = "priya.\(UUID().uuidString.prefix(8).lowercased())@intranet"
+        try await seed { context in
+            let person = PersonBuilder().withEmail(priya).withDisplayName(priya).build(in: context)
+            let sender = PersonBuilder().withEmail(alice).withDisplayName("Alice Smith").build(in: context)
+            Self.addMessage(
+                id: "to-priya-upper",
+                date: Date(timeIntervalSince1970: 1_000),
+                senderEmail: alice,
+                senderName: "Alice Smith",
+                rawTo: "\"\(priya.uppercased())\" <\(priya)>",
+                participants: [(sender, .from), (person, .to)],
+                in: context
+            )
+        }
+
+        await runRepair()
+
+        let name = try await storedDisplayName(forEmail: priya)
+        XCTAssertEqual(name, priya)
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.addressShapedPersonNameRepairKey))
     }
 
     /// Idempotency: with the flag cleared, a second run over the repaired

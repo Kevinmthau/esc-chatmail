@@ -361,7 +361,8 @@ extension DataCleanupService {
         let result: (changedPersonEmails: Set<String>, conversationIDs: Set<NSManagedObjectID>, unrecoveredCount: Int)? = await context.perform {
             let request = Person.fetchRequest()
             // "@" narrows the scan to candidate rows; the shape test below is
-            // the one display paths use, so "Jake @ Studs" is left alone.
+            // the one `isBetterDisplayName` uses, so "Jake @ Studs" is left
+            // alone.
             request.predicate = NSPredicate(format: "displayName CONTAINS %@", "@")
             request.fetchBatchSize = 100
             request.relationshipKeyPathsForPrefetching = [
@@ -383,13 +384,20 @@ extension DataCleanupService {
             var conversationIDs: Set<NSManagedObjectID> = []
             var unrecoveredCount = 0
             for person in persons {
+                let email = EmailNormalizer.normalize(person.email)
+                // The `forEmail:` form also matches the person's own dotless,
+                // internationalized or domain-literal address
+                // (`"ops@intranet" <ops@intranet>`), which a header could
+                // store as the name but the bare-address pattern misses; the
+                // context-free test would leave those rows unrepaired. The
+                // recovered-name check below uses the same form so the two
+                // agree on what counts as an address.
                 guard let storedName = person.displayName,
-                      EmailNormalizer.isEmailAddressShapedDisplayName(storedName) else {
+                      EmailNormalizer.isEmailAddressShapedDisplayName(storedName, forEmail: email) else {
                     continue
                 }
-                let email = EmailNormalizer.normalize(person.email)
                 guard let recoveredName = Self.recoveredHeaderDisplayName(for: person, email: email),
-                      !EmailNormalizer.isEmailAddressShapedDisplayName(recoveredName),
+                      !EmailNormalizer.isEmailAddressShapedDisplayName(recoveredName, forEmail: email),
                       EmailNormalizer.isBetterDisplayName(recoveredName, than: storedName, forEmail: email) else {
                     unrecoveredCount += 1
                     continue
