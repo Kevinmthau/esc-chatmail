@@ -133,9 +133,7 @@ final class MessageFetcherTests: XCTestCase {
         let task = Task {
             try await fetcher.fetchBatch(["slow"]) { _ in .empty }
         }
-        for _ in 0..<1_000 where mockAPI.getMessageCallCountSnapshot() == 0 {
-            await Task.yield()
-        }
+        await waitUntil { mockAPI.getMessageCallCountSnapshot() > 0 }
         XCTAssertEqual(mockAPI.getMessageCallCountSnapshot(), 1)
 
         task.cancel()
@@ -158,10 +156,7 @@ final class MessageFetcherTests: XCTestCase {
         let task = Task {
             try await fetcher.fetchBatch(["retry"]) { _ in .empty }
         }
-        for _ in 0..<1_000 where !clock.hasStartedSleeping {
-            await Task.yield()
-        }
-        XCTAssertTrue(clock.hasStartedSleeping)
+        await waitUntil { clock.hasStartedSleeping }
 
         task.cancel()
         do {
@@ -261,6 +256,29 @@ final class MessageFetcherTests: XCTestCase {
         XCTAssertTrue(result.goneIds.isEmpty)
         XCTAssertTrue(result.failedIds.isEmpty)
         XCTAssertEqual(mockAPI.getMessageCallCount, 0)
+    }
+
+    // MARK: - Helpers
+
+    /// Polls `condition` until it holds or `timeout` elapses. The cancellation
+    /// tests wait here for the background fetch to reach the suspension point
+    /// they cancel at: a fixed number of `Task.yield()`s ran out on a loaded
+    /// CI VM before the task got there, so the wait is bounded by wall clock.
+    private func waitUntil(
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
 }
