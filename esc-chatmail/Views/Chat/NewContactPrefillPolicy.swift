@@ -21,8 +21,10 @@ import Foundation
 /// name merged across every header that ever named the address. Rows merged before
 /// `EmailNormalizer.isBetterDisplayName` stopped letting an email-address-shaped name
 /// ("jacob.laycock@studs.com") replace a name ("Jacob Laycock") can still hold the address until
-/// a later header names the person; no launch pass rewrites them. Reading it first is what
-/// brought the add screen up without the name the header showed.
+/// a later header names the person: the one-shot
+/// `DataCleanupService.repairAddressShapedPersonDisplayNamesIfNeeded` recovers a name only from
+/// headers the store kept, and To/Cc headers are kept only since model v6. Reading it first is
+/// what brought the add screen up without the name the header showed.
 enum NewContactPrefillPolicy {
     /// The `CNMutableContact` name fields to prefill. Empty strings leave a field blank.
     struct NameComponents: Equatable {

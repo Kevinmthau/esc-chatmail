@@ -109,11 +109,13 @@ final class ConversationManager: Sendable {
     }
 
     /// Refreshes stored display names for selected conversations without touching rollup fields.
+    /// - Returns: false when the conversation fetch failed.
     @MainActor
+    @discardableResult
     func updateConversationDisplayNames(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
-    ) async {
+    ) async -> Bool {
         await rollupUpdater.updateDisplayNamesForConversations(
             conversationIDs: conversationIDs,
             in: context,

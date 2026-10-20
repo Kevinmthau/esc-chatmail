@@ -105,6 +105,7 @@ struct DataCleanupService: Sendable {
             await migrateConversationsToArchiveModel(in: context)
             await splitConversationsByParticipantSetIfNeeded(in: context)
             await decodeRFC2047HeaderTextIfNeeded(in: context)
+            await repairAddressShapedPersonDisplayNamesIfNeeded(in: context)
             await removeDuplicateMessages(in: context)
             await removeDuplicateConversations(in: context)
             await mergeActiveConversationDuplicates(in: context)
@@ -117,7 +118,7 @@ struct DataCleanupService: Sendable {
     /// Runs incremental cleanup (no duplicate message check).
     ///
     /// The flag-gated migrations share one cleanup-sensitive hold; in steady
-    /// state both are no-ops, so that hold costs a save of nothing. The 6-hour
+    /// state each is a no-op, so that hold costs a save of nothing. The 6-hour
     /// store-wide maintenance then takes the gate once per pass
     /// (`runMaintenancePassesCooperatively`) rather than around the whole run:
     /// optimistic-send creation queues on the same gate, and one hold spanning
@@ -130,6 +131,9 @@ struct DataCleanupService: Sendable {
         await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
             await splitConversationsByParticipantSetIfNeeded(in: context)
             await decodeRFC2047HeaderTextIfNeeded(in: context)
+            // After the RFC 2047 pass, which decodes the senderName values
+            // this one reads.
+            await repairAddressShapedPersonDisplayNamesIfNeeded(in: context)
             // Not checked: each flag-gated migration latches its flag only
             // after its own save succeeds, so a failure here (logged by the
             // hold) leaves it to retry at the next sync, and it has no bearing
