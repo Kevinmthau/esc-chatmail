@@ -537,6 +537,9 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertEqual(coordinator.sendCount, 1)
     }
 
+    /// Polls `condition` until it holds or `timeout` elapses. The condition is
+    /// checked before the deadline on every pass, so a main-thread stall longer
+    /// than the timeout cannot fail a condition that came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         file: StaticString = #filePath,
@@ -544,11 +547,13 @@ final class ComposeViewModelTests: XCTestCase {
         condition: @escaping @MainActor () -> Bool
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return }
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
             await Task.yield()
         }
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }
 

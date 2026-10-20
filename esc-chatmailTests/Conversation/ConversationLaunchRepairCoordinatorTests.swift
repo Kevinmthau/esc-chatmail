@@ -332,15 +332,18 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
         return conversation
     }
 
-    // Production runs the preview repair at .background priority; on a loaded
-    // CI VM that worker finished ~65s after this suite released it, past the
-    // 30s deadline (testCancel_whileAwaitingSyncWaiter_leavesRepairRerunnable,
-    // PR #235's CI run). A poll never raises the worker's priority, so
-    // makeCoordinator passes `repairTaskPriority: nil` and the worker inherits
-    // the test's priority instead. The deadline stays a generous liveness
-    // bound — a green run exits at the first successful poll — and the 50ms
-    // interval keeps this MainActor fetch-and-refresh poll from contending
-    // with the repair task's own MainActor hops.
+    /// Production runs the preview repair at .background priority; on a loaded
+    /// CI VM that worker finished ~65s after this suite released it, past the
+    /// 30s deadline (testCancel_whileAwaitingSyncWaiter_leavesRepairRerunnable,
+    /// PR #235's CI run). A poll never raises the worker's priority, so
+    /// makeCoordinator passes `repairTaskPriority: nil` and the worker inherits
+    /// the test's priority instead. The deadline stays a generous liveness
+    /// bound — a green run exits at the first successful poll — and the 50ms
+    /// interval keeps this MainActor fetch-and-refresh poll from contending
+    /// with the repair task's own MainActor hops.
+    /// The condition is checked before the deadline on every pass, so a
+    /// main-thread stall longer than the timeout cannot fail a condition that
+    /// came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 30.0,
         pollIntervalNanoseconds: UInt64 = 50_000_000,
@@ -350,14 +353,13 @@ final class ConversationLaunchRepairCoordinatorTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if (try? condition()) == true {
+        while (try? condition()) != true {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }
 

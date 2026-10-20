@@ -74,6 +74,9 @@ final class SettingsAppSignOutPrompterTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// Polls `condition` until it holds or `timeout` elapses. The condition is
+    /// checked before the deadline on every pass, so a main-thread stall longer
+    /// than the timeout cannot fail a condition that came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 5.0,
         pollIntervalNanoseconds: UInt64 = 10_000_000,
@@ -82,13 +85,13 @@ final class SettingsAppSignOutPrompterTests: XCTestCase {
         condition: @escaping () -> Bool
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() {
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }
 

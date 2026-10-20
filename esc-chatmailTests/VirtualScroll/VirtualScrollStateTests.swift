@@ -5244,6 +5244,9 @@ final class VirtualScrollStateTests: XCTestCase {
         participant.message = message
     }
 
+    /// Polls `condition` until it holds or `timeout` elapses. The condition is
+    /// checked before the deadline on every pass, so a main-thread stall longer
+    /// than the timeout cannot fail a condition that came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         pollIntervalNanoseconds: UInt64 = 20_000_000,
@@ -5253,16 +5256,17 @@ final class VirtualScrollStateTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if condition() {
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
+    /// `waitUntil` with the condition evaluated on `context`'s queue. Checked
+    /// before the deadline on every pass, for the same reason as `waitUntil(timeout:pollIntervalNanoseconds:file:line:condition:)`.
     private func waitUntilInContext(
         _ context: NSManagedObjectContext,
         timeout: TimeInterval = 2.0,
@@ -5273,16 +5277,17 @@ final class VirtualScrollStateTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if await context.perform({ condition(context) }) {
+        while await !context.perform({ condition(context) }) {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for context condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for context condition", file: file, line: line)
     }
 
+    /// Polls until `expected` page loads have parked in `gates`. Checked before
+    /// the deadline on every pass, for the same reason as `waitUntil(timeout:pollIntervalNanoseconds:file:line:condition:)`.
     private func waitUntilArrivedPageLoads(
         _ expected: Int,
         in gates: PageLoadGates,
@@ -5293,16 +5298,17 @@ final class VirtualScrollStateTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if await gates.arrivedCount() >= expected {
+        while await gates.arrivedCount() < expected {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for parked page loads", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for parked page loads", file: file, line: line)
     }
 
+    /// Polls until `recorder` holds `expectedCount` ranges. Checked before the
+    /// deadline on every pass, for the same reason as `waitUntil(timeout:pollIntervalNanoseconds:file:line:condition:)`.
     private func waitUntilRecordedRangeCount(
         _ expectedCount: Int,
         in recorder: RangeRecorder,
@@ -5313,14 +5319,13 @@ final class VirtualScrollStateTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if await recorder.snapshot().count >= expectedCount {
+        while await recorder.snapshot().count < expectedCount {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for recorded range count", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for recorded range count", file: file, line: line)
     }
 }
 

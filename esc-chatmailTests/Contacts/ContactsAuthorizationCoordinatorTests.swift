@@ -120,6 +120,9 @@ final class ContactsAuthorizationCoordinatorTests: XCTestCase {
         )
     }
 
+    /// Polls `condition` until it holds or `timeout` elapses. The condition is
+    /// checked before the deadline on every pass, so a main-thread stall longer
+    /// than the timeout cannot fail a condition that came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         condition: @escaping @MainActor () -> Bool,
@@ -127,11 +130,13 @@ final class ContactsAuthorizationCoordinatorTests: XCTestCase {
         line: UInt = #line
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return }
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }
 
