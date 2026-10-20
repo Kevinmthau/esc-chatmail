@@ -123,6 +123,29 @@ final class ConversationIdentityTests: XCTestCase {
         XCTAssertEqual(identity.participantDisplayNames["jacob.laycock@studs.com"], "Jacob Laycock")
     }
 
+    /// A Cc name matching the sender's address ("Jacob Laycock" for
+    /// jacob.laycock@) is the later candidate, and it ties the From name on
+    /// part count, which the real name wins.
+    ///
+    /// Revert-check: removing the part-count `guard` from the derived-candidate
+    /// branch of `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails
+    /// this test (the longer Cc name replaced the From name).
+    func testMakeConversationIdentity_addressDerivedCcNameDoesNotReplaceFromName() {
+        let headers = [
+            MessageHeader(name: "From", value: "Jake Laycock <jacob.laycock@studs.com>"),
+            MessageHeader(name: "To", value: "Kevin <kmthau@gmail.com>"),
+            MessageHeader(name: "Cc", value: "Jacob Laycock <jacob.laycock@studs.com>")
+        ]
+
+        let identity = makeConversationIdentity(
+            from: headers,
+            myAliases: ["kmthau@gmail.com"]
+        )
+
+        XCTAssertEqual(identity.participants, ["jacob.laycock@studs.com"])
+        XCTAssertEqual(identity.participantDisplayNames["jacob.laycock@studs.com"], "Jake Laycock")
+    }
+
     func testMakeConversationIdentity_excludesAllSelfAliasesFromRecipients() {
         let headers = [
             MessageHeader(name: "From", value: "Friend <friend@example.com>"),

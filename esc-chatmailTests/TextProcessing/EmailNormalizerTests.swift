@@ -533,6 +533,131 @@ final class EmailNormalizerTests: XCTestCase {
         }
     }
 
+    // MARK: - isBetterDisplayName: never better in both directions
+
+    /// For jacob.laycock@ the real "Jake Laycock" replaced the address-derived
+    /// "Jacob Laycock" (two parts each), and "Jacob Laycock" won it back as the
+    /// longer name.
+    ///
+    /// Revert-check: removing the part-count `guard` from the derived-candidate
+    /// branch (`newIsDerived && !existingIsDerived`) of
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test.
+    func testIsBetterDisplayName_forEmail_addressDerivedNameNeverReplacesRealNameOfEqualPartCount() {
+        let result = EmailNormalizer.isBetterDisplayName(
+            "Jacob Laycock",
+            than: "Jake Laycock",
+            forEmail: "jacob.laycock@studs.com"
+        )
+        XCTAssertFalse(result)
+    }
+
+    /// HONEST SCOPE: passes without the fix too. It pins the direction the fix
+    /// kept: at an equal part count the real name wins.
+    func testIsBetterDisplayName_forEmail_realNameReplacesAddressDerivedNameOfEqualPartCount() {
+        let result = EmailNormalizer.isBetterDisplayName(
+            "Jake Laycock",
+            than: "Jacob Laycock",
+            forEmail: "jacob.laycock@studs.com"
+        )
+        XCTAssertTrue(result)
+    }
+
+    /// The converse of `testIsBetterDisplayName_forEmail_replacesSinglePartAddressDerivedName`.
+    ///
+    /// Revert-check: removing the part-count `guard` from the derived-candidate
+    /// branch of `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails
+    /// this test ("Kmthau" won back as the longer one-word name).
+    func testIsBetterDisplayName_forEmail_singlePartAddressDerivedNameNeverReplacesRealName() {
+        let result = EmailNormalizer.isBetterDisplayName("Kmthau", than: "Kevin", forEmail: "kmthau@example.com")
+        XCTAssertFalse(result)
+    }
+
+    /// HONEST SCOPE: passes without the fix too. The guard covers only the tie:
+    /// a derived name with more parts still replaces a shorter real name, the
+    /// converse of `testIsBetterDisplayName_forEmail_preservesMoreCompleteAddressDerivedName`.
+    func testIsBetterDisplayName_forEmail_fullerAddressDerivedNameStillReplacesShorterRealName() {
+        let result = EmailNormalizer.isBetterDisplayName("John Doe", than: "John", forEmail: "john.doe@example.com")
+        XCTAssertTrue(result)
+    }
+
+    /// Revert-check: restoring `new != existing && hasIntentionalCasing(new)` in
+    /// place of the `newHasIntentionalCasing != hasIntentionalCasing(existing)`
+    /// comparison in `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)`
+    /// fails this test (the uncased name then won the base ranking on word
+    /// count, while the cased one won on casing).
+    func testIsBetterDisplayName_forEmail_uncasedDerivedNameNeverReplacesIntentionallyCasedOne() {
+        let result = EmailNormalizer.isBetterDisplayName(
+            "jacob laycock",
+            than: "Jacob.Laycock",
+            forEmail: "jacob.laycock@studs.com"
+        )
+        XCTAssertFalse(result)
+    }
+
+    /// Revert-check: restoring `new != existing && hasIntentionalCasing(new)` in
+    /// place of the intentional-casing comparison in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (both variants have intentional casing, so each replaced the other).
+    func testIsBetterDisplayName_forEmail_intentionallyCasedDerivedVariantsDoNotReplaceEachOther() {
+        let email = "jacob.laycock@studs.com"
+        XCTAssertFalse(EmailNormalizer.isBetterDisplayName("JACOB LAYCOCK", than: "Jacob Laycock", forEmail: email))
+        XCTAssertFalse(EmailNormalizer.isBetterDisplayName("Jacob Laycock", than: "JACOB LAYCOCK", forEmail: email))
+    }
+
+    /// Revert-check: removing the part-count `guard` from the derived-candidate
+    /// branch of `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails
+    /// this test (From-then-Cc order ended on "Jacob Laycock").
+    func testIsBetterDisplayName_forEmail_headerOrderDoesNotFlipBetweenRealAndAddressDerivedName() {
+        let email = "jacob.laycock@studs.com"
+        func fold(_ candidates: [String]) -> String? {
+            candidates.reduce(nil) { stored, candidate in
+                EmailNormalizer.isBetterDisplayName(candidate, than: stored, forEmail: email) ? candidate : stored
+            }
+        }
+
+        XCTAssertEqual(fold(["Jake Laycock", "Jacob Laycock"]), "Jake Laycock", "From header, then a Cc name matching the address")
+        XCTAssertEqual(fold(["Jacob Laycock", "Jake Laycock"]), "Jake Laycock", "To name matching the address, then a From header")
+    }
+
+    /// A pair ranked better in both directions makes the stored name follow
+    /// header order. Ties (false both ways) are allowed: they keep the stored
+    /// name. The failure message lists every offending pair.
+    ///
+    /// Revert-check: removing the part-count `guard` from the derived-candidate
+    /// branch of `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails
+    /// this test (Jacob Laycock / Jake Laycock, Kevin / Kmthau, ...), and so
+    /// does restoring `new != existing && hasIntentionalCasing(new)` in place of
+    /// the intentional-casing comparison (BONBONWHIMS / BonBonWhims,
+    /// Jacob Laycock / JACOB LAYCOCK, ...).
+    func testIsBetterDisplayName_forEmail_neverRanksBothNamesOfAPairBetter() {
+        let namesByEmail: [(email: String, names: [String])] = [
+            ("bonbonwhims@example.com", ["BONBONWHIMS", "Bonbonwhims", "bonbonwhims", "BonBonWhims", "Bon Bon Whims"]),
+            ("jacob.laycock@studs.com", [
+                "Jacob Laycock", "Jake Laycock", "Jake", "Jacob", "J. Laycock", "Jacob R. Laycock",
+                "JACOB LAYCOCK", "jacob laycock", "Jacob.Laycock", "jacob.laycock",
+                "jacob.laycock@studs.com", "=?utf-8?B?SmFrZQ==?="
+            ]),
+            ("john.doe@example.com", ["John", "John Doe", "Jonathan Doe", "Johnny", "JOHN DOE", "john_doe", "Dr. John Doe"]),
+            ("kmthau@example.com", ["Kevin", "Kmthau", "kmthau", "KMTHAU", "Kevin Thau", "Kev"]),
+            ("mary-jane.smith@example.com", ["Mary-Jane Smith", "Mary Jane Smith", "MJ Smith", "Mary Smith", "MARY-JANE SMITH"]),
+            // Address-shaped only through the participant's own address.
+            ("ops@intranet", ["Ops", "OPS", "Operations Team", "ops@intranet"])
+        ]
+
+        var betterBothWays: [String] = []
+        for (email, names) in namesByEmail {
+            for (index, first) in names.enumerated() {
+                for second in names[(index + 1)...]
+                where EmailNormalizer.isBetterDisplayName(first, than: second, forEmail: email)
+                    && EmailNormalizer.isBetterDisplayName(second, than: first, forEmail: email) {
+                    betterBothWays.append("\(email): \"\(first)\" / \"\(second)\"")
+                }
+            }
+        }
+
+        XCTAssertEqual(betterBothWays, [])
+    }
+
     // MARK: - Hide My Email Detection
 
     // MARK: - mergeNewestFirstHeaderDisplayName
@@ -590,6 +715,25 @@ final class EmailNormalizerTests: XCTestCase {
             forEmail: "jacob.laycock@studs.com"
         )
         XCTAssertEqual(result, "Jacob")
+    }
+
+    /// A case-only variant is a token subset either way, so only the ranking
+    /// decides. Both variants used to rank better than each other, so the
+    /// older one always won; now neither does and the newest From name stays.
+    ///
+    /// Revert-check: restoring `new != existing && hasIntentionalCasing(new)` in
+    /// place of the intentional-casing comparison in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test.
+    func testMergeNewestFirstHeaderDisplayName_olderCaseOnlyVariantNeverReplacesNewestName() {
+        let email = "jacob.laycock@studs.com"
+        XCTAssertEqual(
+            EmailNormalizer.mergeNewestFirstHeaderDisplayName("JACOB LAYCOCK", into: "Jacob Laycock", forEmail: email),
+            "Jacob Laycock"
+        )
+        XCTAssertEqual(
+            EmailNormalizer.mergeNewestFirstHeaderDisplayName("Jacob Laycock", into: "JACOB LAYCOCK", forEmail: email),
+            "JACOB LAYCOCK"
+        )
     }
 
     func testIsDisplayNameTokenSubset_subsetAndNonSubset() {

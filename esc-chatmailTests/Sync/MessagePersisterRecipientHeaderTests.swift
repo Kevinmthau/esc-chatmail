@@ -278,6 +278,42 @@ final class MessagePersisterRecipientHeaderTests: XCTestCase {
         try await assertStoredDisplayName("José", forEmail: jose)
     }
 
+    /// His From header names him "Jake Laycock", then a reply's To header names
+    /// him "Jacob Laycock", which matches his address and ties on part count.
+    ///
+    /// Revert-check: removing the part-count `guard` from the derived-candidate
+    /// branch of `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails
+    /// this test (`PersonFactory.findOrCreate` stored the longer "Jacob Laycock").
+    func testCreate_fromHeaderNameThenAddressDerivedToName_keepsFromHeaderName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jake-writes", from: "Jake Laycock <\(jacob)>", to: [me], secondsAfterBase: 0),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+        try await assertStoredDisplayName("Jake Laycock", forEmail: jacob)
+
+        try await persister.createNewMessage(
+            makeNamedArrival(
+                id: "reply-to-jake",
+                from: "Me <\(me.email)>",
+                to: [EmailAddress(email: jacob, displayName: "Jacob Laycock")],
+                isFromMe: true,
+                secondsAfterBase: 60
+            ),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("Jake Laycock", forEmail: jacob)
+    }
+
     private func makeNamedArrival(
         id: String,
         from: String,
