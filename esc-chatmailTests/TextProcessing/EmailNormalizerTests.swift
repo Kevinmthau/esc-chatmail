@@ -408,6 +408,101 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertFalse(result)
     }
 
+    // MARK: - isBetterDisplayName: address-shaped names
+
+    /// A To/Cc header written as `"jacob.laycock@studs.com" <jacob.laycock@studs.com>`
+    /// splits into more comparison parts than the address-derived "Jacob Laycock",
+    /// which is how it used to take the stored name.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test.
+    func testIsBetterDisplayName_forEmail_addressShapedNameNeverReplacesAddressDerivedName() {
+        let result = EmailNormalizer.isBetterDisplayName(
+            "jacob.laycock@studs.com",
+            than: "Jacob Laycock",
+            forEmail: "jacob.laycock@studs.com"
+        )
+        XCTAssertFalse(result)
+    }
+
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (the longer address beat a one-word name of the same part count).
+    func testIsBetterDisplayName_forEmail_addressShapedNameNeverReplacesOneWordName() {
+        let result = EmailNormalizer.isBetterDisplayName(
+            "jacob.laycock@studs.com",
+            than: "Jake",
+            forEmail: "jacob.laycock@studs.com"
+        )
+        XCTAssertFalse(result)
+    }
+
+    /// The other half of the rule, and what heals a row that already holds the
+    /// address: the next header that names the person replaces it.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (a one-word name shorter than the address never won it back).
+    func testIsBetterDisplayName_forEmail_nameReplacesAddressShapedName() {
+        let result = EmailNormalizer.isBetterDisplayName(
+            "Jake",
+            than: "jacob.laycock@studs.com",
+            forEmail: "jacob.laycock@studs.com"
+        )
+        XCTAssertTrue(result)
+    }
+
+    /// The stored name must not depend on which header was processed last.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (From-then-Cc order ended on the address).
+    func testIsBetterDisplayName_forEmail_headerOrderDoesNotFlipNameToAddress() {
+        let email = "jacob.laycock@studs.com"
+        func fold(_ candidates: [String]) -> String? {
+            candidates.reduce(nil) { stored, candidate in
+                EmailNormalizer.isBetterDisplayName(candidate, than: stored, forEmail: email) ? candidate : stored
+            }
+        }
+
+        XCTAssertEqual(fold(["Jacob Laycock", email]), "Jacob Laycock", "From header, then an address-shaped Cc name")
+        XCTAssertEqual(fold([email, "Jacob Laycock"]), "Jacob Laycock", "Address-shaped To name, then a From header")
+    }
+
+    /// HONEST SCOPE: passes without the fix too. It pins what the guard leaves
+    /// alone: an address-shaped name still fills an empty slot, so a Person
+    /// named only by such a header is stored exactly as before.
+    func testIsBetterDisplayName_forEmail_addressShapedNameStillFillsEmptyName() {
+        XCTAssertTrue(EmailNormalizer.isBetterDisplayName(
+            "jacob.laycock@studs.com",
+            than: nil,
+            forEmail: "jacob.laycock@studs.com"
+        ))
+    }
+
+    /// The encoded-word guard runs first: a raw encoded-word on screen is worse
+    /// than an address, so a decoded address-shaped candidate still replaces it.
+    ///
+    /// Revert-check: moving the `isEmailAddressShapedDisplayName` guard above the
+    /// `RFC2047Decoder.containsEncodedWord` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test.
+    func testIsBetterDisplayName_forEmail_addressShapedNameStillReplacesEncodedWordGarbage() {
+        let result = EmailNormalizer.isBetterDisplayName(
+            "jose@example.com",
+            than: "=?utf-8?B?Sm9zw6k=?=",
+            forEmail: "jose@example.com"
+        )
+        XCTAssertTrue(result)
+    }
+
+    func testIsEmailAddressShapedDisplayName_addressesAndNames() {
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("jacob.laycock@studs.com"))
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("Jacob (jacob.laycock@studs.com)"))
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("Jacob Laycock"))
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("@jacob"))
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("Jacob @ Studs"))
+    }
+
     // MARK: - Hide My Email Detection
 
     // MARK: - mergeNewestFirstHeaderDisplayName
@@ -446,6 +541,25 @@ final class EmailNormalizerTests: XCTestCase {
             forEmail: "sender@example.com"
         )
         XCTAssertEqual(result, "Current Name")
+    }
+
+    /// "Jacob" is a token subset of "jacob.laycock@studs.com" (whose comparison
+    /// tokens are "jacob", "laycock@studs", "com"), so only the ranking keeps
+    /// the older address from upgrading the newest name.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test.
+    /// HONEST SCOPE: both production callers pass only names that survived
+    /// `PersonDisplayNameResolver.sanitizedExplicitDisplayName`, which already
+    /// drops address-shaped names, so this pins the function's contract rather
+    /// than a path sync reaches today.
+    func testMergeNewestFirstHeaderDisplayName_olderAddressShapedNameNeverUpgradesNewestName() {
+        let result = EmailNormalizer.mergeNewestFirstHeaderDisplayName(
+            "jacob.laycock@studs.com",
+            into: "Jacob",
+            forEmail: "jacob.laycock@studs.com"
+        )
+        XCTAssertEqual(result, "Jacob")
     }
 
     func testIsDisplayNameTokenSubset_subsetAndNonSubset() {
