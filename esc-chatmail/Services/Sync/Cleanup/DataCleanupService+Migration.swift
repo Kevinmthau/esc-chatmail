@@ -298,6 +298,12 @@ extension DataCleanupService {
         }
 
         guard await context.performSaveIfNeeded(caller: "DataCleanupService.decodeRFC2047HeaderText") else {
+            // Left staged, the decoded values would be committed by the next
+            // save of this context (the cleanup hold in incremental cleanup,
+            // the final save in full cleanup) with the flag clear and no cache
+            // invalidation; the re-run would then find nothing to decode and
+            // never invalidate PersonCache.
+            await context.perform { context.rollback() }
             Log.warning("RFC 2047 header text repair save failed; will retry next cleanup", category: .coreData)
             return
         }
