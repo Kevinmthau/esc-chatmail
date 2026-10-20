@@ -243,6 +243,41 @@ final class MessagePersisterRecipientHeaderTests: XCTestCase {
         try await assertStoredDisplayName("Jake", forEmail: jacob)
     }
 
+    /// The same ordering for an internationalized address: header extraction
+    /// takes it from the angle brackets, but the bare-address pattern does not
+    /// match it as a display name.
+    ///
+    /// Revert-check: removing the `normalize(displayName) == normalize(email)`
+    /// term in `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)`
+    /// fails this test (`PersonFactory.findOrCreate` stored the address).
+    func testCreate_fromHeaderNameThenRepeatedInternationalizedAddress_keepsFromHeaderName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+        let jose = "jose@correo.españa"
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jose-writes", from: "José <\(jose)>", to: [me], secondsAfterBase: 0),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await persister.createNewMessage(
+            makeNamedArrival(
+                id: "reply-to-jose",
+                from: "Me <\(me.email)>",
+                to: [EmailAddress(email: jose, displayName: jose)],
+                isFromMe: true,
+                secondsAfterBase: 60
+            ),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("José", forEmail: jose)
+    }
+
     private func makeNamedArrival(
         id: String,
         from: String,
