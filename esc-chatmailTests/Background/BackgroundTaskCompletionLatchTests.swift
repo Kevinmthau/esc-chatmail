@@ -238,32 +238,45 @@ final class BackgroundTaskCompletionLatchTests: XCTestCase {
         XCTAssertEqual(work.value, 0)
     }
 
+    /// Polls until a worker is parked on `startGate` or `timeout` elapses. The
+    /// condition is checked before the deadline on every pass, so a stall longer
+    /// than the timeout cannot fail a condition that came true during the stall.
     private func waitUntilWorkerIsBlocked(
         on startGate: BackgroundTaskWorkerStartGate,
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<1_000 {
-            if startGate.hasWaitingWorker {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !startGate.hasWaitingWorker {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for worker start gate", file: file, line: line)
                 return
             }
-            await Task.yield()
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        XCTFail("Timed out waiting for worker start gate", file: file, line: line)
     }
 
+    /// Polls until `probe` holds a pending-request callback or `timeout`
+    /// elapses. The condition is checked before the deadline on every pass, so
+    /// a stall longer than the timeout cannot fail a condition that came true
+    /// during the stall.
     private func waitUntilCallbackIsInstalled(
         on probe: PendingTaskRequestsCallbackProbe,
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<1_000 {
-            if probe.hasCallback {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !probe.hasCallback {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for pending-request callback", file: file, line: line)
                 return
             }
-            await Task.yield()
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        XCTFail("Timed out waiting for pending-request callback", file: file, line: line)
     }
 }
 

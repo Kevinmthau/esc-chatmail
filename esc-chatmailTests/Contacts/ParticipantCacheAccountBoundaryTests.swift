@@ -325,34 +325,55 @@ final class ParticipantCacheAccountBoundaryTests: XCTestCase {
         )
     }
 
-    private func waitUntilClosed(_ cache: PersonCache) async -> Bool {
-        for _ in 0..<1_000 {
-            if await cache.captureAccountGeneration() == nil {
-                return true
-            }
-            await Task.yield()
+    /// Polls until `cache` refuses to capture a generation (its close has begun)
+    /// or `timeout` elapses, returning whether it closed. The condition is
+    /// checked before the deadline on every pass, so a stall longer than the
+    /// timeout cannot fail a condition that came true during the stall.
+    private func waitUntilClosed(
+        _ cache: PersonCache,
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while await cache.captureAccountGeneration() != nil {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        return false
+        return true
     }
 
-    private func waitUntilClosed(_ resolver: ProfilePhotoResolver) async -> Bool {
-        for _ in 0..<1_000 {
-            if await resolver.captureAccountGeneration() == nil {
-                return true
-            }
-            await Task.yield()
+    /// `ProfilePhotoResolver` copy of `waitUntilClosed(_:)` for `PersonCache`:
+    /// the condition is checked before the deadline on every pass, so a stall
+    /// longer than the timeout cannot fail a condition that came true during
+    /// the stall.
+    private func waitUntilClosed(
+        _ resolver: ProfilePhotoResolver,
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while await resolver.captureAccountGeneration() != nil {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        return false
+        return true
     }
 
-    private func waitUntilClosed(_ resolver: ContactsResolver) async -> Bool {
-        for _ in 0..<1_000 {
-            if await resolver.captureAccountGeneration() == nil {
-                return true
-            }
-            await Task.yield()
+    /// `ContactsResolver` copy of `waitUntilClosed(_:)` for `PersonCache`: the
+    /// condition is checked before the deadline on every pass, so a stall
+    /// longer than the timeout cannot fail a condition that came true during
+    /// the stall.
+    private func waitUntilClosed(
+        _ resolver: ContactsResolver,
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while await resolver.captureAccountGeneration() != nil {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        return false
+        return true
     }
 
     private func makePersonStore(
