@@ -531,14 +531,9 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 1)
 
         secondRead.cancel()
-        for _ in 0..<100 where !waiterFinished.isSet {
-            await Task.yield()
-        }
-
-        XCTAssertTrue(
-            waiterFinished.isSet,
-            "A cancelled coalesced reader must be removed and resumed without waiting for the owner request"
-        )
+        // A cancelled coalesced reader must be removed and resumed without
+        // waiting for the owner request, which stays suspended until release.
+        await waitUntil { waiterFinished.isSet }
         if !waiterFinished.isSet {
             // Avoid hanging the test on the exact regression being asserted.
             await request.release()
@@ -740,8 +735,23 @@ final class AttachmentDownloaderTests: XCTestCase {
                 in: testStack.newBackgroundContext()
             )
         }
-        for _ in 0..<100 where apiClient.getMessageCallCountSnapshot() == 1 {
-            await Task.yield()
+        // The sibling registers its own download key just before the
+        // synthesized-inline branch, so waiting on it puts the sibling on the
+        // recovery path while the owner's recovery is still suspended.
+        // Revert-check: no longer storing the operation in
+        // `activeSynthesizedInlineRecoveries` fails this assertion and the
+        // final count assertion.
+        // HONEST SCOPE: one background-context read (the already-readable
+        // check) separates that registration from joining the recovery, and
+        // nothing observable marks the join itself. A sibling that started its
+        // own recovery raises the count asynchronously, so this assertion
+        // catches it only when the poll interval outlasts that hop; the count
+        // assertion after the sibling's result catches it regardless.
+        await waitUntil {
+            downloader.isDownloading(
+                messageId: messageID,
+                attachmentId: secondRecovered.attachmentID
+            )
         }
         XCTAssertEqual(
             apiClient.getMessageCallCountSnapshot(),
@@ -750,13 +760,9 @@ final class AttachmentDownloaderTests: XCTestCase {
         )
 
         ownerRead.cancel()
-        for _ in 0..<100 where !ownerFinished.isSet {
-            await Task.yield()
-        }
-        XCTAssertTrue(
-            ownerFinished.isSet,
-            "A canceled CID owner must stop waiting while shared recovery continues for siblings"
-        )
+        // A canceled CID owner must stop waiting while shared recovery
+        // continues for siblings.
+        await waitUntil { ownerFinished.isSet }
         if !ownerFinished.isSet {
             // Avoid hanging the test on the exact regression being asserted.
             await messageRequest.release()
@@ -2046,6 +2052,32 @@ final class AttachmentDownloaderTests: XCTestCase {
     private func saveViewContext() throws {
         guard viewContext.hasChanges else { return }
         try viewContext.save()
+    }
+
+    /// Polls `condition` until it holds or `timeout` elapses. The coalescing
+    /// tests wait here for a background read to register or unwind: a fixed
+    /// number of `Task.yield()`s can run out on a loaded CI VM before the
+    /// read's background-context hops finish, so the wait is bounded by wall
+    /// clock. The condition is checked before the deadline on every pass, so a
+    /// main-thread stall longer than the timeout cannot fail a condition that
+    /// came true during the stall. Main-actor isolated because the conditions
+    /// read the downloader.
+    @MainActor
+    private func waitUntil(
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
     }
 
     private func makeSynthesizedInlineMessage(
