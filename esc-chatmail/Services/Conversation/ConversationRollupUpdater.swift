@@ -369,15 +369,19 @@ struct ConversationRollupUpdater: Sendable {
     }
 
     /// Refreshes stored display names for selected conversations without recomputing rollups.
+    /// - Returns: false when the conversation fetch failed, so a caller that
+    ///   latches a one-shot flag can leave it clear instead of reading the
+    ///   failure as "nothing to refresh".
     @MainActor
+    @discardableResult
     func updateDisplayNamesForConversations(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext,
         myEmail: String
-    ) async {
-        guard !conversationIDs.isEmpty else { return }
+    ) async -> Bool {
+        guard !conversationIDs.isEmpty else { return true }
 
-        await context.perform {
+        return await context.perform {
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
             request.relationshipKeyPathsForPrefetching = [
@@ -391,12 +395,13 @@ struct ConversationRollupUpdater: Sendable {
                 conversations = try context.fetch(request)
             } catch {
                 Log.error("Failed to fetch conversations for display-name update", category: .conversation, error: error)
-                return
+                return false
             }
 
             for conversation in conversations {
                 self.updateDisplayNameOnly(for: conversation, myEmail: myEmail)
             }
+            return true
         }
     }
 

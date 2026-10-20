@@ -327,6 +327,234 @@ extension DataCleanupService {
     }
 }
 
+// MARK: - Address-Shaped Person Name Repair
+
+extension DataCleanupService {
+
+    static let addressShapedPersonNameRepairKey = "hasRepairedAddressShapedPersonNamesV1"
+
+    /// One-time repair for `Person.displayName` rows that hold an email
+    /// address instead of a name. Before `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)`
+    /// refused to let an address-shaped name replace a name, a To/Cc header
+    /// written as `"jacob.laycock@studs.com" <jacob.laycock@studs.com>` could
+    /// overwrite a stored name with the address, and a one-word name ("Jake")
+    /// it replaced never came back. Display paths refuse to show such a name,
+    /// so the loss shows as an unresolved participant in group titles and the
+    /// Participants sheet, and as no name in the Create New Contact fallback.
+    /// Ingestion now heals a row when a later header names the person; this
+    /// pass recovers a name for the rows nobody names again, from the headers
+    /// already stored on that person's messages.
+    ///
+    /// Recovery is partial by construction: From names come from
+    /// `Message.senderName`, but To/Cc names only from `rawToHeader` /
+    /// `rawCcHeader`, which exist only on rows persisted since model v6. A row
+    /// with no stored header naming the person keeps the address, and the
+    /// flag still latches: a re-run cannot find a name the store does not
+    /// hold, and the next header that names the person heals it in ingestion.
+    ///
+    /// Idempotent: a repaired row no longer matches the selection and an
+    /// unrecoverable one recovers nothing again, so a re-run writes nothing.
+    /// The flag is only written after a successful save. The titles of the
+    /// repaired people's conversations are refreshed in the same save, the
+    /// way sync refreshes them after `updateKnownParticipantDisplayNames`;
+    /// a `hasRefreshedConversationNames` key bump instead would re-derive
+    /// every conversation's name on every device.
+    func repairAddressShapedPersonDisplayNamesIfNeeded(in context: NSManagedObjectContext) async {
+        guard !migrationFlags.bool(forKey: Self.addressShapedPersonNameRepairKey) else { return }
+
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        let result: (changedPersonEmails: Set<String>, conversationIDs: Set<NSManagedObjectID>, unrecoveredCount: Int)? = await context.perform {
+            let request = Person.fetchRequest()
+            // "@" narrows the scan to candidate rows; the shape test below is
+            // the one `isBetterDisplayName` uses, so "Jake @ Studs" is left
+            // alone.
+            request.predicate = NSPredicate(format: "displayName CONTAINS %@", "@")
+            request.fetchBatchSize = 100
+            request.relationshipKeyPathsForPrefetching = [
+                "messageParticipations.message",
+                "conversationParticipations.conversation"
+            ]
+
+            let persons: [Person]
+            do {
+                persons = try context.fetch(request)
+            } catch {
+                // An unreadable store is not "no corrupted rows": leave the
+                // flag clear so the next cleanup retries.
+                Log.error("Address-shaped person name repair fetch failed", category: .coreData, error: error)
+                return nil
+            }
+
+            var changedPersonEmails: Set<String> = []
+            var conversationIDs: Set<NSManagedObjectID> = []
+            var unrecoveredCount = 0
+            for person in persons {
+                let email = EmailNormalizer.normalize(person.email)
+                // The `forEmail:` form also matches the person's own dotless,
+                // internationalized or domain-literal address
+                // (`"ops@intranet" <ops@intranet>`), which a header could
+                // store as the name but the bare-address pattern misses; the
+                // context-free test would leave those rows unrepaired. The
+                // recovered-name check below uses the same form so the two
+                // agree on what counts as an address.
+                guard let storedName = person.displayName,
+                      EmailNormalizer.isEmailAddressShapedDisplayName(storedName, forEmail: email) else {
+                    continue
+                }
+                guard let recoveredName = Self.recoveredHeaderDisplayName(for: person, email: email),
+                      !EmailNormalizer.isEmailAddressShapedDisplayName(recoveredName, forEmail: email),
+                      EmailNormalizer.isBetterDisplayName(recoveredName, than: storedName, forEmail: email) else {
+                    unrecoveredCount += 1
+                    continue
+                }
+
+                person.displayName = recoveredName
+                changedPersonEmails.insert(email)
+                for participation in person.conversationParticipations ?? [] {
+                    if let conversationID = participation.conversation?.objectID {
+                        conversationIDs.insert(conversationID)
+                    }
+                }
+            }
+
+            return (changedPersonEmails, conversationIDs, unrecoveredCount)
+        }
+
+        guard let result else { return }
+
+        // Stored titles were derived from the address-holding rows; refresh
+        // them from the repaired names before the one save below.
+        guard await conversationManager.updateConversationDisplayNames(
+            conversationIDs: result.conversationIDs,
+            in: context
+        ) else {
+            await context.perform { context.rollback() }
+            Log.warning("Address-shaped person name repair title refresh failed; will retry next cleanup", category: .coreData)
+            return
+        }
+
+        guard await context.performSaveIfNeeded(caller: "DataCleanupService.repairAddressShapedPersonDisplayNames") else {
+            // Left staged, the repair would be committed by the next save of
+            // this context (the cleanup hold retries one at once) with the
+            // flag clear and no cache invalidation; the re-run would then
+            // find nothing to repair and never invalidate PersonCache.
+            await context.perform { context.rollback() }
+            Log.warning("Address-shaped person name repair save failed; will retry next cleanup", category: .coreData)
+            return
+        }
+
+        migrationFlags.set(true, forKey: Self.addressShapedPersonNameRepairKey)
+
+        if !result.changedPersonEmails.isEmpty {
+            // Cached person rows still carry the address; invalidate them and
+            // notify readers (participant sheets, live titles) so the
+            // recovered names publish.
+            PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(
+                emails: result.changedPersonEmails
+            )
+        }
+
+        if !result.changedPersonEmails.isEmpty || result.unrecoveredCount > 0 {
+            let duration = CFAbsoluteTimeGetCurrent() - startTime
+            Log.info(
+                "Address-shaped person name repair recovered \(result.changedPersonEmails.count) person(s), left \(result.unrecoveredCount) without a stored header name, refreshed \(result.conversationIDs.count) conversation title(s) in \(String(format: "%.2f", duration))s",
+                category: .coreData
+            )
+        }
+    }
+
+    /// The name the stored headers give `person`, or nil when none names it.
+    /// Candidates come from the person's own participation rows: a From row
+    /// offers that message's `senderName`, a To/Cc row offers this address's
+    /// phrase in the raw recipient header (nil before model v6, so such a row
+    /// offers nothing). Bcc has no stored header. Each candidate goes through
+    /// `sanitizedExplicitDisplayName`, which rejects placeholders, Hide My
+    /// Email labels, raw local parts and address-shaped names. The survivors
+    /// are folded newest-first through `isBetterDisplayName`, starting from
+    /// nil, so of two equally good names the newer one wins.
+    /// Call on `person`'s context queue.
+    private static func recoveredHeaderDisplayName(for person: Person, email: String) -> String? {
+        struct Candidate {
+            let name: String
+            let date: Date
+            let messageID: String
+            /// Order the candidates one message offers (a note to self names
+            /// its sender in From and To), so the fold does not depend on the
+            /// unordered participation set.
+            let kindRank: Int
+            let headerIndex: Int
+        }
+
+        var candidates: [Candidate] = []
+        for participation in person.messageParticipations ?? [] {
+            guard let message = participation.message else { continue }
+
+            let headerNames: [String?]
+            let kindRank: Int
+            switch ParticipantKind(rawValue: participation.kind) {
+            case .from:
+                // A refetch rewrites senderEmail/senderName without rewiring
+                // participant rows, so after a changed From address this row's
+                // senderName names someone else.
+                guard let senderEmail = message.senderEmail,
+                      EmailNormalizer.normalize(senderEmail) == email else { continue }
+                headerNames = [message.senderName]
+                kindRank = 0
+            case .to:
+                headerNames = recipientHeaderDisplayNames(forEmail: email, in: message.rawToHeader)
+                kindRank = 1
+            case .cc:
+                headerNames = recipientHeaderDisplayNames(forEmail: email, in: message.rawCcHeader)
+                kindRank = 2
+            case .bcc, nil:
+                continue
+            }
+
+            for (headerIndex, headerName) in headerNames.enumerated() {
+                guard let name = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                    headerName,
+                    forEmail: email
+                ) else { continue }
+                candidates.append(Candidate(
+                    name: name,
+                    date: message.internalDate,
+                    messageID: message.id,
+                    kindRank: kindRank,
+                    headerIndex: headerIndex
+                ))
+            }
+        }
+
+        candidates.sort {
+            if $0.date != $1.date { return $0.date > $1.date }
+            if $0.messageID != $1.messageID { return $0.messageID > $1.messageID }
+            return ($0.kindRank, $0.headerIndex) < ($1.kindRank, $1.headerIndex)
+        }
+
+        var winner: String?
+        for candidate in candidates
+        where EmailNormalizer.isBetterDisplayName(candidate.name, than: winner, forEmail: email) {
+            winner = candidate.name
+        }
+        return winner
+    }
+
+    /// Display-name phrases `header` gives `email`, parsed the way ingestion
+    /// parses To/Cc (`MessageProcessor.parseEmailAddresses`). Empty when the
+    /// header is nil (not stored before model v6) or never names the address.
+    private static func recipientHeaderDisplayNames(forEmail email: String, in header: String?) -> [String] {
+        guard let header else { return [] }
+        return EmailAddressListParser.addressTokens(from: header).compactMap { token -> String? in
+            guard let tokenEmail = EmailNormalizer.extractEmail(from: token),
+                  EmailNormalizer.normalize(tokenEmail) == email else {
+                return nil
+            }
+            return EmailNormalizer.extractDisplayName(from: token)
+        }
+    }
+}
+
 // MARK: - Participant-Set Split Migration
 
 extension DataCleanupService {
