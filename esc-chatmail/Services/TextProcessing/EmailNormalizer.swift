@@ -169,6 +169,11 @@ class EmailNormalizer {
     /// Returns true if `newName` should replace `existingName` for a specific email.
     /// Address-derived names are weak because they were likely synthesized from the
     /// local part before a real header or contact name was available.
+    ///
+    /// Never true in both directions for one pair, or the stored name would
+    /// flip with every header that carries the other one (`EmailNormalizerTests`
+    /// checks this over a table of realistic pairs). It can be false in both
+    /// directions: such a tie keeps whichever name is already stored.
     static func isBetterDisplayName(_ newName: String?, than existingName: String?, forEmail email: String) -> Bool {
         guard let new = newName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !new.isEmpty else { return false }
@@ -198,13 +203,34 @@ class EmailNormalizer {
             return existingIsAddress
         }
 
-        if isAddressDerivedDisplayName(existing, forEmail: email) {
-            if !isAddressDerivedDisplayName(new, forEmail: email) {
-                return displayNameParts(new).count >= displayNameParts(existing).count
-            }
+        // Each branch below decides a pair the same way from both sides. A
+        // pair that ranked better in both directions made the stored name
+        // follow header order: for jacob.laycock@, the real "Jake Laycock"
+        // replaced the address-derived "Jacob Laycock" at an equal part count,
+        // and "Jacob Laycock" won it back as the longer name.
+        let existingIsDerived = isAddressDerivedDisplayName(existing, forEmail: email)
+        let newIsDerived = isAddressDerivedDisplayName(new, forEmail: email)
+        if existingIsDerived && !newIsDerived {
+            return displayNameParts(new).count >= displayNameParts(existing).count
+        }
 
-            if new != existing && hasIntentionalCasing(new) {
-                return true
+        if newIsDerived && !existingIsDerived {
+            // The converse of the branch above: a derived name replaces a real
+            // one only with strictly more parts (a fuller "John Doe" over
+            // "John"), never at an equal part count, where the real name wins.
+            guard displayNameParts(new).count > displayNameParts(existing).count else { return false }
+            return isBetterDisplayName(new, than: existing)
+        }
+
+        if newIsDerived && existingIsDerived {
+            // Intentional casing ("BONBONWHIMS") beats the auto-formatted
+            // "Bonbonwhims" whatever their word counts. Two intentionally cased
+            // variants fall through to the base ranking rather than each
+            // replacing the other; a case-only pair is a tie that keeps the
+            // stored name.
+            let newHasIntentionalCasing = hasIntentionalCasing(new)
+            if newHasIntentionalCasing != hasIntentionalCasing(existing) {
+                return newHasIntentionalCasing
             }
         }
 
