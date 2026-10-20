@@ -320,10 +320,7 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         }
         let waitTask = Task { await awaiter.wait() }
 
-        for _ in 0..<20 where !evaluationStarted {
-            await Task.yield()
-        }
-        XCTAssertTrue(evaluationStarted)
+        await waitUntil { evaluationStarted }
 
         let start = Date()
         waitTask.cancel()
@@ -877,6 +874,30 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTFail("Timed out waiting for the expected pre-rendered full-email DOM")
+    }
+
+    /// Polls `condition` until it holds or `timeout` elapses. The cancellation
+    /// test waits here for the awaiter's probe to start, bounded by wall clock
+    /// rather than by a fixed number of `Task.yield()`s. The condition is
+    /// checked before the deadline on every pass: under CPU load WebKit's
+    /// synchronous process-assertion calls stalled the simulator's main thread
+    /// past the whole timeout, and a deadline-first loop then failed a
+    /// condition that came true during the stall.
+    private func waitUntil(
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
     }
 }
 
