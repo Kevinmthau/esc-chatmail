@@ -421,6 +421,11 @@ extension DataCleanupService {
         }
 
         guard await context.performSaveIfNeeded(caller: "DataCleanupService.repairAddressShapedPersonDisplayNames") else {
+            // Left staged, the repair would be committed by the next save of
+            // this context (the cleanup hold retries one at once) with the
+            // flag clear and no cache invalidation; the re-run would then
+            // find nothing to repair and never invalidate PersonCache.
+            await context.perform { context.rollback() }
             Log.warning("Address-shaped person name repair save failed; will retry next cleanup", category: .coreData)
             return
         }

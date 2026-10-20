@@ -286,6 +286,51 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
         XCTAssertEqual(name, jake)
     }
 
+    /// A failed save must not leave the repair staged: the cleanup hold saves
+    /// the same context right after this pass, and committing the repair
+    /// there would leave the flag clear with no cache invalidation, so the
+    /// re-run would find nothing to repair and never notify readers.
+    func testRepair_saveFails_laterSaveOfSameContextCommitsNothing() async throws {
+        _ = try await seedGroupWithToOnlyJake(rawHeaders: true)
+        let jake = self.jake!
+        let context = FirstSaveFailingContext()
+        context.persistentStoreCoordinator = stack.persistentContainer.persistentStoreCoordinator
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+        await runRepair(in: context)
+        // What settleCleanupSensitiveHold does next in runIncrementalCleanup;
+        // this save really writes.
+        let laterSaveSucceeded = await context.performSaveIfNeeded(caller: "test")
+        XCTAssertTrue(laterSaveSucceeded)
+
+        // Revert-check: the context.rollback() on the save-failure path of
+        // repairAddressShapedPersonDisplayNamesIfNeeded.
+        let nameAfterLaterSave = try await storedDisplayName(forEmail: jake)
+        XCTAssertEqual(nameAfterLaterSave, jake, "The failed repair must not reach the store through a later save")
+        XCTAssertFalse(migrationFlags.bool(forKey: DataCleanupService.addressShapedPersonNameRepairKey))
+
+        let posted = expectation(description: "the retry notifies readers of the repaired email")
+        posted.assertForOverFulfill = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: .personDisplayInfoDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            if PersonDisplayInfoChangeNotification.emails(from: notification).contains(jake) {
+                posted.fulfill()
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        // The next cleanup runs on a fresh context.
+        await runRepair()
+
+        let retriedName = try await storedDisplayName(forEmail: jake)
+        XCTAssertEqual(retriedName, "Jake")
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.addressShapedPersonNameRepairKey))
+        await fulfillment(of: [posted], timeout: 10)
+    }
+
     func testRepair_postsDisplayInfoChangeForRepairedEmail() async throws {
         _ = try await seedGroupWithToOnlyJake(rawHeaders: true)
         let jake = self.jake!
@@ -458,6 +503,35 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
             request.fetchLimit = 1
             return try XCTUnwrap(context.fetch(request).first).displayName
         }
+    }
+}
+
+/// Throws on its first `save()` and really saves on every later one.
+/// `ScriptedSaveContext`'s fail-then-succeed mode never writes the store, so
+/// it cannot show what a later save of the same context commits.
+/// `@unchecked Sendable`: `lock` guards `saveAttempts`.
+private final class FirstSaveFailingContext: NSManagedObjectContext, @unchecked Sendable {
+    private let lock = NSLock()
+    private var saveAttempts = 0
+
+    init() {
+        super.init(concurrencyType: .privateQueueConcurrencyType)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("not supported in tests")
+    }
+
+    override func save() throws {
+        lock.lock()
+        saveAttempts += 1
+        let attempt = saveAttempts
+        lock.unlock()
+
+        if attempt == 1 {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSManagedObjectMergeError)
+        }
+        try super.save()
     }
 }
 
