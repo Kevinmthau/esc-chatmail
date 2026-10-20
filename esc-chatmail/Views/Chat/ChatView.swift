@@ -362,11 +362,11 @@ struct ChatView: View {
             ParticipantsListView(
                 conversation: conversation,
                 chatDependencies: chatDependencies,
-                onCreateNewContact: { person in
-                    viewModel.contactManager.createNewContact(for: person)
+                onCreateNewContact: { prefill in
+                    viewModel.contactManager.createNewContact(prefill)
                 },
-                onAddToExistingContact: { person in
-                    viewModel.contactManager.addToExistingContact(for: person)
+                onAddToExistingContact: { email in
+                    viewModel.contactManager.addToExistingContact(email: email)
                 },
                 onEditContact: { identifier in
                     viewModel.contactManager.editExistingContact(identifier: identifier)

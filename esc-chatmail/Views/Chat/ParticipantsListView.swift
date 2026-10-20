@@ -3,8 +3,8 @@ import Contacts
 
 struct ParticipantsListView: View {
     let conversation: Conversation
-    let onCreateNewContact: (Person) -> Void
-    let onAddToExistingContact: (Person) -> Void
+    let onCreateNewContact: (NewContactPrefillPolicy.Prefill) -> Void
+    let onAddToExistingContact: (String) -> Void
     let onEditContact: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     private let participantLoader: ParticipantLoader
@@ -20,8 +20,8 @@ struct ParticipantsListView: View {
     init(
         conversation: Conversation,
         chatDependencies: ChatDependencies,
-        onCreateNewContact: @escaping (Person) -> Void,
-        onAddToExistingContact: @escaping (Person) -> Void,
+        onCreateNewContact: @escaping (NewContactPrefillPolicy.Prefill) -> Void,
+        onAddToExistingContact: @escaping (String) -> Void,
         onEditContact: @escaping (String) -> Void
     ) {
         self.conversation = conversation
@@ -44,10 +44,10 @@ struct ParticipantsListView: View {
                         isExistingContact: participant.isExistingContact,
                         contactIdentifier: participant.contactIdentifier,
                         onCreateNewContact: {
-                            onCreateNewContact(participant.person)
+                            onCreateNewContact(participant.newContactPrefill)
                         },
                         onAddToExistingContact: {
-                            onAddToExistingContact(participant.person)
+                            onAddToExistingContact(participant.email)
                         },
                         onEditContact: { identifier in
                             onEditContact(identifier)
@@ -82,55 +82,72 @@ struct ParticipantsListView: View {
     /// Uses email normalization to properly match participants.
     @MainActor
     private func updateOtherParticipants() async {
-        let otherEmails = participantLoader.extractNonMeParticipants(
-            from: conversation,
-            currentUserEmail: currentUserEmail
-        )
-        let otherEmailSet = Set(otherEmails.map { EmailNormalizer.normalize($0) })
-
         guard let participants = conversation.participants else {
             cachedOtherParticipants = []
             return
         }
 
-        var personsByNormalizedEmail: [String: Person] = [:]
+        // Value copies of each participant's Person, taken before the resolve suspends: a sync can
+        // delete a Person while the sheet resolves or stays open, and a row needs only the email
+        // and the stored name.
+        var storedPersonsByNormalizedEmail: [String: (email: String, displayName: String?)] = [:]
         for participant in participants {
             guard let person = participant.person else { continue }
 
             let normalizedEmail = EmailNormalizer.normalize(person.email)
-            guard otherEmailSet.contains(normalizedEmail),
-                  personsByNormalizedEmail[normalizedEmail] == nil else {
+            guard !normalizedEmail.isEmpty,
+                  storedPersonsByNormalizedEmail[normalizedEmail] == nil else {
                 continue
             }
 
-            personsByNormalizedEmail[normalizedEmail] = person
+            storedPersonsByNormalizedEmail[normalizedEmail] = (person.email, person.displayName)
         }
 
-        let resolvedParticipants = await participantLoader.resolveParticipants(for: otherEmails)
+        // Resolve from the snapshot the chat header uses (its alias-aware participant list plus
+        // the conversation's header and stored names), so a sender the header names is not
+        // "Unknown Contact" here and the user's own send-as aliases are not listed.
+        let resolvedParticipants: [ParticipantLoader.ResolvedParticipant]
+        if let context = conversation.managedObjectContext {
+            resolvedParticipants = await participantLoader.resolveParticipants(
+                inConversation: conversation.objectID,
+                context: context,
+                currentUserEmail: currentUserEmail
+            )
+        } else {
+            resolvedParticipants = await participantLoader.resolveParticipants(
+                for: participantLoader.extractNonMeParticipants(
+                    from: conversation,
+                    currentUserEmail: currentUserEmail
+                )
+            )
+        }
         guard !Task.isCancelled else { return }
 
         cachedOtherParticipants = resolvedParticipants.compactMap { participant in
-            guard let person = personsByNormalizedEmail[EmailNormalizer.normalize(participant.email)] else {
+            guard let person = storedPersonsByNormalizedEmail[EmailNormalizer.normalize(participant.email)] else {
                 return nil
             }
 
             return ParticipantListItem(
-                person: person,
                 displayName: participant.displayName,
                 email: person.email,
                 isExistingContact: participant.contactIdentifier != nil,
-                contactIdentifier: participant.contactIdentifier
+                contactIdentifier: participant.contactIdentifier,
+                newContactPrefill: NewContactPrefillPolicy.prefill(
+                    for: participant,
+                    storedDisplayName: person.displayName
+                )
             )
         }
     }
 }
 
 private struct ParticipantListItem: Identifiable {
-    let person: Person
     let displayName: String
     let email: String
     let isExistingContact: Bool
     let contactIdentifier: String?
+    let newContactPrefill: NewContactPrefillPolicy.Prefill
 
     var id: String {
         if let contactIdentifier, !contactIdentifier.isEmpty {
