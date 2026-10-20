@@ -278,6 +278,44 @@ final class MessagePersisterRecipientHeaderTests: XCTestCase {
         try await assertStoredDisplayName("José", forEmail: jose)
     }
 
+    /// Outlook's form for a recipient that has no name, parsed from the real
+    /// header so the test covers what sanitizing leaves on.
+    ///
+    /// Revert-check: making `EmailNormalizer.unwrappingSingleQuotes(_:)` return
+    /// its input unchanged fails this test (`PersonFactory.findOrCreate` stored
+    /// the quoted address over "Jake").
+    func testCreate_fromHeaderNameThenOutlookSingleQuotedToAddress_keepsFromHeaderName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+        let outlookName = try XCTUnwrap(EmailNormalizer.extractDisplayName(from: "\"'\(jacob)'\" <\(jacob)>"))
+        XCTAssertEqual(outlookName, "'\(jacob)'", "Precondition: header sanitizing keeps the single quotes")
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jake-writes", from: "Jake <\(jacob)>", to: [me], secondsAfterBase: 0),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+        try await assertStoredDisplayName("Jake", forEmail: jacob)
+
+        try await persister.createNewMessage(
+            makeNamedArrival(
+                id: "outlook-reply-to-jake",
+                from: "Me <\(me.email)>",
+                to: [EmailAddress(email: jacob, displayName: outlookName)],
+                isFromMe: true,
+                secondsAfterBase: 60
+            ),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("Jake", forEmail: jacob)
+    }
+
     /// His From header names him "Jake Laycock", then a reply's To header names
     /// him "Jacob Laycock", which matches his address and ties on part count.
     ///

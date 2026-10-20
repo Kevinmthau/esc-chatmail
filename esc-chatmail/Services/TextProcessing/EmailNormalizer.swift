@@ -308,8 +308,16 @@ class EmailNormalizer {
     /// name. `PersonDisplayNameResolver` never shows such a name. Only an
     /// address the bare-address pattern matches counts: a dotted domain ending
     /// in an ASCII label of two or more letters.
+    ///
+    /// Outlook and Exchange write a recipient that has no name as
+    /// `"'jacob.laycock@studs.com'" <jacob.laycock@studs.com>`. Header
+    /// sanitizing strips only the double quotes, and the bare pattern rejects
+    /// the trailing `'`, so that address passed as a name: shown in titles,
+    /// and stored as a Person name that no one-word name could replace. One
+    /// pair of wrapping single quotes is therefore peeled before matching.
     static func isEmailAddressShapedDisplayName(_ displayName: String) -> Bool {
-        displayName.contains("@") && extractEmail(from: displayName) != nil
+        let candidate = unwrappingSingleQuotes(displayName)
+        return candidate.contains("@") && extractEmail(from: candidate) != nil
     }
 
     /// `isEmailAddressShapedDisplayName(_:)`, or the name is `email` itself.
@@ -320,8 +328,18 @@ class EmailNormalizer {
     /// it. `isBetterDisplayName(_:than:forEmail:)` never lets such a name
     /// replace a name.
     static func isEmailAddressShapedDisplayName(_ displayName: String, forEmail email: String) -> Bool {
-        isEmailAddressShapedDisplayName(displayName)
-            || (displayName.contains("@") && normalize(displayName) == normalize(email))
+        let candidate = unwrappingSingleQuotes(displayName)
+        return isEmailAddressShapedDisplayName(candidate)
+            || (candidate.contains("@") && normalize(candidate) == normalize(email))
+    }
+
+    /// `value` without one pair of wrapping ASCII single quotes, as Outlook
+    /// writes an address it repeats as the name (`'ops@intranet'`); any other
+    /// value unchanged.
+    private static func unwrappingSingleQuotes(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2, trimmed.hasPrefix("'"), trimmed.hasSuffix("'") else { return value }
+        return String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func isAddressDerivedDisplayName(_ displayName: String?, forEmail email: String) -> Bool {

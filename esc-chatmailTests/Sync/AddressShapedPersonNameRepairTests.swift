@@ -263,6 +263,46 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
         XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.addressShapedPersonNameRepairKey))
     }
 
+    /// Outlook's `"'addr'" <addr>` Cc header stored the address with its single
+    /// quotes on, which the shape test used to miss, so the pass skipped the
+    /// row. The quoted Cc name itself must not be the recovered name either.
+    ///
+    /// Revert-check: making `EmailNormalizer.unwrappingSingleQuotes(_:)` return
+    /// its input unchanged fails this test (the row is not selected and keeps
+    /// the quoted address).
+    func testRepair_storedNameIsOutlookSingleQuotedAddress_recoversName() async throws {
+        let jake = self.jake!
+        let alice = self.alice!
+        let quoted = "'\(jake)'"
+        try await seed { context in
+            let person = PersonBuilder().withEmail(jake).withDisplayName(quoted).build(in: context)
+            let sender = PersonBuilder().withEmail(alice).withDisplayName("Alice Smith").build(in: context)
+            Self.addMessage(
+                id: "to-jake",
+                date: Date(timeIntervalSince1970: 1_000),
+                senderEmail: alice,
+                senderName: "Alice Smith",
+                rawTo: "Jake <\(jake)>",
+                participants: [(sender, .from), (person, .to)],
+                in: context
+            )
+            Self.addMessage(
+                id: "outlook-cc-jake",
+                date: Date(timeIntervalSince1970: 2_000),
+                senderEmail: alice,
+                senderName: "Alice Smith",
+                rawCc: "\"\(quoted)\" <\(jake)>",
+                participants: [(sender, .from), (person, .cc)],
+                in: context
+            )
+        }
+
+        await runRepair()
+
+        let name = try await storedDisplayName(forEmail: jake)
+        XCTAssertEqual(name, "Jake")
+    }
+
     /// Idempotency: with the flag cleared, a second run over the repaired
     /// store (one recovered row, one unrecoverable pre-v6 row) saves nothing.
     ///

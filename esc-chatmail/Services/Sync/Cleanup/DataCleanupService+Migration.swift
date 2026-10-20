@@ -331,7 +331,10 @@ extension DataCleanupService {
 
 extension DataCleanupService {
 
-    static let addressShapedPersonNameRepairKey = "hasRepairedAddressShapedPersonNamesV1"
+    // Bump whenever `EmailNormalizer.isEmailAddressShapedDisplayName` starts
+    // recognizing a new shape, so stores that latched an older pass select
+    // the rows it missed. V2: Outlook's single-quoted `'addr'`.
+    static let addressShapedPersonNameRepairKey = "hasRepairedAddressShapedPersonNamesV2"
 
     /// One-time repair for `Person.displayName` rows that hold an email
     /// address instead of a name. Before `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)`

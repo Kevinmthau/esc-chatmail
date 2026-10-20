@@ -533,6 +533,47 @@ final class EmailNormalizerTests: XCTestCase {
         }
     }
 
+    /// Outlook writes a recipient that has no name as
+    /// `"'jacob.laycock@studs.com'" <jacob.laycock@studs.com>`, and header
+    /// sanitizing strips only the double quotes.
+    ///
+    /// Revert-check: removing the `unwrappingSingleQuotes` call in
+    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:)` fails this test.
+    func testIsEmailAddressShapedDisplayName_recognizesOutlookSingleQuotedAddress() {
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: "\"'jacob.laycock@studs.com'\" <jacob.laycock@studs.com>"),
+            "'jacob.laycock@studs.com'",
+            "Precondition: header sanitizing keeps the single quotes"
+        )
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("'jacob.laycock@studs.com'"))
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName(" 'jacob.laycock@studs.com' "))
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("'Jacob Laycock'"))
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("'Jacob @ Studs'"))
+    }
+
+    /// Revert-check: removing the `unwrappingSingleQuotes` call in
+    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)` fails this
+    /// test (the bare pattern misses a dotless address, and the quotes broke the
+    /// match with the participant's own).
+    func testIsEmailAddressShapedDisplayName_forEmail_recognizesSingleQuotedOwnDotlessAddress() {
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("'ops@intranet'"), "Precondition")
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("'ops@intranet'", forEmail: "ops@intranet"))
+    }
+
+    /// Revert-check: making `EmailNormalizer.unwrappingSingleQuotes(_:)` return
+    /// its input unchanged fails this test (the quoted address split into more
+    /// parts than either name and outranked it). Removing only one overload's
+    /// call does not: for the participant's own address each overload's
+    /// unwrap catches it alone.
+    func testIsBetterDisplayName_forEmail_outlookSingleQuotedAddressNeverReplacesName() {
+        let email = "jacob.laycock@studs.com"
+        let quoted = "'\(email)'"
+        for name in ["Jake", "Jacob Laycock"] {
+            XCTAssertFalse(EmailNormalizer.isBetterDisplayName(quoted, than: name, forEmail: email), name)
+            XCTAssertTrue(EmailNormalizer.isBetterDisplayName(name, than: quoted, forEmail: email), name)
+        }
+    }
+
     // MARK: - isBetterDisplayName: never better in both directions
 
     /// For jacob.laycock@ the real "Jake Laycock" replaced the address-derived
