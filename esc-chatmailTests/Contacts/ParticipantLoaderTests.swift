@@ -1085,8 +1085,9 @@ final class ParticipantLoaderTests: XCTestCase {
 
     /// End to end for the reported bug, from the sheet's resolve to the unsaved `CNMutableContact`
     /// the add screen opens with. The stored Person name here holds the address itself (a To/Cc
-    /// header of the form `"jacob.laycock@studs.com" <jacob.laycock@studs.com>` can win
-    /// `EmailNormalizer.isBetterDisplayName` over "Jacob Laycock"), which is what the removed
+    /// header of the form `"jacob.laycock@studs.com" <jacob.laycock@studs.com>` won
+    /// `EmailNormalizer.isBetterDisplayName` over "Jacob Laycock" before that ranking put
+    /// email-shaped names last, and rows stored then keep it), which is what the removed
     /// `ChatContactManager.createNewContact(for: Person)` read: it put the address in the
     /// given-name field and no name anywhere.
     ///

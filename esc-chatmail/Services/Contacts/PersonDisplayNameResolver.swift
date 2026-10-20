@@ -202,7 +202,9 @@ enum PersonDisplayNameResolver {
         guard !normalized.isEmpty,
               !isPlaceholderDisplayName(normalized),
               !EmailNormalizer.isHideMyEmailDisplayName(normalized),
-              !looksLikeEmailAddress(normalized) else {
+              // The ranking's own rule, so `isBetterDisplayName` never stores a
+              // name this discards over one it shows.
+              !EmailNormalizer.isEmailShapedDisplayName(normalized) else {
             return nil
         }
 
@@ -213,10 +215,6 @@ enum PersonDisplayNameResolver {
         let lowercased = value.lowercased()
         return placeholderDisplayNames.contains(lowercased)
             || matches(unknownContactsCountRegex, lowercased)
-    }
-
-    private static func looksLikeEmailAddress(_ value: String) -> Bool {
-        value.contains("@") && EmailNormalizer.extractEmail(from: value) != nil
     }
 
     private static func isRawEmailLocalPart(_ displayName: String, forEmail email: String) -> Bool {

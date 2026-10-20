@@ -106,6 +106,36 @@ final class PersonFactoryTests: XCTestCase {
         }
     }
 
+    /// Headers naming one address both ways — "Jacob Laycock" from one message,
+    /// the address itself from an Outlook-style `"addr" <addr>` To header on
+    /// another — leave the same name whichever is processed first.
+    ///
+    /// Revert-check: the `existingIsEmailShaped != newIsEmailShaped` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)`; the
+    /// name-first order then ends on the address.
+    func testFindOrCreate_emailShapedAndRealHeaderNames_keepRealNameInEitherOrder() throws {
+        let nameFirstEmail = "jacob.laycock@studs.com"
+        let addressFirstEmail = "jane.roe@studs.com"
+        try context.performAndWait {
+            _ = try PersonFactory.findOrCreate(email: nameFirstEmail, displayName: "Jacob Laycock", in: context)
+            let nameFirst = try PersonFactory.findOrCreate(
+                email: nameFirstEmail,
+                displayName: nameFirstEmail,
+                in: context
+            )
+
+            _ = try PersonFactory.findOrCreate(email: addressFirstEmail, displayName: addressFirstEmail, in: context)
+            let addressFirst = try PersonFactory.findOrCreate(
+                email: addressFirstEmail,
+                displayName: "Jane Roe",
+                in: context
+            )
+
+            XCTAssertEqual(nameFirst.displayName, "Jacob Laycock")
+            XCTAssertEqual(addressFirst.displayName, "Jane Roe")
+        }
+    }
+
     func testFindOrCreate_createsOnceAcrossRepeatedCalls() throws {
         try context.performAndWait {
             let first = try PersonFactory.findOrCreate(

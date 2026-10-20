@@ -408,6 +408,88 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertFalse(result)
     }
 
+    // MARK: - isBetterDisplayName: email-shaped names
+
+    /// The reported flip. An Outlook-style To/Cc header,
+    /// `"jacob.laycock@studs.com" <jacob.laycock@studs.com>`, and one that named
+    /// the person each replaced the other, so `Person.displayName` ended on
+    /// whichever header was processed last: split on dots the address counted
+    /// three parts to the address-derived "Jacob Laycock"'s two, and the name
+    /// counted two space-separated parts to the address's one.
+    ///
+    /// Revert-check: the `existingIsEmailShaped != newIsEmailShaped` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails the first
+    /// assertion.
+    func testIsBetterDisplayName_forEmail_addressDerivedNameAndEmailShapedName_rankTheSameInBothOrders() {
+        let email = "jacob.laycock@studs.com"
+
+        XCTAssertFalse(EmailNormalizer.isBetterDisplayName(email, than: "Jacob Laycock", forEmail: email))
+        XCTAssertTrue(EmailNormalizer.isBetterDisplayName("Jacob Laycock", than: email, forEmail: email))
+    }
+
+    /// A caller that has not sanitized the header phrase passes the quotes too.
+    ///
+    /// Revert-check: the guard above, or the quote stripping in
+    /// `EmailNormalizer.isEmailShapedDisplayName` (a leading quote hides the
+    /// address from the bare-address match).
+    func testIsBetterDisplayName_forEmail_quotedEmailShapedNameNeverReplacesName() {
+        let email = "jacob.laycock@studs.com"
+
+        XCTAssertFalse(EmailNormalizer.isBetterDisplayName("\"\(email)\"", than: "Jacob Laycock", forEmail: email))
+    }
+
+    /// A one-word name lost to the address on length and could never win back.
+    ///
+    /// Revert-check: the `existingIsEmailShaped != newIsEmailShaped` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails both
+    /// assertions.
+    func testIsBetterDisplayName_forEmail_oneWordNameAndEmailShapedName_nameWinsInBothOrders() {
+        let email = "kmthau@example.com"
+
+        XCTAssertFalse(EmailNormalizer.isBetterDisplayName(email, than: "Kevin", forEmail: email))
+        XCTAssertTrue(EmailNormalizer.isBetterDisplayName("Kevin", than: email, forEmail: email))
+    }
+
+    /// A name with an address inside it is one `PersonDisplayNameResolver`
+    /// discards, so it must not replace one the resolver shows.
+    ///
+    /// Revert-check: the `existingIsEmailShaped != newIsEmailShaped` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)`.
+    func testIsBetterDisplayName_forEmail_nameCarryingAnAddressNeverReplacesName() {
+        let email = "jacob.laycock@studs.com"
+
+        XCTAssertFalse(EmailNormalizer.isBetterDisplayName(
+            "Jacob Laycock (jacob.laycock@studs.com)",
+            than: "Jacob",
+            forEmail: email
+        ))
+    }
+
+    /// An email-shaped name still fills an empty slot: the resolver treats it
+    /// as no name, and any later header name replaces it.
+    ///
+    /// HONEST SCOPE: pins the deliberate choice; it held before the guard too.
+    func testIsBetterDisplayName_forEmail_emailShapedNameFillsEmptySlot() {
+        let email = "jacob.laycock@studs.com"
+
+        XCTAssertTrue(EmailNormalizer.isBetterDisplayName(email, than: nil, forEmail: email))
+        XCTAssertTrue(EmailNormalizer.isBetterDisplayName(email, than: "  ", forEmail: email))
+    }
+
+    func testIsEmailShapedDisplayName_addressesAndNamesCarryingOne_areEmailShaped() {
+        XCTAssertTrue(EmailNormalizer.isEmailShapedDisplayName("jacob.laycock@studs.com"))
+        XCTAssertTrue(EmailNormalizer.isEmailShapedDisplayName("\"jacob.laycock@studs.com\""))
+        XCTAssertTrue(EmailNormalizer.isEmailShapedDisplayName("<jacob.laycock@studs.com>"))
+        XCTAssertTrue(EmailNormalizer.isEmailShapedDisplayName("Jacob Laycock (jacob.laycock@studs.com)"))
+    }
+
+    func testIsEmailShapedDisplayName_namesAndHandles_areNotEmailShaped() {
+        XCTAssertFalse(EmailNormalizer.isEmailShapedDisplayName(nil))
+        XCTAssertFalse(EmailNormalizer.isEmailShapedDisplayName("Jacob Laycock"))
+        XCTAssertFalse(EmailNormalizer.isEmailShapedDisplayName("Jacob (@jlaycock)"))
+        XCTAssertFalse(EmailNormalizer.isEmailShapedDisplayName("Studs @ NYC"))
+    }
+
     // MARK: - Hide My Email Detection
 
     // MARK: - mergeNewestFirstHeaderDisplayName

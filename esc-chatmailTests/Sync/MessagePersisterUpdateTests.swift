@@ -1106,6 +1106,69 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "BONBONWHIMS")
     }
 
+    /// A refreshed message whose To header is Outlook-style
+    /// (`"jacob.laycock@studs.com" <jacob.laycock@studs.com>`) replaced the
+    /// name an earlier header stored for that recipient, and the next header
+    /// naming him swapped it back, so the stored name depended on which
+    /// message synced last.
+    ///
+    /// Revert-check: the `existingIsEmailShaped != newIsEmailShaped` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)`.
+    func testUpdateExistingMessage_emailShapedRecipientName_keepsStoredParticipantName() async throws {
+        let recipientEmail = "jacob.laycock@studs.com"
+        let (existingMessage, recipient) = makeMessageWithRecipient(
+            email: recipientEmail,
+            storedDisplayName: "Jacob Laycock",
+            messageID: "email-shaped-recipient-name-message"
+        )
+
+        var headers = ProcessedHeaders()
+        headers.from = "Sam Sender <sender@example.com>"
+        headers.to = [EmailAddress(
+            email: recipientEmail,
+            displayName: EmailNormalizer.extractDisplayName(from: "\"\(recipientEmail)\" <\(recipientEmail)>")
+        )]
+        headers.isFromMe = false
+
+        let didUpdate = await persister.updateExistingMessage(
+            refreshedProcessedMessage(for: existingMessage, headers: headers),
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(recipient.displayName, "Jacob Laycock")
+    }
+
+    /// A participant already stored under an email-shaped name (by an earlier
+    /// build, or by first sighting in an Outlook-style header) takes the next
+    /// name a header gives, even a one-word one that used to lose on length.
+    ///
+    /// Revert-check: the `existingIsEmailShaped != newIsEmailShaped` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)`.
+    func testUpdateExistingMessage_oneWordRecipientName_replacesStoredEmailShapedName() async throws {
+        let recipientEmail = "jacob.laycock@studs.com"
+        let (existingMessage, recipient) = makeMessageWithRecipient(
+            email: recipientEmail,
+            storedDisplayName: recipientEmail,
+            messageID: "one-word-recipient-name-message"
+        )
+
+        var headers = ProcessedHeaders()
+        headers.from = "Sam Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: recipientEmail, displayName: "Jacob")]
+        headers.isFromMe = false
+
+        let didUpdate = await persister.updateExistingMessage(
+            refreshedProcessedMessage(for: existingMessage, headers: headers),
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(recipient.displayName, "Jacob")
+    }
+
     func testUpdateExistingMessage_tracksAllConversationsSharingRenamedParticipant() async throws {
         await ModificationTracker.shared.reset()
 
@@ -2860,6 +2923,58 @@ final class MessagePersisterUpdateTests: XCTestCase {
         participant.participantKind = kind
         participant.person = person
         participant.message = message
+    }
+
+    /// A stored message from sender@example.com to one To-only recipient whose
+    /// Person row holds `storedDisplayName`.
+    private func makeMessageWithRecipient(
+        email recipientEmail: String,
+        storedDisplayName: String,
+        messageID: String
+    ) -> (message: Message, recipient: Person) {
+        let senderEmail = "sender@example.com"
+        let conversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [senderEmail, recipientEmail]))
+            .build(in: context)
+        let sender = PersonBuilder()
+            .withEmail(senderEmail)
+            .withDisplayName("Sam Sender")
+            .build(in: context)
+        let recipient = PersonBuilder()
+            .withEmail(recipientEmail)
+            .withDisplayName(storedDisplayName)
+            .build(in: context)
+        addConversationParticipant(person: sender, to: conversation)
+        addConversationParticipant(person: recipient, to: conversation)
+        let message = MessageBuilder()
+            .withId(messageID)
+            .withThreadId("\(messageID)-thread")
+            .withSender(email: senderEmail, name: "Sam Sender")
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(person: sender, kind: .from, to: message)
+        addMessageParticipant(person: recipient, kind: .to, to: message)
+        return (message, recipient)
+    }
+
+    /// `existingMessage` as a refresh re-delivers it, with `headers` in place
+    /// of its stored ones.
+    private func refreshedProcessedMessage(for existingMessage: Message, headers: ProcessedHeaders) -> ProcessedMessage {
+        ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
     }
 
     private func fetchMessage(id: String) throws -> Message? {

@@ -184,6 +184,22 @@ class EmailNormalizer {
             return existingLooksEncoded
         }
 
+        // A name carrying an email address (Outlook-style To/Cc headers write
+        // `"addr" <addr>`) says nothing the address does not, and
+        // `PersonDisplayNameResolver` never shows one: it fills an empty slot
+        // but never replaces a name, and any name replaces it. The token rules
+        // below cannot rank it. They split it on dots, so
+        // "jacob.laycock@studs.com" (three parts) beat the address-derived
+        // "Jacob Laycock" (two), "Jacob Laycock" beat it back (two
+        // space-separated parts to one), and `Person.displayName` flipped with
+        // header processing order; a one-word name ("Kevin") lost to it on
+        // length and could never win back.
+        let existingIsEmailShaped = isEmailShapedDisplayName(existing)
+        let newIsEmailShaped = isEmailShapedDisplayName(new)
+        if existingIsEmailShaped != newIsEmailShaped {
+            return existingIsEmailShaped
+        }
+
         if isAddressDerivedDisplayName(existing, forEmail: email) {
             if !isAddressDerivedDisplayName(new, forEmail: email) {
                 return displayNameParts(new).count >= displayNameParts(existing).count
@@ -262,6 +278,15 @@ class EmailNormalizer {
         guard !nameParts.isEmpty else { return false }
         let otherParts = Set(displayNameParts(other))
         return nameParts.allSatisfy { otherParts.contains($0) }
+    }
+
+    /// True when a display name carries an email address: the address itself,
+    /// bare or in double quotes, or a name with one inside it. This is the rule
+    /// `PersonDisplayNameResolver` discards a name by, so the ranking above
+    /// never keeps such a name over one the resolver would show.
+    static func isEmailShapedDisplayName(_ displayName: String?) -> Bool {
+        guard let displayName, displayName.contains("@") else { return false }
+        return extractEmail(from: displayName.replacingOccurrences(of: "\"", with: "")) != nil
     }
 
     static func isAddressDerivedDisplayName(_ displayName: String?, forEmail email: String) -> Bool {
