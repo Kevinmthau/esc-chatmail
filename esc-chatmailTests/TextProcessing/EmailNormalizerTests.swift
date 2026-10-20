@@ -503,6 +503,36 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("Jacob @ Studs"))
     }
 
+    /// Header extraction takes any bracketed address, but the bare pattern
+    /// needs a dotted domain ending in an ASCII label, so these repeated
+    /// addresses are recognized only by matching the participant's own.
+    ///
+    /// Revert-check: removing the `normalize(displayName) == normalize(email)`
+    /// term in `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)`
+    /// fails this test.
+    func testIsEmailAddressShapedDisplayName_forEmail_recognizesOwnAddressTheBarePatternMisses() {
+        for address in ["ops@intranet", "jose@correo.españa", "ops@[192.0.2.1]"] {
+            XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName(address), "Precondition: \(address)")
+            XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName(address, forEmail: address), address)
+        }
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("OPS@Intranet", forEmail: "ops@intranet"))
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("Ops", forEmail: "ops@intranet"))
+        XCTAssertFalse(
+            EmailNormalizer.isEmailAddressShapedDisplayName("ops@intranet", forEmail: "admin@intranet"),
+            "Another dotless address is out of reach without the participant's own"
+        )
+    }
+
+    /// Revert-check: removing the `normalize(displayName) == normalize(email)`
+    /// term in `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)`
+    /// fails this test (each address outranked the one-word name by length).
+    func testIsBetterDisplayName_forEmail_ownAddressTheBarePatternMissesNeverReplacesName() {
+        for (address, name) in [("ops@intranet", "Ops"), ("jose@correo.españa", "José"), ("ops@[192.0.2.1]", "Ops")] {
+            XCTAssertFalse(EmailNormalizer.isBetterDisplayName(address, than: name, forEmail: address), address)
+            XCTAssertTrue(EmailNormalizer.isBetterDisplayName(name, than: address, forEmail: address), address)
+        }
+    }
+
     // MARK: - Hide My Email Detection
 
     // MARK: - mergeNewestFirstHeaderDisplayName
