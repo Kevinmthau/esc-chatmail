@@ -3,7 +3,7 @@ import Contacts
 
 struct ParticipantsListView: View {
     let conversation: Conversation
-    let onCreateNewContact: (Person) -> Void
+    let onCreateNewContact: (NewContactPrefillPolicy.Prefill) -> Void
     let onAddToExistingContact: (Person) -> Void
     let onEditContact: (String) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -20,7 +20,7 @@ struct ParticipantsListView: View {
     init(
         conversation: Conversation,
         chatDependencies: ChatDependencies,
-        onCreateNewContact: @escaping (Person) -> Void,
+        onCreateNewContact: @escaping (NewContactPrefillPolicy.Prefill) -> Void,
         onAddToExistingContact: @escaping (Person) -> Void,
         onEditContact: @escaping (String) -> Void
     ) {
@@ -44,7 +44,7 @@ struct ParticipantsListView: View {
                         isExistingContact: participant.isExistingContact,
                         contactIdentifier: participant.contactIdentifier,
                         onCreateNewContact: {
-                            onCreateNewContact(participant.person)
+                            onCreateNewContact(participant.newContactPrefill)
                         },
                         onAddToExistingContact: {
                             onAddToExistingContact(participant.person)
@@ -106,7 +106,18 @@ struct ParticipantsListView: View {
             personsByNormalizedEmail[normalizedEmail] = person
         }
 
-        let resolvedParticipants = await participantLoader.resolveParticipants(for: otherEmails)
+        // Resolve with the conversation's header and stored names, as the chat header does, so a
+        // sender the header names is not "Unknown Contact" here (and not prefilled nameless).
+        let resolvedParticipants: [ParticipantLoader.ResolvedParticipant]
+        if let context = conversation.managedObjectContext {
+            resolvedParticipants = await participantLoader.resolveParticipants(
+                for: otherEmails,
+                inConversation: conversation.objectID,
+                context: context
+            )
+        } else {
+            resolvedParticipants = await participantLoader.resolveParticipants(for: otherEmails)
+        }
         guard !Task.isCancelled else { return }
 
         cachedOtherParticipants = resolvedParticipants.compactMap { participant in
@@ -119,7 +130,8 @@ struct ParticipantsListView: View {
                 displayName: participant.displayName,
                 email: person.email,
                 isExistingContact: participant.contactIdentifier != nil,
-                contactIdentifier: participant.contactIdentifier
+                contactIdentifier: participant.contactIdentifier,
+                newContactPrefill: NewContactPrefillPolicy.prefill(for: participant)
             )
         }
     }
@@ -131,6 +143,7 @@ private struct ParticipantListItem: Identifiable {
     let email: String
     let isExistingContact: Bool
     let contactIdentifier: String?
+    let newContactPrefill: NewContactPrefillPolicy.Prefill
 
     var id: String {
         if let contactIdentifier, !contactIdentifier.isEmpty {

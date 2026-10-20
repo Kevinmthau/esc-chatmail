@@ -362,8 +362,8 @@ struct ChatView: View {
             ParticipantsListView(
                 conversation: conversation,
                 chatDependencies: chatDependencies,
-                onCreateNewContact: { person in
-                    viewModel.contactManager.createNewContact(for: person)
+                onCreateNewContact: { prefill in
+                    viewModel.contactManager.createNewContact(prefill)
                 },
                 onAddToExistingContact: { person in
                     viewModel.contactManager.addToExistingContact(for: person)

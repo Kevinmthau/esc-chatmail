@@ -35,37 +35,33 @@ final class ChatContactManager: ObservableObject {
     private var pendingSelectedContactIdentifierRequiringPermission: String?
     private var pendingSelectedContactNameRequiringPermission: String?
 
-    private func prepareContactToAdd(displayName: String?, email: String) {
+    /// The unsaved contact the "new contact" screen opens with. Builds a `CNMutableContact` only;
+    /// nothing touches the Contacts store until the user saves it.
+    static func newContact(from prefill: NewContactPrefillPolicy.Prefill) -> CNMutableContact {
         let contact = CNMutableContact()
 
-        let trimmedDisplayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedDisplayName.isEmpty {
-            let components = trimmedDisplayName.split(separator: " ").map(String.init)
-            if components.count >= 2 {
-                contact.givenName = components[0]
-                contact.familyName = components.dropFirst().joined(separator: " ")
-            } else {
-                contact.givenName = trimmedDisplayName
-            }
+        if let name = prefill.name {
+            contact.namePrefix = name.namePrefix
+            contact.givenName = name.givenName
+            contact.middleName = name.middleName
+            contact.familyName = name.familyName
+            contact.nameSuffix = name.nameSuffix
         }
 
-        contact.emailAddresses = [CNLabeledValue(label: CNLabelWork, value: email as NSString)]
-
-        contactToAdd = ContactWrapper(contact: contact)
+        contact.emailAddresses = [CNLabeledValue(label: CNLabelWork, value: prefill.email as NSString)]
+        return contact
     }
 
-    /// Called when user selects "Create New Contact"
-    func createNewContact(for person: Person) {
+    /// Called when user selects "Create New Contact". Takes a value snapshot of the
+    /// Participants-sheet row (see `NewContactPrefillPolicy`), not the `Person`: the permission
+    /// prompt can keep the Task suspended while a sync deletes the Person.
+    func createNewContact(_ prefill: NewContactPrefillPolicy.Prefill) {
         showingParticipantsList = false
-        // Copy values out of the managed object before suspending; the permission
-        // prompt can keep the Task suspended while a sync deletes the Person.
-        let displayName = person.displayName
-        let email = person.email
 
         Task { [weak self] in
             guard let self else { return }
             guard await ensureContactsAccessForEditing() else { return }
-            prepareContactToAdd(displayName: displayName, email: email)
+            contactToAdd = ContactWrapper(contact: Self.newContact(from: prefill))
         }
     }
 
