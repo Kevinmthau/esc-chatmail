@@ -195,6 +195,29 @@ final class DuplicatePersonMergeTests: XCTestCase {
         XCTAssertEqual(merged.avatarURL, "https://example.com/a.png", "An avatar only the loser had must carry across")
     }
 
+    /// Of a named row and a duplicate holding the address as its name, the
+    /// named row survives and keeps its name, whichever the fetch yields first.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// in either fetch order. Both rankings said yes, so `survivingPerson` took
+    /// the later row: the address row (survivor assertion), or the named row,
+    /// over which `adoptMissingIdentityFields` then copied the address (name
+    /// assertion).
+    func testAddressShapedDuplicateNameNeverOverwritesRealName() async throws {
+        let email = "jacob.laycock@studs.com"
+        PersonBuilder().withEmail(email).withDisplayName(email).build(in: context)
+        let named = PersonBuilder().withEmail(email).withDisplayName("Jacob Laycock").build(in: context)
+        try context.save()
+        let namedID = named.objectID
+
+        await makeService().mergeDuplicatePersons(in: context)
+
+        let rows = try personRows(forEmail: email)
+        XCTAssertEqual(rows.map(\.objectID), [namedID], "The named row must survive")
+        XCTAssertEqual(rows.map(\.displayName), ["Jacob Laycock"])
+    }
+
     /// Rerunning must be a no-op rather than picking a different survivor.
     func testRerunIsStable() async throws {
         PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)

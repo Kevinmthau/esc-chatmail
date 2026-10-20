@@ -101,6 +101,28 @@ final class ConversationIdentityTests: XCTestCase {
         XCTAssertEqual(identity.type, .oneToOne)
     }
 
+    /// From is folded before Cc, so a Cc entry that repeats the sender's address
+    /// as its display name is the later candidate. The fold seeds the Person
+    /// name of every participant a new conversation creates.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test.
+    func testMakeConversationIdentity_addressShapedCcNameDoesNotReplaceFromName() {
+        let headers = [
+            MessageHeader(name: "From", value: "Jacob Laycock <jacob.laycock@studs.com>"),
+            MessageHeader(name: "To", value: "Kevin <kmthau@gmail.com>"),
+            MessageHeader(name: "Cc", value: "\"jacob.laycock@studs.com\" <jacob.laycock@studs.com>")
+        ]
+
+        let identity = makeConversationIdentity(
+            from: headers,
+            myAliases: ["kmthau@gmail.com"]
+        )
+
+        XCTAssertEqual(identity.participants, ["jacob.laycock@studs.com"])
+        XCTAssertEqual(identity.participantDisplayNames["jacob.laycock@studs.com"], "Jacob Laycock")
+    }
+
     func testMakeConversationIdentity_excludesAllSelfAliasesFromRecipients() {
         let headers = [
             MessageHeader(name: "From", value: "Friend <friend@example.com>"),

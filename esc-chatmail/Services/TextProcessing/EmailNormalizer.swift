@@ -184,6 +184,20 @@ class EmailNormalizer {
             return existingLooksEncoded
         }
 
+        // An address used as a display name (a To/Cc header written as
+        // `"jacob.laycock@studs.com" <jacob.laycock@studs.com>`) names no one:
+        // it never replaces a name, and any name replaces it. Without this the
+        // address split into more comparison parts than the address-derived
+        // "Jacob Laycock" and won the branch below, while "Jacob Laycock" had
+        // more words than the address and won it back, so the stored Person
+        // name flipped with header order; an address that replaced a one-word
+        // name ("Jake") was longer than any one-word name and never left.
+        let existingIsAddress = isEmailAddressShapedDisplayName(existing, forEmail: email)
+        let newIsAddress = isEmailAddressShapedDisplayName(new, forEmail: email)
+        if existingIsAddress != newIsAddress {
+            return existingIsAddress
+        }
+
         if isAddressDerivedDisplayName(existing, forEmail: email) {
             if !isAddressDerivedDisplayName(new, forEmail: email) {
                 return displayNameParts(new).count >= displayNameParts(existing).count
@@ -262,6 +276,26 @@ class EmailNormalizer {
         guard !nameParts.isEmpty else { return false }
         let otherParts = Set(displayNameParts(other))
         return nameParts.allSatisfy { otherParts.contains($0) }
+    }
+
+    /// True when a display name is, or embeds, an email address rather than a
+    /// name. `PersonDisplayNameResolver` never shows such a name. Only an
+    /// address the bare-address pattern matches counts: a dotted domain ending
+    /// in an ASCII label of two or more letters.
+    static func isEmailAddressShapedDisplayName(_ displayName: String) -> Bool {
+        displayName.contains("@") && extractEmail(from: displayName) != nil
+    }
+
+    /// `isEmailAddressShapedDisplayName(_:)`, or the name is `email` itself.
+    /// Header extraction takes any address inside angle brackets, so a header
+    /// that repeats a dotless, internationalized or domain-literal address
+    /// (`"ops@intranet" <ops@intranet>`) yields a name the bare pattern does
+    /// not match; comparing with the participant's own address still catches
+    /// it. `isBetterDisplayName(_:than:forEmail:)` never lets such a name
+    /// replace a name.
+    static func isEmailAddressShapedDisplayName(_ displayName: String, forEmail email: String) -> Bool {
+        isEmailAddressShapedDisplayName(displayName)
+            || (displayName.contains("@") && normalize(displayName) == normalize(email))
     }
 
     static func isAddressDerivedDisplayName(_ displayName: String?, forEmail email: String) -> Bool {

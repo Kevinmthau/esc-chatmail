@@ -116,6 +116,209 @@ final class MessagePersisterRecipientHeaderTests: XCTestCase {
         try await assertDurableHeaders(to: rawTo, cc: "")
     }
 
+    // MARK: - Recipient display names
+
+    private let jacob = "jacob.laycock@studs.com"
+    private let me = EmailAddress(email: "me@example.com", displayName: "Me")
+
+    /// The reported ordering: his own From header names him, then a reply whose
+    /// To header repeats his address as the display name
+    /// (`"jacob.laycock@studs.com" <jacob.laycock@studs.com>`) is persisted.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (`PersonFactory.findOrCreate` stored the address).
+    func testCreate_fromHeaderNameThenAddressShapedToName_keepsFromHeaderName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jacob-writes", from: "Jacob Laycock <\(jacob)>", to: [me], secondsAfterBase: 0),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+        try await assertStoredDisplayName("Jacob Laycock", forEmail: jacob)
+
+        try await persister.createNewMessage(
+            makeNamedArrival(
+                id: "reply-to-jacob",
+                from: "Me <\(me.email)>",
+                to: [EmailAddress(email: jacob, displayName: jacob)],
+                isFromMe: true,
+                secondsAfterBase: 60
+            ),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("Jacob Laycock", forEmail: jacob)
+    }
+
+    /// Same ordering through the refetch path: the reply first arrives with a
+    /// bare address, and a later full fetch supplies the address-shaped name.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (`MessagePersister.updateKnownParticipantDisplayNames` stored the address).
+    func testRefetch_addressShapedToNameDoesNotReplaceFromHeaderName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jacob-writes", from: "Jacob Laycock <\(jacob)>", to: [me], secondsAfterBase: 0),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await persister.createNewMessage(
+            makeNamedArrival(
+                id: "reply-to-jacob",
+                from: "Me <\(me.email)>",
+                to: [EmailAddress(email: jacob, displayName: nil)],
+                isFromMe: true,
+                secondsAfterBase: 60
+            ),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+        try await assertStoredDisplayName("Jacob Laycock", forEmail: jacob)
+
+        _ = await persister.updateExistingMessage(
+            makeNamedArrival(
+                id: "reply-to-jacob",
+                from: "Me <\(me.email)>",
+                to: [EmailAddress(email: jacob, displayName: jacob)],
+                isFromMe: true,
+                secondsAfterBase: 60
+            ),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("Jacob Laycock", forEmail: jacob)
+    }
+
+    /// A row that already holds the address (no header has named him yet) takes
+    /// the name the next From header gives, even a one-word name shorter than
+    /// the address. This is how rows corrupted before the fix heal.
+    ///
+    /// Revert-check: removing the `isEmailAddressShapedDisplayName` guard in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (the address kept the row).
+    func testCreate_addressShapedToNameThenOneWordFromName_storesFromHeaderName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+
+        try await persister.createNewMessage(
+            makeNamedArrival(
+                id: "write-to-jacob",
+                from: "Me <\(me.email)>",
+                to: [EmailAddress(email: jacob, displayName: jacob)],
+                isFromMe: true,
+                secondsAfterBase: 0
+            ),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+        try await assertStoredDisplayName(jacob, forEmail: jacob)
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jake-replies", from: "Jake <\(jacob)>", to: [me], secondsAfterBase: 60),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("Jake", forEmail: jacob)
+    }
+
+    /// The same ordering for an internationalized address: header extraction
+    /// takes it from the angle brackets, but the bare-address pattern does not
+    /// match it as a display name.
+    ///
+    /// Revert-check: removing the `normalize(displayName) == normalize(email)`
+    /// term in `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)`
+    /// fails this test (`PersonFactory.findOrCreate` stored the address).
+    func testCreate_fromHeaderNameThenRepeatedInternationalizedAddress_keepsFromHeaderName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+        let jose = "jose@correo.españa"
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jose-writes", from: "José <\(jose)>", to: [me], secondsAfterBase: 0),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await persister.createNewMessage(
+            makeNamedArrival(
+                id: "reply-to-jose",
+                from: "Me <\(me.email)>",
+                to: [EmailAddress(email: jose, displayName: jose)],
+                isFromMe: true,
+                secondsAfterBase: 60
+            ),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("José", forEmail: jose)
+    }
+
+    private func makeNamedArrival(
+        id: String,
+        from: String,
+        to: [EmailAddress],
+        isFromMe: Bool = false,
+        secondsAfterBase: TimeInterval
+    ) -> ProcessedMessage {
+        var headers = ProcessedHeaders()
+        headers.subject = "Studs"
+        headers.from = from
+        headers.to = to
+        headers.isFromMe = isFromMe
+
+        var arrival = ProcessedMessage()
+        arrival.id = id
+        arrival.gmThreadId = "thread-studs"
+        arrival.internalDate = Date(timeIntervalSince1970: 1_700_000_000 + secondsAfterBase)
+        arrival.headers = headers
+        arrival.snippet = "Body"
+        arrival.plainTextBody = "Body"
+        return arrival
+    }
+
+    /// Duplicate-email Person rows are legal, so every row for the address must
+    /// carry the name, not just whichever one a fetch returns first.
+    private func assertStoredDisplayName(
+        _ expected: String,
+        forEmail email: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let context = stack.newBackgroundContext()
+        try await context.perform {
+            let request = Person.fetchRequest()
+            request.predicate = NSPredicate(format: "email == %@", email)
+            let names = try context.fetch(request).map(\.displayName)
+            XCTAssertFalse(names.isEmpty, "No Person row for the address", file: file, line: line)
+            XCTAssertEqual(names, [String?](repeating: expected, count: names.count), file: file, line: line)
+        }
+    }
+
     private func makePersister() -> MessagePersister {
         MessagePersister(photoPrefetcher: { _ in })
     }
