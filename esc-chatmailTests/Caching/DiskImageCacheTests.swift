@@ -122,6 +122,9 @@ final class DiskImageCacheTests: XCTestCase {
     /// Copied shape from ContactsAuthorizationCoordinatorTests, minus the
     /// main-actor condition: this suite polls the filesystem. The sweep lands
     /// within milliseconds; the deadline is a generous bound, not a pace.
+    /// The condition is checked before the deadline on every pass, so a stall
+    /// longer than the timeout cannot fail a condition that came true during
+    /// the stall.
     private func waitUntil(
         timeout: TimeInterval = 10.0,
         pollIntervalNanoseconds: UInt64 = 20_000_000,
@@ -130,10 +133,12 @@ final class DiskImageCacheTests: XCTestCase {
         line: UInt = #line
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return }
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }

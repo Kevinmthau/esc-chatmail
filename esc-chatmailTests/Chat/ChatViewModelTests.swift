@@ -2975,6 +2975,9 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
+    /// Polls `condition` until it holds or `timeout` elapses. The condition is
+    /// checked before the deadline on every pass, so a main-thread stall longer
+    /// than the timeout cannot fail a condition that came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         pollIntervalNanoseconds: UInt64 = 20_000_000,
@@ -2984,14 +2987,13 @@ final class ChatViewModelTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if await condition() {
+        while await !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }
 

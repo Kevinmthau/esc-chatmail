@@ -100,10 +100,13 @@ final class ConversationSearchServiceTests: XCTestCase {
         XCTAssertEqual(published, ["a", ""])
     }
 
-    // Copied shape from ConversationLaunchRepairCoordinatorTests. Each
-    // caller waits on a positive publish condition; the fake clock makes
-    // the debounce complete in microseconds, so the first successful poll
-    // normally returns — the deadline is a generous bound, not a pace.
+    /// Copied shape from ConversationLaunchRepairCoordinatorTests. Each
+    /// caller waits on a positive publish condition; the fake clock makes
+    /// the debounce complete in microseconds, so the first successful poll
+    /// normally returns — the deadline is a generous bound, not a pace.
+    /// The condition is checked before the deadline on every pass, so a
+    /// main-thread stall longer than the timeout cannot fail a condition that
+    /// came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 30.0,
         pollIntervalNanoseconds: UInt64 = 50_000_000,
@@ -113,13 +116,12 @@ final class ConversationSearchServiceTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if (try? condition()) == true {
+        while (try? condition()) != true {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }

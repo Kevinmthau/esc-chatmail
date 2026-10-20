@@ -859,10 +859,12 @@ final class RichContentVerdictBackfillTests: XCTestCase {
         await join.value
     }
 
-    // Bounded by a wall-clock deadline with a poll interval, the shape
-    // ConversationLaunchRepairCoordinatorTests uses. Coordinators here pass
-    // `repairTaskPriority: nil`, so the worker inherits the test's priority and a green run
-    // returns at the first successful poll; the deadline is only a liveness bound.
+    /// Bounded by a wall-clock deadline with a poll interval, the shape
+    /// ConversationLaunchRepairCoordinatorTests uses. Coordinators here pass
+    /// `repairTaskPriority: nil`, so the worker inherits the test's priority and a green run
+    /// returns at the first successful poll; the deadline is only a liveness bound.
+    /// The condition is checked before the deadline on every pass, so a main-thread stall
+    /// longer than the timeout cannot fail a condition that came true during the stall.
     @discardableResult
     private func waitUntil(
         _ expectation: String,
@@ -873,14 +875,14 @@ final class RichContentVerdictBackfillTests: XCTestCase {
         condition: @escaping @MainActor () -> Bool
     ) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() {
-                return true
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting until \(expectation)", file: file, line: line)
+                return false
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        XCTFail("Timed out waiting until \(expectation)", file: file, line: line)
-        return false
+        return true
     }
 }
 

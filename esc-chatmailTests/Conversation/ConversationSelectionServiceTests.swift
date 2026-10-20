@@ -306,7 +306,9 @@ final class ConversationSelectionServiceTests: XCTestCase {
     }
 
     /// Deadline-poll wait copied from ChatViewModelTests (async-condition
-    /// variant, needed here to read the mock actor's queue).
+    /// variant, needed here to read the mock actor's queue). The condition is
+    /// checked before the deadline on every pass, so a main-thread stall longer
+    /// than the timeout cannot fail a condition that came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         pollIntervalNanoseconds: UInt64 = 20_000_000,
@@ -316,13 +318,12 @@ final class ConversationSelectionServiceTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if await condition() {
+        while await !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }

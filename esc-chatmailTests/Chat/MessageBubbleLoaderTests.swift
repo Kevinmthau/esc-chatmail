@@ -3198,19 +3198,21 @@ private actor RichVerdictMemoProducerGate {
 
 /// Polls until `condition` holds or the wall-clock deadline passes. Returns false on
 /// timeout instead of failing, so the caller can release what it parked first.
+/// The condition is checked before the deadline on every pass, so a stall longer than
+/// the timeout cannot return false for a condition that came true during the stall.
 private func waitUntilRichVerdictCondition(
     timeout: TimeInterval = 5.0,
     pollIntervalNanoseconds: UInt64 = 10_000_000,
     condition: @escaping () async -> Bool
 ) async -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-        if await condition() {
-            return true
+    while await !condition() {
+        guard Date() < deadline else {
+            return false
         }
         try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
     }
-    return false
+    return true
 }
 
 /// Reads like a newsletter's plain-text fallback to `NewsletterFallbackText`: a marker

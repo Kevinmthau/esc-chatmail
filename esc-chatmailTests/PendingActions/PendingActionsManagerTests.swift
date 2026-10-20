@@ -666,6 +666,10 @@ final class PendingActionsManagerTests: XCTestCase {
         return try context.count(for: PendingAction.fetchRequest())
     }
 
+    /// Polls until `coordinator` stops issuing account-work requests (a transition
+    /// has begun quiescing) or `timeout` elapses. The coordinator is checked
+    /// before the deadline on every pass, so a stall longer than the timeout
+    /// cannot fail a transition that started during the stall.
     private func waitUntilAccountTransitionStarts(
         _ coordinator: SyncRunCoordinator,
         timeout: TimeInterval = 2.0,
@@ -674,14 +678,13 @@ final class PendingActionsManagerTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if await coordinator.makeAccountWorkRequest() == nil {
+        while await coordinator.makeAccountWorkRequest() != nil {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for account transition", file: file, line: line)
                 return
             }
             await Task.yield()
         }
-
-        XCTFail("Timed out waiting for account transition", file: file, line: line)
     }
 
     // MARK: - Account-scoped API failures

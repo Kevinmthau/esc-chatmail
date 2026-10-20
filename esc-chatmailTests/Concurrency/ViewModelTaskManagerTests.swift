@@ -175,6 +175,9 @@ final class ViewModelTaskManagerTests: XCTestCase {
         }
     }
 
+    /// Polls `predicate` until it holds or `timeout` elapses. The predicate is
+    /// checked before the deadline on every pass, so a main-thread stall longer
+    /// than the timeout cannot fail a predicate that came true during the stall.
     private func waitUntil(
         _ predicate: @escaping () async -> Bool,
         _ message: String,
@@ -183,15 +186,13 @@ final class ViewModelTaskManagerTests: XCTestCase {
         line: UInt = #line
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if await predicate() {
+        while await !predicate() {
+            guard Date() < deadline else {
+                XCTFail(message, file: file, line: line)
                 return
             }
-
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
-
-        XCTFail(message, file: file, line: line)
     }
 
     private enum RunMode {

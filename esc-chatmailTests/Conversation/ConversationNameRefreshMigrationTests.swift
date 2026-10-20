@@ -588,19 +588,22 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         return conversation
     }
 
-    // Production runs the launch repairs at .background priority (and they
-    // historically awaited the shared SyncEngine going idle; forTesting now
-    // injects an immediate waiter). Raising this deadline never fixed the
-    // resulting flakes: 15s timed out, and then 60s lost
-    // testRepairMissingConversationPreviewsRunsV2WhenLegacyV1Completed on
-    // PR #236's merge run, whose worker logged its save 0.6s after the
-    // deadline — a loaded CI VM can leave .background jobs unscheduled for
-    // over a minute, and polling never raises their priority. forTesting now
-    // defaults `launchRepairTaskPriority` to nil, so the repairs inherit the
-    // test's priority; the deadline is only a liveness bound, and a green run
-    // exits at the first successful poll. The 50ms interval keeps this
-    // MainActor fetch-and-refresh poll from contending with the repair task's
-    // own MainActor hops.
+    /// Production runs the launch repairs at .background priority (and they
+    /// historically awaited the shared SyncEngine going idle; forTesting now
+    /// injects an immediate waiter). Raising this deadline never fixed the
+    /// resulting flakes: 15s timed out, and then 60s lost
+    /// testRepairMissingConversationPreviewsRunsV2WhenLegacyV1Completed on
+    /// PR #236's merge run, whose worker logged its save 0.6s after the
+    /// deadline — a loaded CI VM can leave .background jobs unscheduled for
+    /// over a minute, and polling never raises their priority. forTesting now
+    /// defaults `launchRepairTaskPriority` to nil, so the repairs inherit the
+    /// test's priority; the deadline is only a liveness bound, and a green run
+    /// exits at the first successful poll. The 50ms interval keeps this
+    /// MainActor fetch-and-refresh poll from contending with the repair task's
+    /// own MainActor hops.
+    /// The condition is checked before the deadline on every pass, so a
+    /// main-thread stall longer than the timeout cannot fail a condition that
+    /// came true during the stall.
     private func waitUntil(
         timeout: TimeInterval = 60.0,
         pollIntervalNanoseconds: UInt64 = 50_000_000,
@@ -610,13 +613,12 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
 
-        while Date() < deadline {
-            if (try? condition()) == true {
+        while (try? condition()) != true {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }

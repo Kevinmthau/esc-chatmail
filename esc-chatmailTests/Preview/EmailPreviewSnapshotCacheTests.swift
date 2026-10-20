@@ -1085,7 +1085,9 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
     /// where the whole test process stalled after the WebKit renderer tests —
     /// the next test, which has no waits at all, took 1.35s instead of ~0.01s.
     /// The deadline is a liveness guard, not a latency assertion: green runs
-    /// exit at the first satisfied poll.
+    /// exit at the first satisfied poll. The condition is checked before the
+    /// deadline on every pass, so a main-thread stall longer than the timeout
+    /// cannot fail a condition that came true during the stall.
     @MainActor
     private func waitUntil(
         timeout: TimeInterval = 10.0,
@@ -1095,13 +1097,13 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         condition: @escaping @MainActor () -> Bool
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() {
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
-        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
     private func makeImage(color: UIColor) -> UIImage {
