@@ -4,14 +4,21 @@ import type { MsgParticipantRow } from '@/db/types'
 import { convoRow, msgRow } from '@/outbox/testSupport'
 import {
   ADDRESS_SHAPED_PERSON_NAME_REPAIR_KEY,
+  decodeRfc2047DisplayNamesIfNeeded,
   peelQuoteWrappedDisplayNamesIfNeeded,
   QUOTE_WRAPPED_DISPLAY_NAME_REPAIR_KEY,
   repairAddressShapedPersonDisplayNamesIfNeeded,
+  repairStoredDisplayNamesIfNeeded,
+  RFC2047_DISPLAY_NAME_REPAIR_KEY,
 } from './displayNameRepair'
 import { makeTestDb, ME } from './testSupport'
 
 const JACOB = 'jacob.laycock@studs.com'
 const BOB = 'bob@example.com'
+const JOSE = 'jose@example.com'
+// "José García", as a B-encoded and a Q-encoded word.
+const JOSE_B = '=?UTF-8?B?Sm9zw6kgR2FyY8OtYQ==?='
+const JOSE_Q = '=?utf-8?Q?Jos=C3=A9_Garc=C3=ADa?='
 
 function participant(
   messageId: string,
@@ -46,6 +53,179 @@ beforeEach(() => {
 afterEach(async () => {
   vi.restoreAllMocks()
   await db.delete()
+})
+
+// Before sanitizeDisplayName decoded them, every stored copy of a name a
+// header spelled as an RFC 2047 encoded word kept the raw word.
+describe('decodeRfc2047DisplayNamesIfNeeded', () => {
+  // Revert-check: dropping any of the three `bulkPut` writes, or the
+  // `refreshConversationTitles` call, in `decodeRfc2047DisplayNamesIfNeeded`
+  // fails this test.
+  it('decodes every stored copy of the name and re-derives the title that spelled it', async () => {
+    await db.people.bulkPut([
+      { email: JOSE, displayName: JOSE_B },
+      { email: BOB, displayName: 'Bob Smith' },
+    ])
+    await addConversation('group', [JOSE, BOB], `${JOSE_B}, Bob Smith`)
+    await db.messages.add(
+      msgRow({ id: 'from-jose', conversationId: 'group', senderEmail: JOSE, senderName: JOSE_B }),
+    )
+    await db.msgParticipants.bulkAdd([
+      participant('from-jose', JOSE, 'from', JOSE_B),
+      participant('from-jose', ME, 'to'),
+      participant('from-jose', BOB, 'cc', '=?iso-8859-1?Q?Bob_Smith?='),
+    ])
+
+    const result = await decodeRfc2047DisplayNamesIfNeeded(db)
+
+    expect(result).toEqual({
+      performed: true,
+      decodedPersonCount: 1,
+      decodedParticipantCount: 2,
+      decodedSenderNameCount: 1,
+      refreshedConversationCount: 1,
+    })
+    expect(await db.people.get(JOSE)).toEqual({ email: JOSE, displayName: 'José García' })
+    expect((await db.messages.get('from-jose'))?.senderName).toBe('José García')
+    const rows = await db.msgParticipants.where('messageId').equals('from-jose').toArray()
+    expect(rows.map((row) => row.displayName)).toEqual(['José García', '', 'Bob Smith'])
+    expect(await title('group')).toBe('Bob Smith, José García')
+    expect(await flag(RFC2047_DISPLAY_NAME_REPAIR_KEY)).toBe(true)
+  })
+
+  // A title spells its creating message's header names, which no row this
+  // pass decodes need still hold: here the Person row took a clean name and
+  // the message is gone.
+  // Revert-check: passing `refreshConversationTitles` only the conversations
+  // of the decoded rows (`conversationIdsOfPeople(db, decodedPeople)`), as the
+  // peel pass reaches them, instead of every conversation fails this test.
+  it('re-derives a title that spells an encoded word even where no decoded name reaches it', async () => {
+    await db.people.put({ email: JOSE, displayName: 'José García' })
+    await addConversation('stale', [JOSE], JOSE_Q)
+
+    const result = await decodeRfc2047DisplayNamesIfNeeded(db)
+
+    expect(result).toMatchObject({ decodedPersonCount: 0, refreshedConversationCount: 1 })
+    expect(await title('stale')).toBe('José García')
+  })
+
+  // Re-deriving swaps a title's creation-time header names for Person names;
+  // a title without an encoded word cannot spell an encoded name, so it keeps
+  // them.
+  // Revert-check: replacing the `containsEncodedWord` filter passed to
+  // `refreshConversationTitles` with one that accepts every title fails this
+  // test.
+  it('leaves a title without an encoded word as created, even in a conversation it decodes names in', async () => {
+    await db.people.put({ email: JOSE, displayName: JOSE_B })
+    await addConversation('jose', [JOSE], 'José')
+
+    const result = await decodeRfc2047DisplayNamesIfNeeded(db)
+
+    expect(result).toMatchObject({ decodedPersonCount: 1, refreshedConversationCount: 0 })
+    expect(await title('jose')).toBe('José')
+  })
+
+  // A quote-wrapped name is the peel pass's, and a word the decoder rejects
+  // (a malformed `=XX` escape, an unknown encoding) is kept by ingestion too.
+  // Revert-check: dropping the `containsEncodedWord` gate in
+  // `decodedDisplayName` fails this test (the quote-wrapped name would be
+  // peeled here), and so does dropping its `decoded === stored` check (the
+  // rejected words would be rewritten unchanged and counted).
+  it('leaves a name without a decodable encoded word to the other passes', async () => {
+    const names = ["'Jacob Laycock'", '=?utf-8?Q?bad=ZZ?=', '=?utf-8?X?abc?=', 'Q=?A']
+    await db.people.bulkPut(names.map((displayName, i) => ({ email: `p${i}@x.com`, displayName })))
+    await db.messages.bulkAdd(
+      names.map((senderName, i) => msgRow({ id: `m${i}`, conversationId: 'c', senderName })),
+    )
+    await db.msgParticipants.bulkAdd(
+      names.map((displayName, i) => participant(`m${i}`, `p${i}@x.com`, 'from', displayName)),
+    )
+
+    const result = await decodeRfc2047DisplayNamesIfNeeded(db)
+
+    expect(result).toEqual({
+      performed: true,
+      decodedPersonCount: 0,
+      decodedParticipantCount: 0,
+      decodedSenderNameCount: 0,
+      refreshedConversationCount: 0,
+    })
+    expect((await db.people.toArray()).map((person) => person.displayName)).toEqual(names)
+    expect((await db.messages.toArray()).map((message) => message.senderName)).toEqual(names)
+    expect((await db.msgParticipants.toArray()).map((row) => row.displayName)).toEqual(names)
+  })
+
+  // Revert-check: dropping the flag check at the top of
+  // `decodeRfc2047DisplayNamesIfNeeded` fails this test.
+  it('runs once: an encoded name stored after the flag latched is left to ingestion', async () => {
+    expect((await decodeRfc2047DisplayNamesIfNeeded(db)).performed).toBe(true)
+    await db.people.put({ email: JOSE, displayName: JOSE_B })
+
+    expect((await decodeRfc2047DisplayNamesIfNeeded(db)).performed).toBe(false)
+    expect((await db.people.get(JOSE))?.displayName).toBe(JOSE_B)
+  })
+
+  // Revert-check: writing the flag outside the pass's transaction (before the
+  // writes, in a transaction of its own) fails this test.
+  it('commits nothing, flag included, when a write fails', async () => {
+    await db.people.put({ email: JOSE, displayName: JOSE_B })
+    await addConversation('encoded', [JOSE], JOSE_B)
+    vi.spyOn(db.conversations, 'bulkPut').mockImplementation(() => {
+      throw new Error('quota exceeded')
+    })
+
+    await expect(decodeRfc2047DisplayNamesIfNeeded(db)).rejects.toThrow('quota exceeded')
+
+    expect((await db.people.get(JOSE))?.displayName).toBe(JOSE_B)
+    expect(await title('encoded')).toBe(JOSE_B)
+    expect(await flag(RFC2047_DISPLAY_NAME_REPAIR_KEY)).toBeUndefined()
+  })
+})
+
+describe('repairStoredDisplayNamesIfNeeded', () => {
+  // The ranking never lets a name still holding an encoded word replace even
+  // an address, so the address pass can recover "Jake" only once the header
+  // name it reads is decoded.
+  // Revert-check: running `decodeRfc2047DisplayNamesIfNeeded` after
+  // `repairAddressShapedPersonDisplayNamesIfNeeded` fails this test.
+  it('decodes the participant names the address pass recovers a name from first', async () => {
+    await db.people.put({ email: JACOB, displayName: JACOB })
+    await addConversation('solo', [JACOB], JACOB)
+    await db.messages.add(msgRow({ id: 'encoded', conversationId: 'solo' }))
+    await db.msgParticipants.add(participant('encoded', JACOB, 'to', '=?utf-8?B?SmFrZQ==?='))
+
+    await repairStoredDisplayNamesIfNeeded(db)
+
+    expect((await db.people.get(JACOB))?.displayName).toBe('Jake')
+    expect(await title('solo')).toBe('Jake')
+  })
+
+  // Outlook wraps a name in quotes outside an encoded word or inside it. On a
+  // store whose peel pass latched before the decode pass existed, the peel
+  // pass cannot remove the quotes decoding exposes, so the decode pass must.
+  // Revert-check: replacing `sanitizeDisplayName` with `decodeRfc2047` in
+  // `decodeRfc2047DisplayNamesIfNeeded` and `decodedDisplayName` fails this
+  // test.
+  it('peels the quotes decoding exposes even when the peel pass already ran', async () => {
+    await db.syncState.put({ key: QUOTE_WRAPPED_DISPLAY_NAME_REPAIR_KEY, value: true })
+    await db.people.put({ email: JACOB, displayName: '=?utf-8?Q?=27Jacob_Laycock=27?=' })
+    await addConversation('solo', [JACOB], '=?utf-8?Q?=27Jacob_Laycock=27?=')
+    await db.messages.add(
+      msgRow({ id: 'outlook', conversationId: 'solo', senderName: "'=?utf-8?Q?Jacob_Laycock?='" }),
+    )
+    await db.msgParticipants.add(
+      participant('outlook', JACOB, 'from', "'=?utf-8?Q?Jacob_Laycock?='"),
+    )
+
+    await repairStoredDisplayNamesIfNeeded(db)
+
+    expect((await db.people.get(JACOB))?.displayName).toBe('Jacob Laycock')
+    expect((await db.messages.get('outlook'))?.senderName).toBe('Jacob Laycock')
+    expect((await db.msgParticipants.toArray()).map((row) => row.displayName)).toEqual([
+      'Jacob Laycock',
+    ])
+    expect(await title('solo')).toBe('Jacob Laycock')
+  })
 })
 
 // Outlook and Exchange wrap a name in single quotes, and before

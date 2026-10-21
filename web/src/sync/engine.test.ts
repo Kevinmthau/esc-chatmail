@@ -6,6 +6,7 @@ import { convoRow, msgRow } from '@/outbox/testSupport'
 import {
   ADDRESS_SHAPED_PERSON_NAME_REPAIR_KEY,
   QUOTE_WRAPPED_DISPLAY_NAME_REPAIR_KEY,
+  RFC2047_DISPLAY_NAME_REPAIR_KEY,
 } from './displayNameRepair'
 import { runSync, setSyncLockForTests, syncLockName } from './engine'
 import {
@@ -130,12 +131,16 @@ describe('runSync', () => {
     expect(await db.conversations.get(source.id)).toBeUndefined()
   })
 
-  // Revert-check: dropping either try/catch in
+  // Revert-check: dropping any of the three try/catches in
   // `repairStoredDisplayNamesIfNeeded` fails this test.
   it('carries on with the sync when the stored-name repairs fail, leaving them to retry', async () => {
     await seedAccount(db)
-    // Both passes select this row: it is quote-wrapped, and an address.
-    await db.people.put({ email: ALICE, displayName: `'${ALICE}'` })
+    // The address and peel passes select Alice's row, which is quote-wrapped
+    // and an address; the decode pass selects José's encoded one.
+    await db.people.bulkPut([
+      { email: ALICE, displayName: `'${ALICE}'` },
+      { email: 'jose@example.com', displayName: '=?UTF-8?B?Sm9zw6k=?=' },
+    ])
     await db.conversations.add(convoRow({ id: 'alice', participantHash: hashFor(ALICE) }))
     await db.messages.add(msgRow({ id: 'from-alice', conversationId: 'alice' }))
     await db.msgParticipants.add({
@@ -154,8 +159,10 @@ describe('runSync', () => {
 
     expect(outcome.error).toBeUndefined()
     expect((await db.accounts.get(ME))?.historyId).toBe('h2')
-    expect(warn).toHaveBeenCalledTimes(2)
+    expect(warn).toHaveBeenCalledTimes(3)
     expect((await db.people.get(ALICE))?.displayName).toBe(`'${ALICE}'`)
+    expect((await db.people.get('jose@example.com'))?.displayName).toBe('=?UTF-8?B?Sm9zw6k=?=')
+    expect(await db.syncState.get(RFC2047_DISPLAY_NAME_REPAIR_KEY)).toBeUndefined()
     expect(await db.syncState.get(ADDRESS_SHAPED_PERSON_NAME_REPAIR_KEY)).toBeUndefined()
     expect(await db.syncState.get(QUOTE_WRAPPED_DISPLAY_NAME_REPAIR_KEY)).toBeUndefined()
   })
