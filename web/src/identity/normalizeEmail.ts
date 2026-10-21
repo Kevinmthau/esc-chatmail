@@ -1,6 +1,10 @@
 // Port of esc-chatmail/Services/TextProcessing/EmailNormalizer.swift.
 // The normalize() output feeds participant hashing, so it must match iOS
-// byte-for-byte — see the parity vectors in participantSet.test.ts.
+// byte-for-byte — see the parity vectors in participantSet.test.ts. The
+// display-name rules (sanitizing and ranking) have no shared golden fixture,
+// so normalizeEmail.test.ts ports EmailNormalizerTests' cases instead.
+
+import { containsEncodedWord, decodeRfc2047 } from '@/mime/rfc2047Decoder'
 
 /**
  * Canonical email normalization for identity hashing: trim + lowercase; for
@@ -86,8 +90,8 @@ export function extractAllEmails(value: string): string[] {
 export function extractDisplayName(value: string): string | null {
   const emailStartIndex = value.indexOf('<')
   if (emailStartIndex !== -1) {
-    const name = value.slice(0, emailStartIndex).trim()
-    return name === '' ? null : name.replaceAll('"', '')
+    const name = sanitizeDisplayName(value.slice(0, emailStartIndex))
+    return name === '' ? null : name
   }
 
   const trimmed = value.trim()
@@ -95,21 +99,40 @@ export function extractDisplayName(value: string): string | null {
   if (commentStart !== -1 && trimmed.endsWith(')')) {
     const beforeComment = firstBareEmailMatch(trimmed.slice(0, commentStart))
     if (beforeComment !== null && beforeComment.email !== '') {
-      const comment = trimmed
-        .slice(commentStart + 1, trimmed.length - 1)
-        .trim()
-        .replaceAll('"', '')
+      const comment = sanitizeDisplayName(trimmed.slice(commentStart + 1, trimmed.length - 1))
       return comment === '' ? null : comment
     }
   }
 
   const bareMatch = firstBareEmailMatch(trimmed)
   if (bareMatch !== null) {
-    const leadingName = trimmed.slice(0, bareMatch.index).trim().replaceAll('"', '')
+    const leadingName = sanitizeDisplayName(trimmed.slice(0, bareMatch.index))
     return leadingName === '' ? null : leadingName
   }
 
   return null
+}
+
+/**
+ * Decodes RFC 2047 encoded-words and strips quoting from a display-name
+ * phrase parsed out of an address header. Decoding happens AFTER the address
+ * structure is parsed so decoded content can never inject a fake "<addr>"
+ * into address parsing, and BEFORE quote-stripping so a name that only
+ * becomes quoted once decoded is still unquoted for display.
+ *
+ * Quote-stripping removes every double quote, then peels the wrapping quotes
+ * `stripWrappingQuotes` recognizes. Outlook and Exchange write a recipient as
+ * `'Jacob Laycock' <…>` or `"'Jacob Laycock'" <…>`; removing only double
+ * quotes stored and showed `'Jacob Laycock'`, and because the quotes hid that
+ * it restates jacob.laycock@'s address, it outranked the plain "Jacob Laycock"
+ * in `isBetterDisplayNameForEmail`. A quote inside a name (`O'Brien`, `'Til
+ * Tuesday`) is not wrapping and stays. The pairs are not matched, so a name
+ * that merely starts and ends with a quoted part (`'Ann' & 'Bob'`) loses its
+ * outer two quotes; such header names are rare enough not to justify parsing
+ * quote nesting.
+ */
+function sanitizeDisplayName(name: string): string {
+  return stripWrappingQuotes(decodeRfc2047(name).replaceAll('"', ''))
 }
 
 /**
@@ -155,28 +178,150 @@ export function isBetterDisplayName(
  * True if `newName` should replace `existingName` for a specific email.
  * Address-derived names are weak: they were likely synthesized from the local
  * part before a real header or contact name was available.
+ *
+ * Never true in both directions for one pair, or the stored name would flip
+ * with every header that carries the other one (normalizeEmail.test.ts checks
+ * this over a table of realistic pairs). It can be false in both directions:
+ * such a tie keeps whichever name is already stored.
  */
 export function isBetterDisplayNameForEmail(
   newName: string | null | undefined,
   existingName: string | null | undefined,
   email: string,
 ): boolean {
-  const trimmedNew = newName?.trim()
-  if (trimmedNew === undefined || trimmedNew === '') return false
-  const trimmedExisting = existingName?.trim()
-  if (trimmedExisting === undefined || trimmedExisting === '') return true
+  const quotedNew = newName?.trim()
+  if (quotedNew === undefined || quotedNew === '') return false
+  const quotedExisting = existingName?.trim()
+  if (quotedExisting === undefined || quotedExisting === '') return true
 
-  if (isAddressDerivedDisplayName(trimmedExisting, email)) {
-    if (!isAddressDerivedDisplayName(trimmedNew, email)) {
-      return displayNameParts(trimmedNew).length >= displayNameParts(trimmedExisting).length
+  // Rows stored before `sanitizeDisplayName` peeled Outlook's wrapping quotes
+  // still hold `'Jacob Laycock'`. Rank every name as written inside its
+  // quotes: the quotes hid that it restates jacob.laycock@'s address, so it
+  // replaced the address-derived "Jacob Laycock" at an equal part count and
+  // the plain name could never win back, and they made it the longer name in
+  // the base ranking. A quoted name and its own unquoted form are one name,
+  // and the shorter spelling (fewer quotes) wins, so ingestion heals a quoted
+  // row when the name recurs.
+  const unquotedNew = stripWrappingQuotes(quotedNew)
+  const unquotedExisting = stripWrappingQuotes(quotedExisting)
+  if (unquotedNew === '') return false
+  if (unquotedExisting === '') return true
+  if (unquotedNew === unquotedExisting) {
+    return quotedNew.length < quotedExisting.length
+  }
+
+  // A name still carrying a raw RFC 2047 encoded-word is garbage on screen:
+  // any decoded candidate beats it, and an undecoded candidate never
+  // replaces a clean existing name.
+  const existingLooksEncoded = containsEncodedWord(unquotedExisting)
+  const newLooksEncoded = containsEncodedWord(unquotedNew)
+  if (existingLooksEncoded !== newLooksEncoded) {
+    return existingLooksEncoded
+  }
+
+  // An address used as a display name (a To/Cc header written as
+  // `"jacob.laycock@studs.com" <jacob.laycock@studs.com>`) names no one: it
+  // never replaces a name, and any name replaces it. Without this the address
+  // split into more comparison parts than the address-derived "Jacob Laycock"
+  // and won the branch below, while "Jacob Laycock" had more words than the
+  // address and won it back, so the stored Person name flipped with header
+  // order; an address that replaced a one-word name ("Jake") was longer than
+  // any one-word name and never left.
+  const existingIsAddress = isEmailAddressShapedDisplayName(unquotedExisting, email)
+  const newIsAddress = isEmailAddressShapedDisplayName(unquotedNew, email)
+  if (existingIsAddress !== newIsAddress) {
+    return existingIsAddress
+  }
+
+  // Each branch below decides a pair the same way from both sides. A pair
+  // that ranked better in both directions made the stored name follow header
+  // order: for jacob.laycock@, the real "Jake Laycock" replaced the
+  // address-derived "Jacob Laycock" at an equal part count, and "Jacob
+  // Laycock" won it back as the longer name.
+  const existingIsDerived = isAddressDerivedDisplayName(unquotedExisting, email)
+  const newIsDerived = isAddressDerivedDisplayName(unquotedNew, email)
+  if (existingIsDerived && !newIsDerived) {
+    return displayNameParts(unquotedNew).length >= displayNameParts(unquotedExisting).length
+  }
+
+  if (newIsDerived && !existingIsDerived) {
+    // The converse of the branch above: a derived name replaces a real one
+    // only with strictly more parts (a fuller "John Doe" over "John"), never
+    // at an equal part count, where the real name wins.
+    if (displayNameParts(unquotedNew).length <= displayNameParts(unquotedExisting).length) {
+      return false
     }
+    return isBetterDisplayName(unquotedNew, unquotedExisting)
+  }
 
-    if (trimmedNew !== trimmedExisting && hasIntentionalCasing(trimmedNew)) {
-      return true
+  if (newIsDerived && existingIsDerived) {
+    // Intentional casing ("BONBONWHIMS") beats the auto-formatted
+    // "Bonbonwhims" whatever their word counts. Two intentionally cased
+    // variants fall through to the base ranking rather than each replacing
+    // the other; a case-only pair is a tie that keeps the stored name.
+    const newHasIntentionalCasing = hasIntentionalCasing(unquotedNew)
+    if (newHasIntentionalCasing !== hasIntentionalCasing(unquotedExisting)) {
+      return newHasIntentionalCasing
     }
   }
 
-  return isBetterDisplayName(trimmedNew, trimmedExisting)
+  return isBetterDisplayName(unquotedNew, unquotedExisting)
+}
+
+/**
+ * True when a display name is, or embeds, an email address rather than a
+ * name. Only an address the bare-address pattern matches counts — a dotted
+ * domain ending in an ASCII label of two or more letters — unless `email` is
+ * given: then the name, less its wrapping quotes, being `email` itself also
+ * counts. Header extraction takes any address inside angle brackets, so a
+ * header that repeats a dotless, internationalized or domain-literal address
+ * (`"ops@intranet" <ops@intranet>`) yields a name the bare pattern does not
+ * match; comparing with the participant's own address still catches it.
+ * `isBetterDisplayNameForEmail` never lets such a name replace a name.
+ *
+ * Outlook and Exchange write a recipient that has no name as
+ * `"'jacob.laycock@studs.com'" <jacob.laycock@studs.com>`, and the bare
+ * pattern rejects the trailing `'`. `sanitizeDisplayName` peels those quotes,
+ * but names stored before it did still hold `'addr'`, so wrapping quotes are
+ * peeled before matching.
+ */
+export function isEmailAddressShapedDisplayName(displayName: string, email?: string): boolean {
+  const candidate = stripWrappingQuotes(displayName)
+  if (!candidate.includes('@')) return false
+  if (extractEmail(candidate) !== null) return true
+  return email !== undefined && normalizeEmail(candidate) === normalizeEmail(email)
+}
+
+const WRAPPING_QUOTE_PAIRS: ReadonlyArray<readonly [open: string, close: string]> = [
+  ['"', '"'],
+  ["'", "'"],
+  ['\u201C', '\u201D'],
+  ['\u2018', '\u2019'],
+  ['\u00AB', '\u00BB'],
+]
+
+/**
+ * `value`, trimmed, with every layer of wrapping quotes ("…", '…', “…”, ‘…’,
+ * «…») peeled off, as Outlook writes an address it repeats as the name
+ * (`'ops@intranet'`) or quotes a name; anything else is only trimmed. Shared
+ * with `sanitizeDisplayName` and the ranking in `isBetterDisplayNameForEmail`
+ * (port of EmailNormalizer.strippingWrappingQuotes), so they agree on what
+ * counts as quoting.
+ */
+export function stripWrappingQuotes(value: string): string {
+  let result = value.trim()
+  let didStrip = true
+  while (didStrip && result.length >= 2) {
+    didStrip = false
+    for (const [open, close] of WRAPPING_QUOTE_PAIRS) {
+      if (result.startsWith(open) && result.endsWith(close)) {
+        result = result.slice(1, -1).trim()
+        didStrip = true
+        break
+      }
+    }
+  }
+  return result
 }
 
 /** True when the display name is just a re-formatting of the address itself. */

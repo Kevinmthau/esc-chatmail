@@ -66,7 +66,8 @@ export function base64DecodeText(text: string): string | null {
   return utf8Decoder.decode(bytes)
 }
 
-function hexValue(byte: number): number | null {
+/** The value of one ASCII hex digit byte, or null for any other byte. */
+export function hexValue(byte: number): number | null {
   if (byte >= 48 && byte <= 57) return byte - 48 // 0-9
   if (byte >= 65 && byte <= 70) return byte - 55 // A-F
   if (byte >= 97 && byte <= 102) return byte - 87 // a-f
