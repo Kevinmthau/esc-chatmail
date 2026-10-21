@@ -308,20 +308,63 @@ class EmailNormalizer {
     /// name. `PersonDisplayNameResolver` never shows such a name. Only an
     /// address the bare-address pattern matches counts: a dotted domain ending
     /// in an ASCII label of two or more letters.
+    ///
+    /// Outlook and Exchange write a recipient that has no name as
+    /// `"'jacob.laycock@studs.com'" <jacob.laycock@studs.com>`. Header
+    /// sanitizing strips only the double quotes, and the bare pattern rejects
+    /// the trailing `'`, so that address passed as a name: shown in titles,
+    /// and stored as a Person name that no one-word name could replace.
+    /// Wrapping quotes (`strippingWrappingQuotes(_:)`) are therefore peeled
+    /// before matching.
     static func isEmailAddressShapedDisplayName(_ displayName: String) -> Bool {
-        displayName.contains("@") && extractEmail(from: displayName) != nil
+        embedsBareOrBracketedAddress(strippingWrappingQuotes(displayName))
     }
 
-    /// `isEmailAddressShapedDisplayName(_:)`, or the name is `email` itself.
-    /// Header extraction takes any address inside angle brackets, so a header
-    /// that repeats a dotless, internationalized or domain-literal address
-    /// (`"ops@intranet" <ops@intranet>`) yields a name the bare pattern does
-    /// not match; comparing with the participant's own address still catches
-    /// it. `isBetterDisplayName(_:than:forEmail:)` never lets such a name
-    /// replace a name.
+    /// `isEmailAddressShapedDisplayName(_:)`, or the name, less its wrapping
+    /// quotes, is `email` itself. Header extraction takes any address inside
+    /// angle brackets, so a header that repeats a dotless, internationalized
+    /// or domain-literal address (`"ops@intranet" <ops@intranet>`) yields a
+    /// name the bare pattern does not match; comparing with the participant's
+    /// own address still catches it. `isBetterDisplayName(_:than:forEmail:)`
+    /// never lets such a name replace a name.
     static func isEmailAddressShapedDisplayName(_ displayName: String, forEmail email: String) -> Bool {
-        isEmailAddressShapedDisplayName(displayName)
-            || (displayName.contains("@") && normalize(displayName) == normalize(email))
+        let candidate = strippingWrappingQuotes(displayName)
+        return embedsBareOrBracketedAddress(candidate)
+            || (candidate.contains("@") && normalize(candidate) == normalize(email))
+    }
+
+    /// The match both `isEmailAddressShapedDisplayName` overloads share, on a
+    /// value whose wrapping quotes are already peeled.
+    private static func embedsBareOrBracketedAddress(_ candidate: String) -> Bool {
+        candidate.contains("@") && extractEmail(from: candidate) != nil
+    }
+
+    private static let wrappingQuotePairs: [(open: Character, close: Character)] = [
+        ("\"", "\""),
+        ("'", "'"),
+        ("\u{201C}", "\u{201D}"),
+        ("\u{2018}", "\u{2019}"),
+        ("\u{00AB}", "\u{00BB}")
+    ]
+
+    /// `value`, trimmed, with every layer of wrapping quotes ("…", '…', “…”,
+    /// ‘…’, «…») peeled off, as Outlook writes an address it repeats as the
+    /// name (`'ops@intranet'`) or quotes a name; anything else is only
+    /// trimmed. Shared with `NewContactPrefillPolicy`, so the add-contact
+    /// screen and the address-shape test agree on what counts as quoting.
+    static func strippingWrappingQuotes(_ value: String) -> String {
+        var result = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        var didStrip = true
+        while didStrip, result.count >= 2 {
+            didStrip = false
+            for pair in wrappingQuotePairs where result.first == pair.open && result.last == pair.close {
+                result = String(result.dropFirst().dropLast())
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                didStrip = true
+                break
+            }
+        }
+        return result
     }
 
     static func isAddressDerivedDisplayName(_ displayName: String?, forEmail email: String) -> Bool {

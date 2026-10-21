@@ -115,14 +115,6 @@ enum NewContactPrefillPolicy {
 
     // MARK: - Cleaning
 
-    private static let wrappingQuotePairs: [(open: Character, close: Character)] = [
-        ("\"", "\""),
-        ("'", "'"),
-        ("\u{201C}", "\u{201D}"),
-        ("\u{2018}", "\u{2019}"),
-        ("\u{00AB}", "\u{00BB}")
-    ]
-
     private static let trailingQualifierRegex: NSRegularExpression? = {
         try? NSRegularExpression(pattern: #"\s*(\([^()]*\)|\[[^\[\]]*\])\s*$"#)
     }()
@@ -150,7 +142,7 @@ enum NewContactPrefillPolicy {
         // qualifier ("(Studs)") and is still prefilled.
         guard !isNoReplyAddress(email) else { return nil }
 
-        candidate = strippingWrappingQuotes(candidate)
+        candidate = EmailNormalizer.strippingWrappingQuotes(candidate)
         guard !containsRelayMarker(candidate) else { return nil }
 
         // "Jacob Laycock (Studs)" / "Jacob Laycock [NYC]": the qualifier is not part of the name.
@@ -159,7 +151,7 @@ enum NewContactPrefillPolicy {
         let withoutQualifier = RegexSanitizer.replace(in: candidate, regex: trailingQualifierRegex, with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !withoutQualifier.isEmpty {
-            candidate = strippingWrappingQuotes(withoutQualifier)
+            candidate = EmailNormalizer.strippingWrappingQuotes(withoutQualifier)
         }
 
         return PersonDisplayNameResolver.sanitizedExplicitDisplayName(candidate, forEmail: email)
@@ -174,21 +166,6 @@ enum NewContactPrefillPolicy {
         guard let relayMarkerRegex else { return false }
         let range = NSRange(location: 0, length: value.utf16.count)
         return relayMarkerRegex.firstMatch(in: value, options: [], range: range) != nil
-    }
-
-    private static func strippingWrappingQuotes(_ value: String) -> String {
-        var result = value
-        var didStrip = true
-        while didStrip, result.count >= 2 {
-            didStrip = false
-            for pair in wrappingQuotePairs where result.first == pair.open && result.last == pair.close {
-                result = String(result.dropFirst().dropLast())
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                didStrip = true
-                break
-            }
-        }
-        return result
     }
 
     // MARK: - Splitting

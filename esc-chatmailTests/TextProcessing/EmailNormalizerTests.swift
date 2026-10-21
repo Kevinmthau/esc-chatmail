@@ -533,6 +533,62 @@ final class EmailNormalizerTests: XCTestCase {
         }
     }
 
+    /// Outlook writes a recipient that has no name as
+    /// `"'jacob.laycock@studs.com'" <jacob.laycock@studs.com>`, and header
+    /// sanitizing strips only the double quotes.
+    ///
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:)` fails this test.
+    func testIsEmailAddressShapedDisplayName_outlookSingleQuotedAddress_isRecognized() {
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: "\"'jacob.laycock@studs.com'\" <jacob.laycock@studs.com>"),
+            "'jacob.laycock@studs.com'",
+            "Precondition: header sanitizing keeps the single quotes"
+        )
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("'jacob.laycock@studs.com'"))
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName(" 'jacob.laycock@studs.com' "))
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("'Jacob Laycock'"))
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("'Jacob @ Studs'"))
+    }
+
+    /// The same peel covers every quote pair `NewContactPrefillPolicy` treats
+    /// as wrapping, and every layer of it.
+    ///
+    /// Revert-check: narrowing `EmailNormalizer.wrappingQuotePairs` to the
+    /// ASCII single quote fails this test, and so does peeling one layer only
+    /// in `EmailNormalizer.strippingWrappingQuotes(_:)`.
+    func testIsEmailAddressShapedDisplayName_typographicOrNestedQuotedAddress_isRecognized() {
+        let email = "jacob.laycock@studs.com"
+        for quoted in ["\u{2018}\(email)\u{2019}", "\u{201C}\(email)\u{201D}", "\u{00AB}\(email)\u{00BB}", "''\(email)''"] {
+            XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName(quoted), quoted)
+            XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName(quoted, forEmail: email), quoted)
+        }
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("\u{2018}Jacob Laycock\u{2019}"))
+    }
+
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)` fails this
+    /// test (the bare pattern misses a dotless address, and the quotes broke the
+    /// match with the participant's own).
+    func testIsEmailAddressShapedDisplayName_forEmail_recognizesSingleQuotedOwnDotlessAddress() {
+        XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("'ops@intranet'"), "Precondition")
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("'ops@intranet'", forEmail: "ops@intranet"))
+    }
+
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)`, the
+    /// overload the ranking uses, fails this test (the quoted address outranked
+    /// "Jake" as the longer one-part name, and the address-derived "Jacob
+    /// Laycock" on comparison parts).
+    func testIsBetterDisplayName_forEmail_outlookSingleQuotedAddressNeverReplacesName() {
+        let email = "jacob.laycock@studs.com"
+        let quoted = "'\(email)'"
+        for name in ["Jake", "Jacob Laycock"] {
+            XCTAssertFalse(EmailNormalizer.isBetterDisplayName(quoted, than: name, forEmail: email), name)
+            XCTAssertTrue(EmailNormalizer.isBetterDisplayName(name, than: quoted, forEmail: email), name)
+        }
+    }
+
     // MARK: - isBetterDisplayName: never better in both directions
 
     /// For jacob.laycock@ the real "Jake Laycock" replaced the address-derived
@@ -635,7 +691,8 @@ final class EmailNormalizerTests: XCTestCase {
             ("jacob.laycock@studs.com", [
                 "Jacob Laycock", "Jake Laycock", "Jake", "Jacob", "J. Laycock", "Jacob R. Laycock",
                 "JACOB LAYCOCK", "jacob laycock", "Jacob.Laycock", "jacob.laycock",
-                "jacob.laycock@studs.com", "=?utf-8?B?SmFrZQ==?="
+                "jacob.laycock@studs.com", "'jacob.laycock@studs.com'", "\u{2018}jacob.laycock@studs.com\u{2019}",
+                "=?utf-8?B?SmFrZQ==?="
             ]),
             ("john.doe@example.com", ["John", "John Doe", "Jonathan Doe", "Johnny", "JOHN DOE", "john_doe", "Dr. John Doe"]),
             ("kmthau@example.com", ["Kevin", "Kmthau", "kmthau", "KMTHAU", "Kevin Thau", "Kev"]),
