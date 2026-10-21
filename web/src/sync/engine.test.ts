@@ -1,8 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSyncProgress } from '@/db/kv'
 import type { ChatmailDB } from '@/db/schema'
 import { makeParticipantSetIdentity } from '@/identity/participantSet'
 import { convoRow, msgRow } from '@/outbox/testSupport'
+import {
+  ADDRESS_SHAPED_PERSON_NAME_REPAIR_KEY,
+  QUOTE_WRAPPED_DISPLAY_NAME_REPAIR_KEY,
+} from './displayNameRepair'
 import { runSync, setSyncLockForTests, syncLockName } from './engine'
 import {
   PARTICIPANT_SET_REPAIR_SIGNATURE_KEY,
@@ -35,6 +39,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   setSyncLockForTests(undefined)
+  vi.restoreAllMocks()
   await db.delete()
 })
 
@@ -83,6 +88,76 @@ describe('runSync', () => {
     expect(outcome.error).toBeUndefined()
     expect(await db.conversations.get(source.id)).toBeUndefined()
     expect((await db.messages.get('pre-message'))?.conversationId).toBe(destination.id)
+  })
+
+  // Revert-check: dropping the `repairStoredDisplayNamesIfNeeded` call from
+  // `runSync` fails this test, and so does moving it after the first
+  // `repairParticipantSetConversations` call (the move would then wait for
+  // the post-sync pass, after the network work this test observes).
+  it('peels stored names before the participant-set repair classifies relays', async () => {
+    await seedAccount(db)
+    const source = convoRow({ id: 'quoted-source', participantHash: hashFor(ALICE, RELAY) })
+    const destination = convoRow({ id: 'quoted-destination', participantHash: hashFor(ALICE) })
+    await db.conversations.bulkAdd([source, destination])
+    await db.messages.add(msgRow({ id: 'quoted-message', conversationId: source.id }))
+    await db.msgParticipants.bulkAdd([
+      { messageId: 'quoted-message', email: ALICE, displayName: 'Alice', kind: 'from' },
+      { messageId: 'quoted-message', email: ME, displayName: '', kind: 'to' },
+      { messageId: 'quoted-message', email: RELAY, displayName: "'Hide My Email'", kind: 'cc' },
+    ])
+    // Outlook's quotes hide the Hide My Email label from the relay test.
+    await db.people.bulkPut([
+      { email: ALICE, displayName: 'Alice' },
+      { email: RELAY, displayName: "'Hide My Email'" },
+    ])
+    await db.convoParticipants.bulkPut([
+      { conversationId: source.id, email: ALICE, role: 'normal' },
+      { conversationId: source.id, email: RELAY, role: 'normal' },
+      { conversationId: destination.id, email: ALICE, role: 'normal' },
+    ])
+
+    const listHistory = api.listHistory.bind(api)
+    api.listHistory = async (params) => {
+      expect((await db.people.get(RELAY))?.displayName).toBe('Hide My Email')
+      expect((await db.messages.get('quoted-message'))?.conversationId).toBe(destination.id)
+      return listHistory(params)
+    }
+    api.historyFactory = () => ({ historyId: 'h2', history: [] })
+
+    const outcome = await runSync(testDeps(db, api), 'manual')
+
+    expect(outcome.error).toBeUndefined()
+    expect(await db.conversations.get(source.id)).toBeUndefined()
+  })
+
+  // Revert-check: dropping either try/catch in
+  // `repairStoredDisplayNamesIfNeeded` fails this test.
+  it('carries on with the sync when the stored-name repairs fail, leaving them to retry', async () => {
+    await seedAccount(db)
+    // Both passes select this row: it is quote-wrapped, and an address.
+    await db.people.put({ email: ALICE, displayName: `'${ALICE}'` })
+    await db.conversations.add(convoRow({ id: 'alice', participantHash: hashFor(ALICE) }))
+    await db.messages.add(msgRow({ id: 'from-alice', conversationId: 'alice' }))
+    await db.msgParticipants.add({
+      messageId: 'from-alice',
+      email: ALICE,
+      displayName: 'Alice',
+      kind: 'from',
+    })
+    vi.spyOn(db.people, 'bulkPut').mockImplementation(() => {
+      throw new Error('quota exceeded')
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    api.historyFactory = () => ({ historyId: 'h2', history: [] })
+
+    const outcome = await runSync(testDeps(db, api), 'manual')
+
+    expect(outcome.error).toBeUndefined()
+    expect((await db.accounts.get(ME))?.historyId).toBe('h2')
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect((await db.people.get(ALICE))?.displayName).toBe(`'${ALICE}'`)
+    expect(await db.syncState.get(ADDRESS_SHAPED_PERSON_NAME_REPAIR_KEY)).toBeUndefined()
+    expect(await db.syncState.get(QUOTE_WRAPPED_DISPLAY_NAME_REPAIR_KEY)).toBeUndefined()
   })
 
   it('runs again after sync so Person enrichment can repair older messages', async () => {

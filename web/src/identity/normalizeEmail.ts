@@ -301,6 +301,14 @@ const WRAPPING_QUOTE_PAIRS: ReadonlyArray<readonly [open: string, close: string]
 ]
 
 /**
+ * The opening quote of each pair `stripWrappingQuotes` peels (port of
+ * EmailNormalizer.wrappingQuoteOpeners). A string without any of them cannot
+ * hold a quote-wrapped name, which lets the stored-name repair
+ * (sync/displayNameRepair.ts) skip it.
+ */
+export const WRAPPING_QUOTE_OPENERS: readonly string[] = WRAPPING_QUOTE_PAIRS.map(([open]) => open)
+
+/**
  * `value`, trimmed, with every layer of wrapping quotes ("…", '…', “…”, ‘…’,
  * «…») peeled off, as Outlook writes an address it repeats as the name
  * (`'ops@intranet'`) or quotes a name; anything else is only trimmed. Shared

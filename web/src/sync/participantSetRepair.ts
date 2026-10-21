@@ -81,7 +81,8 @@ function participantRowsByConversation(
   return grouped
 }
 
-function personNames(people: readonly PersonRow[]): Map<string, string> {
+/** Normalized email -> stored Person display name. */
+export function personNames(people: readonly PersonRow[]): Map<string, string> {
   const names = new Map<string, string>()
   for (const person of people) {
     const email = normalizeEmail(person.email)
@@ -111,7 +112,7 @@ function repairSignature(myAliases: ReadonlySet<string>, people: readonly Person
 }
 
 function displayNamesForIdentity(
-  identity: ParticipantSetIdentity,
+  identity: Pick<ParticipantSetIdentity, 'participants'>,
   names: ReadonlyMap<string, string>,
 ): Record<string, string> {
   const result: Record<string, string> = {}
@@ -124,8 +125,13 @@ function displayNamesForIdentity(
   return result
 }
 
-function conversationDisplayName(
-  identity: ParticipantSetIdentity,
+/**
+ * The title for `identity`'s participants from the stored Person names. The
+ * stored-name repair (displayNameRepair.ts) re-derives titles with this too,
+ * so the two repairs never write different titles for one conversation.
+ */
+export function conversationDisplayName(
+  identity: Pick<ParticipantSetIdentity, 'participants'>,
   names: ReadonlyMap<string, string>,
 ): string {
   const displayNames = displayNamesForIdentity(identity, names)
