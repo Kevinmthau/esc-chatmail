@@ -189,12 +189,17 @@ enum PersonDisplayNameResolver {
         return candidate
     }
 
+    /// Wrapping quotes are peeled as `EmailNormalizer.sanitizeDisplayName`
+    /// peels them from headers: `Person.displayName` and `Message.senderName`
+    /// rows stored before it did hold Outlook's `'Jacob Laycock'`, which
+    /// titles, the Participants sheet and bubble sender names showed with its
+    /// quotes, and the quotes kept the address-derived test from seeing it.
     private static func normalizedCandidate(_ displayName: String?) -> String? {
         guard let displayName else { return nil }
         let normalized = RegexSanitizer.replace(
-            in: displayName
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "\"", with: ""),
+            in: EmailNormalizer.strippingWrappingQuotes(
+                displayName.replacingOccurrences(of: "\"", with: "")
+            ),
             regex: RegexSanitizer.whitespaceRunRegex,
             with: " "
         )

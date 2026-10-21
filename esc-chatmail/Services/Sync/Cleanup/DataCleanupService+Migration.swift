@@ -571,6 +571,145 @@ extension DataCleanupService {
     }
 }
 
+// MARK: - Quote-Wrapped Display Name Repair
+
+extension DataCleanupService {
+
+    static let quoteWrappedDisplayNameRepairKey = "hasPeeledQuoteWrappedDisplayNamesV1"
+
+    /// One-time repair for `Person.displayName` and `Message.senderName`
+    /// values stored with the wrapping quotes Outlook and Exchange put around
+    /// a name (`'Jacob Laycock' <…>`), from before
+    /// `EmailNormalizer.sanitizeDisplayName` peeled them. Display paths and the
+    /// ranking already read such a row as its unquoted form; this pass rewrites
+    /// the rows, so readers that show the stored value as is (the full-email
+    /// reader, forwarded and reply headers) lose the quotes too, and refreshes
+    /// the stored titles of the conversations involved, which spell the
+    /// quoted name until their next rollup. The new value is exactly what
+    /// ingestion now stores for the same header.
+    ///
+    /// Idempotent: a peeled row no longer matches, so a re-run writes nothing.
+    /// The flag is only written after a successful save. The titles are
+    /// refreshed in the same save, the way sync refreshes them after
+    /// `updateKnownParticipantDisplayNames`; a `hasRefreshedConversationNames`
+    /// key bump instead would re-derive every conversation's name on every
+    /// device.
+    func peelQuoteWrappedDisplayNamesIfNeeded(in context: NSManagedObjectContext) async {
+        guard !migrationFlags.bool(forKey: Self.quoteWrappedDisplayNameRepairKey) else { return }
+
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        let result: (changedPersonEmails: Set<String>, conversationIDs: Set<NSManagedObjectID>, messageCount: Int)? = await context.perform {
+            // Sanitized values are trimmed, so a wrapped one starts with its
+            // opening quote; the peel below decides whether it is wrapped
+            // ("'Til Tuesday" is not).
+            func startsWithWrappingQuote(_ key: String) -> NSPredicate {
+                NSCompoundPredicate(orPredicateWithSubpredicates: EmailNormalizer.wrappingQuoteOpeners.map {
+                    NSPredicate(format: "%K BEGINSWITH %@", key, $0)
+                })
+            }
+
+            let personRequest = Person.fetchRequest()
+            personRequest.predicate = startsWithWrappingQuote("displayName")
+            personRequest.fetchBatchSize = 100
+            personRequest.relationshipKeyPathsForPrefetching = ["conversationParticipations.conversation"]
+
+            let messageRequest = Message.fetchRequest()
+            messageRequest.predicate = startsWithWrappingQuote("senderName")
+            messageRequest.fetchBatchSize = 200
+            messageRequest.relationshipKeyPathsForPrefetching = ["conversation"]
+
+            let persons: [Person]
+            let messages: [Message]
+            do {
+                persons = try context.fetch(personRequest)
+                messages = try context.fetch(messageRequest)
+            } catch {
+                // An unreadable store is not "no quoted rows": leave the flag
+                // clear so the next cleanup retries.
+                Log.error("Quote-wrapped display name repair fetch failed", category: .coreData, error: error)
+                return nil
+            }
+
+            var changedPersonEmails: Set<String> = []
+            var conversationIDs: Set<NSManagedObjectID> = []
+            for person in persons {
+                guard let stored = person.displayName,
+                      let peeled = Self.peeledDisplayName(stored) else { continue }
+                person.displayName = peeled.isEmpty ? nil : peeled
+                changedPersonEmails.insert(EmailNormalizer.normalize(person.email))
+                for participation in person.conversationParticipations ?? [] {
+                    if let conversationID = participation.conversation?.objectID {
+                        conversationIDs.insert(conversationID)
+                    }
+                }
+            }
+
+            var messageCount = 0
+            for message in messages {
+                guard let stored = message.senderName,
+                      let peeled = Self.peeledDisplayName(stored) else { continue }
+                message.senderName = peeled.isEmpty ? nil : peeled
+                messageCount += 1
+                if let conversationID = message.conversation?.objectID {
+                    conversationIDs.insert(conversationID)
+                }
+            }
+
+            return (changedPersonEmails, conversationIDs, messageCount)
+        }
+
+        guard let result else { return }
+
+        // Stored titles were derived from the quoted names; refresh them from
+        // the peeled rows before the one save below.
+        guard await conversationManager.updateConversationDisplayNames(
+            conversationIDs: result.conversationIDs,
+            in: context
+        ) else {
+            await context.perform { context.rollback() }
+            Log.warning("Quote-wrapped display name repair title refresh failed; will retry next cleanup", category: .coreData)
+            return
+        }
+
+        guard await context.performSaveIfNeeded(caller: "DataCleanupService.peelQuoteWrappedDisplayNames") else {
+            // Left staged, the repair would be committed by the next save of
+            // this context (the cleanup hold retries one at once) with the
+            // flag clear and no cache invalidation; the re-run would then
+            // find nothing to peel and never invalidate PersonCache.
+            await context.perform { context.rollback() }
+            Log.warning("Quote-wrapped display name repair save failed; will retry next cleanup", category: .coreData)
+            return
+        }
+
+        migrationFlags.set(true, forKey: Self.quoteWrappedDisplayNameRepairKey)
+
+        if !result.changedPersonEmails.isEmpty {
+            // Cached person rows still carry the quotes; invalidate them and
+            // notify readers (participant sheets, live titles) so the peeled
+            // names publish.
+            PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(
+                emails: result.changedPersonEmails
+            )
+        }
+
+        if !result.changedPersonEmails.isEmpty || result.messageCount > 0 {
+            let duration = CFAbsoluteTimeGetCurrent() - startTime
+            Log.info(
+                "Quote-wrapped display name repair peeled \(result.changedPersonEmails.count) person(s), \(result.messageCount) message(s), refreshed \(result.conversationIDs.count) conversation title(s) in \(String(format: "%.2f", duration))s",
+                category: .coreData
+            )
+        }
+    }
+
+    /// `stored` with its wrapping quotes peeled, or nil when it has none to
+    /// peel (an inner quote, or none at all), so the row is left untouched.
+    private static func peeledDisplayName(_ stored: String) -> String? {
+        let peeled = EmailNormalizer.strippingWrappingQuotes(stored)
+        return peeled == stored.trimmingCharacters(in: .whitespacesAndNewlines) ? nil : peeled
+    }
+}
+
 // MARK: - Participant-Set Split Migration
 
 extension DataCleanupService {

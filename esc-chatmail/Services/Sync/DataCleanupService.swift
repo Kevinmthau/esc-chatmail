@@ -106,6 +106,7 @@ struct DataCleanupService: Sendable {
             await splitConversationsByParticipantSetIfNeeded(in: context)
             await decodeRFC2047HeaderTextIfNeeded(in: context)
             await repairAddressShapedPersonDisplayNamesIfNeeded(in: context)
+            await peelQuoteWrappedDisplayNamesIfNeeded(in: context)
             await removeDuplicateMessages(in: context)
             await removeDuplicateConversations(in: context)
             await mergeActiveConversationDuplicates(in: context)
@@ -134,6 +135,7 @@ struct DataCleanupService: Sendable {
             // After the RFC 2047 pass, which decodes the senderName values
             // this one reads.
             await repairAddressShapedPersonDisplayNamesIfNeeded(in: context)
+            await peelQuoteWrappedDisplayNamesIfNeeded(in: context)
             // Not checked: each flag-gated migration latches its flag only
             // after its own save succeeds, so a failure here (logged by the
             // hold) leaves it to retry at the next sync, and it has no bearing
