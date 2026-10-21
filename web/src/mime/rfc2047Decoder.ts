@@ -80,7 +80,11 @@ export function decodeRfc2047(value: string): string {
         }
         pendingCharset = charset
       }
-      pendingBytes.push(...wordBytes)
+      // Not `push(...wordBytes)`: a spread passes every byte as a call
+      // argument, so one word over ~120 KB exceeds V8's argument limit and
+      // throws RangeError, which escapes extractDisplayName and fails the
+      // whole sync batch. iOS appends to Data, which cannot throw.
+      for (const byte of wordBytes) pendingBytes.push(byte)
       previousWasDecodedWord = true
     } else {
       // Undecodable word: keep the surrounding text and the word itself
