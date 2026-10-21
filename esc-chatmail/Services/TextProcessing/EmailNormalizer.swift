@@ -113,10 +113,22 @@ class EmailNormalizer {
     /// address structure is parsed so decoded content can never inject a fake
     /// "<addr>" into address parsing, and BEFORE quote-stripping so a name
     /// that only becomes quoted once decoded is still unquoted for display.
+    ///
+    /// Quote-stripping removes every double quote, then peels the wrapping
+    /// quotes `strippingWrappingQuotes(_:)` recognizes. Outlook and Exchange
+    /// write a recipient as `'Jacob Laycock' <…>` or `"'Jacob Laycock'" <…>`;
+    /// removing only double quotes stored and showed `'Jacob Laycock'`, and
+    /// because the quotes hid that it restates jacob.laycock@'s address, it
+    /// outranked the plain "Jacob Laycock" in `isBetterDisplayName(_:than:forEmail:)`.
+    /// A quote inside a name (`O'Brien`, `'Til Tuesday`) is not wrapping and
+    /// stays. The pairs are not matched, so a name that merely starts and ends
+    /// with a quoted part (`'Ann' & 'Bob'`) loses its outer two quotes; such
+    /// header names are rare enough not to justify parsing quote nesting.
     static func sanitizeDisplayName(_ name: String) -> String {
-        RFC2047Decoder.decode(name)
-            .replacingOccurrences(of: "\"", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        strippingWrappingQuotes(
+            RFC2047Decoder.decode(name)
+                .replacingOccurrences(of: "\"", with: "")
+        )
     }
 
     /// Converts an email username to a formatted display name
@@ -175,10 +187,26 @@ class EmailNormalizer {
     /// checks this over a table of realistic pairs). It can be false in both
     /// directions: such a tie keeps whichever name is already stored.
     static func isBetterDisplayName(_ newName: String?, than existingName: String?, forEmail email: String) -> Bool {
-        guard let new = newName?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !new.isEmpty else { return false }
-        guard let existing = existingName?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !existing.isEmpty else { return true }
+        guard let quotedNew = newName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !quotedNew.isEmpty else { return false }
+        guard let quotedExisting = existingName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !quotedExisting.isEmpty else { return true }
+
+        // Rows stored before `sanitizeDisplayName` peeled Outlook's wrapping
+        // quotes still hold `'Jacob Laycock'`. Rank every name as written
+        // inside its quotes: the quotes hid that it restates jacob.laycock@'s
+        // address, so it replaced the address-derived "Jacob Laycock" at an
+        // equal part count and the plain name could never win back, and they
+        // made it the longer name in the base ranking. A quoted name and its
+        // own unquoted form are one name, and the shorter spelling (fewer
+        // quotes) wins, so ingestion heals a quoted row when the name recurs.
+        let new = strippingWrappingQuotes(quotedNew)
+        let existing = strippingWrappingQuotes(quotedExisting)
+        guard !new.isEmpty else { return false }
+        guard !existing.isEmpty else { return true }
+        if new == existing {
+            return quotedNew.count < quotedExisting.count
+        }
 
         // A name still carrying a raw RFC 2047 encoded-word is garbage on
         // screen: any decoded candidate beats it, and an undecoded candidate
@@ -311,11 +339,12 @@ class EmailNormalizer {
     ///
     /// Outlook and Exchange write a recipient that has no name as
     /// `"'jacob.laycock@studs.com'" <jacob.laycock@studs.com>`. Header
-    /// sanitizing strips only the double quotes, and the bare pattern rejects
-    /// the trailing `'`, so that address passed as a name: shown in titles,
-    /// and stored as a Person name that no one-word name could replace.
-    /// Wrapping quotes (`strippingWrappingQuotes(_:)`) are therefore peeled
-    /// before matching.
+    /// sanitizing used to strip only the double quotes, and the bare pattern
+    /// rejects the trailing `'`, so that address passed as a name: shown in
+    /// titles, and stored as a Person name that no one-word name could
+    /// replace. `sanitizeDisplayName` now peels the single quotes too, but
+    /// rows stored before it still hold `'addr'`, so wrapping quotes
+    /// (`strippingWrappingQuotes(_:)`) are still peeled before matching.
     static func isEmailAddressShapedDisplayName(_ displayName: String) -> Bool {
         embedsBareOrBracketedAddress(strippingWrappingQuotes(displayName))
     }
@@ -347,11 +376,18 @@ class EmailNormalizer {
         ("\u{00AB}", "\u{00BB}")
     ]
 
+    /// The opening quote of every pair `strippingWrappingQuotes(_:)` peels,
+    /// for a store query that narrows a scan to rows that may be wrapped.
+    static let wrappingQuoteOpeners: [String] = wrappingQuotePairs.map { String($0.open) }
+
     /// `value`, trimmed, with every layer of wrapping quotes ("…", '…', “…”,
     /// ‘…’, «…») peeled off, as Outlook writes an address it repeats as the
     /// name (`'ops@intranet'`) or quotes a name; anything else is only
-    /// trimmed. Shared with `NewContactPrefillPolicy`, so the add-contact
-    /// screen and the address-shape test agree on what counts as quoting.
+    /// trimmed. Shared with `sanitizeDisplayName`, the ranking in
+    /// `isBetterDisplayName(_:than:forEmail:)`, `PersonDisplayNameResolver`,
+    /// `NewContactPrefillPolicy` and the stored-row repair
+    /// (`DataCleanupService.peelQuoteWrappedDisplayNamesIfNeeded`), so they
+    /// all agree on what counts as quoting.
     static func strippingWrappingQuotes(_ value: String) -> String {
         var result = value.trimmingCharacters(in: .whitespacesAndNewlines)
         var didStrip = true

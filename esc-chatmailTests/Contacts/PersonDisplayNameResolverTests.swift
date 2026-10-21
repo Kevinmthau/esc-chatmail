@@ -13,6 +13,63 @@ final class PersonDisplayNameResolverTests: XCTestCase {
         XCTAssertNil(PersonDisplayNameResolver.sanitizedRealDisplayName("'\(email)'", forEmail: email))
     }
 
+    /// `Person.displayName` and `Message.senderName` rows stored before header
+    /// sanitizing peeled Outlook's quotes hold `'Jake Laycock'`, which titles,
+    /// the Participants sheet and bubble sender names showed with its quotes.
+    ///
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `PersonDisplayNameResolver.normalizedCandidate(_:)` fails this test.
+    func testSanitizedDisplayNames_storedOutlookQuoteWrappedName_peelQuotes() {
+        let email = "jake@studs.com"
+        for stored in ["'Jake Laycock'", "\u{2018}Jake Laycock\u{2019}", "\u{201C}Jake Laycock\u{201D}", "\"'Jake  Laycock'\""] {
+            XCTAssertEqual(PersonDisplayNameResolver.sanitizedExplicitDisplayName(stored, forEmail: email), "Jake Laycock", stored)
+            XCTAssertEqual(PersonDisplayNameResolver.sanitizedRealDisplayName(stored, forEmail: email), "Jake Laycock", stored)
+        }
+        XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName("''", forEmail: email), "Only quotes is no name")
+    }
+
+    /// The quotes hid that `'Jacob Laycock'` restates jacob.laycock@'s address,
+    /// so the resolver showed it where it rejects the plain "Jacob Laycock" as
+    /// possibly synthesized from the local part. It now reads the same as the
+    /// unquoted name: an explicit header name, never a real stored name.
+    ///
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `PersonDisplayNameResolver.normalizedCandidate(_:)` fails this test.
+    func testSanitizedRealDisplayName_storedQuoteWrappedAddressDerivedName_isRejectedLikeItsUnquotedForm() {
+        let email = "jacob.laycock@studs.com"
+        XCTAssertNil(PersonDisplayNameResolver.sanitizedRealDisplayName("Jacob Laycock", forEmail: email), "Precondition")
+        XCTAssertNil(PersonDisplayNameResolver.sanitizedRealDisplayName("'Jacob Laycock'", forEmail: email))
+        XCTAssertEqual(
+            PersonDisplayNameResolver.sanitizedExplicitDisplayName("'Jacob Laycock'", forEmail: email),
+            "Jacob Laycock"
+        )
+    }
+
+    /// A stored quoted name and the same name from a newer header are one
+    /// name in a title, not two.
+    ///
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `PersonDisplayNameResolver.normalizedCandidate(_:)` fails this test.
+    func testConversationDisplayName_quotedAndUnquotedSpellingsOfOneName_countOnce() {
+        let emails = ["jake@studs.com", "alice@example.com"]
+        let expected = PersonDisplayNameResolver.conversationDisplayName(
+            realNames: ["Jake Laycock", "Alice Smith"],
+            totalParticipantCount: 2,
+            fallback: nil,
+            participantEmails: emails
+        )
+
+        let title = PersonDisplayNameResolver.conversationDisplayName(
+            realNames: ["'Jake Laycock'", "Jake Laycock", "Alice Smith"],
+            totalParticipantCount: 2,
+            fallback: nil,
+            participantEmails: emails
+        )
+
+        XCTAssertEqual(title, expected)
+        XCTAssertFalse(title.contains("'"), title)
+    }
+
     func testSanitizedExplicitDisplayName_preservesAllLetterBrandMatchingDomain() {
         let result = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
             "github",

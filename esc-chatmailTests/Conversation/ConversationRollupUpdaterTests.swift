@@ -1189,6 +1189,54 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "The Browser Editors")
     }
 
+    /// From header names stored before sanitizing peeled Outlook's quotes
+    /// (`'Jake Laycock' <…>`) titled the chat `'Jake Laycock'`.
+    ///
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `PersonDisplayNameResolver.normalizedCandidate(_:)` fails this test.
+    func testUpdateDisplayNameOnly_storedQuoteWrappedFromHeaderName_titleOmitsQuotes() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("'Jake Laycock'")
+            .build(in: context)
+        addConversationParticipant(
+            email: "jake@studs.com",
+            displayName: "'Jake Laycock'",
+            to: conversation
+        )
+        MessageBuilder()
+            .withSender(email: "jake@studs.com", name: "'Jake Laycock'")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Jake Laycock")
+    }
+
+    /// A participant only ever To/Cc'd is named by the stored Person row
+    /// alone, so its quotes reached the group title.
+    ///
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `PersonDisplayNameResolver.normalizedCandidate(_:)` fails this test.
+    func testUpdateDisplayNameOnly_groupWithStoredQuoteWrappedRecipientName_titleOmitsQuotes() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Unknown Contact")
+            .build(in: context)
+        addConversationParticipant(email: "alice@example.com", displayName: "Alice Smith", to: conversation)
+        addConversationParticipant(email: "jake@studs.com", displayName: "'Jake Laycock'", to: conversation)
+        MessageBuilder()
+            .withSender(email: "alice@example.com", name: "Alice Smith")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        let title = try XCTUnwrap(conversation.displayName)
+        XCTAssertTrue(["Alice & Jake", "Jake & Alice"].contains(title), title)
+    }
+
     @discardableResult
     private func addConversationParticipant(
         email: String,

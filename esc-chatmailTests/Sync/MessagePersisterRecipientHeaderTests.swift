@@ -279,16 +279,19 @@ final class MessagePersisterRecipientHeaderTests: XCTestCase {
     }
 
     /// Outlook's form for a recipient that has no name, parsed from the real
-    /// header so the test covers what sanitizing leaves on.
+    /// header so the test covers what sanitizing leaves on: now the bare
+    /// address, which the address-shape rule keeps off the row.
     ///
     /// Revert-check: removing the `strippingWrappingQuotes` call in
-    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)` fails this
-    /// test (`PersonFactory.findOrCreate` stored the quoted address over "Jake").
+    /// `EmailNormalizer.sanitizeDisplayName(_:)` fails the first assertion.
+    /// HONEST SCOPE: past it, three peels keep the quoted address out
+    /// (sanitizing, the ranking, the shape test), so no single one's removal
+    /// fails the rest.
     func testCreate_fromHeaderNameThenOutlookSingleQuotedToAddress_keepsFromHeaderName() async throws {
         let context = stack.newBackgroundContext()
         let persister = makePersister()
         let outlookName = try XCTUnwrap(EmailNormalizer.extractDisplayName(from: "\"'\(jacob)'\" <\(jacob)>"))
-        XCTAssertEqual(outlookName, "'\(jacob)'", "Precondition: header sanitizing keeps the single quotes")
+        XCTAssertEqual(outlookName, jacob, "Header sanitizing peels the single quotes")
 
         try await persister.createNewMessage(
             makeNamedArrival(id: "jake-writes", from: "Jake <\(jacob)>", to: [me], secondsAfterBase: 0),
@@ -350,6 +353,102 @@ final class MessagePersisterRecipientHeaderTests: XCTestCase {
         try await context.perform { try context.save() }
 
         try await assertStoredDisplayName("Jake Laycock", forEmail: jacob)
+    }
+
+    // MARK: - Outlook quote-wrapped names
+
+    /// The reported header: Outlook wraps the sender's name in single quotes,
+    /// and both the new Person row and the message's sender name kept them.
+    ///
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `EmailNormalizer.sanitizeDisplayName(_:)` fails this test.
+    func testCreate_outlookQuoteWrappedFromName_storesNameWithoutQuotes() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jacob-writes", from: "\"'Jacob Laycock'\" <\(jacob)>", to: [me], secondsAfterBase: 0),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("Jacob Laycock", forEmail: jacob)
+        try await assertStoredSenderName("Jacob Laycock", forMessage: "jacob-writes")
+    }
+
+    /// A row stored before sanitizing peeled the quotes heals when a header
+    /// names him the same way without them.
+    ///
+    /// Revert-check: removing the `new == existing` comparison in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (the two spellings tied and the quoted row stayed), and so does ranking
+    /// the names as stored instead of peeled.
+    func testCreate_storedQuoteWrappedNameThenSameNameUnquoted_healsStoredName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+        try await seedStoredQuoteWrappedName("'Jacob Laycock'")
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jacob-writes", from: "Jacob Laycock <\(jacob)>", to: [me], secondsAfterBase: 60),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("Jacob Laycock", forEmail: jacob)
+    }
+
+    /// The quotes hid that `'Jacob Laycock'` restates his address and made it
+    /// the longer name, so his real "Jake Laycock" could not replace it.
+    ///
+    /// Revert-check: ranking the names as stored instead of peeled in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test.
+    func testCreate_storedQuoteWrappedAddressDerivedNameThenRealName_storesRealName() async throws {
+        let context = stack.newBackgroundContext()
+        let persister = makePersister()
+        try await seedStoredQuoteWrappedName("'Jacob Laycock'")
+
+        try await persister.createNewMessage(
+            makeNamedArrival(id: "jake-writes", from: "Jake Laycock <\(jacob)>", to: [me], secondsAfterBase: 60),
+            labelIds: nil,
+            myAliases: [me.email],
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        try await assertStoredDisplayName("Jake Laycock", forEmail: jacob)
+    }
+
+    /// Stores `quotedName` on his Person row as builds before sanitizing
+    /// peeled the quotes did. Seeded directly: every ingestion path now
+    /// sanitizes the name, recipients included (`saveParticipants` re-parses
+    /// each one as a header).
+    private func seedStoredQuoteWrappedName(_ quotedName: String) async throws {
+        let email = jacob
+        let context = stack.newBackgroundContext()
+        try await context.perform {
+            _ = PersonBuilder().withEmail(email).withDisplayName(quotedName).build(in: context)
+            try context.save()
+        }
+        try await assertStoredDisplayName(quotedName, forEmail: email)
+    }
+
+    private func assertStoredSenderName(
+        _ expected: String,
+        forMessage id: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let context = stack.newBackgroundContext()
+        try await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            let message = try XCTUnwrap(try context.fetch(request).first, file: file, line: line)
+            XCTAssertEqual(message.senderName, expected, file: file, line: line)
+        }
     }
 
     private func makeNamedArrival(

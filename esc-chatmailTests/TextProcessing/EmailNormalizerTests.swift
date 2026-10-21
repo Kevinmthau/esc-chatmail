@@ -289,6 +289,68 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertEqual(result, "José")
     }
 
+    // MARK: - extractDisplayName: Outlook quote-wrapped names
+
+    /// Outlook and Exchange wrap a recipient's name in single quotes, bare or
+    /// inside the quoted string, and sanitizing kept them, so titles showed
+    /// `'Jacob Laycock'`. Each header form the extractor parses is covered.
+    ///
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `EmailNormalizer.sanitizeDisplayName(_:)` fails this test.
+    func testExtractDisplayName_outlookQuoteWrappedName_peelsQuotes() {
+        let email = "jacob.laycock@studs.com"
+        let headers = [
+            "'Jacob Laycock' <\(email)>",
+            "\"'Jacob Laycock'\" <\(email)>",
+            "\"\u{2018}Jacob Laycock\u{2019}\" <\(email)>",
+            "\u{201C}Jacob Laycock\u{201D} <\(email)>",
+            "\"' Jacob Laycock '\" <\(email)>",
+            "\(email) ('Jacob Laycock')",
+            "'Jacob Laycock' \(email)"
+        ]
+        for header in headers {
+            XCTAssertEqual(EmailNormalizer.extractDisplayName(from: header), "Jacob Laycock", header)
+        }
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: "\"'\(email)'\" <\(email)>"),
+            email,
+            "Outlook's nameless recipient yields the bare address"
+        )
+        XCTAssertNil(EmailNormalizer.extractDisplayName(from: "\"''\" <\(email)>"), "Only quotes is no name")
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: "'Patrick O'Brien' <pobrien@example.com>"),
+            "Patrick O'Brien",
+            "An apostrophe inside a wrapped name stays"
+        )
+    }
+
+    /// A name that becomes quote-wrapped only once decoded is peeled too:
+    /// decoding runs before quote-stripping.
+    ///
+    /// Revert-check: peeling before `RFC2047Decoder.decode` in
+    /// `EmailNormalizer.sanitizeDisplayName(_:)` fails this test, and so does
+    /// removing its `strippingWrappingQuotes` call.
+    func testExtractDisplayName_rfc2047NameDecodingToSingleQuotedName_peelsDecodedQuotes() {
+        let email = "jacob.laycock@studs.com"
+        for header in ["=?utf-8?B?J0phY29iIExheWNvY2sn?= <\(email)>", "=?utf-8?Q?=27Jacob_Laycock=27?= <\(email)>"] {
+            XCTAssertEqual(EmailNormalizer.extractDisplayName(from: header), "Jacob Laycock", header)
+        }
+    }
+
+    /// HONEST SCOPE: passes without the fix too. It fails if the peel
+    /// over-matches: a quote inside a name, or one that does not wrap the
+    /// whole name (Google Groups' relay form), is part of the name.
+    func testExtractDisplayName_quoteNotWrappingWholeName_isKept() {
+        let cases = [
+            "Patrick O'Brien <pobrien@example.com>": "Patrick O'Brien",
+            "'Til Tuesday <band@example.com>": "'Til Tuesday",
+            "\"'Jacob Laycock' via Studs Team\" <studs-team@googlegroups.com>": "'Jacob Laycock' via Studs Team"
+        ]
+        for (header, expected) in cases {
+            XCTAssertEqual(EmailNormalizer.extractDisplayName(from: header), expected, header)
+        }
+    }
+
     // MARK: - formatAsDisplayName Tests
 
     func testFormatAsDisplayName_dotSeparated_formatsAsTitleCase() {
@@ -534,17 +596,13 @@ final class EmailNormalizerTests: XCTestCase {
     }
 
     /// Outlook writes a recipient that has no name as
-    /// `"'jacob.laycock@studs.com'" <jacob.laycock@studs.com>`, and header
-    /// sanitizing strips only the double quotes.
+    /// `"'jacob.laycock@studs.com'" <jacob.laycock@studs.com>`. Header
+    /// sanitizing used to strip only the double quotes, so rows stored before
+    /// it peeled the single quotes still hold `'jacob.laycock@studs.com'`.
     ///
     /// Revert-check: removing the `strippingWrappingQuotes` call in
     /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:)` fails this test.
     func testIsEmailAddressShapedDisplayName_outlookSingleQuotedAddress_isRecognized() {
-        XCTAssertEqual(
-            EmailNormalizer.extractDisplayName(from: "\"'jacob.laycock@studs.com'\" <jacob.laycock@studs.com>"),
-            "'jacob.laycock@studs.com'",
-            "Precondition: header sanitizing keeps the single quotes"
-        )
         XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("'jacob.laycock@studs.com'"))
         XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName(" 'jacob.laycock@studs.com' "))
         XCTAssertFalse(EmailNormalizer.isEmailAddressShapedDisplayName("'Jacob Laycock'"))
@@ -575,11 +633,17 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("'ops@intranet'", forEmail: "ops@intranet"))
     }
 
-    /// Revert-check: removing the `strippingWrappingQuotes` call in
-    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)`, the
-    /// overload the ranking uses, fails this test (the quoted address outranked
-    /// "Jake" as the longer one-part name, and the address-derived "Jacob
-    /// Laycock" on comparison parts).
+    /// A row stored before sanitizing peeled the quotes holds the quoted
+    /// address. The ranking peels a name before testing its shape, and the
+    /// shape test peels it again, so the address is caught twice.
+    ///
+    /// Revert-check: removing both the peel at the top of
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` (ranking the
+    /// names as stored) and the `strippingWrappingQuotes` call in
+    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)` fails this
+    /// test (the quoted address outranked "Jake" as the longer one-part name,
+    /// and the address-derived "Jacob Laycock" on comparison parts); either one
+    /// alone keeps it passing.
     func testIsBetterDisplayName_forEmail_outlookSingleQuotedAddressNeverReplacesName() {
         let email = "jacob.laycock@studs.com"
         let quoted = "'\(email)'"
@@ -587,6 +651,49 @@ final class EmailNormalizerTests: XCTestCase {
             XCTAssertFalse(EmailNormalizer.isBetterDisplayName(quoted, than: name, forEmail: email), name)
             XCTAssertTrue(EmailNormalizer.isBetterDisplayName(name, than: quoted, forEmail: email), name)
         }
+    }
+
+    // MARK: - isBetterDisplayName: quote-wrapped stored names
+
+    /// Person rows stored before sanitizing peeled Outlook's quotes hold
+    /// `'Jacob Laycock'`. The same name without its quotes replaces it, so the
+    /// next header that names him heals the row, and never the reverse: for
+    /// jacob.laycock@ the quotes hid that `'Jacob Laycock'` restates the
+    /// address, so it replaced the derived "Jacob Laycock" at an equal part
+    /// count, which could never win back.
+    ///
+    /// Revert-check: removing the `new == existing` comparison in
+    /// `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails this test
+    /// (each pair tied once peeled, so the quoted row stayed), and so does
+    /// ranking the names as stored instead of peeled.
+    func testIsBetterDisplayName_forEmail_unquotedNameReplacesItsQuoteWrappedForm() {
+        let email = "jacob.laycock@studs.com"
+        for quoted in ["'Jacob Laycock'", "\u{2018}Jacob Laycock\u{2019}", "'Jake'", "''Jake Laycock''"] {
+            let unquoted = EmailNormalizer.strippingWrappingQuotes(quoted)
+            XCTAssertTrue(EmailNormalizer.isBetterDisplayName(unquoted, than: quoted, forEmail: email), quoted)
+            XCTAssertFalse(EmailNormalizer.isBetterDisplayName(quoted, than: unquoted, forEmail: email), quoted)
+        }
+        XCTAssertTrue(EmailNormalizer.isBetterDisplayName("'Jake'", than: "''Jake''", forEmail: email), "Fewer layers win")
+        XCTAssertFalse(
+            EmailNormalizer.isBetterDisplayName("'Jake'", than: "\u{2018}Jake\u{2019}", forEmail: email),
+            "Two spellings with as many quotes tie and keep the stored one"
+        )
+    }
+
+    /// A quote-wrapped name ranks as the name inside its quotes against any
+    /// other name: `'Jacob Laycock'` is address-derived for jacob.laycock@, so
+    /// the real "Jake Laycock" replaces it at an equal part count, and quotes
+    /// do not make `'Jake'` the longer one-word name.
+    ///
+    /// Revert-check: ranking the names as stored instead of peeled below the
+    /// peel in `EmailNormalizer.isBetterDisplayName(_:than:forEmail:)` fails
+    /// this test (the quoted names won the base ranking as the longer strings).
+    func testIsBetterDisplayName_forEmail_quoteWrappedNameRanksAsTheNameInsideItsQuotes() {
+        let email = "jacob.laycock@studs.com"
+        XCTAssertTrue(EmailNormalizer.isBetterDisplayName("Jake Laycock", than: "'Jacob Laycock'", forEmail: email))
+        XCTAssertFalse(EmailNormalizer.isBetterDisplayName("'Jacob Laycock'", than: "Jake Laycock", forEmail: email))
+        XCTAssertTrue(EmailNormalizer.isBetterDisplayName("Jacob", than: "'Jake'", forEmail: email))
+        XCTAssertFalse(EmailNormalizer.isBetterDisplayName("'Jake'", than: "Jacob", forEmail: email))
     }
 
     // MARK: - isBetterDisplayName: never better in both directions
@@ -684,7 +791,10 @@ final class EmailNormalizerTests: XCTestCase {
     /// this test (Jacob Laycock / Jake Laycock, Kevin / Kmthau, ...), and so
     /// does restoring `new != existing && hasIntentionalCasing(new)` in place of
     /// the intentional-casing comparison (BONBONWHIMS / BonBonWhims,
-    /// Jacob Laycock / JACOB LAYCOCK, ...).
+    /// Jacob Laycock / JACOB LAYCOCK, ...), and so does returning true from the
+    /// `new == existing` comparison for every pair equal once peeled
+    /// ('Jake' / Jake, ...). The quote-wrapped entries pin that ranking the
+    /// peeled names keeps the property.
     func testIsBetterDisplayName_forEmail_neverRanksBothNamesOfAPairBetter() {
         let namesByEmail: [(email: String, names: [String])] = [
             ("bonbonwhims@example.com", ["BONBONWHIMS", "Bonbonwhims", "bonbonwhims", "BonBonWhims", "Bon Bon Whims"]),
@@ -692,10 +802,11 @@ final class EmailNormalizerTests: XCTestCase {
                 "Jacob Laycock", "Jake Laycock", "Jake", "Jacob", "J. Laycock", "Jacob R. Laycock",
                 "JACOB LAYCOCK", "jacob laycock", "Jacob.Laycock", "jacob.laycock",
                 "jacob.laycock@studs.com", "'jacob.laycock@studs.com'", "\u{2018}jacob.laycock@studs.com\u{2019}",
-                "=?utf-8?B?SmFrZQ==?="
+                "=?utf-8?B?SmFrZQ==?=",
+                "'Jacob Laycock'", "\u{2018}Jacob Laycock\u{2019}", "''Jacob Laycock''", "'Jake Laycock'", "'Jake'"
             ]),
             ("john.doe@example.com", ["John", "John Doe", "Jonathan Doe", "Johnny", "JOHN DOE", "john_doe", "Dr. John Doe"]),
-            ("kmthau@example.com", ["Kevin", "Kmthau", "kmthau", "KMTHAU", "Kevin Thau", "Kev"]),
+            ("kmthau@example.com", ["Kevin", "Kmthau", "kmthau", "KMTHAU", "Kevin Thau", "Kev", "'Kevin'", "'Kmthau'"]),
             ("mary-jane.smith@example.com", ["Mary-Jane Smith", "Mary Jane Smith", "MJ Smith", "Mary Smith", "MARY-JANE SMITH"]),
             // Address-shaped only through the participant's own address.
             ("ops@intranet", ["Ops", "OPS", "Operations Team", "ops@intranet"])
