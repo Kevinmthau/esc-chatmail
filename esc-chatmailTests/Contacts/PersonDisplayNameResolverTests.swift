@@ -5,9 +5,9 @@ final class PersonDisplayNameResolverTests: XCTestCase {
     /// Outlook's `"'addr'" <addr>` leaves the address wrapped in single quotes,
     /// which the resolver used to show as the person's name.
     ///
-    /// Revert-check: removing the `unwrappingSingleQuotes` call in
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
     /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:)` fails this test.
-    func testSanitizedDisplayNames_omitOutlookSingleQuotedAddress() {
+    func testSanitizedDisplayNames_outlookSingleQuotedAddress_returnNil() {
         let email = "jacob.laycock@studs.com"
         XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName("'\(email)'", forEmail: email))
         XCTAssertNil(PersonDisplayNameResolver.sanitizedRealDisplayName("'\(email)'", forEmail: email))

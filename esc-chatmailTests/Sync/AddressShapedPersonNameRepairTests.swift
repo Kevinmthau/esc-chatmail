@@ -267,32 +267,68 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
     /// quotes on, which the shape test used to miss, so the pass skipped the
     /// row. The quoted Cc name itself must not be the recovered name either.
     ///
-    /// Revert-check: making `EmailNormalizer.unwrappingSingleQuotes(_:)` return
-    /// its input unchanged fails this test (the row is not selected and keeps
-    /// the quoted address).
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)` fails this
+    /// test (the row is not selected and keeps the quoted address).
     func testRepair_storedNameIsOutlookSingleQuotedAddress_recoversName() async throws {
+        try await seedJakeWithOutlookQuotedStoredName()
+
+        await runRepair()
+
+        let name = try await storedDisplayName(forEmail: jake)
+        XCTAssertEqual(name, "Jake")
+    }
+
+    /// A store that latched #311's pass before the shape test learned `'addr'`
+    /// must still run this one, or the rows that pass could not select keep
+    /// the quoted address.
+    ///
+    /// Revert-check: restoring `DataCleanupService.addressShapedPersonNameRepairKey`
+    /// to "hasRepairedAddressShapedPersonNamesV1" fails this test (the pass
+    /// returns at its flag guard).
+    func testRepair_storeLatchedV1Pass_stillRepairsOutlookSingleQuotedAddress() async throws {
+        try await seedJakeWithOutlookQuotedStoredName()
+        migrationFlags.set(true, forKey: "hasRepairedAddressShapedPersonNamesV1")
+
+        await runRepair()
+
+        let name = try await storedDisplayName(forEmail: jake)
+        XCTAssertEqual(name, "Jake")
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.addressShapedPersonNameRepairKey))
+    }
+
+    /// Before the shape test recognized `'addr'`, the resolver took it for a
+    /// real name, so a title derived then spells it out. Nothing stored names
+    /// Jake, so his row keeps the address, but that title must still be
+    /// refreshed.
+    ///
+    /// Revert-check: removing the title collection from the unrecovered branch
+    /// of `DataCleanupService.repairAddressShapedPersonDisplayNamesIfNeeded`
+    /// fails this test (the title keeps the quoted address).
+    func testRepair_unrecoveredOutlookSingleQuotedAddress_refreshesTitleThatSpellsItOut() async throws {
         let jake = self.jake!
         let alice = self.alice!
         let quoted = "'\(jake)'"
+        let conversationID = UUID()
         try await seed { context in
-            let person = PersonBuilder().withEmail(jake).withDisplayName(quoted).build(in: context)
+            let me = PersonBuilder().withEmail(Self.me).withDisplayName("Me").build(in: context)
             let sender = PersonBuilder().withEmail(alice).withDisplayName("Alice Smith").build(in: context)
+            let person = PersonBuilder().withEmail(jake).withDisplayName(quoted).build(in: context)
+            let conversation = ConversationBuilder()
+                .withId(conversationID)
+                .withParticipantHash("p|group-\(conversationID.uuidString)")
+                .withDisplayName("Alice & \(quoted)")
+                .withParticipant(me)
+                .withParticipant(sender)
+                .withParticipant(person)
+                .build(in: context)
             Self.addMessage(
-                id: "to-jake",
+                id: "pre-v6-to-jake-\(conversationID.uuidString)",
                 date: Date(timeIntervalSince1970: 1_000),
                 senderEmail: alice,
                 senderName: "Alice Smith",
-                rawTo: "Jake <\(jake)>",
-                participants: [(sender, .from), (person, .to)],
-                in: context
-            )
-            Self.addMessage(
-                id: "outlook-cc-jake",
-                date: Date(timeIntervalSince1970: 2_000),
-                senderEmail: alice,
-                senderName: "Alice Smith",
-                rawCc: "\"\(quoted)\" <\(jake)>",
-                participants: [(sender, .from), (person, .cc)],
+                participants: [(sender, .from), (me, .to), (person, .to)],
+                conversation: conversation,
                 in: context
             )
         }
@@ -300,7 +336,9 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
         await runRepair()
 
         let name = try await storedDisplayName(forEmail: jake)
-        XCTAssertEqual(name, "Jake")
+        XCTAssertEqual(name, quoted, "Precondition: no stored header names him")
+        let title = try await storedConversationTitle(conversationID)
+        XCTAssertEqual(title, "Alice Smith +1")
     }
 
     /// Idempotency: with the flag cleared, a second run over the repaired
@@ -532,6 +570,37 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
             )
         }
         return conversationID
+    }
+
+    /// Jake's stored name is his address in Outlook's single quotes. The older
+    /// To header names him "Jake"; the newer Outlook Cc header repeats the
+    /// quoted address as his name.
+    private func seedJakeWithOutlookQuotedStoredName() async throws {
+        let jake = self.jake!
+        let alice = self.alice!
+        let quoted = "'\(jake)'"
+        try await seed { context in
+            let person = PersonBuilder().withEmail(jake).withDisplayName(quoted).build(in: context)
+            let sender = PersonBuilder().withEmail(alice).withDisplayName("Alice Smith").build(in: context)
+            Self.addMessage(
+                id: "to-jake",
+                date: Date(timeIntervalSince1970: 1_000),
+                senderEmail: alice,
+                senderName: "Alice Smith",
+                rawTo: "Jake <\(jake)>",
+                participants: [(sender, .from), (person, .to)],
+                in: context
+            )
+            Self.addMessage(
+                id: "outlook-cc-jake",
+                date: Date(timeIntervalSince1970: 2_000),
+                senderEmail: alice,
+                senderName: "Alice Smith",
+                rawCc: "\"\(quoted)\" <\(jake)>",
+                participants: [(sender, .from), (person, .cc)],
+                in: context
+            )
+        }
     }
 
     private func seed(_ build: @escaping (NSManagedObjectContext) -> Void) async throws {

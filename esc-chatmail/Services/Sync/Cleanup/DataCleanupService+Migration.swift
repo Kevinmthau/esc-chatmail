@@ -333,7 +333,7 @@ extension DataCleanupService {
 
     // Bump whenever `EmailNormalizer.isEmailAddressShapedDisplayName` starts
     // recognizing a new shape, so stores that latched an older pass select
-    // the rows it missed. V2: Outlook's single-quoted `'addr'`.
+    // the rows it missed. V2: quote-wrapped addresses, Outlook's `'addr'`.
     static let addressShapedPersonNameRepairKey = "hasRepairedAddressShapedPersonNamesV2"
 
     /// One-time repair for `Person.displayName` rows that hold an email
@@ -358,7 +358,8 @@ extension DataCleanupService {
     /// Idempotent: a repaired row no longer matches the selection and an
     /// unrecoverable one recovers nothing again, so a re-run writes nothing.
     /// The flag is only written after a successful save. The titles of the
-    /// repaired people's conversations are refreshed in the same save, the
+    /// repaired people's conversations, and those that still spell out an
+    /// unrecovered row's stored address, are refreshed in the same save, the
     /// way sync refreshes them after `updateKnownParticipantDisplayNames`;
     /// a `hasRefreshedConversationNames` key bump instead would re-derive
     /// every conversation's name on every device.
@@ -409,6 +410,18 @@ extension DataCleanupService {
                       !EmailNormalizer.isEmailAddressShapedDisplayName(recoveredName, forEmail: email),
                       EmailNormalizer.isBetterDisplayName(recoveredName, than: storedName, forEmail: email) else {
                     unrecoveredCount += 1
+                    // The row keeps its name, but a stored title can still
+                    // spell it out: titles derived before the shape test
+                    // learned a shape (Outlook's `'addr'` before V2) took it
+                    // for a real name. Refresh only those, so the walk skips
+                    // the conversations of every other unrecovered row.
+                    let trimmedStoredName = storedName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    for participation in person.conversationParticipations ?? [] {
+                        if let conversation = participation.conversation,
+                           conversation.displayName?.contains(trimmedStoredName) == true {
+                            conversationIDs.insert(conversation.objectID)
+                        }
+                    }
                     continue
                 }
 

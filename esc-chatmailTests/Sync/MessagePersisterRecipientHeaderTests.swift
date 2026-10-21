@@ -281,9 +281,9 @@ final class MessagePersisterRecipientHeaderTests: XCTestCase {
     /// Outlook's form for a recipient that has no name, parsed from the real
     /// header so the test covers what sanitizing leaves on.
     ///
-    /// Revert-check: making `EmailNormalizer.unwrappingSingleQuotes(_:)` return
-    /// its input unchanged fails this test (`PersonFactory.findOrCreate` stored
-    /// the quoted address over "Jake").
+    /// Revert-check: removing the `strippingWrappingQuotes` call in
+    /// `EmailNormalizer.isEmailAddressShapedDisplayName(_:forEmail:)` fails this
+    /// test (`PersonFactory.findOrCreate` stored the quoted address over "Jake").
     func testCreate_fromHeaderNameThenOutlookSingleQuotedToAddress_keepsFromHeaderName() async throws {
         let context = stack.newBackgroundContext()
         let persister = makePersister()
