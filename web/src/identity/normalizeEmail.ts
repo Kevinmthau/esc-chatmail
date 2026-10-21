@@ -130,8 +130,11 @@ export function extractDisplayName(value: string): string | null {
  * that merely starts and ends with a quoted part (`'Ann' & 'Bob'`) loses its
  * outer two quotes; such header names are rare enough not to justify parsing
  * quote nesting.
+ *
+ * Exported for the stored-name repair (sync/displayNameRepair.ts), which
+ * rewrites a name stored with raw encoded-words to what this now stores.
  */
-function sanitizeDisplayName(name: string): string {
+export function sanitizeDisplayName(name: string): string {
   return stripWrappingQuotes(decodeRfc2047(name).replaceAll('"', ''))
 }
 
