@@ -454,6 +454,26 @@ describe('applyPersist — creation and routing', () => {
     expect(result.persistedMessageIds.has('m1')).toBe(true)
   })
 
+  it('stores a raw RFC 2047 subject decoded, so the list preview reads as a forward', async () => {
+    // Before the decode, the stored subject was the encoded word itself: the
+    // chat showed "=?utf-8?B?…?=" and nothing recognized the forward.
+    // Revert-check: restoring `parsed.subject = header.value` in
+    // mime/parse's `extractHeaders` fails this test.
+    await persistMessages([
+      textMessage({
+        id: 'm1',
+        from: 'alice@example.com',
+        subject: '=?utf-8?B?RndkOiBUcmlwIHBsYW5z?=',
+        body: 'See below.',
+      }),
+    ])
+
+    const message = await db.messages.get('m1')
+    expect(message!.subject).toBe('Fwd: Trip plans')
+    const conversation = await db.conversations.get(message!.conversationId)
+    expect(conversation!.snippet).toBe('Fwd: "Trip plans"')
+  })
+
   it('deletes the local copy when a message moved to an excluded mailbox, and never inserts it', async () => {
     await persistMessages([textMessage({ id: 'm1', from: 'alice@example.com' })])
     expect(await db.messages.get('m1')).toBeDefined()

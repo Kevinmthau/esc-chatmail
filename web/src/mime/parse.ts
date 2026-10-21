@@ -12,6 +12,7 @@ import { analyzeCalendarInvite } from './calendarInvite'
 import { base64UrlDecodeToString, decodeTransferEncoding } from './decode'
 import { extractPlainTextFromHtml } from './htmlText'
 import { extractDisplayText, extractHtmlFromRawSource } from './rawSource'
+import { decodeRfc2047 } from './rfc2047Decoder'
 
 export interface ParsedAddress {
   email: string
@@ -105,7 +106,12 @@ function extractHeaders(headers: readonly GmailHeader[]): ParsedHeaders {
   for (const header of headers) {
     switch (header.name.toLowerCase()) {
       case 'subject':
-        parsed.subject = header.value
+        // Subject is unstructured text, so the whole value is safe to decode
+        // (unlike address headers, which are parsed first and decoded per
+        // display-name phrase). Decode here, once: the calendar and newsletter
+        // signals, the stored row, and the 'Fwd:' prefix check that routes
+        // forwards all read this value, and an encoded subject hides that prefix.
+        parsed.subject = decodeRfc2047(header.value)
         break
       case 'from': {
         parsed.fromRaw = header.value

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { GmailApiError, NetworkError } from '../gmail/errors'
 import type { GmailMessage, GmailPart } from '../gmail/types'
+import { encodeHeaderIfNeeded } from '../outbox/mimeBuilder'
 import { extractAttachments } from './attachments'
 import { LargeBodyFetchError, parseGmailMessage } from './parse'
 
@@ -72,6 +73,50 @@ describe('parseGmailMessage headers', () => {
 
   it('returns null without payload headers', async () => {
     expect(await parseGmailMessage({ id: 'x', threadId: 'y' })).toBeNull()
+  })
+})
+
+describe('parseGmailMessage subject decoding', () => {
+  async function parsedSubject(value: string): Promise<string | null> {
+    const parsed = await parseGmailMessage(
+      message({
+        partId: '',
+        mimeType: 'text/plain',
+        headers: [
+          { name: 'Subject', value },
+          { name: 'From', value: 'jane@example.com' },
+        ],
+        body: { data: b64url('Hi!') },
+      }),
+    )
+    return parsed!.headers.subject
+  }
+
+  // Port of the subject decode in MessageProcessor.extractHeaders.
+  // Revert-check: restoring `parsed.subject = header.value` in
+  // `extractHeaders` fails every case.
+  it.each([
+    ['a base64 word', '=?utf-8?B?5Lya6K2w44Gu6K2w6aGM?=', '会議の議題'],
+    ['a Q word', '=?UTF-8?Q?Caf=C3=A9_au_lait?=', 'Café au lait'],
+    ['a word between plain text', 'Re: =?utf-8?B?UsOpc3Vtw6k=?= attached', 'Re: Résumé attached'],
+    // The forward routing (`isForwardedSubject`) and the conversation-list
+    // `Fwd: "…"` preview both key off a literal 'Fwd:' prefix.
+    ['an encoded forward prefix', '=?utf-8?B?RndkOiBUcmlwIHBsYW5z?=', 'Fwd: Trip plans'],
+  ])('decodes %s', async (_label, value, expected) => {
+    expect(await parsedSubject(value)).toBe(expected)
+  })
+
+  it("decodes a long subject folded by the app's own MIME builder", async () => {
+    // A sent message's echo carries the subject the outbox encoded. Folding
+    // splits it into several encoded words, and the whitespace between
+    // them must vanish (RFC 2047 §6.2) for the echo to match the subject
+    // the optimistic row stored.
+    // Revert-check: restoring `parsed.subject = header.value` in
+    // `extractHeaders` fails this test.
+    const subject = 'Ünïcödé subject that runs long enough to need folding — ' + 'é'.repeat(40)
+    const encoded = encodeHeaderIfNeeded(subject)
+    expect(encoded).toContain('?=\r\n =?UTF-8?B?')
+    expect(await parsedSubject(encoded)).toBe(subject)
   })
 })
 
