@@ -6,6 +6,7 @@
 import { setSyncProgress } from '@/db/kv'
 import { AuthRequiredError } from '@/gmail/errors'
 import { depsNow, type SyncDeps } from './deps'
+import { repairStoredDisplayNamesIfNeeded } from './displayNameRepair'
 import { runIncrementalSync, type SyncRunResult } from './incremental'
 import { repairParticipantSetConversations } from './participantSetRepair'
 
@@ -77,6 +78,10 @@ export async function runSync(deps: SyncDeps, reason: SyncReason): Promise<RunSy
   return currentLock().request(syncLockName(deps.accountEmail), async (acquired) => {
     if (!acquired) return { ran: false }
     try {
+      // The one-shot stored-name repairs run first: a Person stored as
+      // `'Hide My Email'` counts as a relay only once its quotes are peeled,
+      // and the participant-set repair reads that classification.
+      await repairStoredDisplayNamesIfNeeded(deps.db)
       // The cached alias/People snapshot can repair stale local routing before
       // any network work. A second pass catches aliases or Person display-name
       // enrichment learned during this sync; its signature gate makes the
