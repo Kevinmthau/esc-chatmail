@@ -2063,6 +2063,27 @@ final class GoldenCorpusReplayTests: XCTestCase {
         }
     }
 
+    func testRFC2047DecodingCorpusReplay() throws {
+        let corpus = try loadCorpus()
+        XCTAssertFalse(corpus.rfc2047DecodingCases.isEmpty)
+        for scenario in corpus.rfc2047DecodingCases {
+            XCTContext.runActivity(named: "rfc2047:\(scenario.id)") { _ in
+                let decoded = RFC2047Decoder.decode(scenario.input)
+                // Scalar for scalar, never `normalize`: whitespace is part of the
+                // §6.2 contract, and Swift's String == is canonical equivalence,
+                // so a decoder that normalized Unicode would pass `==` here while
+                // web's code-unit comparison failed.
+                // Revert-check: dropping the padding restore in
+                // `RFC2047Decoder.decodeBase64` fails `base64_missing_padding`.
+                XCTAssertEqual(
+                    Array(decoded.unicodeScalars),
+                    Array(scenario.expected.unicodeScalars),
+                    "\(scenario.id): decoded \(decoded.debugDescription). \(scenario.notes ?? "")"
+                )
+            }
+        }
+    }
+
     // MARK: - Corpus Loading
 
     private func loadCorpus() throws -> GoldenCorpus {
@@ -2096,6 +2117,7 @@ private struct GoldenCorpus: Decodable {
     let conversationListSnippetCases: [ConversationListSnippetCase]
     let cleanedSnippetCases: [CleanedSnippetCase]
     let newsletterDetectionCases: [NewsletterDetectionCase]
+    let rfc2047DecodingCases: [RFC2047DecodingCase]
 
     enum CodingKeys: String, CodingKey {
         case plainTextQuoteCleanupCases
@@ -2106,6 +2128,7 @@ private struct GoldenCorpus: Decodable {
         case conversationListSnippetCases
         case cleanedSnippetCases
         case newsletterDetectionCases
+        case rfc2047DecodingCases
     }
 
     init(from decoder: Decoder) throws {
@@ -2118,6 +2141,7 @@ private struct GoldenCorpus: Decodable {
         conversationListSnippetCases = try container.decodeIfPresent([ConversationListSnippetCase].self, forKey: .conversationListSnippetCases) ?? []
         cleanedSnippetCases = try container.decode([CleanedSnippetCase].self, forKey: .cleanedSnippetCases)
         newsletterDetectionCases = try container.decodeIfPresent([NewsletterDetectionCase].self, forKey: .newsletterDetectionCases) ?? []
+        rfc2047DecodingCases = try container.decode([RFC2047DecodingCase].self, forKey: .rfc2047DecodingCases)
     }
 }
 
@@ -2234,4 +2258,11 @@ private struct CleanedSnippetCase: Decodable {
     let snippet: String?
     let isFromMe: Bool
     let expected: String?
+}
+
+private struct RFC2047DecodingCase: Decodable {
+    let id: String
+    let input: String
+    let expected: String
+    let notes: String?
 }

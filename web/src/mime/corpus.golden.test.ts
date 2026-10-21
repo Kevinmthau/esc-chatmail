@@ -9,6 +9,7 @@ import { processChatBubbleText } from './bubble'
 import { calculateNewsletterScore } from './newsletter'
 import { extractHtmlFromRawSource } from './rawSource'
 import { createCleanedSnippet } from './preview'
+import { decodeRfc2047 } from './rfc2047Decoder'
 
 interface PlainTextQuoteCleanupCase {
   id: string
@@ -60,12 +61,20 @@ interface CleanedSnippetCase {
   notes?: string
 }
 
+interface Rfc2047DecodingCase {
+  id: string
+  input: string
+  expected: string
+  notes?: string
+}
+
 interface GoldenCorpus {
   plainTextQuoteCleanupCases: PlainTextQuoteCleanupCase[]
   htmlToBubbleTextCases: HtmlToBubbleTextCase[]
   rawSourceHTMLRecoveryCases: RawSourceHtmlRecoveryCase[]
   newsletterDetectionCases: NewsletterDetectionCase[]
   cleanedSnippetCases: CleanedSnippetCase[]
+  rfc2047DecodingCases: Rfc2047DecodingCase[]
 }
 
 const corpus = corpusJson as unknown as GoldenCorpus
@@ -163,5 +172,19 @@ describe('golden corpus: cleanedSnippetCases', () => {
       createCleanedSnippet(scenario.html, scenario.plainText, scenario.snippet),
       scenario.notes,
     ).toBe(scenario.expected)
+  })
+})
+
+// Pins the decoder against iOS RFC2047Decoder. Compared exactly, never through
+// `normalize`: whitespace between encoded words is part of the contract.
+describe('golden corpus: rfc2047DecodingCases', () => {
+  it('has cases', () => {
+    expect(corpus.rfc2047DecodingCases.length).toBeGreaterThan(0)
+  })
+
+  it.each(corpus.rfc2047DecodingCases.map((c) => [c.id, c] as const))('%s', (_id, scenario) => {
+    // Revert-check: dropping the ASCII branch in `decodeWithCharset` fails
+    // `us_ascii_eight_bit_falls_back_to_utf8`.
+    expect(decodeRfc2047(scenario.input), scenario.notes).toBe(scenario.expected)
   })
 })

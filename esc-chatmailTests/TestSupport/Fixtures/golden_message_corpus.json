@@ -1748,5 +1748,199 @@
       "isFromMe": false,
       "expected": null
     }
+  ],
+  "rfc2047DecodingCases": [
+    {
+      "id": "base64_utf8",
+      "notes": "Base64 UTF-8 word.",
+      "input": "=?utf-8?B?SsO2cmcgTcO8bGxlcg==?=",
+      "expected": "Jörg Müller"
+    },
+    {
+      "id": "base64_missing_padding",
+      "notes": "Senders strip base64 padding. iOS restores it by hand; web's atob is forgiving-base64 and accepts it missing.",
+      "input": "=?utf-8?B?Sm9zw6k?=",
+      "expected": "José"
+    },
+    {
+      "id": "base64_length_one_mod_four_verbatim",
+      "notes": "Five base64 characters can never decode: iOS's padding restore must not make them, and atob rejects them too. The word stays verbatim.",
+      "input": "=?utf-8?B?Sm9zw?=",
+      "expected": "=?utf-8?B?Sm9zw?="
+    },
+    {
+      "id": "base64_iso_8859_1",
+      "notes": "ISO-8859-1 label with a byte outside 0x80-0x9F. Known deviation, deliberately not pinned here: web decodes ISO-8859-1 labels with TextDecoder (windows-1252) and iOS with true Latin-1, so they differ on bytes 0x80-0x9F only.",
+      "input": "=?iso-8859-1?B?TfxsbGVyIEdtYkg=?=",
+      "expected": "Müller GmbH"
+    },
+    {
+      "id": "base64_gb2312",
+      "notes": "A non-Latin charset, resolved through each platform's charset table (CoreFoundation IANA names on iOS, WHATWG labels on web).",
+      "input": "=?gb2312?B?vqm2qw==?=",
+      "expected": "京东"
+    },
+    {
+      "id": "charset_language_tag_stripped",
+      "notes": "RFC 2231 language suffix on the charset. Without the strip, 'gb2312*zh' is an unknown label and the UTF-8 and Latin-1 fallbacks garble the bytes.",
+      "input": "=?gb2312*zh?B?vqm2qw==?=",
+      "expected": "京东"
+    },
+    {
+      "id": "empty_encoded_text",
+      "notes": "An encoded word with no encoded text decodes to nothing.",
+      "input": "=?utf-8?B??=",
+      "expected": ""
+    },
+    {
+      "id": "q_utf8_lowercase_encoding_letter",
+      "notes": "Q encoding, letter in lowercase; underscore is a space.",
+      "input": "=?utf-8?q?Jos=C3=A9_Garc=C3=ADa?=",
+      "expected": "José García"
+    },
+    {
+      "id": "q_lowercase_hex_escape",
+      "notes": "Q hex escapes accept lowercase digits.",
+      "input": "=?utf-8?Q?Jos=c3=a9?=",
+      "expected": "José"
+    },
+    {
+      "id": "q_encoded_underscore_is_literal",
+      "notes": "A bare underscore is a space; =5F is a literal underscore.",
+      "input": "=?utf-8?Q?snake=5Fcase_name?=",
+      "expected": "snake_case name"
+    },
+    {
+      "id": "q_us_ascii_underscore_is_space",
+      "notes": "us-ascii label with only ASCII bytes.",
+      "input": "=?us-ascii?Q?John_Smith?=",
+      "expected": "John Smith"
+    },
+    {
+      "id": "q_windows_1252_label_maps_0x80_0x9f",
+      "notes": "An explicit windows-1252 label maps 0x93/0x94 to curly quotes on both platforms. Only the ISO-8859-1 label differs there (see base64_iso_8859_1).",
+      "input": "=?windows-1252?Q?=93Quoted=94?=",
+      "expected": "“Quoted”"
+    },
+    {
+      "id": "q_combining_sequence_not_normalized",
+      "notes": "Decoding must not normalize Unicode: a decomposed e + U+0301 stays decomposed. Both replays compare code for code (iOS by Unicode scalars, because Swift's String == is canonical equivalence).",
+      "input": "=?utf-8?Q?Jose=CC=81?=",
+      "expected": "Jose\u0301"
+    },
+    {
+      "id": "same_charset_words_whitespace_dropped",
+      "notes": "RFC 2047 6.2: whitespace between adjacent encoded words is deleted.",
+      "input": "=?utf-8?B?QWNtZQ==?= =?utf-8?B?Q29ycA==?=",
+      "expected": "AcmeCorp"
+    },
+    {
+      "id": "different_charset_words_whitespace_dropped",
+      "notes": "RFC 2047 6.2 across charsets: the words do not join one byte run, so only the between-words rule drops the space.",
+      "input": "=?utf-8?B?QWNtZQ==?= =?iso-8859-1?Q?Corp?=",
+      "expected": "AcmeCorp"
+    },
+    {
+      "id": "folded_header_whitespace_between_words_dropped",
+      "notes": "A folded header (CRLF + tab) between words of different charsets is whitespace too; the encoded text carries the intended space.",
+      "input": "=?utf-8?Q?Caf=C3=A9?=\r\n\t=?iso-8859-1?Q?_cr=E8me?=",
+      "expected": "Café crème"
+    },
+    {
+      "id": "multibyte_character_split_across_words",
+      "notes": "The two UTF-8 bytes of 'É' split across words: bytes accumulate across the run before charset decoding.",
+      "input": "=?UTF-8?B?ww==?= =?UTF-8?B?iW1pbGll?=",
+      "expected": "Émilie"
+    },
+    {
+      "id": "multibyte_split_across_differently_cased_labels",
+      "notes": "The run joins on the normalized charset, so 'UTF-8' and 'utf-8' halves of one character still join.",
+      "input": "=?UTF-8?Q?=C3?= =?utf-8?Q?=89milie?=",
+      "expected": "Émilie"
+    },
+    {
+      "id": "text_between_words_preserved",
+      "notes": "Separator text between two encoded words is content, spaces included, and ends the byte run.",
+      "input": "=?utf-8?Q?Acme?= and =?utf-8?Q?Corp?=",
+      "expected": "Acme and Corp"
+    },
+    {
+      "id": "whitespace_between_word_and_text_preserved",
+      "notes": "Whitespace between an encoded word and ordinary text stays.",
+      "input": "Re: =?utf-8?B?Sm9zw6k=?= update",
+      "expected": "Re: José update"
+    },
+    {
+      "id": "encoded_word_inside_quotes",
+      "notes": "RFC 2047 forbids an encoded word inside a quoted string, so Gmail leaves it raw. The decoder decodes it anyway and keeps the quotes; display-name sanitizing removes them later.",
+      "input": "\"=?utf-8?Q?Jos=C3=A9_Garc=C3=ADa?=\" <jose@example.com>",
+      "expected": "\"José García\" <jose@example.com>"
+    },
+    {
+      "id": "invalid_base64_verbatim",
+      "notes": "Invalid base64 leaves the word verbatim.",
+      "input": "=?utf-8?B?!!!notbase64!!!?=",
+      "expected": "=?utf-8?B?!!!notbase64!!!?="
+    },
+    {
+      "id": "invalid_q_hex_escape_verbatim",
+      "notes": "A Q '=' followed by non-hex characters fails the word.",
+      "input": "=?utf-8?Q?bad=ZZescape?=",
+      "expected": "=?utf-8?Q?bad=ZZescape?="
+    },
+    {
+      "id": "truncated_q_hex_escape_verbatim",
+      "notes": "A Q '=' with fewer than two characters left fails the word.",
+      "input": "=?utf-8?Q?bad=A?=",
+      "expected": "=?utf-8?Q?bad=A?="
+    },
+    {
+      "id": "unknown_encoding_letter_verbatim",
+      "notes": "Only B and Q are encodings.",
+      "input": "=?utf-8?X?abcdef?=",
+      "expected": "=?utf-8?X?abcdef?="
+    },
+    {
+      "id": "undecodable_word_after_valid_word_keeps_spacing",
+      "notes": "Whitespace next to an undecodable word is not between two encoded words, so it stays.",
+      "input": "=?utf-8?B?QWNtZQ==?= =?utf-8?X?bad?= tail",
+      "expected": "Acme =?utf-8?X?bad?= tail"
+    },
+    {
+      "id": "valid_word_after_undecodable_word_keeps_spacing",
+      "notes": "After an undecodable word the next separator is ordinary text again.",
+      "input": "=?utf-8?X?bad?= =?utf-8?Q?Corp?=",
+      "expected": "=?utf-8?X?bad?= Corp"
+    },
+    {
+      "id": "look_alike_delimiters_unchanged",
+      "notes": "An opener and a closer with no well-formed word between them leave the text alone.",
+      "input": "Is 2+2 =? 4 ?= yes",
+      "expected": "Is 2+2 =? 4 ?= yes"
+    },
+    {
+      "id": "plain_text_unchanged",
+      "notes": "Text without encoded words passes through.",
+      "input": "John Smith",
+      "expected": "John Smith"
+    },
+    {
+      "id": "us_ascii_eight_bit_falls_back_to_utf8",
+      "notes": "us-ascii is strict on both platforms: 8-bit bytes under it (usually mislabeled UTF-8) fall through to the UTF-8 fallback instead of becoming 'JosÃ©'.",
+      "input": "=?us-ascii?Q?Jos=C3=A9?=",
+      "expected": "José"
+    },
+    {
+      "id": "invalid_utf8_falls_back_to_latin1",
+      "notes": "0xE9 alone is invalid UTF-8; the Latin-1 fallback maps every byte.",
+      "input": "=?utf-8?Q?Jos=E9?=",
+      "expected": "José"
+    },
+    {
+      "id": "unknown_charset_falls_back_to_utf8",
+      "notes": "A charset neither platform knows falls back to UTF-8.",
+      "input": "=?x-no-such-charset?B?Sm9zw6k=?=",
+      "expected": "José"
+    }
   ]
 }
