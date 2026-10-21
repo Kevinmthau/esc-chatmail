@@ -9,6 +9,7 @@ import { depsNow, type SyncDeps } from './deps'
 import { repairStoredDisplayNamesIfNeeded } from './displayNameRepair'
 import { runIncrementalSync, type SyncRunResult } from './incremental'
 import { repairParticipantSetConversations } from './participantSetRepair'
+import { repairStoredSubjectsIfNeeded } from './subjectRepair'
 
 export type SyncReason = 'manual' | 'startup' | 'interval' | 'visibility' | 'online'
 
@@ -87,6 +88,10 @@ export async function runSync(deps: SyncDeps, reason: SyncReason): Promise<RunSy
       // enrichment learned during this sync; its signature gate makes the
       // usual no-change pass a small metadata check.
       await repairParticipantSetConversations(deps.db, deps.accountEmail, depsNow(deps))
+      // One-shot and local-only, so it runs before network work too. It
+      // never reads participants, so its place relative to the
+      // participant-set repairs does not matter.
+      await repairStoredSubjectsIfNeeded(deps.db, depsNow(deps))
       const result = await runIncrementalSync(deps)
       await repairParticipantSetConversations(deps.db, deps.accountEmail, depsNow(deps))
       return { ran: true, result }
