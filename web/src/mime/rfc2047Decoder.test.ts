@@ -132,4 +132,20 @@ describe('decodeRfc2047', () => {
       expect(decodeRfc2047('=?utf-8?Q??=')).toBe('')
     })
   })
+
+  describe('large input', () => {
+    const text = 'a'.repeat(200_000)
+
+    it.each([
+      ['Q', text],
+      ['B', btoa(text)],
+    ])('decodes a single ~200 KB %s-encoded word without throwing', (encoding, encodedText) => {
+      // One word's bytes used to be appended with a spread, which throws
+      // RangeError past V8's ~120 K call-argument limit; the throw escaped
+      // extractDisplayName and failed the whole sync batch.
+      // Revert-check: restoring `pendingBytes.push(...wordBytes)` in
+      // `decodeRfc2047` fails both cases.
+      expect(decodeRfc2047(`=?utf-8?${encoding}?${encodedText}?=`)).toBe(text)
+    })
+  })
 })
