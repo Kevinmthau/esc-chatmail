@@ -393,6 +393,14 @@ final class AttachmentDownloader: ObservableObject {
     private let baseRetryDelay: TimeInterval
     private let loadAttachmentData: @Sendable (String?) async -> Data?
     private let prepareDownloadDirectories: @Sendable () -> Void
+    private let fetchAttachmentFileReferences: @Sendable (NSManagedObjectContext) throws -> [NSDictionary]
+
+    /// Orphans younger than this survive the sweep and are judged by a later
+    /// one. Every writer (a download, CID persistence, inline recovery) writes
+    /// its file before saving the row that names it, so a file whose row
+    /// lands after the sweep's database snapshot looks orphaned for that
+    /// window; thumbnailing a large PDF can hold it open for seconds.
+    nonisolated static let orphanSweepRecentFileGracePeriod: TimeInterval = 60 * 60
 
     init(
         apiClient: (any GmailAPIClientProtocol)? = nil,
@@ -406,6 +414,12 @@ final class AttachmentDownloader: ObservableObject {
         },
         prepareDownloadDirectories: @escaping @Sendable () -> Void = {
             AttachmentPaths.setupDirectories()
+        },
+        fetchAttachmentFileReferences: @escaping @Sendable (NSManagedObjectContext) throws -> [NSDictionary] = { context in
+            let request = NSFetchRequest<NSDictionary>(entityName: "Attachment")
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["localURL", "previewURL"]
+            return try context.fetch(request)
         }
     ) {
         self.apiClient = apiClient ?? GmailAPIClient.shared
@@ -414,6 +428,7 @@ final class AttachmentDownloader: ObservableObject {
         self.baseRetryDelay = baseRetryDelay
         self.loadAttachmentData = loadAttachmentData
         self.prepareDownloadDirectories = prepareDownloadDirectories
+        self.fetchAttachmentFileReferences = fetchAttachmentFileReferences
         prepareDownloadDirectories()
     }
 
@@ -1264,33 +1279,30 @@ final class AttachmentDownloader: ObservableObject {
         let cleanupLease = ComposeAttachmentLeaseRegistry.shared.beginFileCleanup()
         defer { ComposeAttachmentLeaseRegistry.shared.endFileCleanup(cleanupLease) }
 
-        // Fetch valid file paths in background context
+        // Taken before the snapshot: anything written after this instant
+        // (and within the grace period before it) may belong to a row the
+        // snapshot cannot see yet.
+        let snapshotStartedAt = Date()
+        let recentFileCutoff = snapshotStartedAt.addingTimeInterval(-Self.orphanSweepRecentFileGracePeriod)
+        let fetchAttachmentFileReferences = self.fetchAttachmentFileReferences
         let context = coreDataStack.newBackgroundContext()
-        let validFiles: Set<String> = await context.perform {
-            let request = NSFetchRequest<NSManagedObject>(entityName: "Attachment")
-            request.fetchBatchSize = 50
-
-            let attachments: [NSManagedObject]
+        let validFiles: Set<String>? = await context.perform {
             do {
-                attachments = try context.fetch(request)
+                let references = try fetchAttachmentFileReferences(context)
+                return Set(references.flatMap { reference -> [String] in
+                    [reference["localURL"] as? String, reference["previewURL"] as? String].compactMap { $0 }
+                })
             } catch {
-                Log.warning("Failed to fetch attachments for cleanup", category: .attachment)
-                return Set<String>()
+                // A failed read is never "no attachments": treating it as an
+                // empty set deleted every attachment and preview on disk,
+                // including the user's sent originals, which cannot be
+                // re-downloaded. Skip, as the HTML orphan sweep does.
+                Log.error("Skipping orphaned attachment cleanup because attachment paths could not be read", category: .attachment, error: error)
+                return nil
             }
-
-            return Set(attachments.compactMap { attachment -> [String] in
-                guard let att = attachment as? Attachment else { return [] }
-                var files: [String] = []
-                if let localURL = att.localURL {
-                    files.append(localURL)
-                }
-                if let previewURL = att.previewURL {
-                    files.append(previewURL)
-                }
-                return files
-            }.flatMap { $0 })
         }
 
+        guard let validFiles else { return }
         guard isActive(generation) else { return }
 
         // This account-scoped deleter participates in the same teardown drain
@@ -1303,7 +1315,8 @@ final class AttachmentDownloader: ObservableObject {
             for fileURL in attachmentContents {
                 guard !Task.isCancelled, !generation.isCancelled else { return }
                 let relativePath = AttachmentPaths.relativePath(from: fileURL)
-                if let path = relativePath, !validFiles.contains(path) {
+                if let path = relativePath, !validFiles.contains(path),
+                   Self.isOldEnoughToSweep(fileURL, cutoff: recentFileCutoff) {
                     guard !generation.isCancelled else { return }
                     Self.removeOrphanedFile(at: fileURL, relativePath: path)
                 }
@@ -1316,7 +1329,8 @@ final class AttachmentDownloader: ObservableObject {
             for fileURL in previewContents {
                 guard !Task.isCancelled, !generation.isCancelled else { return }
                 let relativePath = AttachmentPaths.relativePath(from: fileURL)
-                if let path = relativePath, !validFiles.contains(path) {
+                if let path = relativePath, !validFiles.contains(path),
+                   Self.isOldEnoughToSweep(fileURL, cutoff: recentFileCutoff) {
                     guard !generation.isCancelled else { return }
                     Self.removeOrphanedFile(at: fileURL, relativePath: path)
                 }
@@ -1327,6 +1341,18 @@ final class AttachmentDownloader: ObservableObject {
         } onCancel: {
             cleanupTask.cancel()
         }
+    }
+
+    /// True only when both the file's creation and modification dates are
+    /// readable and before `cutoff`. An unreadable date fails closed: the
+    /// file is kept for a later sweep.
+    nonisolated static func isOldEnoughToSweep(_ url: URL, cutoff: Date) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey]),
+              let created = values.creationDate,
+              let modified = values.contentModificationDate else {
+            return false
+        }
+        return max(created, modified) < cutoff
     }
 
     /// Unsaved draft rows are invisible to the background-context snapshot.
