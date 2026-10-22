@@ -1246,6 +1246,43 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(finalInvocationCount, 2)
     }
 
+    /// The launch screen's Try Again must start the next attempt at once,
+    /// not after the loop's backoff (up to a minute) runs out.
+    ///
+    /// Revert-check: making `AppStartupBootstrap.requestPersistenceRetry` a
+    /// no-op leaves the second attempt an hour away and fails the count.
+    func testStartupBootstrap_retryRequestEndsBackoffWait() async {
+        let preparationScript = BackgroundPersistencePreparationScript(outcomes: [false, true])
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: { await preparationScript.prepare() }
+        )
+        let foreground = Task {
+            await bootstrap.preparePersistenceUntilReady(
+                retryDelayNanoseconds: 3_600_000_000_000,
+                maximumRetryDelayNanoseconds: 3_600_000_000_000
+            )
+        }
+
+        let deadline = Date().addingTimeInterval(5)
+        while await preparationScript.invocationCount() < 1, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await bootstrap.requestPersistenceRetry()
+        while await preparationScript.invocationCount() < 2, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let invocationCount = await preparationScript.invocationCount()
+        XCTAssertEqual(invocationCount, 2, "Try Again must not wait out the backoff")
+        guard invocationCount == 2 else {
+            foreground.cancel()
+            _ = await foreground.value
+            return
+        }
+        let foregroundResult = await foreground.value
+        XCTAssertTrue(foregroundResult)
+    }
+
     func testStartupBootstrap_cancelledPersistenceWaiterReleasesWithoutCancellingSharedPreparation() async {
         let readinessGate = BackgroundSyncReadinessGate()
         let bootstrap = AppStartupBootstrap(

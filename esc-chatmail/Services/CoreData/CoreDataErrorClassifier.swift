@@ -2,6 +2,14 @@ import Foundation
 import CoreData
 
 /// Classifies Core Data errors to determine appropriate recovery strategies.
+///
+/// Deleting the store loses the only copies of queued `PendingAction` and
+/// `OutboundSendMutationRecord` rows and of the user's sent attachments, and
+/// forces a full re-sync. So `.storeReset` is an allow-list of errors that
+/// prove the file is not a usable database, and everything else keeps the
+/// store. It used to be the fallback for any error that was neither a timeout
+/// nor a migration error, which deleted the store on a full disk, an I/O
+/// fault, or a launch before first unlock.
 enum CoreDataErrorClassifier {
 
     /// Checks if an error is recoverable with retry.
@@ -38,17 +46,57 @@ enum CoreDataErrorClassifier {
         return migrationCodes.contains(error.code)
     }
 
-    /// Checks if an error is transient and may succeed on retry.
-    /// - Parameter error: The NSError to classify
-    /// - Returns: true if the error is transient
-    static func isTransientError(_ error: NSError) -> Bool {
-        // Errors that might succeed on retry
-        let transientCodes = [
-            NSManagedObjectConstraintMergeError,
-            NSPersistentStoreSaveConflictsError,
-            NSSQLiteError // SQLite busy errors
+    /// True when the store file itself is unreadable as a database:
+    /// `NSFileReadCorruptFileError` (259), or `SQLITE_CORRUPT` / `SQLITE_NOTADB`
+    /// anywhere in the error chain. The only errors that justify a reset.
+    static func isCorruptStoreError(_ error: NSError) -> Bool {
+        let wrapsCorruptFileError = StorageErrorClassifier.errorChain(error).contains {
+            $0.domain == NSCocoaErrorDomain && $0.code == NSFileReadCorruptFileError
+        }
+        let sqliteCodes = StorageErrorClassifier.sqlitePrimaryResultCodes(in: error)
+        return wrapsCorruptFileError
+            || sqliteCodes.contains(StorageErrorClassifier.SQLiteResultCode.corrupt)
+            || sqliteCodes.contains(StorageErrorClassifier.SQLiteResultCode.notADatabase)
+    }
+
+    /// True when the store may be intact but cannot be opened right now: the
+    /// volume is full, an I/O call failed, or the file is unreadable because
+    /// of permissions or data protection (a cold BGTask launch before first
+    /// unlock reports `NSFileReadNoPermissionError` (257) or `SQLITE_AUTH`).
+    /// Checked anywhere in the chain, and ahead of the migration and
+    /// corruption checks, so a migration that ran out of space keeps the store.
+    static func isStoreTemporarilyUnavailableError(_ error: NSError) -> Bool {
+        if StorageErrorClassifier.isOutOfSpace(error) {
+            return true
+        }
+
+        let unavailableCocoaCodes = [
+            NSFileReadNoPermissionError,
+            NSFileWriteNoPermissionError,
+            NSFileWriteVolumeReadOnlyError
         ]
-        return transientCodes.contains(error.code) || error.domain == NSSQLiteErrorDomain
+        let unavailablePOSIXCodes = [EACCES, EPERM, EIO, EROFS].map(Int.init)
+        let wrapsUnavailableError = StorageErrorClassifier.errorChain(error).contains { error in
+            switch error.domain {
+            case NSCocoaErrorDomain:
+                return unavailableCocoaCodes.contains(error.code)
+            case NSPOSIXErrorDomain:
+                return unavailablePOSIXCodes.contains(error.code)
+            default:
+                return false
+            }
+        }
+
+        let unavailableSQLiteCodes: Set<Int> = [
+            StorageErrorClassifier.SQLiteResultCode.permissionDenied,
+            StorageErrorClassifier.SQLiteResultCode.busy,
+            StorageErrorClassifier.SQLiteResultCode.locked,
+            StorageErrorClassifier.SQLiteResultCode.ioError,
+            StorageErrorClassifier.SQLiteResultCode.cannotOpen,
+            StorageErrorClassifier.SQLiteResultCode.authorizationDenied
+        ]
+        return wrapsUnavailableError
+            || !StorageErrorClassifier.sqlitePrimaryResultCodes(in: error).isDisjoint(with: unavailableSQLiteCodes)
     }
 
     /// Determines the recommended recovery action for an error.
@@ -60,10 +108,16 @@ enum CoreDataErrorClassifier {
     static func recommendedAction(for error: NSError, currentAttempts: Int, maxAttempts: Int) -> RecoveryAction {
         if isRecoverableError(error, currentAttempts: currentAttempts, maxAttempts: maxAttempts) {
             return .retry
+        } else if isStoreTemporarilyUnavailableError(error) {
+            return .keepStore
         } else if isMigrationError(error) {
             return .migrationRecovery
-        } else {
+        } else if isCorruptStoreError(error) {
             return .storeReset
+        } else {
+            // Exhausted timeouts and unclassified errors prove nothing about
+            // the file, so they keep it too.
+            return .keepStore
         }
     }
 
@@ -73,7 +127,10 @@ enum CoreDataErrorClassifier {
         case retry
         /// Attempt migration recovery (backup + delete + reload)
         case migrationRecovery
-        /// Reset the store entirely (last resort)
+        /// Back up and delete the store. Only for a store proven corrupt.
         case storeReset
+        /// Leave the store on disk and latch a load error the user can retry
+        /// (`CoreDataStack.retryLoadAfterFailure()`).
+        case keepStore
     }
 }

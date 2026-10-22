@@ -146,6 +146,23 @@ final class TestCoreDataStack: @unchecked Sendable {
         self.testViewContext = context
     }
 
+    /// A SQLite container on the process-wide model whose store is NOT
+    /// loaded, for tests that drive `CoreDataStack`'s own load and recovery
+    /// ladder (`CoreDataStack(unloadedPersistentContainerForTesting:)`).
+    /// Name the store's directory with the `TestCoreDataStack-` prefix so the
+    /// stale-store sweep removes it in a later run.
+    static func makeUnloadedSQLiteContainer(storeURL: URL) -> NSPersistentContainer {
+        creationLock.lock()
+        let container = NSPersistentContainer(name: "ESCChatmail", managedObjectModel: sharedModel)
+        creationLock.unlock()
+
+        let description = NSPersistentStoreDescription(url: storeURL)
+        description.type = NSSQLiteStoreType
+        description.shouldAddStoreAsynchronously = false
+        container.persistentStoreDescriptions = [description]
+        return container
+    }
+
     deinit {
         Self.creationLock.lock()
         Self.graveyard.append(persistentContainer)

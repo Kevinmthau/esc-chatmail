@@ -34,8 +34,12 @@ final class CoreDataRecoveryHandler {
             return .migrationRecovery
 
         case .storeReset:
-            Log.error("Core Data critical error", category: .coreData, error: error)
+            Log.error("Core Data store is corrupt", category: .coreData, error: error)
             return .storeReset
+
+        case .keepStore:
+            Log.error("Core Data store could not be opened; keeping it on disk", category: .coreData, error: error)
+            return .keepStore
         }
     }
 
@@ -83,23 +87,12 @@ final class CoreDataRecoveryHandler {
         }
     }
 
-    /// Notifies the user of a critical error that couldn't be recovered.
-    /// - Parameter error: The error to report
-    func notifyUserOfCriticalError(_ error: Error) {
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(
-                name: NSNotification.Name("CoreDataCriticalError"),
-                object: nil,
-                userInfo: ["error": CoreDataError.persistentFailure(error)]
-            )
-        }
-    }
-
     // MARK: - Result Types
 
     enum RecoveryResult {
         case retry(delay: TimeInterval)
         case migrationRecovery
         case storeReset
+        case keepStore
     }
 }

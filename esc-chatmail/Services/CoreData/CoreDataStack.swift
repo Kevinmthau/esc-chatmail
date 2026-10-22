@@ -22,9 +22,13 @@ final class CoreDataStack: @unchecked Sendable {
     /// Testing seam: when set, this container (typically in-memory) backs the
     /// stack instead of the production SQLite container.
     private let injectedContainerForTesting: NSPersistentContainer?
+    /// True when the injected container still needs its stores loaded through
+    /// the production load and recovery ladder.
+    private let injectedContainerNeedsLoading: Bool
 
     init() {
         self.injectedContainerForTesting = nil
+        self.injectedContainerNeedsLoading = false
     }
 
     /// Creates a stack backed by an existing, already-loaded container so that
@@ -35,8 +39,19 @@ final class CoreDataStack: @unchecked Sendable {
     /// across test boundaries.
     init(persistentContainerForTesting container: NSPersistentContainer) {
         self.injectedContainerForTesting = container
+        self.injectedContainerNeedsLoading = false
         self._isStoreLoaded = true
     }
+
+#if DEBUG
+    /// Test-only: backs the stack with a container whose stores have not been
+    /// loaded, so the first `persistentContainer` access runs the production
+    /// load and recovery ladder against it.
+    init(unloadedPersistentContainerForTesting container: NSPersistentContainer) {
+        self.injectedContainerForTesting = container
+        self.injectedContainerNeedsLoading = true
+    }
+#endif
 
     var isStoreLoaded: Bool {
         // DEBUG-only check to catch potential deadlocks when calling from actor contexts
@@ -124,6 +139,9 @@ final class CoreDataStack: @unchecked Sendable {
 
     lazy var persistentContainer: NSPersistentContainer = {
         if let injectedContainerForTesting {
+            if injectedContainerNeedsLoading {
+                loadPersistentStores(for: injectedContainerForTesting)
+            }
             return injectedContainerForTesting
         }
 
@@ -190,7 +208,27 @@ final class CoreDataStack: @unchecked Sendable {
 
         case .storeReset:
             attemptStoreReset(for: container, originalError: error)
+
+        case .keepStore:
+            setStoreLoadError(PersistentStoreLoadError(classifying: error))
         }
+    }
+
+    /// Reloads the persistent store after a latched load failure, e.g. once
+    /// the user has freed space or the device has unlocked. The container is
+    /// lazy and loads once per process, so before this a latched error lasted
+    /// until the app was killed and launch spun forever. No-op unless a load
+    /// error is latched and no store is attached; callers touch
+    /// `persistentContainer` first, so this never doubles the initial load.
+    func retryLoadAfterFailure() {
+        let container = persistentContainer
+        guard storeLoadError != nil,
+              container.persistentStoreCoordinator.persistentStores.isEmpty else {
+            return
+        }
+        Log.info("Retrying Core Data store load after a latched failure", category: .coreData)
+        resetStoreLoadTracking()
+        loadPersistentStores(for: container)
     }
 
     private func retryLoadingStore(for container: NSPersistentContainer) {
@@ -199,8 +237,7 @@ final class CoreDataStack: @unchecked Sendable {
 
     private func attemptMigrationRecovery(for container: NSPersistentContainer, originalError: NSError) {
         guard let storeURL = container.persistentStoreDescriptions.first?.url else {
-            setStoreLoadError(originalError)
-            recoveryHandler.notifyUserOfCriticalError(originalError)
+            setStoreLoadError(PersistentStoreLoadError(classifying: originalError))
             return
         }
 
@@ -213,16 +250,16 @@ final class CoreDataStack: @unchecked Sendable {
 
     private func attemptStoreReset(for container: NSPersistentContainer, originalError: NSError) {
         guard let storeURL = container.persistentStoreDescriptions.first?.url else {
-            setStoreLoadError(originalError)
-            recoveryHandler.notifyUserOfCriticalError(originalError)
+            setStoreLoadError(PersistentStoreLoadError(classifying: originalError))
             return
         }
 
         if recoveryHandler.prepareStoreReset(for: storeURL) {
             loadPersistentStores(for: container)
         } else {
-            setStoreLoadError(originalError)
-            recoveryHandler.notifyUserOfCriticalError(originalError)
+            // The backup could not be written (often a full disk), so the
+            // store stays and the load can be retried.
+            setStoreLoadError(PersistentStoreLoadError(classifying: originalError))
         }
     }
 
@@ -293,73 +330,6 @@ final class CoreDataStack: @unchecked Sendable {
         let context = persistentContainer.newBackgroundContext()
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         return context
-    }
-
-    func save(context: NSManagedObjectContext, retryCount: Int = CoreDataConfig.maxSaveRetries) throws {
-        try context.performAndWait {
-            guard context.hasChanges else { return }
-
-            var lastError: Error?
-
-            for attempt in 0..<retryCount {
-                do {
-                    try context.save()
-                    return // Success
-                } catch let error as NSError {
-                    lastError = error
-
-                    // Handle specific Core Data errors
-                    if error.code == NSManagedObjectMergeError {
-                        // Resolve merge conflicts, then give the conflicting
-                        // writer's transaction a moment before the bounded
-                        // re-save (attempts capped by retryCount).
-                        handleMergeConflicts(in: context, error: error)
-                        Thread.sleep(forTimeInterval: 0.05 * Double(attempt + 1))
-                    } else if error.code == NSValidationMultipleErrorsError {
-                        // Handle validation errors
-                        handleValidationErrors(in: context, error: error)
-                    } else if CoreDataErrorClassifier.isTransientError(error) && attempt < retryCount - 1 {
-                        // Wait before retry for transient errors
-                        Thread.sleep(forTimeInterval: 0.1 * Double(attempt + 1))
-                        context.rollback()
-                    } else {
-                        // Non-recoverable error
-                        throw CoreDataError.saveFailed(error)
-                    }
-                }
-            }
-
-            if let error = lastError {
-                throw CoreDataError.saveFailed(error)
-            }
-        }
-    }
-
-    private func handleMergeConflicts(in context: NSManagedObjectContext, error: NSError) {
-        // Refresh conflicted objects with mergeChanges: true — fresh store
-        // data is re-faulted UNDER the unsaved local edits so the retried
-        // save keeps them. The previous mergeChanges: false discarded the
-        // pending edits it was trying to save. (Near-unreachable with the
-        // trump merge policy everywhere, but recovery should not lose data.)
-        if let conflicts = error.userInfo[NSPersistentStoreSaveConflictsErrorKey] as? [NSMergeConflict] {
-            for conflict in conflicts {
-                let sourceObject = conflict.sourceObject
-                sourceObject.managedObjectContext?.refresh(sourceObject, mergeChanges: true)
-            }
-        }
-    }
-
-    private func handleValidationErrors(in context: NSManagedObjectContext, error: NSError) {
-        // Log validation errors for debugging
-        if let errors = error.userInfo[NSDetailedErrorsKey] as? [NSError] {
-            for detailedError in errors {
-                if let object = detailedError.userInfo[NSValidationObjectErrorKey] as? NSManagedObject {
-                    Log.warning("Validation error for object: \(object.entity.name ?? "unknown")", category: .coreData)
-                    // Optionally reset invalid objects
-                    context.refresh(object, mergeChanges: false)
-                }
-            }
-        }
     }
 
     func destroyAllData() throws {

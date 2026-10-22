@@ -1,25 +1,47 @@
 import Foundation
 
+/// Set once fresh-install handling has succeeded in this process, so the
+/// foreground retry loop does not re-run it on every attempt.
+@MainActor
+private var hasHandledFreshInstallThisProcess = false
+
+/// Set once an attempt has touched the lazy persistent container. Later
+/// attempts (this loop's, or a foreground launch joining after a cold BGTask
+/// attempt failed) must reload explicitly: the container loads only once.
+@MainActor
+private var hasStartedStoreLoadThisProcess = false
+
 @MainActor
 private func prepareProductionAppPersistence() async -> Bool {
-    guard await FreshInstallHandler().checkAndHandleFreshInstall() else {
-        return false
+    if !hasHandledFreshInstallThisProcess {
+        guard await FreshInstallHandler().checkAndHandleFreshInstall() else {
+            return false
+        }
+        hasHandledFreshInstallThisProcess = true
+        // Fresh-install (or installation-ID mismatch) cleanup, when it ran,
+        // removed the whole defaults domain, including the Version row
+        // App.init just published for the Settings app, and nothing else
+        // rewrites it in this process. The write is skipped when the value is
+        // unchanged.
+        SettingsAppAccountPublisher.shared.publishAppVersion()
     }
-    // Fresh-install (or installation-ID mismatch) cleanup, when it ran, removed
-    // the whole defaults domain, including the Version row App.init just
-    // published for the Settings app, and nothing else rewrites it in this
-    // process. The write is skipped when the value is unchanged.
-    SettingsAppAccountPublisher.shared.publishAppVersion()
 
     // Start loading only after fresh-install cleanup has had a chance to reset
     // persistent state, then wait before exposing the store to either
     // foreground services or background sync.
-    _ = CoreDataStack.shared.persistentContainer
+    if hasStartedStoreLoadThisProcess {
+        CoreDataStack.shared.retryLoadAfterFailure()
+    } else {
+        hasStartedStoreLoadThisProcess = true
+        _ = CoreDataStack.shared.persistentContainer
+    }
     do {
         try await CoreDataStack.shared.waitForStoreToLoad(timeout: .infinity)
+        AppLoadingModel.shared.clearStoreLoadFailure()
         return true
     } catch {
         Log.error("Core Data store failed to load", category: .coreData, error: error)
+        AppLoadingModel.shared.showStoreLoadFailure(error)
         return false
     }
 }
@@ -52,6 +74,8 @@ actor AppStartupBootstrap {
     private var activePreparation: ActivePreparation?
     private var isAuthenticationRestored = false
     private var activeAuthenticationRestore: ActiveAuthenticationRestore?
+    private var persistenceRetryWait: Task<Void, Never>?
+    private var hasPendingPersistenceRetryRequest = false
 
     private init() {
         self.preparePersistenceOperation = {
@@ -111,20 +135,59 @@ actor AppStartupBootstrap {
     /// Background tasks use the single-attempt API above so they can fail fast
     /// within their system budget; SwiftUI's loading task instead retries until
     /// persistence is ready or that view task is cancelled.
+    ///
+    /// The wait between attempts doubles up to `maximumRetryDelayNanoseconds`:
+    /// each attempt reloads a store whose load failed, and a store that failed
+    /// for lack of space would otherwise re-run its migration every second.
+    /// `requestPersistenceRetry()` ends a wait early.
     func preparePersistenceUntilReady(
-        retryDelayNanoseconds: UInt64 = 1_000_000_000
+        retryDelayNanoseconds: UInt64 = 1_000_000_000,
+        maximumRetryDelayNanoseconds: UInt64 = 60_000_000_000
     ) async -> Bool {
+        var retryDelay = min(retryDelayNanoseconds, maximumRetryDelayNanoseconds)
         while !Task.isCancelled {
             if await preparePersistenceIfNeeded() {
                 return true
             }
-            guard await Task.sleepUnlessCancelled(
-                nanoseconds: retryDelayNanoseconds
-            ) else {
+            guard await waitForPersistenceRetry(nanoseconds: retryDelay) else {
                 return false
             }
+            retryDelay = retryDelay > maximumRetryDelayNanoseconds / 2
+                ? maximumRetryDelayNanoseconds
+                : retryDelay * 2
         }
         return false
+    }
+
+    /// Ends the foreground loop's current wait early, e.g. when the user taps
+    /// Try Again after freeing space. A request that arrives while an attempt
+    /// is running makes the next wait return at once.
+    func requestPersistenceRetry() {
+        guard let persistenceRetryWait else {
+            hasPendingPersistenceRetryRequest = true
+            return
+        }
+        persistenceRetryWait.cancel()
+    }
+
+    /// Returns false only when the calling task was cancelled.
+    private func waitForPersistenceRetry(nanoseconds: UInt64) async -> Bool {
+        if hasPendingPersistenceRetryRequest {
+            hasPendingPersistenceRetryRequest = false
+            return !Task.isCancelled
+        }
+
+        let wait = Task<Void, Never> {
+            _ = await Task.sleepUnlessCancelled(nanoseconds: nanoseconds)
+        }
+        persistenceRetryWait = wait
+        await withTaskCancellationHandler {
+            await wait.value
+        } onCancel: {
+            wait.cancel()
+        }
+        persistenceRetryWait = nil
+        return !Task.isCancelled
     }
 
     func restoreAuthenticationIfNeeded() async -> Bool {
