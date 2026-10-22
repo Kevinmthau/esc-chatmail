@@ -23,7 +23,7 @@ protocol ActionExecutorProtocol: Sendable {
 /// Executes pending actions against the Gmail API
 /// Extracted from PendingActionsManager for single responsibility
 actor GmailActionExecutor: ActionExecutorProtocol {
-    private static let gmailBatchModifyLimit = 1_000
+    static let gmailBatchModifyLimit = 1_000
 
     private let apiClientProvider: @Sendable () async -> any GmailAPIClientProtocol
 
@@ -46,9 +46,12 @@ actor GmailActionExecutor: ActionExecutorProtocol {
         switch type {
         case .markRead:
             if let messageIds = payload?["messageIds"] as? [String], !messageIds.isEmpty {
-                for batch in messageIds.chunked(into: Self.gmailBatchModifyLimit) {
-                    try await apiClient.batchModify(ids: batch, addLabelIds: nil, removeLabelIds: ["UNREAD"])
-                }
+                try await Self.batchModify(
+                    messageIds,
+                    addLabelIds: nil,
+                    removeLabelIds: ["UNREAD"],
+                    using: apiClient
+                )
                 Log.diagnostic(.pendingActions, "Executed batch markRead for \(messageIds.count) messages", category: .sync)
                 return
             }
@@ -77,7 +80,12 @@ actor GmailActionExecutor: ActionExecutorProtocol {
             guard let messageIds = payload?["messageIds"] as? [String], !messageIds.isEmpty else {
                 throw PendingActionError.missingMessageIds
             }
-            try await apiClient.batchModify(ids: messageIds, addLabelIds: nil, removeLabelIds: ["INBOX"])
+            try await Self.batchModify(
+                messageIds,
+                addLabelIds: nil,
+                removeLabelIds: ["INBOX"],
+                using: apiClient
+            )
             Log.diagnostic(.pendingActions, "Executed archiveConversation for \(messageIds.count) messages", category: .sync)
 
         case .star:
@@ -99,8 +107,38 @@ actor GmailActionExecutor: ActionExecutorProtocol {
                 throw PendingActionError.missingMessageIds
             }
             // Add SPAM label AND remove INBOX label (matches Gmail behavior)
-            try await apiClient.batchModify(ids: messageIds, addLabelIds: ["SPAM"], removeLabelIds: ["INBOX"])
+            try await Self.batchModify(
+                messageIds,
+                addLabelIds: ["SPAM"],
+                removeLabelIds: ["INBOX"],
+                using: apiClient
+            )
             Log.diagnostic(.pendingActions, "Executed reportSpam for \(messageIds.count) messages", category: .sync)
+        }
+    }
+
+    /// Every multi-message action goes through here. Gmail rejects a
+    /// batchModify naming more than 1,000 IDs, and the processor abandons the
+    /// row on that non-retryable 4xx after the local change already saved:
+    /// conversation archive and Report Spam used to send a whole (possibly
+    /// multi-selected) conversation's lifetime IDs in one request, so a
+    /// 1,000-message chat silently never left the Gmail inbox. Adding and
+    /// removing labels is idempotent, so a retried action re-sending chunks
+    /// that already landed is harmless (unlike the non-idempotent send path).
+    /// Never narrow the ID set to fit: SPAM must reach every message, and
+    /// archiving every ID self-heals local/remote INBOX drift.
+    private static func batchModify(
+        _ messageIds: [String],
+        addLabelIds: [String]?,
+        removeLabelIds: [String]?,
+        using apiClient: any GmailAPIClientProtocol
+    ) async throws {
+        for batch in messageIds.chunked(into: gmailBatchModifyLimit) {
+            try await apiClient.batchModify(
+                ids: batch,
+                addLabelIds: addLabelIds,
+                removeLabelIds: removeLabelIds
+            )
         }
     }
 }

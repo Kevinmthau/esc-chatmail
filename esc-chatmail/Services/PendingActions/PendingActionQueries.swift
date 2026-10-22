@@ -213,12 +213,23 @@ extension PendingActionsManager {
         return await fetchAbandonedActions(accountWorkRequest: accountWorkRequest)
     }
 
+    /// Reads under the non-exclusive lease, unlike the other queries here:
+    /// the conversation list's banner re-reads after every sync, and the
+    /// exclusive run would park behind a sync and then hold the boundary a
+    /// starting foreground sync or BGTask run needs. The lease is still
+    /// refused once an account transition starts, and teardown drains it.
     func fetchAbandonedActions(
         accountWorkRequest: AccountWorkRequest
     ) async -> [AbandonedActionInfo] {
-        await withPendingActionRun(for: accountWorkRequest) { syncRun in
-            await self.fetchAbandonedActions(within: syncRun)
-        } ?? []
+        guard let lease = await syncRunCoordinator.acquireAccountWorkLease(
+            kind: .pendingActions,
+            for: accountWorkRequest
+        ) else {
+            return []
+        }
+        let actions = await fetchAbandonedActions(within: lease)
+        await syncRunCoordinator.endRun(lease)
+        return actions
     }
 
     private func fetchAbandonedActions(

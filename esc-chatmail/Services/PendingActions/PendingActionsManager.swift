@@ -32,6 +32,8 @@ struct PendingActionLifecycleHooks: Sendable {
 /// - `PendingActionsManagerProtocol.swift`: Protocol definition
 /// - `PendingActionProcessor.swift`: Action execution and retry logic
 /// - `PendingActionQueries.swift`: Query methods (count, hasPending, cancel)
+/// - `PendingActionOversizedBatchRequeue.swift`: One-shot requeue of archive
+///   and spam rows abandoned by the unchunked batchModify
 ///
 /// Dependencies:
 /// - NetworkMonitor: Handles connectivity detection
@@ -47,6 +49,8 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     let networkMonitor: NetworkMonitorProtocol
     let syncRunCoordinator: SyncRunCoordinator
     let lifecycleHooks: PendingActionLifecycleHooks
+    /// Holds one-shot repair latches. Tests inject an isolated suite.
+    let oneShotRepairDefaults: UserDefaults
     private let authenticationRetryBaseDelay: TimeInterval
     private let authenticationRetryMaximumDelay: TimeInterval
     private let authenticationRetrySleeper: @Sendable (TimeInterval) async -> Bool
@@ -92,6 +96,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         self.networkMonitor = AppNetworkMonitor.shared
         self.syncRunCoordinator = .shared
         self.lifecycleHooks = PendingActionLifecycleHooks()
+        self.oneShotRepairDefaults = .standard
         self.authenticationRetryBaseDelay = 30
         self.authenticationRetryMaximumDelay = 5 * 60
         self.authenticationRetrySleeper = { delay in
@@ -115,6 +120,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         networkMonitor: NetworkMonitorProtocol = AppNetworkMonitor.shared,
         syncRunCoordinator: SyncRunCoordinator = .shared,
         lifecycleHooks: PendingActionLifecycleHooks = PendingActionLifecycleHooks(),
+        oneShotRepairDefaults: UserDefaults = .standard,
         authenticationRetryBaseDelay: TimeInterval = 30,
         authenticationRetryMaximumDelay: TimeInterval = 5 * 60,
         authenticationRetrySleeper: @escaping @Sendable (TimeInterval) async -> Bool = { delay in
@@ -135,6 +141,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         self.networkMonitor = networkMonitor
         self.syncRunCoordinator = syncRunCoordinator
         self.lifecycleHooks = lifecycleHooks
+        self.oneShotRepairDefaults = oneShotRepairDefaults
         self.authenticationRetryBaseDelay = authenticationRetryBaseDelay
         self.authenticationRetryMaximumDelay = authenticationRetryMaximumDelay
         self.authenticationRetrySleeper = authenticationRetrySleeper
@@ -150,6 +157,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         Task { [weak self] in
             await self?.recoverStuckProcessingActions()
+            await self?.requeueRecentOversizedBatchActionsIfNeeded()
         }
 
         networkMonitor.onConnectivityChange = { [weak self] isConnected in
