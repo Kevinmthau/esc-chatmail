@@ -43,6 +43,7 @@ final class AppLoadingModel: ObservableObject {
 
     func showStoreLoadFailure(_ error: Error) {
         let availableBytes = availableCapacityBytes()
+        let isFreeSpaceKnown = availableBytes != nil
         let kind = AppLoadingPolicy.storeLoadFailureKind(
             for: error,
             availableCapacityBytes: availableBytes
@@ -51,11 +52,12 @@ final class AppLoadingModel: ObservableObject {
             afterFailureOf: kind,
             previousCount: resetEligibleFailureCount,
             isProtectedDataAvailable: isProtectedDataAvailable(),
-            isFreeSpaceKnown: availableBytes != nil
+            isFreeSpaceKnown: isFreeSpaceKnown
         )
         storeLoadFailure = AppLoadingPolicy.storeLoadFailureNotice(
             for: kind,
-            resetEligibleFailureCount: resetEligibleFailureCount
+            resetEligibleFailureCount: resetEligibleFailureCount,
+            isFreeSpaceKnown: isFreeSpaceKnown
         )
     }
 

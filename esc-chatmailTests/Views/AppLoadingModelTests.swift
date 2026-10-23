@@ -57,10 +57,14 @@ final class AppLoadingModelTests: XCTestCase {
     }
 
     /// The stack refuses to reset without a free-space reading, so the
-    /// screen must not offer a button that cannot work.
+    /// screen must not offer a button that cannot work, and those failures
+    /// must not earn the offer for when a reading returns.
     ///
-    /// Revert-check: passing `true` for `isFreeSpaceKnown` in
-    /// `AppLoadingModel.showStoreLoadFailure` offers the reset here.
+    /// Revert-check: passing `true` for `isFreeSpaceKnown` to
+    /// `AppLoadingPolicy.resetEligibleFailureCount` in
+    /// `AppLoadingModel.showStoreLoadFailure` offers the reset on the first
+    /// failure with a reading; passing it to `storeLoadFailureNotice` too
+    /// also offers it during the loop.
     func testShowStoreLoadFailure_failuresWithFreeSpaceUnknown_doNotCount() {
         let harness = Harness()
         harness.availableCapacityBytes = nil
@@ -71,6 +75,37 @@ final class AppLoadingModelTests: XCTestCase {
 
         XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
         XCTAssertEqual(harness.model.storeLoadFailure?.title, "Can't Open Your Mail")
+
+        harness.availableCapacityBytes = 50 * 1024 * 1024 * 1024
+        harness.model.showStoreLoadFailure(keptStoreFailure)
+
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+    }
+
+    /// An offer earned with readings must not survive a failure whose free
+    /// space could not be measured: the stack would refuse the reset, and
+    /// confirming the data loss would only retry into the same offer. The
+    /// streak survives, so the offer returns with the next reading.
+    ///
+    /// Revert-check: passing `true` for `isFreeSpaceKnown` to
+    /// `AppLoadingPolicy.storeLoadFailureNotice` in
+    /// `AppLoadingModel.showStoreLoadFailure` keeps the offer and resets here.
+    func testShowStoreLoadFailure_freeSpaceUnknownAfterOffer_withholdsResetUntilReadingReturns() {
+        let harness = Harness()
+        harness.offerReset()
+
+        harness.availableCapacityBytes = nil
+        harness.model.showStoreLoadFailure(keptStoreFailure)
+        harness.model.resetMailbox()
+
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+        XCTAssertEqual(harness.model.storeLoadFailure?.title, "Can't Open Your Mail")
+        XCTAssertEqual(harness.resetCallCount, 0)
+
+        harness.availableCapacityBytes = 50 * 1024 * 1024 * 1024
+        harness.model.showStoreLoadFailure(keptStoreFailure)
+
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, true)
     }
 
     /// Revert-check: deleting the count reset from

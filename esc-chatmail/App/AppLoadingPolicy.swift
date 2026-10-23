@@ -89,7 +89,8 @@ enum AppLoadingPolicy {
     /// nothing about the file. Nor does one whose free space could not be
     /// measured: a full disk may explain it, and
     /// `CoreDataStack.resetStoreAfterLoadFailure()` refuses to reset without
-    /// a reading, so counting it would offer a reset that cannot run.
+    /// a reading, so counting it would offer a reset that cannot run (and
+    /// `storeLoadFailureNotice` withholds an offer already earned).
     static func resetEligibleFailureCount(
         afterFailureOf kind: StoreLoadFailureKind,
         previousCount: Int,
@@ -102,9 +103,17 @@ enum AppLoadingPolicy {
         return isProtectedDataAvailable && isFreeSpaceKnown ? previousCount + 1 : previousCount
     }
 
+    /// Offers Reset Mailbox only from `mailboxResetFailureThreshold` counted
+    /// failures and only when this failure's free space could be measured. A
+    /// failure without a reading keeps the streak, so an offer earned earlier
+    /// would otherwise stay on screen while
+    /// `CoreDataStack.resetStoreAfterLoadFailure()` refuses every reset, and
+    /// confirming the data loss would only retry. The offer returns with the
+    /// next failure that has a reading.
     static func storeLoadFailureNotice(
         for kind: StoreLoadFailureKind,
-        resetEligibleFailureCount: Int
+        resetEligibleFailureCount: Int,
+        isFreeSpaceKnown: Bool
     ) -> StoreLoadFailureNotice {
         switch kind {
         case .insufficientStorage:
@@ -113,7 +122,7 @@ enum AppLoadingPolicy {
                 message: "MushMail needs more free space to open your mail. Free up storage in Settings, then try again.",
                 offersMailboxReset: false
             )
-        case .storeUnavailable where resetEligibleFailureCount >= mailboxResetFailureThreshold:
+        case .storeUnavailable where isFreeSpaceKnown && resetEligibleFailureCount >= mailboxResetFailureThreshold:
             return StoreLoadFailureNotice(
                 title: "Can't Open Your Mail",
                 message: "MushMail still can't open its mailbox. If trying again doesn't help, you can reset it and download your mail again from Gmail.",
