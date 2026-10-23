@@ -38,11 +38,6 @@ enum AppLoadingPolicy {
         let confirmButtonTitle: String
     }
 
-    /// Below this much free space an open failure is presented as a full
-    /// device even when the error does not say so: at 0 bytes free SQLite
-    /// reports SQLITE_CANTOPEN rather than SQLITE_FULL.
-    static let lowStorageThresholdBytes: Int64 = 200 * 1024 * 1024
-
     /// Consecutive `.storeUnavailable` failures before the screen offers
     /// Reset Mailbox. The launch retry loop's backoff alone reaches five about
     /// 15 s after the first failure (waits of 1, 2, 4 and 8 s), so a transient
@@ -65,11 +60,17 @@ enum AppLoadingPolicy {
         offersMailboxReset: true
     )
 
+    /// Below `StoreVolumeFreeSpace.lowStorageThresholdBytes` of free space
+    /// an open failure is presented as a full device even when the error does
+    /// not say so. `availableCapacityBytes` is a `StoreVolumeFreeSpace`
+    /// reading.
     static func storeLoadFailureKind(
         for error: Error,
         availableCapacityBytes: Int64?
     ) -> StoreLoadFailureKind {
-        let isLowOnStorage = availableCapacityBytes.map { $0 < lowStorageThresholdBytes } ?? false
+        let isLowOnStorage = availableCapacityBytes.map {
+            $0 < StoreVolumeFreeSpace.lowStorageThresholdBytes
+        } ?? false
         let loadError = unwrappedLoadError(error)
         if isInsufficientStorage(loadError) || isLowOnStorage {
             return .insufficientStorage
@@ -85,16 +86,20 @@ enum AppLoadingPolicy {
     /// ends the streak. A failure while protected data is unavailable (a cold
     /// background launch before first unlock, or a locked device) neither
     /// counts nor ends it: data protection alone explains it, so it says
-    /// nothing about the file.
+    /// nothing about the file. Nor does one whose free space could not be
+    /// measured: a full disk may explain it, and
+    /// `CoreDataStack.resetStoreAfterLoadFailure()` refuses to reset without
+    /// a reading, so counting it would offer a reset that cannot run.
     static func resetEligibleFailureCount(
         afterFailureOf kind: StoreLoadFailureKind,
         previousCount: Int,
-        isProtectedDataAvailable: Bool
+        isProtectedDataAvailable: Bool,
+        isFreeSpaceKnown: Bool
     ) -> Int {
         guard kind == .storeUnavailable else {
             return 0
         }
-        return isProtectedDataAvailable ? previousCount + 1 : previousCount
+        return isProtectedDataAvailable && isFreeSpaceKnown ? previousCount + 1 : previousCount
     }
 
     static func storeLoadFailureNotice(

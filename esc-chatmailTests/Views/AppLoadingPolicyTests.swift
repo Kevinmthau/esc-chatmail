@@ -69,7 +69,8 @@ final class AppLoadingPolicyTests: XCTestCase {
         let count = AppLoadingPolicy.resetEligibleFailureCount(
             afterFailureOf: .storeUnavailable,
             previousCount: 2,
-            isProtectedDataAvailable: true
+            isProtectedDataAvailable: true,
+            isFreeSpaceKnown: true
         )
 
         XCTAssertEqual(count, 3)
@@ -86,7 +87,8 @@ final class AppLoadingPolicyTests: XCTestCase {
             let count = AppLoadingPolicy.resetEligibleFailureCount(
                 afterFailureOf: kind,
                 previousCount: threshold,
-                isProtectedDataAvailable: true
+                isProtectedDataAvailable: true,
+                isFreeSpaceKnown: true
             )
 
             XCTAssertEqual(count, 0, "\(kind)")
@@ -102,7 +104,24 @@ final class AppLoadingPolicyTests: XCTestCase {
         let count = AppLoadingPolicy.resetEligibleFailureCount(
             afterFailureOf: .storeUnavailable,
             previousCount: 2,
-            isProtectedDataAvailable: false
+            isProtectedDataAvailable: false,
+            isFreeSpaceKnown: true
+        )
+
+        XCTAssertEqual(count, 2)
+    }
+
+    /// Without a free-space reading a full disk cannot be ruled out, and the
+    /// stack refuses to reset, so the failure must not edge toward an offer.
+    ///
+    /// Revert-check: ignoring `isFreeSpaceKnown` in
+    /// `AppLoadingPolicy.resetEligibleFailureCount` fails this.
+    func testResetEligibleFailureCount_freeSpaceUnknown_neitherCountsNorEndsStreak() {
+        let count = AppLoadingPolicy.resetEligibleFailureCount(
+            afterFailureOf: .storeUnavailable,
+            previousCount: 2,
+            isProtectedDataAvailable: true,
+            isFreeSpaceKnown: false
         )
 
         XCTAssertEqual(count, 2)

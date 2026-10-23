@@ -56,6 +56,23 @@ final class AppLoadingModelTests: XCTestCase {
         XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
     }
 
+    /// The stack refuses to reset without a free-space reading, so the
+    /// screen must not offer a button that cannot work.
+    ///
+    /// Revert-check: passing `true` for `isFreeSpaceKnown` in
+    /// `AppLoadingModel.showStoreLoadFailure` offers the reset here.
+    func testShowStoreLoadFailure_failuresWithFreeSpaceUnknown_doNotCount() {
+        let harness = Harness()
+        harness.availableCapacityBytes = nil
+
+        for _ in 0..<(threshold * 2) {
+            harness.model.showStoreLoadFailure(keptStoreFailure)
+        }
+
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+        XCTAssertEqual(harness.model.storeLoadFailure?.title, "Can't Open Your Mail")
+    }
+
     /// Revert-check: deleting the count reset from
     /// `AppLoadingModel.clearStoreLoadFailure` offers the reset on the first
     /// failure after a successful load.
@@ -147,6 +164,7 @@ final class AppLoadingModelTests: XCTestCase {
         var resetOutcome: CoreDataStack.StoreResetOutcome = .removed
         var resetCallCount = 0
         var isProtectedDataAvailable = true
+        var availableCapacityBytes: Int64? = 50 * 1024 * 1024 * 1024
         private(set) var model: AppLoadingModel!
 
         @MainActor
@@ -158,7 +176,7 @@ final class AppLoadingModelTests: XCTestCase {
                     resetCallCount += 1
                     return resetOutcome
                 },
-                availableCapacityBytes: { nil },
+                availableCapacityBytes: { [unowned self] in availableCapacityBytes },
                 isProtectedDataAvailable: { [unowned self] in isProtectedDataAvailable }
             )
         }

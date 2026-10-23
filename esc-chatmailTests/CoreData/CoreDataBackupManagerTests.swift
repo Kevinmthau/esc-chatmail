@@ -221,4 +221,73 @@ final class CoreDataBackupManagerTests: XCTestCase {
         XCTAssertTrue(remainingNames.contains(created[3].lastPathComponent))
         XCTAssertTrue(remainingNames.contains(created[2].lastPathComponent))
     }
+
+    // MARK: - Prune Backups
+
+    /// A backup is a whole mailbox, so only the newest is kept.
+    ///
+    /// Revert-check: passing a `keepCount` above 1 from
+    /// `CoreDataBackupManager.pruneBackups` keeps the older backup.
+    func testPruneBackups_twoRecentBackups_keepsOnlyNewest() throws {
+        let now = Date()
+        let newest = try writeBackup(named: Self.timestampedBackupName(at: now.addingTimeInterval(-60)))
+        let older = try writeBackup(named: Self.timestampedBackupName(at: now.addingTimeInterval(-3_600)))
+
+        CoreDataBackupManager.pruneBackups(for: storeURL, now: now)
+
+        XCTAssertEqual(CoreDataBackupManager.listBackups(for: storeURL).map(\.lastPathComponent), [newest.lastPathComponent])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: older.path))
+    }
+
+    /// Kept for good, the newest backup doubles the app's footprint once
+    /// sync refills the mailbox; it expires after the retention window.
+    ///
+    /// Revert-check: ignoring `removingBackupsDatedBefore` in
+    /// `CoreDataBackupManager.cleanupOldBackups` keeps the expired backup.
+    func testPruneBackups_newestBackupPastRetention_removesIt() throws {
+        let now = Date()
+        let expired = try writeBackup(
+            named: Self.timestampedBackupName(
+                at: now.addingTimeInterval(-CoreDataBackupManager.retentionInterval - 60)
+            )
+        )
+        let expiredWAL = URL(fileURLWithPath: expired.path + "-wal")
+        try Data("wal".utf8).write(to: expiredWAL)
+
+        CoreDataBackupManager.pruneBackups(for: storeURL, now: now)
+
+        XCTAssertTrue(CoreDataBackupManager.listBackups(for: storeURL).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: expiredWAL.path))
+    }
+
+    /// A legacy backup without a timestamp in its name is aged by its
+    /// creation date.
+    func testPruneBackups_untimestampedBackupWithinRetention_isKept() throws {
+        let now = Date()
+        let legacy = try writeBackup(named: "legacy.sqlite", createdAt: now.addingTimeInterval(-3_600))
+
+        CoreDataBackupManager.pruneBackups(for: storeURL, now: now)
+
+        XCTAssertEqual(CoreDataBackupManager.listBackups(for: storeURL).map(\.lastPathComponent), [legacy.lastPathComponent])
+    }
+
+    func testRemoveAllBackups_removesEveryBackup() throws {
+        _ = try writeBackup(named: Self.timestampedBackupName(at: Date()))
+        _ = try writeBackup(named: "legacy.sqlite")
+
+        CoreDataBackupManager.removeAllBackups(for: storeURL)
+
+        XCTAssertTrue(CoreDataBackupManager.listBackups(for: storeURL).isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: storeURL.path), "Only backups are removed")
+    }
+
+    /// Matches `createTimestampedBackup`'s name for this suite's `Store.sqlite`.
+    private static func timestampedBackupName(at date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss'Z'"
+        return "Store.backup-\(formatter.string(from: date)).sqlite"
+    }
 }

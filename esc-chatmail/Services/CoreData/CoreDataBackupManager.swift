@@ -1,7 +1,19 @@
 import Foundation
 
 /// Handles backup operations for Core Data stores.
+///
+/// A backup is a whole copy of the mailbox, written before a reset or
+/// migration recovery removes the store, and nothing in the app reads it back.
+/// It is kept for a while as the last copy of queued PendingAction and
+/// OutboundSendMutationRecord rows, then pruned (`pruneBackups`), and removed
+/// with the mailbox at sign-out (`CoreDataStack.destroyAllData()`). Before
+/// pruning, every backup stayed for good: on APFS the copy is a clone that
+/// keeps every block of the removed store, so each reset doubled the app's
+/// footprint once sync refilled the mailbox.
 enum CoreDataBackupManager {
+
+    /// How long the newest backup is kept once a store has opened again.
+    static let retentionInterval: TimeInterval = 7 * 24 * 60 * 60
 
     /// Creates a timestamped backup of a SQLite store file and its associated files.
     /// - Parameter storeURL: The URL of the main SQLite store file
@@ -46,6 +58,53 @@ enum CoreDataBackupManager {
     /// - Parameter storeURL: The URL of the main SQLite store file
     /// - Returns: Array of backup URLs sorted by embedded timestamp, then creation date (newest first)
     static func listBackups(for storeURL: URL) -> [URL] {
+        sortedBackupFiles(for: storeURL).map(\.url)
+    }
+
+    /// Cleans up old backups, keeping only the most recent ones.
+    /// - Parameters:
+    ///   - storeURL: The URL of the main SQLite store file
+    ///   - keepCount: Number of backups to keep (default: 3)
+    ///   - cutoff: Also removes kept backups dated before this, by the
+    ///     timestamp in their name or else their creation date
+    static func cleanupOldBackups(
+        for storeURL: URL,
+        keepCount: Int = 3,
+        removingBackupsDatedBefore cutoff: Date? = nil
+    ) {
+        let backups = sortedBackupFiles(for: storeURL).enumerated().filter { index, backup in
+            index >= keepCount || cutoff.map { backup.date < $0 } == true
+        }.map(\.element.url)
+
+        for backup in backups {
+            do {
+                try removeStore(at: backup)
+                Log.info("Removed old backup: \(backup.lastPathComponent)", category: .coreData)
+            } catch {
+                Log.warning("Failed to remove old backup: \(error.localizedDescription)", category: .coreData)
+            }
+        }
+    }
+
+    /// Keeps only the newest backup, and drops that one too once it is older
+    /// than `retentionInterval`. Runs whenever a store opens, which every
+    /// reset and migration recovery is followed by.
+    static func pruneBackups(for storeURL: URL, now: Date = Date()) {
+        cleanupOldBackups(
+            for: storeURL,
+            keepCount: 1,
+            removingBackupsDatedBefore: now.addingTimeInterval(-retentionInterval)
+        )
+    }
+
+    /// Removes every backup of the store, for a teardown that removes the
+    /// mailbox itself. Best-effort: failures are logged, not thrown.
+    static func removeAllBackups(for storeURL: URL) {
+        cleanupOldBackups(for: storeURL, keepCount: 0)
+    }
+
+    /// Backups sorted by embedded timestamp, then creation date (newest first).
+    private static func sortedBackupFiles(for storeURL: URL) -> [BackupFile] {
         let backupsDir = storeURL.deletingLastPathComponent().appendingPathComponent("Backups")
 
         guard let contents = try? FileManager.default.contentsOfDirectory(
@@ -78,25 +137,6 @@ enum CoreDataBackupManager {
             }
 
             return lhs.filename < rhs.filename
-        }.map(\.url)
-    }
-
-    /// Cleans up old backups, keeping only the most recent ones.
-    /// - Parameters:
-    ///   - storeURL: The URL of the main SQLite store file
-    ///   - keepCount: Number of backups to keep (default: 3)
-    static func cleanupOldBackups(for storeURL: URL, keepCount: Int = 3) {
-        let backups = listBackups(for: storeURL)
-
-        guard backups.count > keepCount else { return }
-
-        for backup in backups.dropFirst(keepCount) {
-            do {
-                try removeStore(at: backup)
-                Log.info("Removed old backup: \(backup.lastPathComponent)", category: .coreData)
-            } catch {
-                Log.warning("Failed to remove old backup: \(error.localizedDescription)", category: .coreData)
-            }
         }
     }
 
@@ -107,6 +147,12 @@ enum CoreDataBackupManager {
         let timestamp: Date?
         let creationDate: Date
         let filename: String
+
+        /// When the backup was made: the timestamp in its name, or else its
+        /// creation date (`.distantPast` when unreadable, so it expires).
+        var date: Date {
+            timestamp ?? creationDate
+        }
 
         init(url: URL, creationDate: Date) {
             self.url = url
