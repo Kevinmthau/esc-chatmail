@@ -81,6 +81,44 @@ final class CoreDataErrorClassifierTests: XCTestCase {
         }
     }
 
+    /// Deterministic migration failures used to reach a reset through the
+    /// old `.storeReset` fallback. Under the allow-list a code missing from
+    /// `isMigrationError` keeps a store that can never open, so launch would
+    /// sit on the failure screen for good.
+    ///
+    /// Revert-check: removing any of these codes from
+    /// `CoreDataErrorClassifier.isMigrationError` fails the matching case.
+    func testRecommendedAction_deterministicMigrationFailures_returnMigrationRecovery() {
+        let cases: [(String, Int)] = [
+            ("NSMigrationMissingMappingModelError", NSMigrationMissingMappingModelError),
+            ("NSMigrationManagerSourceStoreError", NSMigrationManagerSourceStoreError),
+            ("NSMigrationManagerDestinationStoreError", NSMigrationManagerDestinationStoreError),
+            ("NSEntityMigrationPolicyError", NSEntityMigrationPolicyError),
+            ("NSInferredMappingModelError", NSInferredMappingModelError)
+        ]
+        for (name, code) in cases {
+            let error = NSError(domain: NSCocoaErrorDomain, code: code)
+            let action = CoreDataErrorClassifier.recommendedAction(for: error, currentAttempts: 0, maxAttempts: 3)
+            guard case .migrationRecovery = action else {
+                XCTFail("Expected \(name) to run migration recovery, got \(action)")
+                continue
+            }
+        }
+    }
+
+    /// A migration-family failure caused by a full disk still keeps the store.
+    func testRecommendedAction_missingMappingModelOnFullDisk_keepsStore() {
+        let error = NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSMigrationMissingMappingModelError,
+            userInfo: [NSSQLiteErrorDomain: NSNumber(value: 13)]
+        )
+        let action = CoreDataErrorClassifier.recommendedAction(for: error, currentAttempts: 0, maxAttempts: 3)
+        guard case .keepStore = action else {
+            return XCTFail("Expected .keepStore, got \(action)")
+        }
+    }
+
     /// An unclassified error proves nothing about the file, so it keeps the
     /// store instead of deleting it.
     ///

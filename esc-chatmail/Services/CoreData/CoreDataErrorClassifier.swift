@@ -33,6 +33,14 @@ enum CoreDataErrorClassifier {
     }
 
     /// Checks if an error is migration-related.
+    ///
+    /// Covers the whole 1341xx migration family. Before `.storeReset` became an
+    /// allow-list the fallback recovered any code missing here the same way, so
+    /// gaps did not matter; now a missing code falls through to `.keepStore`,
+    /// and a deterministic failure such as a mapping model lightweight
+    /// migration cannot infer (134140) would leave launch on the failure screen
+    /// for good. Out-of-space and other unavailable-store causes are checked
+    /// first and still keep the store.
     /// - Parameter error: The NSError to classify
     /// - Returns: true if the error is related to migration
     static func isMigrationError(_ error: NSError) -> Bool {
@@ -41,6 +49,11 @@ enum CoreDataErrorClassifier {
             NSMigrationConstraintViolationError,
             NSMigrationCancelledError,
             NSMigrationMissingSourceModelError,
+            NSMigrationMissingMappingModelError,
+            NSMigrationManagerSourceStoreError,
+            NSMigrationManagerDestinationStoreError,
+            NSEntityMigrationPolicyError,
+            NSInferredMappingModelError,
             NSPersistentStoreIncompatibleVersionHashError
         ]
         return migrationCodes.contains(error.code)
