@@ -14,7 +14,7 @@ final class AppLoadingPolicyTests: XCTestCase {
         )
 
         let kind = AppLoadingPolicy.storeLoadFailureKind(for: error, availableCapacityBytes: plentyOfSpace)
-        let notice = AppLoadingPolicy.storeLoadFailureNotice(for: kind, resetEligibleFailureCount: 0)
+        let notice = AppLoadingPolicy.storeLoadFailureNotice(for: kind, resetEligibleFailureCount: 0, isFreeSpaceKnown: true)
 
         XCTAssertEqual(kind, .insufficientStorage)
         XCTAssertEqual(notice.title, "Not Enough Storage")
@@ -47,7 +47,7 @@ final class AppLoadingPolicyTests: XCTestCase {
 
         let withSpace = AppLoadingPolicy.storeLoadFailureKind(for: error, availableCapacityBytes: plentyOfSpace)
         let capacityUnknown = AppLoadingPolicy.storeLoadFailureKind(for: error, availableCapacityBytes: nil)
-        let notice = AppLoadingPolicy.storeLoadFailureNotice(for: withSpace, resetEligibleFailureCount: 1)
+        let notice = AppLoadingPolicy.storeLoadFailureNotice(for: withSpace, resetEligibleFailureCount: 1, isFreeSpaceKnown: true)
 
         XCTAssertEqual(withSpace, .storeUnavailable)
         XCTAssertEqual(capacityUnknown, .storeUnavailable)
@@ -133,11 +133,13 @@ final class AppLoadingPolicyTests: XCTestCase {
     func testStoreLoadFailureNotice_storeUnavailable_offersResetOnlyFromThreshold() {
         let below = AppLoadingPolicy.storeLoadFailureNotice(
             for: .storeUnavailable,
-            resetEligibleFailureCount: threshold - 1
+            resetEligibleFailureCount: threshold - 1,
+            isFreeSpaceKnown: true
         )
         let atThreshold = AppLoadingPolicy.storeLoadFailureNotice(
             for: .storeUnavailable,
-            resetEligibleFailureCount: threshold
+            resetEligibleFailureCount: threshold,
+            isFreeSpaceKnown: true
         )
 
         XCTAssertFalse(below.offersMailboxReset)
@@ -145,11 +147,29 @@ final class AppLoadingPolicyTests: XCTestCase {
         XCTAssertEqual(atThreshold.title, "Can't Open Your Mail")
     }
 
+    /// A failure without a free-space reading keeps the streak, but the
+    /// stack refuses to reset without a reading, so an offer already earned
+    /// must not stay on screen as a button that only retries.
+    ///
+    /// Revert-check: dropping `isFreeSpaceKnown` from the `.storeUnavailable`
+    /// `where` clause in `AppLoadingPolicy.storeLoadFailureNotice` fails this.
+    func testStoreLoadFailureNotice_freeSpaceUnknownPastThreshold_withholdsReset() {
+        let notice = AppLoadingPolicy.storeLoadFailureNotice(
+            for: .storeUnavailable,
+            resetEligibleFailureCount: threshold * 10,
+            isFreeSpaceKnown: false
+        )
+
+        XCTAssertFalse(notice.offersMailboxReset)
+        XCTAssertEqual(notice.title, "Can't Open Your Mail")
+    }
+
     func testStoreLoadFailureNotice_storageOrOtherFailure_neverOffersReset() {
         for kind in [AppLoadingPolicy.StoreLoadFailureKind.insufficientStorage, .other] {
             let notice = AppLoadingPolicy.storeLoadFailureNotice(
                 for: kind,
-                resetEligibleFailureCount: threshold * 10
+                resetEligibleFailureCount: threshold * 10,
+                isFreeSpaceKnown: true
             )
 
             XCTAssertFalse(notice.offersMailboxReset, "\(kind)")
