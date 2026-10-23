@@ -9,7 +9,9 @@ import CoreData
 /// prove the file is not a usable database, and everything else keeps the
 /// store. It used to be the fallback for any error that was neither a timeout
 /// nor a migration error, which deleted the store on a full disk, an I/O
-/// fault, or a launch before first unlock.
+/// fault, or a launch before first unlock. A kept store that never opens is
+/// reset only by the user, from the launch screen's Reset Mailbox
+/// (`AppLoadingPolicy`, `CoreDataStack.resetStoreAfterLoadFailure()`).
 enum CoreDataErrorClassifier {
 
     /// Checks if an error is recoverable with retry.
@@ -143,7 +145,8 @@ enum CoreDataErrorClassifier {
         /// Back up and delete the store. Only for a store proven corrupt.
         case storeReset
         /// Leave the store on disk and latch a load error the user can retry
-        /// (`CoreDataStack.retryLoadAfterFailure()`).
+        /// (`CoreDataStack.retryLoadAfterFailure()`) or, once retrying has
+        /// not helped, reset (`CoreDataStack.resetStoreAfterLoadFailure()`).
         case keepStore
     }
 }

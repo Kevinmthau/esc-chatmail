@@ -231,6 +231,52 @@ final class CoreDataStack: @unchecked Sendable {
         loadPersistentStores(for: container)
     }
 
+    /// What `resetStoreAfterLoadFailure()` did.
+    enum StoreResetOutcome: Equatable {
+        /// The store was backed up and removed. `retryLoadAfterFailure()`
+        /// then loads an empty one.
+        case removed
+        /// Nothing was touched: no `.unavailable` load failure is latched
+        /// with the store detached. The store opened, a timeout retry is
+        /// pending, or the latched failure is a full disk.
+        case notResettable
+        /// The backup could not be written or the store could not be
+        /// removed, so it was kept and the failure stays latched.
+        case failed
+    }
+
+    /// Backs up and removes a store whose load failed and was kept, for the
+    /// launch screen's Reset Mailbox once retrying has not helped
+    /// (`AppLoadingPolicy`): a permanent error outside the classifier's reset
+    /// allow-list otherwise strands the user on that screen. Goes through the
+    /// same backup-then-remove path as a corrupt store; the caller then calls
+    /// `retryLoadAfterFailure()`.
+    ///
+    /// Refuses unless an `.unavailable` failure is latched and no store is
+    /// attached, so it never deletes an open store or one a timeout retry is
+    /// about to load, and never runs on a full disk, where freeing space
+    /// keeps the data. Call it on the main actor, where launch attempts load
+    /// the store synchronously, so a load cannot start between these checks
+    /// and the removal.
+    func resetStoreAfterLoadFailure() -> StoreResetOutcome {
+        let container = persistentContainer
+        guard let loadError = storeLoadError,
+              case PersistentStoreLoadError.unavailable = loadError,
+              container.persistentStoreCoordinator.persistentStores.isEmpty,
+              let storeURL = container.persistentStoreDescriptions.first?.url else {
+            return .notResettable
+        }
+        // Deliberate data loss, like migration recovery: the backup is the
+        // only copy of queued PendingAction and OutboundSendMutationRecord
+        // rows.
+        Log.error(
+            "Resetting the store at the user's request; queued PendingAction/OutboundSendMutationRecord rows survive only in the backup",
+            category: .coreData,
+            error: loadError
+        )
+        return recoveryHandler.prepareStoreReset(for: storeURL) ? .removed : .failed
+    }
+
     private func retryLoadingStore(for container: NSPersistentContainer) {
         loadPersistentStores(for: container)
     }
