@@ -106,7 +106,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             queuedSubmission.optimisticMessageObjectID,
             snapshot.createdOptimisticMessageObjectIDs.last
         )
-        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+        await assertPostSendSyncRanOnce(syncPerformer)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
         XCTAssertEqual(mutationTracker.trackedConversationReferences, [queuedSubmission.conversationReference])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
@@ -189,7 +189,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             queuedSubmission.optimisticMessageObjectID,
             snapshot.createdOptimisticMessageObjectIDs.last
         )
-        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+        await assertPostSendSyncRanOnce(syncPerformer)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
         XCTAssertEqual(mutationTracker.trackedConversationReferences, [queuedSubmission.conversationReference])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
@@ -585,7 +585,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertTrue(snapshot.sendNewCalls.first?.htmlBody?.contains("Forwarded HTML") == true)
         XCTAssertEqual(snapshot.markAttachmentsAsUploadingCalls, [])
         XCTAssertEqual(snapshot.sendNewCalls.first?.inlineAttachmentContentIDs, ["cid-inline"])
-        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+        await assertPostSendSyncRanOnce(syncPerformer)
     }
 
     func testSend_forwardWithoutUserBodyKeepsOptimisticPreviewEmptyAndSendsForwardedBody() async throws {
@@ -622,7 +622,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendNewCalls.count, 1)
         XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Forwarded plain text")
         XCTAssertTrue(snapshot.sendNewCalls.first?.htmlBody?.contains("Forwarded plain text") == true)
-        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+        await assertPostSendSyncRanOnce(syncPerformer)
     }
 
     func testSend_invokesSuccessHooksAfterBackgroundSend() async throws {
@@ -1943,6 +1943,24 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
+    }
+
+    /// The background send calls `onSuccess` and only then awaits the
+    /// post-send incremental sync (its background lease ends before optional
+    /// mailbox sync), so a test resuming from its `onSuccess` expectation can
+    /// read the count before the detached task reaches the sync: CI saw 0 for
+    /// 1. Wait for the sync, then pin exactly one.
+    ///
+    /// HONEST SCOPE: the suite cannot force that interleaving. Delaying
+    /// `MockCoordinatorSyncPerformer.performIncrementalSync` by 300 ms fails
+    /// every caller with the old immediate read and passes with this wait.
+    private func assertPostSendSyncRanOnce(
+        _ syncPerformer: MockCoordinatorSyncPerformer,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        await waitUntil(file: file, line: line) { syncPerformer.performIncrementalSyncCalls >= 1 }
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1, file: file, line: line)
     }
 
     private func makeCoordinator(
