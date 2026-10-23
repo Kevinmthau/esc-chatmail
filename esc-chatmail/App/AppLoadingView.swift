@@ -10,6 +10,7 @@ import SwiftUI
 /// in place of the spinner when the store could not be opened.
 struct AppLoadingView: View {
     @ObservedObject private var model: AppLoadingModel
+    @State private var isConfirmingMailboxReset = false
 
     @MainActor
     init(model: AppLoadingModel? = nil) {
@@ -38,11 +39,27 @@ struct AppLoadingView: View {
                         model.retry()
                     }
                     .buttonStyle(.borderedProminent)
+                    if failure.offersMailboxReset {
+                        Button("Reset Mailbox…", role: .destructive) {
+                            isConfirmingMailboxReset = true
+                        }
+                    }
                 }
                 .padding(.horizontal, 32)
             } else {
                 ProgressView()
             }
+        }
+        .alert(
+            AppLoadingPolicy.mailboxResetConfirmation.title,
+            isPresented: $isConfirmingMailboxReset
+        ) {
+            Button(AppLoadingPolicy.mailboxResetConfirmation.confirmButtonTitle, role: .destructive) {
+                model.resetMailbox()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(AppLoadingPolicy.mailboxResetConfirmation.message)
         }
     }
 }
