@@ -7,6 +7,7 @@ import SQLite3
 /// error outside the classifier's reset allow-list keeps the store, and a
 /// permanent one used to leave launch on the failure screen for good.
 final class CoreDataStackLoadFailureResetTests: XCTestCase {
+    private static let plentyOfSpace: Int64 = 50 * 1024 * 1024 * 1024
     private var directoriesToRemove: [URL] = []
 
     override func tearDown() {
@@ -23,7 +24,7 @@ final class CoreDataStackLoadFailureResetTests: XCTestCase {
     func testResetStoreAfterLoadFailure_unopenableStore_reloadsEmptyStoreAndKeepsBackup() async throws {
         let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
         let container = TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL)
-        let stack = CoreDataStack(unloadedPersistentContainerForTesting: container)
+        let stack = makeStack(container)
         _ = stack.persistentContainer
         try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
 
@@ -56,11 +57,11 @@ final class CoreDataStackLoadFailureResetTests: XCTestCase {
     func testResetMailbox_realFailedLoad_reachesLoadedStore() async throws {
         let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
         let container = TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL)
-        let stack = CoreDataStack(unloadedPersistentContainerForTesting: container)
+        let stack = makeStack(container)
         let model = AppLoadingModel(
             requestRetry: { stack.retryLoadAfterFailure() },
             resetStore: { stack.resetStoreAfterLoadFailure() },
-            availableCapacityBytes: { nil },
+            availableCapacityBytes: { Self.plentyOfSpace },
             isProtectedDataAvailable: { true }
         )
         _ = stack.persistentContainer
@@ -92,9 +93,7 @@ final class CoreDataStackLoadFailureResetTests: XCTestCase {
     /// store.
     func testResetStoreAfterLoadFailure_insufficientStorageLatched_keepsStore() async throws {
         let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
-        let stack = CoreDataStack(
-            unloadedPersistentContainerForTesting: TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL)
-        )
+        let stack = makeStack(TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL))
         _ = stack.persistentContainer
         try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
         stack.debugSetStoreLoadErrorForTesting(
@@ -116,7 +115,7 @@ final class CoreDataStackLoadFailureResetTests: XCTestCase {
     func testResetStoreAfterLoadFailure_storeAttached_keepsStore() async throws {
         let storeURL = try makeStoreDirectory().appendingPathComponent("Mailbox.sqlite")
         let container = TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL)
-        let stack = CoreDataStack(unloadedPersistentContainerForTesting: container)
+        let stack = makeStack(container)
         _ = stack.persistentContainer
         try await stack.waitForStoreToLoad(timeout: 5)
         XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .notResettable, "A loaded store has nothing latched")
@@ -141,8 +140,8 @@ final class CoreDataStackLoadFailureResetTests: XCTestCase {
         let storeDirectory = try makeStoreDirectory()
         try FileManager.default.removeItem(at: storeDirectory)
         try Data("not a directory".utf8).write(to: storeDirectory)
-        let stack = CoreDataStack(
-            unloadedPersistentContainerForTesting: TestCoreDataStack.makeUnloadedSQLiteContainer(
+        let stack = makeStack(
+            TestCoreDataStack.makeUnloadedSQLiteContainer(
                 storeURL: storeDirectory.appendingPathComponent("Mailbox.sqlite")
             )
         )
@@ -162,7 +161,135 @@ final class CoreDataStackLoadFailureResetTests: XCTestCase {
         }
     }
 
+    /// A full disk usually latches `.unavailable` (SQLite reports CANTOPEN),
+    /// so the latched error alone cannot rule it out; the stack checks free
+    /// space itself rather than trusting the screen to have.
+    ///
+    /// Revert-check: dropping the `StoreVolumeFreeSpace.hasRoomForStoreReset`
+    /// condition from `CoreDataStack.resetStoreAfterLoadFailure` removes the
+    /// store.
+    func testResetStoreAfterLoadFailure_lowFreeSpace_keepsStore() async throws {
+        let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
+        let stack = makeStack(
+            TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL),
+            availableStorageBytes: StoreVolumeFreeSpace.lowStorageThresholdBytes - 1
+        )
+        _ = stack.persistentContainer
+        try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
+
+        XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .notResettable)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: storeURL.path))
+        XCTAssertTrue(CoreDataBackupManager.listBackups(for: storeURL).isEmpty)
+    }
+
+    /// Revert-check: making `StoreVolumeFreeSpace.hasRoomForStoreReset` treat
+    /// a nil reading as room removes the store.
+    func testResetStoreAfterLoadFailure_freeSpaceUnknown_keepsStore() async throws {
+        let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
+        let stack = makeStack(
+            TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL),
+            availableStorageBytes: nil
+        )
+        _ = stack.persistentContainer
+        try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
+
+        XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .notResettable)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: storeURL.path))
+        XCTAssertTrue(CoreDataBackupManager.listBackups(for: storeURL).isEmpty)
+    }
+
+    /// Each reset's backup is a whole mailbox; once the replacement store
+    /// opens, only the newest is kept.
+    ///
+    /// Revert-check: removing the `CoreDataBackupManager.pruneBackups` call
+    /// from `CoreDataStack.loadPersistentStores` keeps the earlier backup.
+    func testRetryAfterReset_earlierBackupPresent_keepsOnlyTheResetsBackup() async throws {
+        let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
+        let earlierBackup = try writeBackupFile(
+            named: "Mailbox.earlier.sqlite",
+            besideStoreAt: storeURL,
+            createdAt: Date(timeIntervalSinceNow: -3_600)
+        )
+        let container = TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL)
+        let stack = makeStack(container)
+        _ = stack.persistentContainer
+        try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
+
+        XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .removed)
+        XCTAssertEqual(CoreDataBackupManager.listBackups(for: storeURL).count, 2)
+        stack.retryLoadAfterFailure()
+        try await stack.waitForStoreToLoad(timeout: 5)
+
+        let backups = CoreDataBackupManager.listBackups(for: storeURL)
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertNotEqual(backups.first?.lastPathComponent, earlierBackup.lastPathComponent)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: earlierBackup.path))
+    }
+
+    /// Sign-out and disconnect remove the mailbox through `destroyAllData`;
+    /// a backup is a copy of that mailbox and goes with it.
+    ///
+    /// Revert-check: removing the `CoreDataBackupManager.removeAllBackups`
+    /// loop from `CoreDataStack.destroyAllData`, or deriving its locations
+    /// from the attached stores (all detached by then), keeps the backup.
+    func testDestroyAllData_loadedStoreWithBackup_removesBackup() async throws {
+        let storeURL = try makeStoreDirectory().appendingPathComponent("Mailbox.sqlite")
+        let stack = makeStack(TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL))
+        _ = stack.persistentContainer
+        try await stack.waitForStoreToLoad(timeout: 5)
+        let backup = try CoreDataBackupManager.createTimestampedBackup(at: storeURL)
+
+        try stack.destroyAllData()
+
+        XCTAssertTrue(CoreDataBackupManager.listBackups(for: storeURL).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: storeURL.path))
+    }
+
+    /// The backups are found from the store's description, so a store that
+    /// never opened (nothing attached to iterate) still loses them.
+    ///
+    /// Revert-check: deriving the backup locations in
+    /// `CoreDataStack.destroyAllData` from the attached stores instead of
+    /// `persistentStoreDescriptions` keeps the backup.
+    func testDestroyAllData_storeNeverOpened_removesBackup() async throws {
+        let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
+        let stack = makeStack(TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL))
+        _ = stack.persistentContainer
+        try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
+        let backup = try writeBackupFile(named: "Mailbox.earlier.sqlite", besideStoreAt: storeURL)
+
+        try stack.destroyAllData()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
     // MARK: - Helpers
+
+    private func makeStack(
+        _ container: NSPersistentContainer,
+        availableStorageBytes: Int64? = CoreDataStackLoadFailureResetTests.plentyOfSpace
+    ) -> CoreDataStack {
+        CoreDataStack(
+            unloadedPersistentContainerForTesting: container,
+            availableStorageBytes: { availableStorageBytes }
+        )
+    }
+
+    private func writeBackupFile(
+        named filename: String,
+        besideStoreAt storeURL: URL,
+        createdAt creationDate: Date? = nil
+    ) throws -> URL {
+        let backupsDirectory = storeURL.deletingLastPathComponent().appendingPathComponent("Backups")
+        try FileManager.default.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
+        let backup = backupsDirectory.appendingPathComponent(filename)
+        try Data("earlier mailbox".utf8).write(to: backup)
+        if let creationDate {
+            try FileManager.default.setAttributes([.creationDate: creationDate], ofItemAtPath: backup.path)
+        }
+        return backup
+    }
 
     private func makeStoreDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory

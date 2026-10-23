@@ -27,9 +27,7 @@ final class AppLoadingModel: ObservableObject {
             CoreDataStack.shared.resetStoreAfterLoadFailure()
         },
         availableCapacityBytes: @escaping @Sendable () -> Int64? = {
-            try? URL(fileURLWithPath: NSHomeDirectory())
-                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-                .volumeAvailableCapacityForImportantUsage
+            StoreVolumeFreeSpace.availableBytes()
         },
         isProtectedDataAvailable: @escaping @MainActor () -> Bool = {
             UIApplication.shared.isProtectedDataAvailable
@@ -44,14 +42,16 @@ final class AppLoadingModel: ObservableObject {
     }
 
     func showStoreLoadFailure(_ error: Error) {
+        let availableBytes = availableCapacityBytes()
         let kind = AppLoadingPolicy.storeLoadFailureKind(
             for: error,
-            availableCapacityBytes: availableCapacityBytes()
+            availableCapacityBytes: availableBytes
         )
         resetEligibleFailureCount = AppLoadingPolicy.resetEligibleFailureCount(
             afterFailureOf: kind,
             previousCount: resetEligibleFailureCount,
-            isProtectedDataAvailable: isProtectedDataAvailable()
+            isProtectedDataAvailable: isProtectedDataAvailable(),
+            isFreeSpaceKnown: availableBytes != nil
         )
         storeLoadFailure = AppLoadingPolicy.storeLoadFailureNotice(
             for: kind,
@@ -94,7 +94,8 @@ final class AppLoadingModel: ObservableObject {
             retry()
         case .notResettable:
             // No resettable failure is latched any more (the store opened, or
-            // a retry is under way); the next attempt reports what is true.
+            // a retry is under way), or the disk filled or could no longer be
+            // measured since the offer; the next attempt reports what is true.
             retry()
         case .failed:
             storeLoadFailure = AppLoadingPolicy.mailboxResetFailedNotice

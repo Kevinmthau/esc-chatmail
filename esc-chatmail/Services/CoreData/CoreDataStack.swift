@@ -25,10 +25,15 @@ final class CoreDataStack: @unchecked Sendable {
     /// True when the injected container still needs its stores loaded through
     /// the production load and recovery ladder.
     private let injectedContainerNeedsLoading: Bool
+    /// `StoreVolumeFreeSpace.availableBytes()`, injectable so tests do not
+    /// depend on the host's free space. Read only by
+    /// `resetStoreAfterLoadFailure()`.
+    private let availableStorageBytes: @Sendable () -> Int64?
 
     init() {
         self.injectedContainerForTesting = nil
         self.injectedContainerNeedsLoading = false
+        self.availableStorageBytes = { StoreVolumeFreeSpace.availableBytes() }
     }
 
     /// Creates a stack backed by an existing, already-loaded container so that
@@ -40,6 +45,7 @@ final class CoreDataStack: @unchecked Sendable {
     init(persistentContainerForTesting container: NSPersistentContainer) {
         self.injectedContainerForTesting = container
         self.injectedContainerNeedsLoading = false
+        self.availableStorageBytes = { StoreVolumeFreeSpace.availableBytes() }
         self._isStoreLoaded = true
     }
 
@@ -47,9 +53,13 @@ final class CoreDataStack: @unchecked Sendable {
     /// Test-only: backs the stack with a container whose stores have not been
     /// loaded, so the first `persistentContainer` access runs the production
     /// load and recovery ladder against it.
-    init(unloadedPersistentContainerForTesting container: NSPersistentContainer) {
+    init(
+        unloadedPersistentContainerForTesting container: NSPersistentContainer,
+        availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() }
+    ) {
         self.injectedContainerForTesting = container
         self.injectedContainerNeedsLoading = true
+        self.availableStorageBytes = availableStorageBytes
     }
 #endif
 
@@ -187,6 +197,9 @@ final class CoreDataStack: @unchecked Sendable {
                 self.setStoreLoaded(true)
                 self.loadAttempts = 0
                 Log.info("Core Data store loaded successfully: \(storeDescription)", category: .coreData)
+                if let storeURL = storeDescription.url {
+                    CoreDataBackupManager.pruneBackups(for: storeURL)
+                }
             }
         }
     }
@@ -237,8 +250,9 @@ final class CoreDataStack: @unchecked Sendable {
         /// then loads an empty one.
         case removed
         /// Nothing was touched: no `.unavailable` load failure is latched
-        /// with the store detached. The store opened, a timeout retry is
-        /// pending, or the latched failure is a full disk.
+        /// with the store detached, or the volume is low on space or could
+        /// not be measured. The store opened, a timeout retry is pending, or
+        /// the disk is (or may be) full.
         case notResettable
         /// The backup could not be written or the store could not be
         /// removed, so it was kept and the failure stays latched.
@@ -254,16 +268,20 @@ final class CoreDataStack: @unchecked Sendable {
     ///
     /// Refuses unless an `.unavailable` failure is latched and no store is
     /// attached, so it never deletes an open store or one a timeout retry is
-    /// about to load, and never runs on a full disk, where freeing space
-    /// keeps the data. Call it on the main actor, where launch attempts load
-    /// the store synchronously, so a load cannot start between these checks
-    /// and the removal.
+    /// about to load. Also refuses unless the volume measurably has
+    /// `StoreVolumeFreeSpace.lowStorageThresholdBytes` free: a full disk
+    /// usually latches `.unavailable` (SQLite reports CANTOPEN, not FULL), so
+    /// the latched error alone cannot rule one out, and there freeing space
+    /// keeps the data while a reset frees nothing. Call it on the main actor,
+    /// where launch attempts load the store synchronously, so a load cannot
+    /// start between these checks and the removal.
     func resetStoreAfterLoadFailure() -> StoreResetOutcome {
         let container = persistentContainer
         guard let loadError = storeLoadError,
               case PersistentStoreLoadError.unavailable = loadError,
               container.persistentStoreCoordinator.persistentStores.isEmpty,
-              let storeURL = container.persistentStoreDescriptions.first?.url else {
+              let storeURL = container.persistentStoreDescriptions.first?.url,
+              StoreVolumeFreeSpace.hasRoomForStoreReset(availableBytes: availableStorageBytes()) else {
             return .notResettable
         }
         // Deliberate data loss, like migration recovery: the backup is the
@@ -394,6 +412,17 @@ final class CoreDataStack: @unchecked Sendable {
                 errors.append(error)
                 Log.error("Failed to destroy Core Data store", category: .coreData, error: error)
             }
+        }
+
+        // Backups from a reset or migration recovery are copies of this
+        // mailbox too, so they go with it (sign-out, disconnect, fresh
+        // install). Read from the descriptions, not the attached stores: the
+        // loop above has detached them all, and a store that never opened was
+        // never attached. Best-effort and not an error: nothing reads a backup
+        // back, so one that survives cannot surface in the app, and
+        // `pruneBackups` expires it.
+        for storeURL in persistentContainer.persistentStoreDescriptions.compactMap(\.url) {
+            CoreDataBackupManager.removeAllBackups(for: storeURL)
         }
 
         // Reset state
