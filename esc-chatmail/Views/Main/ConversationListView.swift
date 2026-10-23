@@ -4,6 +4,7 @@ import CoreData
 struct ConversationListView: View {
     @ObservedObject private var authSession: AuthSession
     @StateObject private var viewModel: ConversationListViewModel
+    @StateObject private var abandonedActions: AbandonedPendingActionsModel
     private let deps: Dependencies
     private let viewContext: NSManagedObjectContext
     /// Built once at init instead of inside `navigationDestination`: the bundle
@@ -26,6 +27,9 @@ struct ConversationListView: View {
                 dependencies: resolvedDeps.makeConversationListDependencies()
             )
         )
+        _abandonedActions = StateObject(
+            wrappedValue: AbandonedPendingActionsModel(manager: resolvedDeps.pendingActionsManager)
+        )
     }
 
     var body: some View {
@@ -45,6 +49,15 @@ struct ConversationListView: View {
 
     private var conversationList: some View {
         List {
+            if let summary = abandonedActions.summary {
+                AbandonedPendingActionsBanner(
+                    summary: summary,
+                    onRetry: abandonedActions.retryAll,
+                    onDismiss: abandonedActions.dismissAll
+                )
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden, edges: .top)
+            }
             ForEach(Array(viewModel.filteredConversationItems.enumerated()), id: \.element.id) { index, item in
                 // One structural path for both selection modes: an if/else here
                 // would make the arms `_ConditionalContent`, so toggling Select
@@ -135,6 +148,7 @@ struct ConversationListView: View {
             // in esc_chatmailApp.initializeApp(), off the first list layout passes.
             AppPrewarmer.prewarmAll()
             viewModel.onAppear(in: viewContext)
+            abandonedActions.refresh()
             // Lookups never prompt on their own, so this is the one deliberate
             // Contacts permission request (no-op after first launch/answer).
             ContactsAuthorizationCoordinator.shared.requestAccessOnFirstAuthenticatedLaunchIfNeeded()

@@ -575,6 +575,48 @@ final class PendingActionsManagerTests: XCTestCase {
         )
     }
 
+    /// The conversation list's banner re-reads abandoned actions after every
+    /// sync, so the read must not queue behind a sync run.
+    ///
+    /// Revert-check: acquiring the exclusive run (`withPendingActionRun`) in
+    /// `PendingActionsManager.fetchAbandonedActions(accountWorkRequest:)`
+    /// parks the read until the sync ends and fails the first assertion.
+    func testFetchAbandonedActionsDoesNotWaitBehindActiveSyncRun() async throws {
+        let coordinator = SyncRunCoordinator()
+        guard let syncRun = await coordinator.beginRun(kind: .foregroundIncremental) else {
+            return XCTFail("Expected a foreground run")
+        }
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            networkMonitor: NeverConnectedNetworkMonitor(),
+            syncRunCoordinator: coordinator
+        )
+        _ = PendingActionBuilder()
+            .withActionType("archiveConversation")
+            .withPayload(["messageIds": ["m-1"]])
+            .withStatus("abandoned")
+            .build(in: context)
+        try testStack.saveViewContext()
+        let finished = LockedFlag()
+
+        let fetchTask = Task {
+            let actions = await manager.fetchAbandonedActions()
+            finished.set()
+            return actions
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while !finished.isSet, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertTrue(finished.isSet, "The read must not park behind the sync run")
+        await coordinator.endRun(syncRun)
+        let actions = await fetchTask.value
+        XCTAssertEqual(actions.map(\.actionType), [.archiveConversation])
+        let activeRunKind = await coordinator.activeRunKind()
+        XCTAssertNil(activeRunKind, "The read's lease is released")
+    }
+
     func testCancelRequestedBeforeAccountTransitionDoesNotDeleteReplacementAction() async throws {
         let coordinator = SyncRunCoordinator()
         guard let blockingRun = await coordinator.beginRun(kind: .foregroundIncremental),
@@ -1705,6 +1747,133 @@ final class PendingActionsManagerTests: XCTestCase {
         )
         XCTAssertNil(activeRunKind)
     }
+
+    // MARK: - Oversized batch actions
+
+    /// End to end through the processor: a multi-selected archive past
+    /// Gmail's 1,000-ID batchModify cap used to be abandoned on its first
+    /// attempt, leaving the mail in the Gmail inbox.
+    ///
+    /// Revert-check: sending the whole payload in one `apiClient.batchModify`
+    /// from `GmailActionExecutor.execute`'s `.archiveConversation` arm makes
+    /// the first assertion fail.
+    func testQueuedOversizedConversationArchive_isSentInChunksAndCompletes() async throws {
+        let apiClient = MockGmailAPIClient()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: GmailActionExecutor(apiClientProvider: { apiClient }),
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            oneShotRepairDefaults: try makeIsolatedDefaults()
+        )
+        let messageIds = (0..<2_001).map { "multi-select-\($0)" }
+
+        await manager.queueConversationAction(
+            type: .archiveConversation,
+            sourceConversationId: UUID(),
+            messageIds: messageIds
+        )
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertTrue(
+            apiClient.batchModifyCalls.allSatisfy { $0.ids.count <= GmailActionExecutor.gmailBatchModifyLimit },
+            "No request may exceed Gmail's batchModify cap"
+        )
+        XCTAssertEqual(apiClient.batchModifyCalls.flatMap(\.ids), messageIds)
+        context.refreshAllObjects()
+        XCTAssertTrue(
+            try context.fetch(PendingAction.fetchRequest()).isEmpty,
+            "The action completes and is cleaned up instead of being abandoned"
+        )
+    }
+
+    /// Revert-check: dropping the `createdAt >= %@` clause or the
+    /// `messageIds.count > batchLimit` guard in
+    /// `PendingActionsManager.requeueRecentOversizedBatchActions` fails the
+    /// old-row or small-row assertion.
+    func testOversizedBatchRequeue_resetsOnlyRecentOversizedArchiveAndSpamRows() async throws {
+        let defaults = try makeIsolatedDefaults()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: MockActionExecutor(),
+            networkMonitor: NeverConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            oneShotRepairDefaults: defaults
+        )
+        let now = Date()
+        let oversized = ["messageIds": (0..<1_001).map { "m-\($0)" }]
+        let atLimit = ["messageIds": (0..<1_000).map { "m-\($0)" }]
+        let recentArchive = PendingActionBuilder()
+            .withActionType("archiveConversation").withPayload(oversized)
+            .withStatus("abandoned").withRetryCount(5)
+            .createdAt(now.addingTimeInterval(-60 * 60)).build(in: context)
+        let recentSpam = PendingActionBuilder()
+            .withActionType("reportSpam").withPayload(oversized)
+            .withStatus("abandoned")
+            .createdAt(now.addingTimeInterval(-60)).build(in: context)
+        let oldArchive = PendingActionBuilder()
+            .withActionType("archiveConversation").withPayload(oversized)
+            .withStatus("abandoned")
+            .createdAt(now.addingTimeInterval(-25 * 60 * 60)).build(in: context)
+        let smallArchive = PendingActionBuilder()
+            .withActionType("archiveConversation").withPayload(atLimit)
+            .withStatus("abandoned")
+            .createdAt(now.addingTimeInterval(-60)).build(in: context)
+        let markRead = PendingActionBuilder()
+            .withActionType("markRead").withPayload(oversized)
+            .withStatus("abandoned")
+            .createdAt(now.addingTimeInterval(-60)).build(in: context)
+        try testStack.saveViewContext()
+
+        await manager.requeueRecentOversizedBatchActionsIfNeeded(now: now)
+
+        context.refreshAllObjects()
+        XCTAssertEqual(recentArchive.status, "pending")
+        XCTAssertEqual(recentArchive.retryCount, 0)
+        XCTAssertEqual(recentSpam.status, "pending")
+        XCTAssertEqual(oldArchive.status, "abandoned", "Replaying a day-old archive could override the user's later changes")
+        XCTAssertEqual(smallArchive.status, "abandoned", "A row within the cap was abandoned for some other reason")
+        XCTAssertEqual(markRead.status, "abandoned", "markRead was always chunked")
+        XCTAssertTrue(defaults.bool(forKey: PendingActionsManager.oversizedBatchRequeueMigrationKey))
+    }
+
+    /// Revert-check: removing the latch read at the top of
+    /// `PendingActionsManager.requeueRecentOversizedBatchActionsIfNeeded`
+    /// requeues the row a second time.
+    func testOversizedBatchRequeue_runsOnlyOnce() async throws {
+        let defaults = try makeIsolatedDefaults()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: MockActionExecutor(),
+            networkMonitor: NeverConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            oneShotRepairDefaults: defaults
+        )
+        await manager.requeueRecentOversizedBatchActionsIfNeeded()
+        XCTAssertTrue(defaults.bool(forKey: PendingActionsManager.oversizedBatchRequeueMigrationKey))
+
+        let abandonedLater = PendingActionBuilder()
+            .withActionType("archiveConversation")
+            .withPayload(["messageIds": (0..<1_001).map { "m-\($0)" }])
+            .withStatus("abandoned")
+            .createdMinutesAgo(1)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        await manager.requeueRecentOversizedBatchActionsIfNeeded()
+
+        context.refreshAllObjects()
+        XCTAssertEqual(abandonedLater.status, "abandoned")
+    }
+
+    private func makeIsolatedDefaults() throws -> UserDefaults {
+        let suiteName = "PendingActionsManagerTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        return defaults
+    }
 }
 
 // MARK: - Account-scoped failure test doubles
@@ -2074,6 +2243,19 @@ private actor SuspendedCancellableActionExecutor: ActionExecutorProtocol {
             wasCancelled = true
             throw CancellationError()
         }
+    }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _isSet = false
+
+    var isSet: Bool {
+        lock.withLock { _isSet }
+    }
+
+    func set() {
+        lock.withLock { _isSet = true }
     }
 }
 

@@ -49,8 +49,8 @@ final class CoreDataRecoveryHandlerTests: XCTestCase {
         }
     }
 
-    func testHandleError_unrecoverable_returnsStoreReset() {
-        let error = NSError(domain: NSCocoaErrorDomain, code: NSValidationMissingMandatoryPropertyError)
+    func testHandleError_corruptStore_returnsStoreReset() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError)
 
         let result = sut.handleError(error, currentAttempts: 0)
 
@@ -59,13 +59,23 @@ final class CoreDataRecoveryHandlerTests: XCTestCase {
         }
     }
 
-    func testHandleError_attemptsExhausted_returnsStoreReset() {
+    func testHandleError_unclassifiedError_keepsStore() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: NSValidationMissingMandatoryPropertyError)
+
+        let result = sut.handleError(error, currentAttempts: 0)
+
+        guard case .keepStore = result else {
+            return XCTFail("Expected .keepStore, got \(result)")
+        }
+    }
+
+    func testHandleError_attemptsExhausted_keepsStore() {
         let error = NSError(domain: NSCocoaErrorDomain, code: NSPersistentStoreTimeoutError)
 
         let result = sut.handleError(error, currentAttempts: 3)
 
-        guard case .storeReset = result else {
-            return XCTFail("Expected .storeReset when attempts exhausted, got \(result)")
+        guard case .keepStore = result else {
+            return XCTFail("Expected .keepStore when attempts exhausted, got \(result)")
         }
     }
 
@@ -100,28 +110,5 @@ final class CoreDataRecoveryHandlerTests: XCTestCase {
     func testPrepareStoreReset_missingStore_returnsFalse() {
         let missing = tempDir.appendingPathComponent("missing.sqlite")
         XCTAssertFalse(sut.prepareStoreReset(for: missing))
-    }
-
-    // MARK: - notifyUserOfCriticalError
-
-    func testNotifyUserOfCriticalError_postsNotificationWithWrappedError() {
-        let expectation = self.expectation(description: "criticalErrorNotification")
-        let underlying = NSError(domain: "TestDomain", code: 42)
-
-        let observer = NotificationCenter.default.addObserver(
-            forName: NSNotification.Name("CoreDataCriticalError"),
-            object: nil,
-            queue: .main
-        ) { notification in
-            if let error = notification.userInfo?["error"] as? CoreDataError,
-               case .persistentFailure = error {
-                expectation.fulfill()
-            }
-        }
-
-        sut.notifyUserOfCriticalError(underlying)
-
-        wait(for: [expectation], timeout: 2.0)
-        NotificationCenter.default.removeObserver(observer)
     }
 }

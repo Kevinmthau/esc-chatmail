@@ -219,9 +219,6 @@ struct CoreDataConfig {
 
     /// Delay between store load retries (in seconds)
     static let retryDelay: TimeInterval = 2.0
-
-    /// Maximum retry attempts for save operations
-    static let maxSaveRetries = 3
 }
 
 // MARK: - Network Configuration
