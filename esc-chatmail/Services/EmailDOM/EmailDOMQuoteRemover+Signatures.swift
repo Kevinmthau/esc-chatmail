@@ -231,10 +231,14 @@ extension EmailDOMQuoteRemover {
     /// sensitive: only an all-caps code of two to four letters directly before the label and
     /// its colon, so a name ahead of a label ("Jane Mobile:") still has to pass the
     /// leading-segment rules. An all-caps surname has the same shape ("Lin CHEN Mobile:"),
-    /// so `isSignaturePhoneLine` drops codes only for a line that fails as written.
+    /// so `isSignaturePhoneLine` drops codes only for a line that fails as written. Shouted
+    /// English words are not codes ("ASAP Phone:", "CALL Mobile:"): without the exclusion an
+    /// authored call-me line became a contact row. Two-letter words stay codes, because a
+    /// state or country code ("OR Office:", "MY Mobile:") is spelled the same.
     private static let signaturePhoneLabelQualifierPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"(?<![\p{L}\p{N}])[A-Z]{2,4}\s+(?=(?i:tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
+            pattern: #"(?<![\p{L}\p{N}])(?!(?:ASAP|CALL|TEXT|FYI|PLS|PLZ|NOTE|THE|AND|FOR|OUR|YOUR|VIA)\s)"# +
+                #"[A-Z]{2,4}\s+(?=(?i:tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
             options: []
         )
     }()
@@ -977,8 +981,12 @@ extension EmailDOMQuoteRemover {
 
     private static func isSignaturePhoneSegmentSequence(_ line: String) -> Bool {
         // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
+        // An MVPN short number has no colon, so it splits on its own label and digits
+        // ("Tel: +886-3-555-0123 Ext. 15000 MVPN 6688"); without the split the short number
+        // sat in the phone's suffix and rejected the row.
         let normalized = line.replacingOccurrences(
-            of: #"(?:\s*[|•│┃¦]\s*|\s+)(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
+            of: #"(?:\s*[|•│┃¦]\s*|\s+)(?=(?:(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:|"# +
+                #"mvpn\s*[:#.]?\s*\d))"#,
             with: "|",
             options: [.regularExpression, .caseInsensitive]
         )

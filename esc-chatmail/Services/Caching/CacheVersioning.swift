@@ -14,7 +14,7 @@ enum CacheVersioning {
     /// in-memory caches need no constant: they start empty on every launch.
     /// The persisted rich-content verdict is versioned separately, by
     /// `richContentVerdictEpoch`: a cleanup change usually needs both bumped.
-    static let chatPreviewDerivationVersion = "2026-10-27-signature-qualified-mobile-v1"
+    static let chatPreviewDerivationVersion = "2026-10-27-signature-mvpn-inline-v1"
 
     /// Epoch of persisted rich-content verdicts (`RichContentVerdict.storedValue`,
     /// `Message.richContentVerdict`). Bump whenever `RichContentVerdictResolver`
@@ -33,7 +33,7 @@ enum CacheVersioning {
     /// A missed bump is not permanent either: a bubble load that disagrees with
     /// the stored verdict has it recomputed (`MessageBubbleLoader.loadContent`).
     /// Valid range 1...16383: the stored value is an Int16 holding `epoch * 2 + bit`.
-    static let richContentVerdictEpoch: Int16 = 2
+    static let richContentVerdictEpoch: Int16 = 3
 
     /// Embedded in email preview snapshot cache keys. Bump when the preview
     /// renderer's visual output changes.

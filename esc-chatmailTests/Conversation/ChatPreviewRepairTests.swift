@@ -150,11 +150,11 @@ final class ChatPreviewRepairTests: XCTestCase {
     // Revert-check: CacheVersioning.chatPreviewDerivationVersion "2026-10-27-signature-qualified-mobile-v1"
     // re-derives a preview the front-core version already completed; the qualified-mobile and MVPN
     // contact rows change only the saved preview, never the canonical HTML bytes.
-    func testQualifiedMobileVersionRepairsLeakedOutlookSignatureWithoutChangingCanonicalHTML() async throws {
+    func testRepairPersistedChatPreviews_qualifiedMobileVersion_rederivesLeakedPreviewWithoutChangingCanonicalHTML() async throws {
         let received = try message("001")
-        let canonicalURL = try XCTUnwrap(handler.saveHTML(QualifiedMobileSignatureFixture.html, for: "001"))
+        let canonicalURL = try XCTUnwrap(handler.saveHTML(try QualifiedMobileSignatureFixture.html(), for: "001"))
         received.bodyStorageURI = canonicalURL.absoluteString
-        received.chatPreviewText = QualifiedMobileSignatureFixture.leakedChatText
+        received.chatPreviewText = try QualifiedMobileSignatureFixture.leakedChatText()
         let canonicalData = try Data(contentsOf: canonicalURL)
         try viewContext.save()
         flags.set(true, forKey: "chatPreviewRepair.2026-09-17-signature-front-core-v1")
@@ -165,8 +165,38 @@ final class ChatPreviewRepairTests: XCTestCase {
         XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
         viewContext.refreshAllObjects()
 
-        XCTAssertEqual(received.chatPreviewText, QualifiedMobileSignatureFixture.expectedChatText)
-        XCTAssertEqual(handler.loadHTML(for: "001"), QualifiedMobileSignatureFixture.html)
+        XCTAssertEqual(received.chatPreviewText, try QualifiedMobileSignatureFixture.expectedChatText())
+        XCTAssertEqual(handler.loadHTML(for: "001"), try QualifiedMobileSignatureFixture.html())
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalData)
+        withExtendedLifetime(repair) {}
+    }
+
+    // Revert-check: CacheVersioning.chatPreviewDerivationVersion "2026-10-27-signature-mvpn-inline-v1"
+    // re-derives a preview the qualified-mobile version already completed; the inline MVPN split
+    // changes only the saved preview, never the canonical HTML bytes.
+    func testRepairPersistedChatPreviews_mvpnInlineVersion_rederivesLeakedPreviewWithoutChangingCanonicalHTML() async throws {
+        let received = try message("001")
+        let mvpnHTML = """
+        <p>Please see the attached schedule.</p><p>Best regards,</p><p>Wei Lin</p>\
+        <p>Example Precision Inc.</p><p>Tel: +886-2-5555-0188 Ext. 321 MVPN 6688</p>\
+        <p>Email: <a href="mailto:wei.lin@example.test">wei.lin@example.test</a></p>
+        """
+        let canonicalURL = try XCTUnwrap(handler.saveHTML(mvpnHTML, for: "001"))
+        received.bodyStorageURI = canonicalURL.absoluteString
+        received.chatPreviewText = "Please see the attached schedule.\n\nBest regards,\n\nWei Lin\n\nExample Precision Inc." +
+            "\n\nTel: +886-2-5555-0188 Ext. 321 MVPN 6688\n\nEmail: wei.lin@example.test"
+        let canonicalData = try Data(contentsOf: canonicalURL)
+        try viewContext.save()
+        flags.set(true, forKey: "chatPreviewRepair.2026-10-27-signature-qualified-mobile-v1")
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
+        viewContext.refreshAllObjects()
+
+        XCTAssertEqual(received.chatPreviewText, "Please see the attached schedule.\n\nBest regards,\n\nWei Lin")
+        XCTAssertEqual(handler.loadHTML(for: "001"), mvpnHTML)
         XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalData)
         withExtendedLifetime(repair) {}
     }

@@ -967,6 +967,12 @@
       "notes": "Anonymized Outlook reply from a Taiwanese manufacturer: carrier/region-qualified mobile labels and an MVPN short number sit between the phone and email rows, so the upward scan stopped at the short number with one contact. The sign-off and name stay. Revert-check: EmailDOMQuoteRemover signaturePhoneLabelQualifierPattern and signatureShortDialPattern (either alone stops the scan) and SignaturePatterns.signOffPhrases 'thanks and best regards' (the name goes too without it) / web SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN, SIGNATURE_SHORT_DIAL_PATTERN, SIGN_OFF_PHRASES.",
       "inputHTML": "<div class=\"WordSection1\"><p class=\"MsoNormal\">Hi team,</p><p class=\"MsoNormal\">Could you please let us know your available time on November 6, or suggest another suitable time?</p><p class=\"MsoNormal\">Thank you for your support!</p><p class=\"MsoNormal\">Thanks and Best Regards,</p><p class=\"MsoNormal\">Lin Chen</p><p class=\"MsoNormal\">Example Computer Inc.</p><p class=\"MsoNormal\">Tel:+886-3-555-0123 Ext. 15000</p><p class=\"MsoNormal\">TWM Mobile: 0912555018</p><p class=\"MsoNormal\">CQ Mobile: 13800555018</p><p class=\"MsoNormal\">MVPN 655018</p><p class=\"MsoNormal\">Email: <a href=\"mailto:lin.chen@example.test\">lin.chen@example.test</a></p></div>",
       "expected": "Hi team,\n\nCould you please let us know your available time on November 6, or suggest another suitable time?\n\nThank you for your support!\n\nThanks and Best Regards,\n\nLin Chen"
+    },
+    {
+      "id": "html_mvpn_short_number_on_phone_row_signature_removed",
+      "notes": "The MVPN short number shares the telephone row with no separator, so the row only reads as contact details once the short number splits off; without the split the upward scan stopped at that row with one contact. Revert-check: the mvpn alternative in EmailDOMQuoteRemover.isSignaturePhoneSegmentSequence's separator pattern / web SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN.",
+      "inputHTML": "<div><p>Please see the attached schedule.</p><p>Best regards,</p><p>Wei Lin</p><p>Example Precision Inc.</p><p>Tel: +886-2-5555-0188 Ext. 321 MVPN 6688</p><p>Email: <a href=\"mailto:wei.lin@example.test\">wei.lin@example.test</a></p></div>",
+      "expected": "Please see the attached schedule.\n\nBest regards,\n\nWei Lin"
     }
   ],
   "rawSourceHTMLRecoveryCases": [

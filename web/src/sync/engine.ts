@@ -5,6 +5,7 @@
 
 import { setSyncProgress } from '@/db/kv'
 import { AuthRequiredError } from '@/gmail/errors'
+import { repairStoredChatPreviewsIfNeeded } from './chatPreviewRepair'
 import { depsNow, type SyncDeps } from './deps'
 import { repairStoredDisplayNamesIfNeeded } from './displayNameRepair'
 import { runIncrementalSync, type SyncRunResult } from './incremental'
@@ -93,6 +94,10 @@ export async function runSync(deps: SyncDeps, reason: SyncReason): Promise<RunSy
       // participant-set repairs does not matter.
       await repairStoredSubjectsIfNeeded(deps.db, depsNow(deps))
       const result = await runIncrementalSync(deps)
+      // Local-only too, but one budget can take seconds on a large mailbox, so it runs
+      // after the network pass rather than holding new mail behind it. It never reads
+      // participants or subjects, so its place among the other repairs does not matter.
+      await repairStoredChatPreviewsIfNeeded(deps.db, depsNow(deps))
       await repairParticipantSetConversations(deps.db, deps.accountEmail, depsNow(deps))
       return { ran: true, result }
     } catch (error) {

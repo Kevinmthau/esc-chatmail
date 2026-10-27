@@ -1827,7 +1827,7 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
     // fails "Jane Mobile:": a name ahead of a label still goes through the leading-segment rules.
     // HONEST SCOPE for the other prose rows: they pass at HEAD and pin what the two rules must
     // not claim.
-    func testIsContactSignatureLine_qualifiedMobileLabelsAndMVPNShortNumbers() {
+    func testIsContactSignatureLine_qualifiedMobileLabelsAndMVPNShortNumbers_separateContactRowsFromProse() {
         let signatureLines = [
             "TWM Mobile: 0912555018",
             "CQ Mobile: 13800555018",
@@ -1873,11 +1873,50 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         }
     }
 
+    // Revert-check: the shouted-word exclusion in EmailDOMQuoteRemover.signaturePhoneLabelQualifierPattern.
+    // Without it each word is dropped as a code and the bare labeled phone is a contact row.
+    // HONEST SCOPE for the two-letter codes: they pass with or without the exclusion and pin that
+    // a state or country code spelled like a word stays a code.
+    func testIsContactSignatureLine_shoutedWordAheadOfLabel_staysProse() {
+        let proseLines = [
+            "ASAP Phone: 415-555-1212",
+            "CALL Mobile: 415-555-1212",
+            "TEXT Cell: 415-555-1212",
+            "FYI Office: 415-555-1212"
+        ]
+        let codeLines = ["OR Office: 503-555-1212", "MY Mobile: 012-345 6789"]
+
+        for line in proseLines {
+            XCTAssertFalse(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected prose line: \(line)")
+        }
+        for line in codeLines {
+            XCTAssertTrue(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected signature line: \(line)")
+            XCTAssertTrue(EmailDOMQuoteRemover.isTrailingSignatureContactLine(line), "Expected trailing contact: \(line)")
+        }
+    }
+
+    // Revert-check: the mvpn alternative in EmailDOMQuoteRemover.isSignaturePhoneSegmentSequence's
+    // separator pattern. Without it the short number stays in the phone's suffix and rejects the row.
+    // HONEST SCOPE for the prose rows: they pass with or without the split and pin that splitting
+    // before "MVPN <digits>" does not turn the prose around it into a contact row.
+    func testIsContactSignatureLine_mvpnNumberAfterPhoneOnOneRow_isContactLine() {
+        let signatureLines = ["Tel: +886-3-555-0123 Ext. 15000 MVPN 6688", "Mobile: 0912555018 MVPN 655018"]
+        let proseLines = ["Call 415-555-1212 or MVPN 6688 today", "Lin Chen MVPN 655018"]
+
+        for line in signatureLines {
+            XCTAssertTrue(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected signature line: \(line)")
+            XCTAssertTrue(EmailDOMQuoteRemover.isTrailingSignatureContactLine(line), "Expected trailing contact: \(line)")
+        }
+        for line in proseLines {
+            XCTAssertFalse(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected prose line: \(line)")
+        }
+    }
+
     // Revert-check: signaturePhoneLabelQualifierPattern or signatureShortDialPattern (without
     // either, the upward scan stops at that row before the name and closing, so nothing is
     // removed) and SignaturePatterns.signOffPhrases "thanks and best regards" (without it the
     // scan stops at the closing as a body line and the name is removed with the signature).
-    func testTrailingContactSignature_qualifiedMobileAndMVPNRowsJoinTheContactBlock() throws {
+    func testTrailingContactSignature_qualifiedMobileAndMVPNRows_joinContactBlockKeepingSignOffAndName() throws {
         let html = """
         <p>Thank you for your support!</p><p>Thanks and Best Regards,</p><p>Lin Chen</p>\
         <p>Example Computer Inc.</p><p>Tel:+886-3-555-0123 Ext. 15000</p><p>TWM Mobile: 0912555018</p>\
@@ -1889,7 +1928,7 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
             "Thank you for your support!\n\nThanks and Best Regards,\nLin Chen"
         )
         XCTAssertEqual(
-            plainText(EmailDOMQuoteRemover.removeQuotes(from: QualifiedMobileSignatureFixture.html, mode: .quotedAndSignatures)),
+            plainText(EmailDOMQuoteRemover.removeQuotes(from: try QualifiedMobileSignatureFixture.html(), mode: .quotedAndSignatures)),
             "Hi team,\n\nCould you please let us know your available time on November 6, or suggest another suitable time?" +
                 "\n\nThank you for your support!\n\nThanks and Best Regards,\nLin Chen"
         )
