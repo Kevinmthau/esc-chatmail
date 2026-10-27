@@ -18,11 +18,11 @@
 // primary key in batches and stops at a per-run budget: a large mailbox converges
 // over several syncs. Each batch reads its rows and bodies in a read-only
 // transaction, derives with no transaction open, and writes in one short transaction
-// that commits the cursor with the rewritten rows and their rollups. The derivation
-// parses every body and is the slow part; run inside the write transaction it held
-// the messages table while a mark-read or a send waited behind it. Like the other
-// repairs, a failure is logged and the next sync resumes from the last committed
-// batch.
+// that commits the cursor with the rewritten rows and their rollups, unless another
+// walker committed since the read. The derivation parses every body and is the slow
+// part; run inside the write transaction it held the messages table while a
+// mark-read or a send waited behind it. Like the other repairs, a failure is logged
+// and the next sync resumes from the last committed batch.
 //
 // A store the sync fills from empty needs no walk at all, so the sync marks this
 // version's walk finished before its network pass while the store is still empty
@@ -82,14 +82,21 @@ export async function repairStoredChatPreviewsIfNeeded(db: ChatmailDB, now: numb
  * calls it before its network pass: everything it then stores is derived by the
  * current cleanup, and without the mark the first sync of a new sign-in re-cleaned
  * every message it had just stored. A store that already holds messages (an
- * upgrade) is left to the walk. A failure is logged, and the walk then runs.
+ * upgrade) is left to the walk, and so is a store with any state of this version:
+ * the walk that state records started from the first message. A failure is logged,
+ * and the walk then runs.
  */
 export async function seedChatPreviewRepairOnFreshStoreIfNeeded(db: ChatmailDB): Promise<void> {
   try {
     await db.transaction('rw', [db.syncState, db.messages], async () => {
       const state = repairState((await db.syncState.get(CHAT_PREVIEW_REPAIR_KEY))?.value)
-      if (state?.version === CHAT_PREVIEW_DERIVATION_VERSION && state.done) return
-      if ((await db.messages.count()) > 0) return
+      // Finished or not. Returning on a finished state alone probed the messages table
+      // on every sync until an upgraded store finished its walk, which takes a large
+      // mailbox many syncs.
+      if (state?.version === CHAT_PREVIEW_DERIVATION_VERSION) return
+      // One key, not count(): IndexedDB counts by walking every key, and this
+      // transaction holds the messages table for writing while it does.
+      if ((await db.messages.limit(1).primaryKeys()).length > 0) return
       const finished: ChatPreviewRepairState = {
         version: CHAT_PREVIEW_DERIVATION_VERSION,
         lastId: null,
@@ -151,12 +158,12 @@ async function rederiveBatch(
       cursor === null
         ? await db.messages.orderBy('id').limit(limit).toArray()
         : await db.messages.where('id').above(cursor).limit(limit).toArray()
-    const eligible = rows.filter((message) => message.isFromMe === 0 && message.hasHtmlBody === 1)
+    const eligible = rows.filter(isRederivable)
     const bodies = await db.bodies.bulkGet(eligible.map((message) => message.id))
-    return { cursor, rows, eligible, bodies }
+    return { state, cursor, rows, eligible, bodies }
   })
   if (snapshot === null) return null
-  const { cursor, rows, eligible, bodies } = snapshot
+  const { state, cursor, rows, eligible, bodies } = snapshot
 
   // No transaction is open here, so the slow part holds no lock.
   const rederived: RederivedPreviews[] = []
@@ -178,10 +185,25 @@ async function rederiveBatch(
   })
 
   return db.transaction('rw', [db.syncState, db.messages, db.conversations], async () => {
+    // Commit only over the state this batch read. Another walker can commit in
+    // between: a second tab when navigator.locks is missing (the fallback lock is
+    // per tab), or a tab on another build. Writing this batch's cursor over its state
+    // moved the cursor back or reopened a finished walk. The rows are dropped with
+    // it: a walker that moved the state past them derived them itself, and one that
+    // reset it makes the next read start over. The next read resumes from that state.
+    const latest = repairState((await db.syncState.get(CHAT_PREVIEW_REPAIR_KEY))?.value)
+    if (!isSameRepairState(latest, state)) {
+      return { scanned: rows.length, rewritten: 0, recomputed: 0, done: false }
+    }
+
     // Re-read, and write back only the previews: putting the rows back as read would
     // revert a local change made while the batch derived (a mark-read, an archive).
     // A row whose previews no longer hold what the derivation compared against keeps
-    // them, because whatever rewrote them read newer inputs.
+    // them, because whatever rewrote them read newer inputs, and so does a row that
+    // no longer qualifies. No writer outside the sync lock changes either today; the
+    // check keeps an outgoing row out of this rule if one ever does. The body is not
+    // re-read: only persist replaces a received row's body, and it runs under the
+    // sync lock this walk also holds.
     const current = await db.messages.bulkGet(rederived.map((entry) => entry.id))
     const rewritten: MessageRow[] = []
     const conversationIds = new Set<string>()
@@ -189,6 +211,7 @@ async function rederiveBatch(
       const message = current[index]
       if (
         message === undefined ||
+        !isRederivable(message) ||
         message.chatPreviewText !== entry.readChatPreviewText ||
         message.cleanedSnippet !== entry.readCleanedSnippet
       ) {
@@ -226,6 +249,19 @@ async function rederiveBatch(
       done,
     }
   })
+}
+
+/** Received rows with a stored HTML body: the only rows this pass re-derives. */
+function isRederivable(message: MessageRow): boolean {
+  return message.isFromMe === 0 && message.hasHtmlBody === 1
+}
+
+function isSameRepairState(
+  a: ChatPreviewRepairState | null,
+  b: ChatPreviewRepairState | null,
+): boolean {
+  if (a === null || b === null) return a === b
+  return a.version === b.version && a.lastId === b.lastId && a.done === b.done
 }
 
 function repairState(value: unknown): ChatPreviewRepairState | null {

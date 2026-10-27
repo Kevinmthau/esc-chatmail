@@ -113,9 +113,10 @@ describe('rederiveStoredChatPreviews', () => {
     })
   })
 
-  // Revert-check: dropping the `isFromMe === 0 && hasHtmlBody === 1` filter, or falling back
-  // to '' instead of the stored value when a derivation comes out null, in `rederiveBatch`
-  // fails this test.
+  // Revert-check: `isRederivable` accepting every row, or `rederiveBatch` falling back to ''
+  // instead of the stored value when a derivation comes out null, fails this test. HONEST
+  // SCOPE: dropping only the read's `isRederivable` filter passes, because the write
+  // transaction re-checks it on every row.
   it('leaves outgoing rows, rows without a body, and bodies that clean to nothing alone', async () => {
     // A stale snippet any recompute would replace.
     await db.conversations.add(convoRow({ id: 'wei', snippet: 'Stale snippet' }))
@@ -237,10 +238,52 @@ describe('rederiveStoredChatPreviews', () => {
     expect((await message('m1'))?.chatPreviewText).toBe('Newer preview')
     expect(await state()).toMatchObject({ lastId: 'm1', done: true })
   })
+
+  // Revert-check: dropping the `isRederivable` re-check in the write transaction of
+  // `rederiveBatch` fails this test: the row, outgoing by then, takes the received rule's
+  // preview.
+  it('leaves a row that stopped qualifying while the batch derived', async () => {
+    await db.conversations.add(convoRow({ id: 'wei' }))
+    await addLeakedMessage('m1', 'wei')
+    let flip: Promise<number> | undefined
+    derivation.onDerive = () => {
+      flip ??= db.messages.update('m1', { isFromMe: 1 })
+    }
+
+    expect((await rederiveStoredChatPreviews(db, NOW)).rewrittenMessageCount).toBe(0)
+    expect(await flip).toBe(1)
+
+    expect((await message('m1'))?.chatPreviewText).toBe(LEAKED_PREVIEW)
+    expect(await state()).toMatchObject({ lastId: 'm1', done: true })
+  })
+
+  // Revert-check: dropping the `isSameRepairState` check in the write transaction of
+  // `rederiveBatch` fails this test: the batch writes its cursor over the other walker's
+  // finished state and reopens the walk at m1.
+  it('leaves the state another walker committed while the batch derived', async () => {
+    await db.conversations.add(convoRow({ id: 'wei' }))
+    await addLeakedMessage('m1', 'wei')
+    await addLeakedMessage('m2', 'wei')
+    const finished = { version: CHAT_PREVIEW_DERIVATION_VERSION, lastId: 'm2', done: true }
+    let commit: Promise<string> | undefined
+    derivation.onDerive = () => {
+      commit ??= db.syncState.put({ key: CHAT_PREVIEW_REPAIR_KEY, value: finished })
+    }
+
+    // A budget of one message: the batch reads m1 alone, so its own cursor is m1, unfinished.
+    expect(await rederiveStoredChatPreviews(db, NOW, 1)).toMatchObject({
+      scannedMessageCount: 1,
+      rewrittenMessageCount: 0,
+    })
+    expect(await commit).toBe(CHAT_PREVIEW_REPAIR_KEY)
+
+    expect(await state()).toEqual(finished)
+    expect((await message('m1'))?.chatPreviewText).toBe(LEAKED_PREVIEW)
+  })
 })
 
 describe('seedChatPreviewRepairOnFreshStoreIfNeeded', () => {
-  // Revert-check: dropping the message count check fails the second half (and the runSync
+  // Revert-check: dropping the emptiness probe fails the second half (and the runSync
   // upgrade test below): a store with messages would skip its walk.
   it('marks the walk finished on a store with no messages, and only there', async () => {
     await seedChatPreviewRepairOnFreshStoreIfNeeded(db)
@@ -253,6 +296,52 @@ describe('seedChatPreviewRepairOnFreshStoreIfNeeded', () => {
     await db.syncState.delete(CHAT_PREVIEW_REPAIR_KEY)
     await addLeakedMessage('m1', 'wei')
     await seedChatPreviewRepairOnFreshStoreIfNeeded(db)
+    expect(await state()).toBeUndefined()
+  })
+
+  // Revert-check: returning on any stored state, instead of only this version's, fails this
+  // test: an empty store an earlier build left would re-clean everything its initial sync
+  // stores.
+  it('marks an empty store whose state an earlier version left', async () => {
+    await db.syncState.put({
+      key: CHAT_PREVIEW_REPAIR_KEY,
+      value: { version: 'earlier-version', lastId: 'm9', done: true },
+    })
+
+    await seedChatPreviewRepairOnFreshStoreIfNeeded(db)
+
+    expect(await state()).toEqual({
+      version: CHAT_PREVIEW_DERIVATION_VERSION,
+      lastId: null,
+      done: true,
+    })
+  })
+
+  // Revert-check: returning only on a finished state of this version, as the seed did, fails
+  // this test: every sync of an upgraded store's walk probed the messages table.
+  it("does not probe the messages while this version's walk is in progress", async () => {
+    const inProgress = { version: CHAT_PREVIEW_DERIVATION_VERSION, lastId: 'm1', done: false }
+    await db.syncState.put({ key: CHAT_PREVIEW_REPAIR_KEY, value: inProgress })
+    await addLeakedMessage('m1', 'wei')
+    const limit = vi.spyOn(db.messages, 'limit')
+    const count = vi.spyOn(db.messages, 'count')
+
+    await seedChatPreviewRepairOnFreshStoreIfNeeded(db)
+
+    expect(limit).not.toHaveBeenCalled()
+    expect(count).not.toHaveBeenCalled()
+    expect(await state()).toEqual(inProgress)
+  })
+
+  // Revert-check: probing with `db.messages.count()` in the seed fails this test. IndexedDB
+  // counts by walking every key, while the seed holds the messages table for writing.
+  it('probes one key of a store with messages instead of counting them', async () => {
+    await addLeakedMessage('m1', 'wei')
+    const count = vi.spyOn(db.messages, 'count')
+
+    await seedChatPreviewRepairOnFreshStoreIfNeeded(db)
+
+    expect(count).not.toHaveBeenCalled()
     expect(await state()).toBeUndefined()
   })
 })
