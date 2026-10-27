@@ -752,14 +752,16 @@ describe('qualified mobile labels and short-dial numbers', () => {
   )
 
   // Revert-check: the mvpn alternative in SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN.
-  // Without it the short number stays in the phone's suffix and rejects the row.
-  it.each(['Tel: +886-3-555-0123 Ext. 15000 MVPN 6688', 'Mobile: 0912555018 MVPN 655018'])(
-    'splits an MVPN number off the phone on the same row: %s',
-    (line) => {
-      expect(isContactSignatureLine(line)).toBe(true)
-      expect(isTrailingSignatureContactLine(line)).toBe(true)
-    },
-  )
+  // Without it the short number stays in the phone's suffix and rejects the row. Also its
+  // \p{Nd}: with a bare \d only the full-width row fails.
+  it.each([
+    'Tel: +886-3-555-0123 Ext. 15000 MVPN 6688',
+    'Mobile: 0912555018 MVPN 655018',
+    'Tel: +886-3-555-0123 Ext. 15000 MVPN ６６８８',
+  ])('splits an MVPN number off the phone on the same row: %s', (line) => {
+    expect(isContactSignatureLine(line)).toBe(true)
+    expect(isTrailingSignatureContactLine(line)).toBe(true)
+  })
 
   // HONEST SCOPE: these pass with or without the split; they pin that splitting before
   // "MVPN <digits>" does not turn prose around the short number into a contact row.

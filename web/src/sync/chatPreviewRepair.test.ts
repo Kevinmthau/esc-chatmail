@@ -1,3 +1,4 @@
+import Dexie from 'dexie'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatmailDB } from '@/db/schema'
 import type { MessageRow } from '@/db/types'
@@ -6,9 +7,33 @@ import {
   CHAT_PREVIEW_DERIVATION_VERSION,
   CHAT_PREVIEW_REPAIR_KEY,
   rederiveStoredChatPreviews,
+  seedChatPreviewRepairOnFreshStoreIfNeeded,
 } from './chatPreviewRepair'
 import { runSync } from './engine'
-import { makeTestDb, NOW, seedAccount, StubGmailApi, testDeps } from './testSupport'
+import {
+  makeTestDb,
+  ME,
+  NOW,
+  seedAccount,
+  StubGmailApi,
+  testDeps,
+  textMessage,
+} from './testSupport'
+
+// Runs a test's hook each time a chat preview is derived, so a test can look at the
+// transaction around the derivation or write while it runs.
+const derivation = vi.hoisted(() => ({ onDerive: null as (() => void) | null }))
+
+vi.mock('@/mime/preview', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/mime/preview')>()
+  return {
+    ...actual,
+    createChatPreviewText: (...args: Parameters<typeof actual.createChatPreviewText>) => {
+      derivation.onDerive?.()
+      return actual.createChatPreviewText(...args)
+    },
+  }
+})
 
 // The MVPN short number shares the telephone row, which the cleanup only reads as
 // contact details since the short number splits off the phone.
@@ -32,6 +57,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  derivation.onDerive = null
   vi.restoreAllMocks()
   await db.delete()
 })
@@ -87,8 +113,9 @@ describe('rederiveStoredChatPreviews', () => {
     })
   })
 
-  // Revert-check: dropping the `isFromMe === 0 && hasHtmlBody === 1` filter, or the
-  // non-null guards on the derived values, in `rederiveBatch` fails this test.
+  // Revert-check: dropping the `isFromMe === 0 && hasHtmlBody === 1` filter, or falling back
+  // to '' instead of the stored value when a derivation comes out null, in `rederiveBatch`
+  // fails this test.
   it('leaves outgoing rows, rows without a body, and bodies that clean to nothing alone', async () => {
     // A stale snippet any recompute would replace.
     await db.conversations.add(convoRow({ id: 'wei', snippet: 'Stale snippet' }))
@@ -158,9 +185,98 @@ describe('rederiveStoredChatPreviews', () => {
     })
     expect((await message('m1'))?.chatPreviewText).toBe(REPAIRED_PREVIEW)
   })
+
+  // Revert-check: deriving inside a transaction in `rederiveBatch` (as the read or the
+  // write transaction's callback does) fails this test.
+  it('derives with no transaction open', async () => {
+    await db.conversations.add(convoRow({ id: 'wei' }))
+    await addLeakedMessage('m1', 'wei')
+    const transactions: unknown[] = []
+    derivation.onDerive = () => transactions.push(Dexie.currentTransaction ?? null)
+
+    await rederiveStoredChatPreviews(db, NOW)
+
+    expect(transactions).toEqual([null])
+    expect((await message('m1'))?.chatPreviewText).toBe(REPAIRED_PREVIEW)
+  })
+
+  // Revert-check: writing back the rows as the read transaction returned them, instead of
+  // re-reading them in the write transaction, fails this test: the mark-read is reverted.
+  it('keeps a local change made while the batch derived', async () => {
+    await db.conversations.add(convoRow({ id: 'wei' }))
+    await addLeakedMessage('m1', 'wei', { isUnread: 1 })
+    let markRead: Promise<number> | undefined
+    derivation.onDerive = () => {
+      markRead ??= db.messages.update('m1', { isUnread: 0, localModifiedAt: NOW })
+    }
+
+    expect((await rederiveStoredChatPreviews(db, NOW)).rewrittenMessageCount).toBe(1)
+    expect(await markRead).toBe(1)
+
+    expect(await message('m1')).toMatchObject({
+      isUnread: 0,
+      localModifiedAt: NOW,
+      chatPreviewText: REPAIRED_PREVIEW,
+      cleanedSnippet: REPAIRED_SNIPPET,
+    })
+  })
+
+  // Revert-check: dropping the comparison with the values the derivation read, in the write
+  // transaction of `rederiveBatch`, fails this test: the newer preview is overwritten.
+  it('leaves previews another writer changed while the batch derived', async () => {
+    await db.conversations.add(convoRow({ id: 'wei' }))
+    await addLeakedMessage('m1', 'wei')
+    let rewrite: Promise<number> | undefined
+    derivation.onDerive = () => {
+      rewrite ??= db.messages.update('m1', { chatPreviewText: 'Newer preview' })
+    }
+
+    expect((await rederiveStoredChatPreviews(db, NOW)).rewrittenMessageCount).toBe(0)
+    expect(await rewrite).toBe(1)
+
+    expect((await message('m1'))?.chatPreviewText).toBe('Newer preview')
+    expect(await state()).toMatchObject({ lastId: 'm1', done: true })
+  })
+})
+
+describe('seedChatPreviewRepairOnFreshStoreIfNeeded', () => {
+  // Revert-check: dropping the message count check fails the second half (and the runSync
+  // upgrade test below): a store with messages would skip its walk.
+  it('marks the walk finished on a store with no messages, and only there', async () => {
+    await seedChatPreviewRepairOnFreshStoreIfNeeded(db)
+    expect(await state()).toEqual({
+      version: CHAT_PREVIEW_DERIVATION_VERSION,
+      lastId: null,
+      done: true,
+    })
+
+    await db.syncState.delete(CHAT_PREVIEW_REPAIR_KEY)
+    await addLeakedMessage('m1', 'wei')
+    await seedChatPreviewRepairOnFreshStoreIfNeeded(db)
+    expect(await state()).toBeUndefined()
+  })
 })
 
 describe('runSync', () => {
+  // Revert-check: dropping the `seedChatPreviewRepairOnFreshStoreIfNeeded` call from `runSync`
+  // fails this test: the repair walks the message the initial sync just stored.
+  it('marks a fresh store finished before its initial sync instead of walking it', async () => {
+    const api = new StubGmailApi()
+    api.profile = { emailAddress: ME, historyId: 'hist-start' }
+    api.messages.set('m1', textMessage({ id: 'm1', threadId: 'tA' }))
+    api.listPages = [{ messages: [{ id: 'm1', threadId: 'tA' }] }]
+
+    const outcome = await runSync(testDeps(db, api), 'startup')
+
+    expect(outcome.error).toBeUndefined()
+    expect(await db.messages.count()).toBe(1)
+    expect(await state()).toEqual({
+      version: CHAT_PREVIEW_DERIVATION_VERSION,
+      lastId: null,
+      done: true,
+    })
+  })
+
   // Revert-check: dropping the `repairStoredChatPreviewsIfNeeded` call from `runSync`
   // fails this test.
   it('repairs stored previews after its network work', async () => {

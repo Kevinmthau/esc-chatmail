@@ -1381,9 +1381,11 @@ const SIGNATURE_BARE_HOURS_LABEL_PATTERN = /^after[ -]hours\s*:$/i
 // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
 // An MVPN short number has no colon, so it splits on its own label and digits
 // ("Tel: +886-3-555-0123 Ext. 15000 MVPN 6688"); without the split the short number sat in
-// the phone's suffix and rejected the row.
+// the phone's suffix and rejected the row. Any decimal digit, as SIGNATURE_SHORT_DIAL_PATTERN
+// takes and as \d means in Swift's ICU: with a bare \d (ASCII without the u flag) a full-width
+// short number ("MVPN ６６８８") split on iOS and leaked on web.
 const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
-  /(?:\s*[|•│┃¦]\s*|\s+)(?=(?:(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:|mvpn\s*[:#.]?\s*\d))/gi
+  /(?:\s*[|•│┃¦]\s*|\s+)(?=(?:(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:|mvpn\s*[:#.]?\s*\p{Nd}))/giu
 
 // A carrier or region code qualifies the word label after it ("TWM Mobile: 0912555018",
 // "CQ Mobile:", "US Cell:"), so it is dropped before the label splits the line. Only an

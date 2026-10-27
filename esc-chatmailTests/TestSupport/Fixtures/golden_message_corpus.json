@@ -973,6 +973,12 @@
       "notes": "The MVPN short number shares the telephone row with no separator, so the row only reads as contact details once the short number splits off; without the split the upward scan stopped at that row with one contact. Revert-check: the mvpn alternative in EmailDOMQuoteRemover.isSignaturePhoneSegmentSequence's separator pattern / web SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN.",
       "inputHTML": "<div><p>Please see the attached schedule.</p><p>Best regards,</p><p>Wei Lin</p><p>Example Precision Inc.</p><p>Tel: +886-2-5555-0188 Ext. 321 MVPN 6688</p><p>Email: <a href=\"mailto:wei.lin@example.test\">wei.lin@example.test</a></p></div>",
       "expected": "Please see the attached schedule.\n\nBest regards,\n\nWei Lin"
+    },
+    {
+      "id": "html_mvpn_full_width_short_number_on_phone_row_signature_removed",
+      "notes": "The inline MVPN short number in full-width digits, as CJK input methods type it. iOS splits it off the phone because ICU's \\d matches any decimal digit; web's split used a bare \\d (ASCII only without the u flag), so the row stayed whole and the signature leaked. Revert-check: web SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN's \\p{Nd}. HONEST SCOPE for iOS: it passes there without any change.",
+      "inputHTML": "<div><p>Please see the attached schedule.</p><p>Best regards,</p><p>Wei Lin</p><p>Example Precision Inc.</p><p>Tel: +886-2-5555-0188 Ext. 321 MVPN ６６８８</p><p>Email: <a href=\"mailto:wei.lin@example.test\">wei.lin@example.test</a></p></div>",
+      "expected": "Please see the attached schedule.\n\nBest regards,\n\nWei Lin"
     }
   ],
   "rawSourceHTMLRecoveryCases": [
