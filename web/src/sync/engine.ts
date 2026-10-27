@@ -5,7 +5,10 @@
 
 import { setSyncProgress } from '@/db/kv'
 import { AuthRequiredError } from '@/gmail/errors'
-import { repairStoredChatPreviewsIfNeeded } from './chatPreviewRepair'
+import {
+  repairStoredChatPreviewsIfNeeded,
+  seedChatPreviewRepairOnFreshStoreIfNeeded,
+} from './chatPreviewRepair'
 import { depsNow, type SyncDeps } from './deps'
 import { repairStoredDisplayNamesIfNeeded } from './displayNameRepair'
 import { runIncrementalSync, type SyncRunResult } from './incremental'
@@ -93,6 +96,10 @@ export async function runSync(deps: SyncDeps, reason: SyncReason): Promise<RunSy
       // never reads participants, so its place relative to the
       // participant-set repairs does not matter.
       await repairStoredSubjectsIfNeeded(deps.db, depsNow(deps))
+      // Before the network pass, while a new sign-in's store is still empty: the
+      // initial sync derives every preview with the current cleanup, so the preview
+      // repair below has nothing to re-derive.
+      await seedChatPreviewRepairOnFreshStoreIfNeeded(deps.db)
       const result = await runIncrementalSync(deps)
       // Local-only too, but one budget can take seconds on a large mailbox, so it runs
       // after the network pass rather than holding new mail behind it. It never reads

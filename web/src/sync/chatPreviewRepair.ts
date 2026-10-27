@@ -15,18 +15,25 @@
 // its preview, because persist fell back to the plain text, which is stored capped.
 //
 // Unlike the one-shot repairs this pass can touch every message, so it walks the
-// primary key in batches, each in its own transaction that commits the cursor with
-// the rewritten rows and their rollups, and stops at a per-run budget. A large
-// mailbox converges over several syncs instead of one long transaction holding the
-// messages table. Like the other repairs, a failure is logged and the next sync
-// resumes from the last committed batch.
+// primary key in batches and stops at a per-run budget: a large mailbox converges
+// over several syncs. Each batch reads its rows and bodies in a read-only
+// transaction, derives with no transaction open, and writes in one short transaction
+// that commits the cursor with the rewritten rows and their rollups. The derivation
+// parses every body and is the slow part; run inside the write transaction it held
+// the messages table while a mark-read or a send waited behind it. Like the other
+// repairs, a failure is logged and the next sync resumes from the last committed
+// batch.
+//
+// A store the sync fills from empty needs no walk at all, so the sync marks this
+// version's walk finished before its network pass while the store is still empty
+// (seedChatPreviewRepairOnFreshStoreIfNeeded).
 
 import type { ChatmailDB } from '@/db/schema'
 import type { MessageRow } from '@/db/types'
 import { createChatPreviewText, createCleanedSnippet } from '@/mime/preview'
 import { rollupConversation } from '@/rollup/rollup'
 
-export const CHAT_PREVIEW_DERIVATION_VERSION = '2026-10-27-signature-mvpn-inline-v1'
+export const CHAT_PREVIEW_DERIVATION_VERSION = '2026-10-27-signature-mvpn-unicode-digits-v1'
 export const CHAT_PREVIEW_REPAIR_KEY = 'chatPreviewRepair'
 export const CHAT_PREVIEW_REPAIR_BATCH_SIZE = 100
 export const CHAT_PREVIEW_REPAIR_MESSAGES_PER_RUN = 1000
@@ -48,6 +55,16 @@ export interface ChatPreviewRepairResult {
   recomputedConversationCount: number
 }
 
+/** A row whose stored previews the current cleanup derives differently. */
+interface RederivedPreviews {
+  id: string
+  /** The stored values the derivation compared against. */
+  readChatPreviewText: string
+  readCleanedSnippet: string
+  chatPreviewText: string
+  cleanedSnippet: string
+}
+
 /**
  * Runs up to one budget of the repair. A failure is logged and the next sync
  * resumes from the last committed batch; the sync that ran it carries on.
@@ -57,6 +74,31 @@ export async function repairStoredChatPreviewsIfNeeded(db: ChatmailDB, now: numb
     await rederiveStoredChatPreviews(db, now)
   } catch (error) {
     console.warn('[previews] chat preview repair failed; will retry', error)
+  }
+}
+
+/**
+ * Marks this version's walk finished on a store that holds no messages. The sync
+ * calls it before its network pass: everything it then stores is derived by the
+ * current cleanup, and without the mark the first sync of a new sign-in re-cleaned
+ * every message it had just stored. A store that already holds messages (an
+ * upgrade) is left to the walk. A failure is logged, and the walk then runs.
+ */
+export async function seedChatPreviewRepairOnFreshStoreIfNeeded(db: ChatmailDB): Promise<void> {
+  try {
+    await db.transaction('rw', [db.syncState, db.messages], async () => {
+      const state = repairState((await db.syncState.get(CHAT_PREVIEW_REPAIR_KEY))?.value)
+      if (state?.version === CHAT_PREVIEW_DERIVATION_VERSION && state.done) return
+      if ((await db.messages.count()) > 0) return
+      const finished: ChatPreviewRepairState = {
+        version: CHAT_PREVIEW_DERIVATION_VERSION,
+        lastId: null,
+        done: true,
+      }
+      await db.syncState.put({ key: CHAT_PREVIEW_REPAIR_KEY, value: finished })
+    })
+  } catch (error) {
+    console.warn('[previews] chat preview repair seed failed; the walk will run', error)
   }
 }
 
@@ -98,69 +140,92 @@ async function rederiveBatch(
   now: number,
   limit: number,
 ): Promise<{ scanned: number; rewritten: number; recomputed: number; done: boolean } | null> {
-  return db.transaction(
-    'rw',
-    [db.syncState, db.messages, db.bodies, db.conversations],
-    async () => {
-      const state = repairState((await db.syncState.get(CHAT_PREVIEW_REPAIR_KEY))?.value)
-      if (state?.version === CHAT_PREVIEW_DERIVATION_VERSION && state.done) return null
-      // A cursor left by an earlier version restarts the walk: rows it already passed
-      // were derived by the code that version replaced.
-      const cursor = state?.version === CHAT_PREVIEW_DERIVATION_VERSION ? state.lastId : null
+  const snapshot = await db.transaction('r', [db.syncState, db.messages, db.bodies], async () => {
+    const state = repairState((await db.syncState.get(CHAT_PREVIEW_REPAIR_KEY))?.value)
+    if (state?.version === CHAT_PREVIEW_DERIVATION_VERSION && state.done) return null
+    // A cursor left by an earlier version restarts the walk: rows it already passed
+    // were derived by the code that version replaced.
+    const cursor = state?.version === CHAT_PREVIEW_DERIVATION_VERSION ? state.lastId : null
 
-      const rows =
-        cursor === null
-          ? await db.messages.orderBy('id').limit(limit).toArray()
-          : await db.messages.where('id').above(cursor).limit(limit).toArray()
-      const eligible = rows.filter((message) => message.isFromMe === 0 && message.hasHtmlBody === 1)
-      const bodies = await db.bodies.bulkGet(eligible.map((message) => message.id))
+    const rows =
+      cursor === null
+        ? await db.messages.orderBy('id').limit(limit).toArray()
+        : await db.messages.where('id').above(cursor).limit(limit).toArray()
+    const eligible = rows.filter((message) => message.isFromMe === 0 && message.hasHtmlBody === 1)
+    const bodies = await db.bodies.bulkGet(eligible.map((message) => message.id))
+    return { cursor, rows, eligible, bodies }
+  })
+  if (snapshot === null) return null
+  const { cursor, rows, eligible, bodies } = snapshot
 
-      const rewritten: MessageRow[] = []
-      const conversationIds = new Set<string>()
-      eligible.forEach((message, index) => {
-        const html = bodies[index]?.html
-        if (html === undefined) return
-        const chatPreviewText = createChatPreviewText(html, null, null)
-        const cleanedSnippet = createCleanedSnippet(html, null, null)
-        let changed = false
-        if (chatPreviewText !== null && chatPreviewText !== message.chatPreviewText) {
-          message.chatPreviewText = chatPreviewText
-          changed = true
-        }
-        if (cleanedSnippet !== null && cleanedSnippet !== message.cleanedSnippet) {
-          message.cleanedSnippet = cleanedSnippet
-          changed = true
-        }
-        if (!changed) return
-        rewritten.push(message)
-        conversationIds.add(message.conversationId)
+  // No transaction is open here, so the slow part holds no lock.
+  const rederived: RederivedPreviews[] = []
+  eligible.forEach((message, index) => {
+    const html = bodies[index]?.html
+    if (html === undefined) return
+    const chatPreviewText = createChatPreviewText(html, null, null) ?? message.chatPreviewText
+    const cleanedSnippet = createCleanedSnippet(html, null, null) ?? message.cleanedSnippet
+    if (chatPreviewText === message.chatPreviewText && cleanedSnippet === message.cleanedSnippet) {
+      return
+    }
+    rederived.push({
+      id: message.id,
+      readChatPreviewText: message.chatPreviewText,
+      readCleanedSnippet: message.cleanedSnippet,
+      chatPreviewText,
+      cleanedSnippet,
+    })
+  })
+
+  return db.transaction('rw', [db.syncState, db.messages, db.conversations], async () => {
+    // Re-read, and write back only the previews: putting the rows back as read would
+    // revert a local change made while the batch derived (a mark-read, an archive).
+    // A row whose previews no longer hold what the derivation compared against keeps
+    // them, because whatever rewrote them read newer inputs.
+    const current = await db.messages.bulkGet(rederived.map((entry) => entry.id))
+    const rewritten: MessageRow[] = []
+    const conversationIds = new Set<string>()
+    rederived.forEach((entry, index) => {
+      const message = current[index]
+      if (
+        message === undefined ||
+        message.chatPreviewText !== entry.readChatPreviewText ||
+        message.cleanedSnippet !== entry.readCleanedSnippet
+      ) {
+        return
+      }
+      rewritten.push({
+        ...message,
+        chatPreviewText: entry.chatPreviewText,
+        cleanedSnippet: entry.cleanedSnippet,
       })
+      conversationIds.add(message.conversationId)
+    })
 
-      if (rewritten.length > 0) {
-        await db.messages.bulkPut(rewritten)
-        // Nested into this transaction, so each rollup reads the rewritten rows.
-        for (const conversationId of conversationIds) {
-          await rollupConversation(db, conversationId, now)
-        }
+    if (rewritten.length > 0) {
+      await db.messages.bulkPut(rewritten)
+      // Nested into this transaction, so each rollup reads the rewritten rows.
+      for (const conversationId of conversationIds) {
+        await rollupConversation(db, conversationId, now)
       }
+    }
 
-      const done = rows.length < limit
-      const next: ChatPreviewRepairState = {
-        version: CHAT_PREVIEW_DERIVATION_VERSION,
-        lastId: rows.at(-1)?.id ?? cursor,
-        done,
-      }
-      // Last write by design: the cursor commits with this batch's rows or not at all.
-      await db.syncState.put({ key: CHAT_PREVIEW_REPAIR_KEY, value: next })
+    const done = rows.length < limit
+    const next: ChatPreviewRepairState = {
+      version: CHAT_PREVIEW_DERIVATION_VERSION,
+      lastId: rows.at(-1)?.id ?? cursor,
+      done,
+    }
+    // Last write by design: the cursor commits with this batch's rows or not at all.
+    await db.syncState.put({ key: CHAT_PREVIEW_REPAIR_KEY, value: next })
 
-      return {
-        scanned: rows.length,
-        rewritten: rewritten.length,
-        recomputed: conversationIds.size,
-        done,
-      }
-    },
-  )
+    return {
+      scanned: rows.length,
+      rewritten: rewritten.length,
+      recomputed: conversationIds.size,
+      done,
+    }
+  })
 }
 
 function repairState(value: unknown): ChatPreviewRepairState | null {
