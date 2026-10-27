@@ -1820,6 +1820,64 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)), "Sounds good.\n\nThanks,\n\nJane Doe")
     }
 
+    // MARK: - Qualified mobile labels and short-dial numbers
+
+    // Revert-check: EmailDOMQuoteRemover.signaturePhoneLabelQualifierPattern (the code-qualified
+    // rows) and signatureShortDialPattern (the MVPN rows). Making the qualifier case-insensitive
+    // fails "Jane Mobile:": a name ahead of a label still goes through the leading-segment rules.
+    // HONEST SCOPE for the other prose rows: they pass at HEAD and pin what the two rules must
+    // not claim.
+    func testIsContactSignatureLine_qualifiedMobileLabelsAndMVPNShortNumbers() {
+        let signatureLines = [
+            "TWM Mobile: 0912555018",
+            "CQ Mobile: 13800555018",
+            "US Cell: 415-555-1212",
+            "HQ Office: 650-555-1213 | Fax: 650-555-1214",
+            "Tel: 415-555-1212 HK Mobile: 9123 4567",
+            "MVPN 655018",
+            "MVPN: 6688",
+            "Tel: 415-555-1212 | MVPN 6688"
+        ]
+        let proseLines = [
+            "Jane Mobile: 415-555-1212",
+            "Call the US Office: 415-555-1212",
+            "Please dial MVPN 655018 to reach the lab.",
+            "MVPN 12",
+            "VPN 655018",
+            "MVPN 655018 after lunch"
+        ]
+
+        for line in signatureLines {
+            XCTAssertTrue(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected signature line: \(line)")
+            XCTAssertTrue(EmailDOMQuoteRemover.isTrailingSignatureContactLine(line), "Expected trailing contact: \(line)")
+        }
+        for line in proseLines {
+            XCTAssertFalse(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected prose line: \(line)")
+        }
+    }
+
+    // Revert-check: signaturePhoneLabelQualifierPattern or signatureShortDialPattern (without
+    // either, the upward scan stops at that row before the name and closing, so nothing is
+    // removed) and SignaturePatterns.signOffPhrases "thanks and best regards" (without it the
+    // scan stops at the closing as a body line and the name is removed with the signature).
+    func testTrailingContactSignature_qualifiedMobileAndMVPNRowsJoinTheContactBlock() throws {
+        let html = """
+        <p>Thank you for your support!</p><p>Thanks and Best Regards,</p><p>Lin Chen</p>\
+        <p>Example Computer Inc.</p><p>Tel:+886-3-555-0123 Ext. 15000</p><p>TWM Mobile: 0912555018</p>\
+        <p>CQ Mobile: 13800555018</p><p>MVPN 655018</p>\
+        <p>Email: <a href="mailto:lin.chen@example.test">lin.chen@example.test</a></p>
+        """
+        XCTAssertEqual(
+            plainText(try trailingContactHTML(html)),
+            "Thank you for your support!\n\nThanks and Best Regards,\nLin Chen"
+        )
+        XCTAssertEqual(
+            plainText(EmailDOMQuoteRemover.removeQuotes(from: QualifiedMobileSignatureFixture.html, mode: .quotedAndSignatures)),
+            "Hi team,\n\nCould you please let us know your available time on November 6, or suggest another suitable time?" +
+                "\n\nThank you for your support!\n\nThanks and Best Regards,\nLin Chen"
+        )
+    }
+
     // MARK: - Idempotence
 
     func testRemoveQuotes_isIdempotent() {

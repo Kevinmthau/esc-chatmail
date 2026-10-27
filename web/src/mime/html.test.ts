@@ -685,3 +685,49 @@ describe('Front core: bare hosts, owned media, wrapper name preservation, lead-i
     expect(cleanedText(html)).toBe('Sounds good.\n\nThanks,\n\nJane Doe')
   })
 })
+
+describe('qualified mobile labels and short-dial numbers', () => {
+  // Revert-check: SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN (the code-qualified rows) and
+  // SIGNATURE_SHORT_DIAL_PATTERN (the MVPN rows).
+  it.each([
+    'TWM Mobile: 0912555018',
+    'CQ Mobile: 13800555018',
+    'US Cell: 415-555-1212',
+    'HQ Office: 650-555-1213 | Fax: 650-555-1214',
+    'Tel: 415-555-1212 HK Mobile: 9123 4567',
+    'MVPN 655018',
+    'MVPN: 6688',
+    'Tel: 415-555-1212 | MVPN 6688',
+  ])('treats the row as a contact line: %s', (line) => {
+    expect(isContactSignatureLine(line)).toBe(true)
+    expect(isTrailingSignatureContactLine(line)).toBe(true)
+  })
+
+  // Revert-check for "Jane Mobile:": the qualifier must be all caps; a name ahead of a label
+  // still goes through the leading-segment rules. HONEST SCOPE for the rest: they pass at
+  // HEAD and pin what the two new rules must not claim.
+  it.each([
+    'Jane Mobile: 415-555-1212',
+    'Call the US Office: 415-555-1212',
+    'Please dial MVPN 655018 to reach the lab.',
+    'MVPN 12',
+    'VPN 655018',
+    'MVPN 655018 after lunch',
+  ])('keeps the row as prose: %s', (line) => {
+    expect(isContactSignatureLine(line)).toBe(false)
+  })
+
+  // Revert-check: either pattern above (the upward scan stops at that row before the name and
+  // closing, so nothing is removed) and SIGN_OFF_PHRASES 'thanks and best regards' (the name
+  // goes too).
+  it('removes the Outlook signature and keeps the sign-off with the name', () => {
+    const html =
+      '<p>Thank you for your support!</p><p>Thanks and Best Regards,</p><p>Lin Chen</p>' +
+      '<p>Example Computer Inc.</p><p>Tel:+886-3-555-0123 Ext. 15000</p><p>TWM Mobile: 0912555018</p>' +
+      '<p>CQ Mobile: 13800555018</p><p>MVPN 655018</p>' +
+      '<p>Email: <a href="mailto:lin.chen@example.test">lin.chen@example.test</a></p>'
+    expect(cleanedText(html)).toBe(
+      'Thank you for your support!\n\nThanks and Best Regards,\nLin Chen',
+    )
+  })
+})

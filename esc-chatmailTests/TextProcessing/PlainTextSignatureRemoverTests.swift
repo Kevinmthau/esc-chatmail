@@ -428,6 +428,19 @@ final class PlainTextSignatureRemoverTests: XCTestCase {
         }
     }
 
+    // Revert-check: EmailDOMQuoteRemover.signaturePhoneLabelQualifierPattern or
+    // signatureShortDialPattern, through the shared contact predicates this pass reuses: without
+    // either, the scan stops at that row before reaching the sign-off and nothing is removed.
+    func testContactOnlyHTMLFallbackRemovesQualifiedMobileAndMVPNRowsAfterSignOffName() {
+        let text = "Thank you for your support!\nThanks and Best Regards,\nLin Chen\nExample Computer Inc.\n" +
+            "Tel:+886-3-555-0123 Ext. 15000\nTWM Mobile: 0912555018\nCQ Mobile: 13800555018\nMVPN 655018\n" +
+            "Email: lin.chen@example.test"
+        XCTAssertEqual(
+            PlainTextSignatureRemover.removeTrailingContactSignature(from: text),
+            "Thank you for your support!\nThanks and Best Regards,\nLin Chen"
+        )
+    }
+
     // MARK: - Front core parity
 
     // Revert-check: URLPatterns.bareHostLine in PlainTextSignatureRemover.evaluateLine.

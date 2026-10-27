@@ -73,7 +73,7 @@ enum SignaturePatterns {
         "with best regards", "with warm regards", "very best", "very best regards",
         "all my best", "my best", "yours sincerely", "sincerely yours", "yours faithfully",
         "respectfully", "respectfully yours", "rgds", "thx", "thanks and regards",
-        "thanks & regards", "warm wishes"
+        "thanks & regards", "thanks and best regards", "thanks & best regards", "warm wishes"
     ]
 
     /// Paragraph-start legal boilerplate, deliberately excluding general body words.

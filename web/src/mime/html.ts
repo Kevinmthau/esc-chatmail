@@ -1382,6 +1382,32 @@ const SIGNATURE_BARE_HOURS_LABEL_PATTERN = /^after[ -]hours\s*:$/i
 const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
   /(?:\s*[|•│┃¦]\s*|\s+)(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)/gi
 
+// A carrier or region code qualifies the word label after it ("TWM Mobile: 0912555018",
+// "CQ Mobile:", "US Cell:"), so it is dropped before the label splits the line. Only an
+// all-caps code of two to four letters directly before the label and its colon: a name
+// ahead of a label ("Jane Mobile:") still has to pass the leading-segment rules. Swift
+// spells the label check inline as (?i:...); Node's RegExp has no inline modifiers, so
+// the captured word is checked against the set instead.
+const SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN = /(?<![\p{L}\p{N}])[A-Z]{2,4}\s+(?=(\p{L}+)\s*:)/gu
+const SIGNATURE_QUALIFIED_PHONE_LABELS = new Set([
+  'tel',
+  'telephone',
+  'phone',
+  'cell',
+  'mobile',
+  'office',
+  'work',
+  'home',
+  'direct',
+  'desk',
+  'main',
+  'fax',
+])
+
+// A corporate mobile-network short number ("MVPN 655018") is shorter than the
+// seven-digit phone floor, but the label is never anything else.
+const SIGNATURE_SHORT_DIAL_PATTERN = /^mvpn\s*[:#.]?\s*\p{Nd}{3,8}$/iu
+
 interface SignatureLine extends VisibleLineElement {
   links: VisibleLineLink[]
   nonLinkText: string
@@ -2073,6 +2099,9 @@ function isSignaturePhoneLine(text: string): boolean {
   const normalized = text
     .trim()
     .replace(/\s+\/\s+/g, '|')
+    .replace(SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN, (qualifier, label: string) =>
+      SIGNATURE_QUALIFIED_PHONE_LABELS.has(label.toLowerCase()) ? '' : qualifier,
+    )
     .replace(SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN, '|')
   const segments = normalized.split(/[|•│┃¦]/u).map((segment) => segment.trim())
   if (segments.length === 0 || segments.some((segment) => segment.length === 0)) {
@@ -2115,6 +2144,7 @@ function isSignaturePhoneLine(text: string): boolean {
 }
 
 function isSignaturePhoneSegment(text: string): boolean {
+  if (SIGNATURE_SHORT_DIAL_PATTERN.test(text)) return true
   let phone: string | undefined
   let phoneStart = -1
   for (const candidateMatch of text.matchAll(SIGNATURE_PHONE_PATTERN)) {

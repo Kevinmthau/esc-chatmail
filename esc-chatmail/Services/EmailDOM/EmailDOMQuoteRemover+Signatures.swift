@@ -226,6 +226,24 @@ extension EmailDOMQuoteRemover {
         )
     }()
 
+    /// A carrier or region code qualifies the word label after it ("TWM Mobile: 0912555018",
+    /// "CQ Mobile:", "US Cell:"), so it is dropped before the label splits the line. Case-
+    /// sensitive: only an all-caps code of two to four letters directly before the label and
+    /// its colon, so a name ahead of a label ("Jane Mobile:") still has to pass the
+    /// leading-segment rules.
+    private static let signaturePhoneLabelQualifierPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"(?<![\p{L}\p{N}])[A-Z]{2,4}\s+(?=(?i:tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
+            options: []
+        )
+    }()
+
+    /// A corporate mobile-network short number ("MVPN 655018") is shorter than the
+    /// seven-digit phone floor, but the label is never anything else.
+    private static let signatureShortDialPattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"^mvpn\s*[:#.]?\s*\d{3,8}$"#, options: [.caseInsensitive])
+    }()
+
     private static let signatureNonPhoneDatePattern: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: #"^(?:(?:19|20)\d{2}(?:-|\.)(?:\d{1,2}(?:-|\.)\d{1,2}|\d{4})|"# +
@@ -943,8 +961,13 @@ extension EmailDOMQuoteRemover {
             with: "|",
             options: .regularExpression
         )
+        let unqualified = signaturePhoneLabelQualifierPattern?.stringByReplacingMatches(
+            in: slashNormalized,
+            range: NSRange(location: 0, length: slashNormalized.utf16.count),
+            withTemplate: ""
+        ) ?? slashNormalized
         // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
-        let normalized = slashNormalized.replacingOccurrences(
+        let normalized = unqualified.replacingOccurrences(
             of: #"(?:\s*[|•│┃¦]\s*|\s+)(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
             with: "|",
             options: [.regularExpression, .caseInsensitive]
@@ -990,6 +1013,9 @@ extension EmailDOMQuoteRemover {
     }
 
     private static func isSignaturePhoneSegment(_ text: String) -> Bool {
+        if matchesEntireLine(signatureShortDialPattern, text: text) {
+            return true
+        }
         let range = NSRange(location: 0, length: text.utf16.count)
 
         let matches = signaturePhonePattern?.matches(in: text, options: [], range: range) ?? []

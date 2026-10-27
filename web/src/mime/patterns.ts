@@ -174,6 +174,8 @@ export const SIGN_OFF_PHRASES = new Set([
   'thx',
   'thanks and regards',
   'thanks & regards',
+  'thanks and best regards',
+  'thanks & best regards',
   'warm wishes',
 ])
 
