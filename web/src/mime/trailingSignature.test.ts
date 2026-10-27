@@ -132,3 +132,16 @@ const cases = [
 it.each(cases)('%s', (_name, input, expected) => {
   expect(removeTrailingContactSignature(input)).toBe(expected)
 })
+
+// Revert-check: SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN or SIGNATURE_SHORT_DIAL_PATTERN, through
+// the shared contact predicates this text pass reuses: without either, the scan stops at that
+// row before reaching the sign-off and nothing is removed.
+it('removes code-qualified mobile rows and an MVPN short number after the sign-off name', () => {
+  const text =
+    'Thank you for your support!\nThanks and Best Regards,\nLin Chen\nExample Computer Inc.\n' +
+    'Tel:+886-3-555-0123 Ext. 15000\nTWM Mobile: 0912555018\nCQ Mobile: 13800555018\nMVPN 655018\n' +
+    'Email: lin.chen@example.test'
+  expect(removeTrailingContactSignature(text)).toBe(
+    'Thank you for your support!\nThanks and Best Regards,\nLin Chen',
+  )
+})
