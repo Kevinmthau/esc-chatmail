@@ -1856,6 +1856,23 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         }
     }
 
+    // Revert-check: EmailDOMQuoteRemover.isSignaturePhoneLine trying the line as written before
+    // dropping codes. Dropping first takes the all-caps surname as a code and leaves a one-word
+    // name, so these rows, contact lines before the qualifier existed, stop the upward scan.
+    func testIsContactSignatureLine_allCapsSurnameAheadOfLabel_staysContactLine() {
+        let lines = [
+            "Lin CHEN Mobile: 0912555018",
+            "Kim LEE Mobile: 010-1234-5678",
+            "Jane DOE Cell: 415-555-1212",
+            "Pat O'NEIL Mobile: 415-555-1212"
+        ]
+
+        for line in lines {
+            XCTAssertTrue(EmailDOMQuoteRemover.isContactSignatureLine(line), "Expected signature line: \(line)")
+            XCTAssertTrue(EmailDOMQuoteRemover.isTrailingSignatureContactLine(line), "Expected trailing contact: \(line)")
+        }
+    }
+
     // Revert-check: signaturePhoneLabelQualifierPattern or signatureShortDialPattern (without
     // either, the upward scan stops at that row before the name and closing, so nothing is
     // removed) and SignaturePatterns.signOffPhrases "thanks and best regards" (without it the

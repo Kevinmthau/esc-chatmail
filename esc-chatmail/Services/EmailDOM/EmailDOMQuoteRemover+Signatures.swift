@@ -230,7 +230,8 @@ extension EmailDOMQuoteRemover {
     /// "CQ Mobile:", "US Cell:"), so it is dropped before the label splits the line. Case-
     /// sensitive: only an all-caps code of two to four letters directly before the label and
     /// its colon, so a name ahead of a label ("Jane Mobile:") still has to pass the
-    /// leading-segment rules.
+    /// leading-segment rules. An all-caps surname has the same shape ("Lin CHEN Mobile:"),
+    /// so `isSignaturePhoneLine` drops codes only for a line that fails as written.
     private static let signaturePhoneLabelQualifierPattern: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: #"(?<![\p{L}\p{N}])[A-Z]{2,4}\s+(?=(?i:tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
@@ -961,13 +962,22 @@ extension EmailDOMQuoteRemover {
             with: "|",
             options: .regularExpression
         )
-        let unqualified = signaturePhoneLabelQualifierPattern?.stringByReplacingMatches(
+        if isSignaturePhoneSegmentSequence(slashNormalized) {
+            return true
+        }
+        // Dropping codes first rejected "Lin CHEN Mobile:": the surname went as a code and the
+        // one-word name left failed the leading-segment rules, so codes only rescue a failed line.
+        guard let unqualified = signaturePhoneLabelQualifierPattern?.stringByReplacingMatches(
             in: slashNormalized,
             range: NSRange(location: 0, length: slashNormalized.utf16.count),
             withTemplate: ""
-        ) ?? slashNormalized
+        ), unqualified != slashNormalized else { return false }
+        return isSignaturePhoneSegmentSequence(unqualified)
+    }
+
+    private static func isSignaturePhoneSegmentSequence(_ line: String) -> Bool {
         // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
-        let normalized = unqualified.replacingOccurrences(
+        let normalized = line.replacingOccurrences(
             of: #"(?:\s*[|•│┃¦]\s*|\s+)(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)"#,
             with: "|",
             options: [.regularExpression, .caseInsensitive]

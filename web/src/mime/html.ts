@@ -1385,9 +1385,11 @@ const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
 // A carrier or region code qualifies the word label after it ("TWM Mobile: 0912555018",
 // "CQ Mobile:", "US Cell:"), so it is dropped before the label splits the line. Only an
 // all-caps code of two to four letters directly before the label and its colon: a name
-// ahead of a label ("Jane Mobile:") still has to pass the leading-segment rules. Swift
-// spells the label check inline as (?i:...); Node's RegExp has no inline modifiers, so
-// the captured word is checked against the set instead.
+// ahead of a label ("Jane Mobile:") still has to pass the leading-segment rules. An
+// all-caps surname has the same shape ("Lin CHEN Mobile:"), so isSignaturePhoneLine drops
+// codes only for a line that fails as written. Swift spells the label check inline as
+// (?i:...); Node's RegExp has no inline modifiers, so the captured word is checked against
+// the set instead.
 const SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN = /(?<![\p{L}\p{N}])[A-Z]{2,4}\s+(?=(\p{L}+)\s*:)/gu
 const SIGNATURE_QUALIFIED_PHONE_LABELS = new Set([
   'tel',
@@ -2096,13 +2098,20 @@ function hasNonEmailContactSignal(text: string): boolean {
 }
 
 function isSignaturePhoneLine(text: string): boolean {
-  const normalized = text
-    .trim()
-    .replace(/\s+\/\s+/g, '|')
-    .replace(SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN, (qualifier, label: string) =>
+  const slashNormalized = text.trim().replace(/\s+\/\s+/g, '|')
+  if (isSignaturePhoneSegmentSequence(slashNormalized)) return true
+  // Dropping codes first rejected "Lin CHEN Mobile:": the surname went as a code and the
+  // one-word name left failed the leading-segment rules, so codes only rescue a failed line.
+  const unqualified = slashNormalized.replace(
+    SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN,
+    (qualifier, label: string) =>
       SIGNATURE_QUALIFIED_PHONE_LABELS.has(label.toLowerCase()) ? '' : qualifier,
-    )
-    .replace(SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN, '|')
+  )
+  return unqualified !== slashNormalized && isSignaturePhoneSegmentSequence(unqualified)
+}
+
+function isSignaturePhoneSegmentSequence(line: string): boolean {
+  const normalized = line.replace(SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN, '|')
   const segments = normalized.split(/[|•│┃¦]/u).map((segment) => segment.trim())
   if (segments.length === 0 || segments.some((segment) => segment.length === 0)) {
     return false

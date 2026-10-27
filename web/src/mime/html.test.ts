@@ -717,6 +717,19 @@ describe('qualified mobile labels and short-dial numbers', () => {
     expect(isContactSignatureLine(line)).toBe(false)
   })
 
+  // Revert-check: isSignaturePhoneLine trying the line as written before dropping codes.
+  // Dropping first takes the all-caps surname as a code and leaves a one-word name, so these
+  // rows, contact lines before the qualifier existed, stop the upward scan as body text.
+  it.each([
+    'Lin CHEN Mobile: 0912555018',
+    'Kim LEE Mobile: 010-1234-5678',
+    'Jane DOE Cell: 415-555-1212',
+    "Pat O'NEIL Mobile: 415-555-1212",
+  ])('keeps an all-caps surname ahead of a label as a contact line: %s', (line) => {
+    expect(isContactSignatureLine(line)).toBe(true)
+    expect(isTrailingSignatureContactLine(line)).toBe(true)
+  })
+
   // Revert-check: either pattern above (the upward scan stops at that row before the name and
   // closing, so nothing is removed) and SIGN_OFF_PHRASES 'thanks and best regards' (the name
   // goes too).
