@@ -5,8 +5,11 @@
 // has since learned to remove stayed in a stored preview until this pass rewrote it
 // from the stored body. Bump CHAT_PREVIEW_DERIVATION_VERSION with any change to the
 // HTML cleanup behind createChatPreviewText / createCleanedSnippet that changes their
-// output (iOS bumps CacheVersioning.chatPreviewDerivationVersion for the same
-// changes), so stores that finished the walk run it again.
+// output, so stores that finished the walk run it again. Each platform bumps only for
+// a change to its own output: iOS keys its pass on
+// CacheVersioning.chatPreviewDerivationVersion, and a bump there for a web-only fix
+// re-derives every received row on every iOS device for nothing (the full-width MVPN
+// fix bumped this constant alone).
 //
 // Received rows with a stored HTML body only. An outgoing row keeps its composer
 // text (an outgoing forward's preview also reads headers that are not stored), and a
