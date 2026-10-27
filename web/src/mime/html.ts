@@ -1379,18 +1379,24 @@ const SIGNATURE_TIME_RANGE_PATTERN =
 const SIGNATURE_BARE_HOURS_LABEL_PATTERN = /^after[ -]hours\s*:$/i
 
 // A bare whitespace rewrite doubled existing separators and failed the empty-segment guard.
+// An MVPN short number has no colon, so it splits on its own label and digits
+// ("Tel: +886-3-555-0123 Ext. 15000 MVPN 6688"); without the split the short number sat in
+// the phone's suffix and rejected the row.
 const SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN =
-  /(?:\s*[|•│┃¦]\s*|\s+)(?=(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:)/gi
+  /(?:\s*[|•│┃¦]\s*|\s+)(?=(?:(?:[mcofdtpwh]|tel|telephone|phone|cell|mobile|office|work|home|direct|desk|main|fax)\s*:|mvpn\s*[:#.]?\s*\d))/gi
 
 // A carrier or region code qualifies the word label after it ("TWM Mobile: 0912555018",
 // "CQ Mobile:", "US Cell:"), so it is dropped before the label splits the line. Only an
 // all-caps code of two to four letters directly before the label and its colon: a name
 // ahead of a label ("Jane Mobile:") still has to pass the leading-segment rules. An
 // all-caps surname has the same shape ("Lin CHEN Mobile:"), so isSignaturePhoneLine drops
-// codes only for a line that fails as written. Swift spells the label check inline as
-// (?i:...); Node's RegExp has no inline modifiers, so the captured word is checked against
-// the set instead.
-const SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN = /(?<![\p{L}\p{N}])[A-Z]{2,4}\s+(?=(\p{L}+)\s*:)/gu
+// codes only for a line that fails as written. Shouted English words are not codes ("ASAP
+// Phone:", "CALL Mobile:"): without the exclusion an authored call-me line became a contact
+// row. Two-letter words stay codes, because a state or country code ("OR Office:", "MY
+// Mobile:") is spelled the same. Swift spells the label check inline as (?i:...); Node's
+// RegExp has no inline modifiers, so the captured word is checked against the set instead.
+const SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN =
+  /(?<![\p{L}\p{N}])(?!(?:ASAP|CALL|TEXT|FYI|PLS|PLZ|NOTE|THE|AND|FOR|OUR|YOUR|VIA)\s)[A-Z]{2,4}\s+(?=(\p{L}+)\s*:)/gu
 const SIGNATURE_QUALIFIED_PHONE_LABELS = new Set([
   'tel',
   'telephone',

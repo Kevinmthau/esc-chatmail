@@ -730,6 +730,46 @@ describe('qualified mobile labels and short-dial numbers', () => {
     expect(isTrailingSignatureContactLine(line)).toBe(true)
   })
 
+  // Revert-check: the shouted-word exclusion in SIGNATURE_PHONE_LABEL_QUALIFIER_PATTERN.
+  // Without it each word is dropped as a code and the bare labeled phone is a contact row.
+  it.each([
+    'ASAP Phone: 415-555-1212',
+    'CALL Mobile: 415-555-1212',
+    'TEXT Cell: 415-555-1212',
+    'FYI Office: 415-555-1212',
+  ])('keeps a shouted word ahead of a label as prose: %s', (line) => {
+    expect(isContactSignatureLine(line)).toBe(false)
+  })
+
+  // HONEST SCOPE: these pass with or without the exclusion; they pin that a two-letter
+  // state or country code spelled like a word stays a code.
+  it.each(['OR Office: 503-555-1212', 'MY Mobile: 012-345 6789'])(
+    'keeps a two-letter code ahead of a label as a contact line: %s',
+    (line) => {
+      expect(isContactSignatureLine(line)).toBe(true)
+      expect(isTrailingSignatureContactLine(line)).toBe(true)
+    },
+  )
+
+  // Revert-check: the mvpn alternative in SIGNATURE_INLINE_PHONE_LABEL_SEPARATOR_PATTERN.
+  // Without it the short number stays in the phone's suffix and rejects the row.
+  it.each(['Tel: +886-3-555-0123 Ext. 15000 MVPN 6688', 'Mobile: 0912555018 MVPN 655018'])(
+    'splits an MVPN number off the phone on the same row: %s',
+    (line) => {
+      expect(isContactSignatureLine(line)).toBe(true)
+      expect(isTrailingSignatureContactLine(line)).toBe(true)
+    },
+  )
+
+  // HONEST SCOPE: these pass with or without the split; they pin that splitting before
+  // "MVPN <digits>" does not turn prose around the short number into a contact row.
+  it.each(['Call 415-555-1212 or MVPN 6688 today', 'Lin Chen MVPN 655018'])(
+    'keeps prose around an inline MVPN number: %s',
+    (line) => {
+      expect(isContactSignatureLine(line)).toBe(false)
+    },
+  )
+
   // Revert-check: either pattern above (the upward scan stops at that row before the name and
   // closing, so nothing is removed) and SIGN_OFF_PHRASES 'thanks and best regards' (the name
   // goes too).
