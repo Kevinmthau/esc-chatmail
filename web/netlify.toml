@@ -1,0 +1,18 @@
+# Netlify site `mushpot-mail`, live at https://mail.mushpot.net.
+#
+# The site's base directory is `web`, set in the Netlify site settings because a
+# netlify.toml inside the base directory cannot set it. Every path below is
+# relative to web/. Pushes to main deploy to production. Netlify cancels a build
+# whose commit leaves web/ unchanged, so iOS-only merges don't redeploy.
+#
+# Deploy previews for pull requests are also off in site settings: Google
+# sign-in only works on origins registered with the OAuth client (README), so a
+# preview URL could not sign in.
+
+[build]
+  # pnpm comes from package.json's packageManager field, through corepack.
+  command = "pnpm build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"

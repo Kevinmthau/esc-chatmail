@@ -1,7 +1,6 @@
 import { Navigate, Outlet, createRootRoute, useLocation } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { signIn, startBoot, useAuthState } from '@/app/boot'
-import { ReloadPrompt } from '@/app/ReloadPrompt'
 import { Spinner } from '@/features/auth/Spinner'
 
 export const Route = createRootRoute({
@@ -31,7 +30,6 @@ function RootLayout() {
     <>
       {showExpiredBanner && <SessionExpiredBanner />}
       <Outlet />
-      <ReloadPrompt />
     </>
   )
 }

@@ -56,6 +56,13 @@ corepack pnpm format         # prettier --write
 corepack pnpm build          # typecheck + production build to dist/
 ```
 
+## Deploying
+
+Production is the Netlify site `mushpot-mail` at https://mail.mushpot.net.
+Every push to `main` that changes `web/` builds and deploys it; build settings
+live in [`netlify.toml`](netlify.toml). The OAuth client must list
+`https://mail.mushpot.net` as an authorized JavaScript origin.
+
 ## Architecture
 
 ```
