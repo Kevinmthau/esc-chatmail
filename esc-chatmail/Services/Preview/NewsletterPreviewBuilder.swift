@@ -16,7 +16,8 @@ struct NewsletterPreviewBuilder {
     /// inside a URL or a price has no space after it and ends nothing.
     private static let sentenceBoundaryRegex = try? NSRegularExpression(pattern: #"[.!?]+\s+"#)
     /// The longest footer lead-in `trimmingFooterContent` steps back over, per
-    /// step. "Want to change how you receive these emails?" is 44 characters.
+    /// step, in UTF-16 units of the text the card shows (link labels, not
+    /// targets). "Want to change how you receive these emails?" is 44.
     private static let maxFooterLeadInLength = 60
 
     func buildPreview(
@@ -94,6 +95,7 @@ struct NewsletterPreviewBuilder {
             shouldSkipLine: shouldSkipLine,
             lineLooksLikePreviewNoise: lineLooksLikePreviewNoise,
             isSkippedLinkTarget: isSkippedLinkTarget,
+            isFooterLeadInQuestion: isFooterLeadInQuestion,
             trimmingLeadingPreviewURLNoise: trimmingLeadingPreviewURLNoise
         )
         let lines = lineAnalyzer.cleanedLines(
@@ -259,24 +261,37 @@ struct NewsletterPreviewBuilder {
     /// A stored snippet reduced to its Markdown link labels (`MarkdownLinkLabels`).
     /// `MessageProcessor` stores the plain-text part as the snippet when the
     /// HTML shows no text, which for an image-only campaign is all links. The
-    /// snippet's leading trims and footer trim run on it as stored first, in
+    /// snippet's leading trims and footer search run on it as stored first, in
     /// the same order as for a snippet without links, so a footer phrase in a
     /// link's target (`[Click here](…/unsubscribe)`) still ends the snippet,
-    /// while one inside the leading subject or title does not. Text with no
-    /// links passes through unchanged.
+    /// while one inside the leading subject or title does not. The footer's
+    /// lead-in is then stepped back over on the label text, which is what the
+    /// card shows: measured on the stored text, a link's URL earlier in the
+    /// footer sentence ("You can [update your preferences](…) or
+    /// [unsubscribe](…)") put a short lead-in over the cap and left it standing.
+    /// Text with no links passes through unchanged.
     private func previewSummaryLinkLabels(in text: String, excluding excluded: [String?]) -> MarkdownLinkLabels.Result {
         guard MarkdownLinkLabels.containsLink(in: text) else {
             return MarkdownLinkLabels.Result(text: text, targets: [])
         }
 
-        let stored = trimmingFooterContent(from: trimmingLeadingSummaryText(from: text, excluding: excluded))
-        let linkLabels = MarkdownLinkLabels.replacingLinks(in: stored)
+        let stored = trimmingLeadingSummaryText(from: text, excluding: excluded)
+        let footerStart = footerPatternStart(in: stored).map { footerStart in
+            MarkdownLinkLabels.enclosingLinkStart(of: footerStart, in: MarkdownLinkLabels.linkRanges(in: stored)) ?? footerStart
+        }
+        // Cut with its trailing space, which the lead-in steps need to see the
+        // boundary of the sentence the footer ended.
+        let kept = footerStart.map { (stored as NSString).substring(to: $0) } ?? stored
+        let linkLabels = MarkdownLinkLabels.replacingLinks(in: kept)
         // Labels keep their own padding (`[Manhattan Vintage ](…)`). Collapse
         // the runs without normalizing again, which would decode entities twice.
-        return MarkdownLinkLabels.Result(
-            text: RegexSanitizer.replace(in: linkLabels.text, regex: RegexSanitizer.whitespaceRunRegex, with: " "),
-            targets: linkLabels.targets
-        )
+        var labels = RegexSanitizer.replace(in: linkLabels.text, regex: RegexSanitizer.whitespaceRunRegex, with: " ")
+        if footerStart != nil {
+            let leadInCut = footerCutLocation(in: labels, footerStart: (labels as NSString).length)
+            labels = (labels as NSString).substring(to: leadInCut)
+        }
+
+        return MarkdownLinkLabels.Result(text: labels, targets: linkLabels.targets)
     }
 
     /// The trims a stored snippet's start gets before its footer is found: the
@@ -316,14 +331,23 @@ struct NewsletterPreviewBuilder {
 
         while true {
             let previousValue = trimmed
+            // The candidate written as a link (`[Subject](url)`, Klaviyo's
+            // headline): a stored snippet's trims run before its links are
+            // stripped, so the match has to see through the link, or a footer
+            // word inside the subject ("privacy policy") is found there first.
+            let leadingLink = MarkdownLinkLabels.leadingLink(in: trimmed)
 
             for candidate in candidates {
-                guard let range = trimmed.range(of: candidate, options: [.anchored, .caseInsensitive]) else {
-                    continue
+                if let range = trimmed.range(of: candidate, options: [.anchored, .caseInsensitive]) {
+                    trimmed = trimmedPreviewBoundaryText(String(trimmed[range.upperBound...]))
+                    break
                 }
 
-                trimmed = trimmedPreviewBoundaryText(String(trimmed[range.upperBound...]))
-                break
+                if let leadingLink,
+                   trimmedPreviewBoundaryText(leadingLink.label).caseInsensitiveCompare(candidate) == .orderedSame {
+                    trimmed = trimmedPreviewBoundaryText((trimmed as NSString).substring(from: NSMaxRange(leadingLink.range)))
+                    break
+                }
             }
 
             if trimmed == previousValue {
@@ -345,21 +369,34 @@ struct NewsletterPreviewBuilder {
     /// body collapsed onto one line, whose line breaks no longer end sentences,
     /// and an unbounded step back would swallow real content.
     private func trimmingFooterContent(from text: String) -> String {
-        let footerStart = footerStopPatterns
-            .compactMap { text.range(of: $0, options: [.caseInsensitive])?.lowerBound }
-            .min()
-
-        guard let footerStart else {
+        guard let footerStart = footerPatternStart(in: text) else {
             return text
         }
 
-        let cut = footerCutLocation(in: text, footerStart: NSRange(footerStart..<footerStart, in: text).location)
+        let cut = footerCutLocation(in: text, footerStart: footerStart)
         return trimmedPreviewBoundaryText((text as NSString).substring(to: cut))
     }
 
-    /// The UTF-16 offset `trimmingFooterContent` cuts at.
+    /// The UTF-16 offset of the first footer pattern in `text`, if any.
+    private func footerPatternStart(in text: String) -> Int? {
+        footerStopPatterns
+            .compactMap { text.range(of: $0, options: [.caseInsensitive])?.lowerBound }
+            .min()
+            .map { NSRange($0..<$0, in: text).location }
+    }
+
+    /// A line that is the footer's lead-in question ("No longer wish to receive
+    /// our emails?"), whatever its wording, when the line after it is a footer
+    /// stop: the line-path counterpart of `footerCutLocation`'s question step.
+    private func isFooterLeadInQuestion(_ line: String) -> Bool {
+        line.hasSuffix("?") && line.utf16.count <= Self.maxFooterLeadInLength
+    }
+
+    /// The UTF-16 offset `trimmingFooterContent` cuts at, given the footer
+    /// pattern's. The link ranges are scanned once for the three offsets asked.
     private func footerCutLocation(in text: String, footerStart: Int) -> Int {
-        let outsideLink = { (location: Int) in MarkdownLinkLabels.enclosingLinkStart(of: location, in: text) ?? location }
+        let linkRanges = MarkdownLinkLabels.linkRanges(in: text)
+        let outsideLink = { (location: Int) in MarkdownLinkLabels.enclosingLinkStart(of: location, in: linkRanges) ?? location }
         let patternCut = outsideLink(footerStart)
         let boundaries = Self.sentenceBoundaryRegex?.matches(
             in: text,

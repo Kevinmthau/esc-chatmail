@@ -9,13 +9,15 @@ import Foundation
 /// source-selection logic lives in one focused, independently testable unit. The
 /// shared predicates it relies on — footer detection via `PreviewLineProcessor`,
 /// plus the builder's `shouldSkipLine` / `lineLooksLikePreviewNoise` /
-/// `isSkippedLinkTarget` helpers and the leading-tracking-URL trimmer — are
-/// injected so the analyzer carries no builder state.
+/// `isSkippedLinkTarget` / `isFooterLeadInQuestion` helpers and the
+/// leading-tracking-URL trimmer — are injected so the analyzer carries no
+/// builder state.
 struct NewsletterLineAnalyzer {
     private let lineProcessor: PreviewLineProcessor
     private let shouldSkipLine: (String) -> Bool
     private let lineLooksLikePreviewNoise: (String) -> Bool
     private let isSkippedLinkTarget: (String) -> Bool
+    private let isFooterLeadInQuestion: (String) -> Bool
     private let trimmingLeadingPreviewURLNoise: (String, Bool) -> String
 
     init(
@@ -23,12 +25,14 @@ struct NewsletterLineAnalyzer {
         shouldSkipLine: @escaping (String) -> Bool,
         lineLooksLikePreviewNoise: @escaping (String) -> Bool,
         isSkippedLinkTarget: @escaping (String) -> Bool,
+        isFooterLeadInQuestion: @escaping (String) -> Bool,
         trimmingLeadingPreviewURLNoise: @escaping (String, Bool) -> String
     ) {
         self.lineProcessor = lineProcessor
         self.shouldSkipLine = shouldSkipLine
         self.lineLooksLikePreviewNoise = lineLooksLikePreviewNoise
         self.isSkippedLinkTarget = isSkippedLinkTarget
+        self.isFooterLeadInQuestion = isFooterLeadInQuestion
         self.trimmingLeadingPreviewURLNoise = trimmingLeadingPreviewURLNoise
     }
 
@@ -85,6 +89,12 @@ struct NewsletterLineAnalyzer {
             let stopsAtFooter = lineProcessor.shouldStopAtFooter(candidateLine)
                 || linkLabels.targets.contains(where: lineProcessor.shouldStopAtFooter)
             if stopsAtFooter, !lines.isEmpty || !leadingURLFallbackLines.isEmpty {
+                // The footer's lead-in question on the line before it ("No
+                // longer wish to receive our emails?") goes with it, whatever
+                // its wording: the footer patterns name only Klaviyo's.
+                if let lastLine = lines.last, isFooterLeadInQuestion(lastLine) {
+                    lines.removeLast()
+                }
                 break
             }
 

@@ -340,9 +340,10 @@ final class NewsletterPreviewLogoAndMarkdownTests: XCTestCase {
     /// Revert-check: without the `trimmingFooterContent` call in
     /// `previewSummaryLinkLabels` the footer link survives and its target
     /// rejects the whole stored snippet, so the card falls back to its line
-    /// (trailing period kept); without `outsideLink` on the pattern's offset in
-    /// `footerCutLocation` the cut lands inside the long target and the snippet
-    /// ends in `[Click here](https://click.acme.example.com/…`.
+    /// (trailing period kept); without `MarkdownLinkLabels.enclosingLinkStart`
+    /// on the pattern's offset in `previewSummaryLinkLabels` the cut lands
+    /// inside the long target and the snippet ends in
+    /// `[Click here](https://click.acme.example.com/…`.
     func testBuildPreview_storedMarkdownSnippetWithFooterLink_endsBeforeTheLink() async throws {
         let storedSnippet = try await storedCleanedSnippet(
             html: Self.acmeImageOnlyHTML,
@@ -543,8 +544,11 @@ final class NewsletterPreviewLogoAndMarkdownTests: XCTestCase {
     /// the unsubscribe line after it would. No stored snippet, so the card's
     /// text comes from its lines.
     ///
-    /// Revert-check: without the "no longer want to receive these emails"
-    /// footer pattern the lead-in becomes the subtitle.
+    /// HONEST SCOPE: the lead-in becomes the subtitle only when both the "no
+    /// longer want to receive these emails" footer pattern and the question
+    /// look-back in `NewsletterLineAnalyzer.previewLines` are reverted; each
+    /// has its own test (the stored period-terminated lead-in, and the lead-in
+    /// of another wording).
     func testBuildPreview_plainTextFooterLeadInOnItsOwnLine_endsTheCardText() {
         let bodyText = """
         Our fall edit is live, with twelve layering pieces picked for changeable weather.
@@ -584,6 +588,121 @@ final class NewsletterPreviewLogoAndMarkdownTests: XCTestCase {
         )
 
         XCTAssertEqual(result?.snippet.contains("paper statements"), true, result?.snippet ?? "nil")
+    }
+
+    /// A lead-in question of any other wording on the line before the
+    /// unsubscribe line goes with it: the footer patterns name only Klaviyo's.
+    ///
+    /// Revert-check: without the `isFooterLeadInQuestion` look-back in
+    /// `NewsletterLineAnalyzer.previewLines` the lead-in becomes the subtitle.
+    func testBuildPreview_plainTextFooterLeadInOfAnotherWording_endsTheCardText() {
+        let bodyText = """
+        Our fall edit is live, with twelve layering pieces picked for changeable weather.
+        No longer wish to receive our emails?
+        [Unsubscribe](https://acme.example.com/u/1)
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: bodyText,
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        XCTAssertNil(result?.subtitle)
+        XCTAssertEqual(result?.snippet, "Our fall edit is live, with twelve layering pieces picked for changeable weather.")
+    }
+
+    /// Klaviyo's lead-in ended with a period instead of its question mark is
+    /// still the footer: the question step cannot see it, the pattern can.
+    ///
+    /// Revert-check: without the "no longer want to receive these emails"
+    /// footer pattern the snippet ends "…weather. No longer want to receive
+    /// these emails".
+    func testBuildPreview_storedSnippetPeriodTerminatedLeadIn_isCutWithTheFooter() {
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: nil,
+            cleanedSnippet: "Our fall edit is live, with twelve layering pieces picked for changeable weather. No longer want to receive these emails. Unsubscribe from this list.",
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        XCTAssertEqual(result?.snippet, "Our fall edit is live, with twelve layering pieces picked for changeable weather")
+    }
+
+    /// The standard Mailchimp footer as a Markdown plain text writes it, each
+    /// option a link: the lead-in is measured on the label text the card shows,
+    /// not on the stored text with the first link's URL in it.
+    ///
+    /// Revert-check: stepping back over the lead-in on the stored text in
+    /// `previewSummaryLinkLabels` (before `MarkdownLinkLabels.replacingLinks`)
+    /// puts "You can [update your preferences](https://…) or " over the cap,
+    /// and the snippet ends "…weather. You can update your preferences or".
+    func testBuildPreview_storedMarkdownSnippetFooterLinksInLeadIn_isCutWithTheFooter() async throws {
+        let bodyText = """
+        Our fall edit is live, with twelve layering pieces picked for changeable weather.
+        You can [update your preferences](https://acme.us1.list-manage.example.com/profile?u=abc123&id=def456&e=ghi789) or [unsubscribe from this list](https://acme.us1.list-manage.example.com/unsubscribe?u=abc123&id=def456&e=ghi789&c=jkl012).
+        """
+        let storedSnippet = try await storedCleanedSnippet(html: Self.acmeImageOnlyHTML, plainText: bodyText)
+        XCTAssertEqual(storedSnippet?.contains("or [unsubscribe from this list](https://"), true, storedSnippet ?? "nil")
+
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: bodyText,
+            cleanedSnippet: storedSnippet,
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        XCTAssertEqual(result?.snippet, "Our fall edit is live, with twelve layering pieces picked for changeable weather")
+    }
+
+    /// A footer target behind a linked image (`[![alt](src)](href)`) ends the
+    /// stored snippet before the whole image link, not inside its outer target.
+    /// The stored snippet is the one-line shape ingest stores.
+    ///
+    /// Revert-check: without `linkedImageRegex` in
+    /// `MarkdownLinkLabels.linkRanges` the cut lands inside the outer target,
+    /// too far past the sentence start to step back over, and the snippet ends
+    /// "…weather. [Stop these emails](https://click.acme.example.com/…".
+    func testBuildPreview_storedMarkdownSnippetWithFooterLinkedImage_endsBeforeTheImageLink() {
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: nil,
+            cleanedSnippet: "Our fall edit is live, with twelve layering pieces picked for changeable weather. [![Stop these emails](https://cdn.example.com/stop.png)](https://click.acme.example.com/ls/click?upn=Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0/unsubscribe?u=1) Acme Outfitters, 12 Harbor Street, Portland ME 04101",
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        XCTAssertEqual(result?.snippet, "Our fall edit is live, with twelve layering pieces picked for changeable weather")
+    }
+
+    /// The repeated subject written as a link (Klaviyo's headline) is trimmed
+    /// before the footer search, as an unlinked one is, so "privacy policy"
+    /// inside it does not cut the stored snippet to nothing.
+    ///
+    /// Revert-check: without the `MarkdownLinkLabels.leadingLink` branch in
+    /// `trimmingLeadingExcludedText` the footer word is found inside the link,
+    /// the cut moves to its start, and the card falls back to its source domain.
+    func testBuildPreview_storedMarkdownSnippetRepeatingSubjectAsLink_keepsItsBody() {
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: nil,
+            cleanedSnippet: "[Changes to our privacy policy](https://acme.example.com/legal) Read the update to see what changes for you this month and how we use your data.",
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Changes to our privacy policy"
+        )
+
+        XCTAssertEqual(
+            result?.snippet,
+            "Read the update to see what changes for you this month and how we use your data"
+        )
     }
 
     /// The builder decodes a stored snippet's entities once, as it did before

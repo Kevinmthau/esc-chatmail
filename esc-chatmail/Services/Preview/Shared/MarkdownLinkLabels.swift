@@ -90,23 +90,48 @@ enum MarkdownLinkLabels {
         )
     }
 
-    /// The UTF-16 offset where the outermost link containing `location` starts,
-    /// or nil when `location` is not inside a link. A footer cut moved there
-    /// drops the link whole, so no `[label](https://` residue is left behind.
-    static func enclosingLinkStart(of location: Int, in text: String) -> Int? {
+    /// The UTF-16 range of every link in `text`, a linked image's whole
+    /// `[![alt](src)](href)` beside its image's. Scanned once per text so
+    /// `enclosingLinkStart` can be asked for several offsets.
+    static func linkRanges(in text: String) -> [NSRange] {
         guard text.contains("](") else {
-            return nil
+            return []
         }
 
         let range = NSRange(location: 0, length: (text as NSString).length)
-        let linkRanges = [linkRegex, linkedImageRegex]
+        return [linkRegex, linkedImageRegex]
             .compactMap { $0 }
             .flatMap { $0.matches(in: text, range: range).map(\.range) }
+    }
 
-        return linkRanges
+    /// The UTF-16 offset where the outermost of `linkRanges` containing
+    /// `location` starts, or nil when `location` is not inside a link. A footer
+    /// cut moved there drops the link whole, so no `[label](https://` residue
+    /// is left behind.
+    static func enclosingLinkStart(of location: Int, in linkRanges: [NSRange]) -> Int? {
+        linkRanges
             .filter { $0.location < location && location < NSMaxRange($0) }
             .map(\.location)
             .min()
+    }
+
+    /// The link `text` starts with, if any: its label and its UTF-16 range. A
+    /// linked image is not one (its outer label is itself an image).
+    static func leadingLink(in text: String) -> (label: String, range: NSRange)? {
+        guard text.hasPrefix("["), let linkRegex else {
+            return nil
+        }
+
+        let nsText = text as NSString
+        guard let match = linkRegex.firstMatch(
+            in: text,
+            options: [.anchored],
+            range: NSRange(location: 0, length: nsText.length)
+        ) else {
+            return nil
+        }
+
+        return (nsText.substring(with: match.range(at: 1)), match.range)
     }
 
     private static func replacingLinksOnce(in text: String) -> Result? {
