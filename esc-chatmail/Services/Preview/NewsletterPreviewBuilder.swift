@@ -12,6 +12,12 @@ struct NewsletterPreviewBuilder {
         pattern: #"^\s*[\(\[\{<]?\s*((?:https?://|www\.)[^\s\)\]\}>]+)(?:\s*[\)\]\}>])?\s*"#,
         options: [.caseInsensitive]
     )
+    /// The end of a sentence: its punctuation and the space after it. A period
+    /// inside a URL or a price has no space after it and ends nothing.
+    private static let sentenceBoundaryRegex = try? NSRegularExpression(pattern: #"[.!?]+\s+"#)
+    /// The longest footer lead-in `trimmingFooterContent` steps back over, per
+    /// step. "Want to change how you receive these emails?" is 44 characters.
+    private static let maxFooterLeadInLength = 60
 
     func buildPreview(
         canonicalHTML: String,
@@ -87,6 +93,7 @@ struct NewsletterPreviewBuilder {
             lineProcessor: lineProcessor,
             shouldSkipLine: shouldSkipLine,
             lineLooksLikePreviewNoise: lineLooksLikePreviewNoise,
+            isSkippedLinkTarget: isSkippedLinkTarget,
             trimmingLeadingPreviewURLNoise: trimmingLeadingPreviewURLNoise
         )
         let lines = lineAnalyzer.cleanedLines(
@@ -223,10 +230,8 @@ struct NewsletterPreviewBuilder {
         excluding excluded: [String?],
         excludedValues: Set<String>
     ) -> String? {
-        let linkLabels = previewSummaryLinkLabels(in: PreviewTextUtilities.normalizedText(text))
-        var normalized = trimmedPreviewBoundaryText(PreviewTextUtilities.normalizedText(linkLabels.text))
-        normalized = trimmingLeadingPreviewURLNoise(from: normalized, requiringTrackingURL: true)
-        normalized = trimmingLeadingExcludedText(from: normalized, excluded: excluded)
+        let linkLabels = previewSummaryLinkLabels(in: PreviewTextUtilities.normalizedText(text), excluding: excluded)
+        var normalized = trimmingLeadingSummaryText(from: linkLabels.text, excluding: excluded)
         normalized = trimmingFooterContent(from: normalized)
 
         // The removed links' targets are judged with the snippet, as they were
@@ -238,7 +243,7 @@ struct NewsletterPreviewBuilder {
               !lineLooksLikePreviewNoise(normalized),
               !looksLikeShortTitleCluster(normalized),
               !shouldSkipLine(normalized),
-              linkLabels.targets.isEmpty || !shouldSkipLine(([normalized] + linkLabels.targets).joined(separator: " ")),
+              !linkLabels.targets.contains(where: isSkippedLinkTarget),
               !lineProcessor.shouldStopAtFooter(normalized) else {
             return nil
         }
@@ -254,18 +259,42 @@ struct NewsletterPreviewBuilder {
     /// A stored snippet reduced to its Markdown link labels (`MarkdownLinkLabels`).
     /// `MessageProcessor` stores the plain-text part as the snippet when the
     /// HTML shows no text, which for an image-only campaign is all links. The
-    /// footer trim runs on the snippet as stored first, so a footer phrase in a
-    /// link's target (`[Click here](…/unsubscribe)`) still ends the snippet there,
-    /// and a link that trim cuts open is dropped whole. Text with no links passes
-    /// through unchanged.
-    private func previewSummaryLinkLabels(in text: String) -> MarkdownLinkLabels.Result {
+    /// snippet's leading trims and footer trim run on it as stored first, in
+    /// the same order as for a snippet without links, so a footer phrase in a
+    /// link's target (`[Click here](…/unsubscribe)`) still ends the snippet,
+    /// while one inside the leading subject or title does not. Text with no
+    /// links passes through unchanged.
+    private func previewSummaryLinkLabels(in text: String, excluding excluded: [String?]) -> MarkdownLinkLabels.Result {
         guard MarkdownLinkLabels.containsLink(in: text) else {
             return MarkdownLinkLabels.Result(text: text, targets: [])
         }
 
-        return MarkdownLinkLabels.replacingLinks(
-            in: MarkdownLinkLabels.removingTrailingPartialLink(from: trimmingFooterContent(from: text))
+        let stored = trimmingFooterContent(from: trimmingLeadingSummaryText(from: text, excluding: excluded))
+        let linkLabels = MarkdownLinkLabels.replacingLinks(in: stored)
+        // Labels keep their own padding (`[Manhattan Vintage ](…)`). Collapse
+        // the runs without normalizing again, which would decode entities twice.
+        return MarkdownLinkLabels.Result(
+            text: RegexSanitizer.replace(in: linkLabels.text, regex: RegexSanitizer.whitespaceRunRegex, with: " "),
+            targets: linkLabels.targets
         )
+    }
+
+    /// The trims a stored snippet's start gets before its footer is found: the
+    /// boundary punctuation, a leading tracking URL, and the title, subject or
+    /// source label it repeats.
+    private func trimmingLeadingSummaryText(from text: String, excluding excluded: [String?]) -> String {
+        var trimmed = trimmedPreviewBoundaryText(text)
+        trimmed = trimmingLeadingPreviewURLNoise(from: trimmed, requiringTrackingURL: true)
+        return trimmingLeadingExcludedText(from: trimmed, excluded: excluded)
+    }
+
+    /// A removed link's target judged for what a URL can say: a social network
+    /// or an unsubscribe page (`ignoredLinePatterns`). Not `shouldSkipLine`,
+    /// whose text-noise heuristics read `target=` or `{{…}}` in a query string
+    /// as markup and would drop an ordinary content link.
+    private func isSkippedLinkTarget(_ target: String) -> Bool {
+        let lowercased = target.lowercased()
+        return ignoredLinePatterns.contains { lowercased.contains($0) }
     }
 
     private func trimmingLeadingExcludedText(from text: String, excluded: [String?]) -> String {
@@ -303,6 +332,18 @@ struct NewsletterPreviewBuilder {
         }
     }
 
+    /// `text` cut before its footer: at the first footer pattern, moved out of
+    /// any Markdown link the pattern sits in (so no `[label](https://` is left
+    /// behind), then back over a short lead-in: the rest of the pattern's own
+    /// sentence and a question just before it ("You can update your
+    /// preferences or unsubscribe.", "Don't want these emails? Unsubscribe.").
+    /// Cutting at the pattern alone left such a lead-in standing as a stored
+    /// snippet's whole text.
+    ///
+    /// The lead-in steps need a sentence boundary before the pattern and are
+    /// capped at `maxFooterLeadInLength`: a stored snippet is often a plain-text
+    /// body collapsed onto one line, whose line breaks no longer end sentences,
+    /// and an unbounded step back would swallow real content.
     private func trimmingFooterContent(from text: String) -> String {
         let footerStart = footerStopPatterns
             .compactMap { text.range(of: $0, options: [.caseInsensitive])?.lowerBound }
@@ -312,7 +353,32 @@ struct NewsletterPreviewBuilder {
             return text
         }
 
-        return trimmedPreviewBoundaryText(String(text[..<footerStart]))
+        let cut = footerCutLocation(in: text, footerStart: NSRange(footerStart..<footerStart, in: text).location)
+        return trimmedPreviewBoundaryText((text as NSString).substring(to: cut))
+    }
+
+    /// The UTF-16 offset `trimmingFooterContent` cuts at.
+    private func footerCutLocation(in text: String, footerStart: Int) -> Int {
+        let outsideLink = { (location: Int) in MarkdownLinkLabels.enclosingLinkStart(of: location, in: text) ?? location }
+        let patternCut = outsideLink(footerStart)
+        let boundaries = Self.sentenceBoundaryRegex?.matches(
+            in: text,
+            range: NSRange(location: 0, length: patternCut)
+        ) ?? []
+
+        guard let lastBoundary = boundaries.last,
+              patternCut - NSMaxRange(lastBoundary.range) <= Self.maxFooterLeadInLength else {
+            return patternCut
+        }
+
+        let sentenceStart = NSMaxRange(lastBoundary.range)
+        let questionStart = boundaries.dropLast().last.map { NSMaxRange($0.range) } ?? 0
+        guard (text as NSString).substring(with: lastBoundary.range).contains("?"),
+              lastBoundary.range.location - questionStart <= Self.maxFooterLeadInLength else {
+            return outsideLink(sentenceStart)
+        }
+
+        return outsideLink(questionStart)
     }
 
     private func trimmedPreviewBoundaryText(_ text: String) -> String {
@@ -555,10 +621,11 @@ struct NewsletterPreviewBuilder {
 
 private let footerStopPatterns = [
     // The lead-in ESPs put before their unsubscribe link ("No longer want to
-    // receive these emails? Unsubscribe."): cutting only at "unsubscribe" left
-    // it standing as a stored snippet's whole text.
-    "no longer want to receive",
-    "no longer wish to receive",
+    // receive these emails? Unsubscribe."), for when it sits on a line of its
+    // own. Anchored on "these emails": "no longer wish to receive" alone also
+    // matches ordinary copy ("…paper statements").
+    "no longer want to receive these emails",
+    "no longer wish to receive these emails",
     "unsubscribe",
     "manage preferences",
     "manage subscriptions",
