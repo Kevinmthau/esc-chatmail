@@ -103,7 +103,8 @@ struct NewsletterPreviewBuilder {
         let heroImageSelector = NewsletterHeroImageSelector(
             lineProcessor: lineProcessor,
             previewLines: lineAnalyzer.previewLines,
-            shouldSkipLine: shouldSkipLine
+            shouldSkipLine: shouldSkipLine,
+            brandNames: [senderName, sourceLabel]
         )
         let heroImage = heroImageSelector.bestCandidate(from: extractedImages)
         let heroImageURL = heroImage?.url
@@ -116,10 +117,14 @@ struct NewsletterPreviewBuilder {
         let fallbackSubject = normalizedSubject.isEmpty ? nil : normalizedSubject
         let resolvedTitle = title ?? fallbackSubject ?? sourceLabel ?? "Newsletter"
         let resolvedSnippet = snippet ?? subtitle ?? sourceDomain ?? "Open the full email to view the complete message."
+        // A subtitle that stood in for the missing snippet is shown once, as the
+        // snippet: the card renders both, so keeping it in both printed the same
+        // line twice (an image-only campaign whose only text line is a caption).
+        let displayedSubtitle = snippet == nil ? nil : subtitle
 
         return NewsletterPreviewModel(
             title: resolvedTitle,
-            subtitle: subtitle,
+            subtitle: displayedSubtitle,
             snippet: lineProcessor.truncate(resolvedSnippet, limit: 220),
             heroImageURL: heroImageURL,
             heroImageDisplayMode: heroImage?.displayMode ?? .fill,

@@ -12,6 +12,15 @@ import Foundation
 /// the leading-tracking-URL trimmer — are injected so the analyzer carries no
 /// builder state.
 struct NewsletterLineAnalyzer {
+    /// `[label](url)` and `![alt](url)`, as ESPs write links in generated
+    /// text/plain parts (Klaviyo writes every link, image links included, this
+    /// way). Only web and mailto targets with no spaces or parentheses match, so
+    /// ordinary bracketed text is left alone.
+    private static let markdownLinkRegex = try? NSRegularExpression(
+        pattern: #"!?\[([^\[\]\n]*)\]\(\s*<?(?:https?://|mailto:)[^\s()<>]*>?\s*\)"#,
+        options: [.caseInsensitive]
+    )
+
     private let lineProcessor: PreviewLineProcessor
     private let shouldSkipLine: (String) -> Bool
     private let lineLooksLikePreviewNoise: (String) -> Bool
@@ -53,7 +62,12 @@ struct NewsletterLineAnalyzer {
     func previewLines(from rawText: String) -> [String] {
         guard !rawText.isEmpty else { return [] }
 
-        let rawLines = rawText.components(separatedBy: .newlines)
+        // Keep only each Markdown link's label. An image-only campaign's HTML
+        // carries almost no text, so its plain-text lines supply the card's
+        // subtitle and snippet, and with the links left in those read as
+        // `[label](https://...)`.
+        let rawLines = RegexSanitizer.replace(in: rawText, regex: Self.markdownLinkRegex, with: "$1")
+            .components(separatedBy: .newlines)
         var lines: [String] = []
         var leadingURLFallbackLines: [String] = []
 

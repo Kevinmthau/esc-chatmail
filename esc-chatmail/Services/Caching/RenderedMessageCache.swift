@@ -899,6 +899,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
                 total +
                     stringSize(image.sourceURL) +
                     stringSize(image.descriptor) +
+                    stringSize(image.altText) +
                     stringSize(image.followingText) +
                     48
             } +

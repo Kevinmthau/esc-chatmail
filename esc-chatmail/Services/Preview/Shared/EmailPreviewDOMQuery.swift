@@ -39,15 +39,19 @@ struct EmailPreviewDOMQuery {
             return []
         }
 
-        let imageElements = Array(selectedElements("img").prefix(maxImages))
+        let allImageElements = selectedElements("img")
+        let imageElements = Array(allImageElements.prefix(maxImages))
+        let ancestorImageCounts = imageCountsByAncestor(of: allImageElements)
         return imageElements.enumerated().compactMap { index, element in
             guard let sourceURL = attributeValue(named: "src", in: element) else {
                 return nil
             }
 
+            let altText = attributeValue(named: "alt", in: element)
             let descriptor = [
-                attributeValue(named: "alt", in: element),
-                attributeValue(named: "class", in: element)
+                altText,
+                attributeValue(named: "class", in: element),
+                enclosingLogoContainerName(of: element, imageCountsByAncestor: ancestorImageCounts)
             ]
             .compactMap { $0?.lowercased() }
             .joined(separator: " ")
@@ -58,10 +62,64 @@ struct EmailPreviewDOMQuery {
                 width: numericAttribute(named: "width", in: element),
                 height: numericAttribute(named: "height", in: element),
                 descriptor: descriptor,
+                altText: altText,
                 followingText: followingTextAfterImage(element, stoppingAt: nextImage),
                 index: index
             )
         }
+    }
+
+    /// How many `<img>` elements sit under each ancestor, keyed by element
+    /// identity, so the logo-container walk can tell where an image stops being
+    /// the only one in its container without re-scanning subtrees.
+    private func imageCountsByAncestor(of imageElements: [Element]) -> [ObjectIdentifier: Int] {
+        var counts: [ObjectIdentifier: Int] = [:]
+        for imageElement in imageElements {
+            var ancestor = imageElement.parent()
+            while let current = ancestor {
+                counts[ObjectIdentifier(current), default: 0] += 1
+                ancestor = current.parent()
+            }
+        }
+        return counts
+    }
+
+    /// The class or id of the nearest container that names this image a logo,
+    /// looking only at containers that hold no other image.
+    ///
+    /// ESP header blocks mark the logo on a wrapping cell, not on the `<img>`:
+    /// Klaviyo's header link bar wraps it in `<td class="hlb-logo">` and gives it
+    /// an alt of just the brand name and the same `width="600"` as every content
+    /// image, so nothing on the tag itself said "logo" and the logo, coming
+    /// first, won the newsletter card's hero slot. Stopping at the first
+    /// container shared with another image keeps a "logo" class on a wider
+    /// header from tagging the content images under it. `<body>` and `<html>`
+    /// are never consulted: an email with a single image would otherwise inherit
+    /// a document-wide class.
+    private func enclosingLogoContainerName(
+        of imageElement: Element,
+        imageCountsByAncestor: [ObjectIdentifier: Int]
+    ) -> String? {
+        var ancestor = imageElement.parent()
+        while let current = ancestor {
+            let tagName = current.tagName().lowercased()
+            guard tagName != "body",
+                  tagName != "html",
+                  imageCountsByAncestor[ObjectIdentifier(current)] == 1 else {
+                return nil
+            }
+
+            for attribute in ["class", "id"] {
+                if let name = attributeValue(named: attribute, in: current),
+                   name.lowercased().contains("logo") {
+                    return name
+                }
+            }
+
+            ancestor = current.parent()
+        }
+
+        return nil
     }
 
     private func firstText(matching selector: String) -> String? {
