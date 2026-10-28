@@ -17,22 +17,26 @@ struct HeroImageCandidate {
 /// nothing else references them, and the URL sanitizer and tracking remover are
 /// owned outright (stateless). The shared line preparation (`previewLines`), the
 /// `shouldSkipLine` predicate, and the `PreviewLineProcessor` (footer detection)
-/// are injected so the selector carries no other builder state.
+/// are injected so the selector carries no other builder state, as are the
+/// sender's names (`brandNames`) used to spot brand-mark images.
 struct NewsletterHeroImageSelector {
     private let lineProcessor: PreviewLineProcessor
     private let previewLines: (String) -> [String]
     private let shouldSkipLine: (String) -> Bool
+    private let brandNames: Set<String>
     private let urlSanitizer = HTMLURLSanitizer()
     private let trackingRemover = HTMLTrackingRemover()
 
     init(
         lineProcessor: PreviewLineProcessor,
         previewLines: @escaping (String) -> [String],
-        shouldSkipLine: @escaping (String) -> Bool
+        shouldSkipLine: @escaping (String) -> Bool,
+        brandNames: [String?] = []
     ) {
         self.lineProcessor = lineProcessor
         self.previewLines = previewLines
         self.shouldSkipLine = shouldSkipLine
+        self.brandNames = PreviewTextUtilities.normalizedSet(from: brandNames)
     }
 
     func bestCandidate(from images: [EmailPreviewImage]) -> HeroImageCandidate? {
@@ -83,6 +87,14 @@ struct NewsletterHeroImageSelector {
                 score -= 18
             }
 
+            // An image described only by the sender's name is a brand mark, not
+            // content: ESP headers alt their logo with the brand name and size it
+            // like every content image, so it led on position alone. A penalty,
+            // not a rejection, so it is still the hero when nothing else is.
+            if isNamedOnlyForBrand(image) {
+                score -= 18
+            }
+
             if lowercasedSource.contains("hero") || lowercasedSource.contains("banner") || lowercasedSource.contains("cover") {
                 score += 14
             }
@@ -120,6 +132,11 @@ struct NewsletterHeroImageSelector {
         }
 
         return bestCandidate
+    }
+
+    private func isNamedOnlyForBrand(_ image: EmailPreviewImage) -> Bool {
+        let altText = PreviewTextUtilities.normalizedComparableText(image.altText)
+        return !altText.isEmpty && brandNames.contains(altText)
     }
 
     private func imageContextScore(fromPlainText plainText: String) -> Int {

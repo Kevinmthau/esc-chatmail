@@ -37,7 +37,11 @@ struct EmailPreviewImage: Equatable, Sendable {
     let sourceURL: String
     let width: Int?
     let height: Int?
+    /// Lowercased `alt` and `class` of the `<img>`, plus the class or id of an
+    /// enclosing logo-only container (`EmailPreviewDOMQuery`), for hint matching.
     let descriptor: String
+    /// The `alt` attribute alone, whitespace-normalized, original case.
+    let altText: String?
     let followingText: String
     let index: Int
 }
