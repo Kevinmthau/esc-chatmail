@@ -12,15 +12,6 @@ import Foundation
 /// the leading-tracking-URL trimmer — are injected so the analyzer carries no
 /// builder state.
 struct NewsletterLineAnalyzer {
-    /// `[label](url)` and `![alt](url)`, as ESPs write links in generated
-    /// text/plain parts (Klaviyo writes every link, image links included, this
-    /// way). Only web and mailto targets with no spaces or parentheses match, so
-    /// ordinary bracketed text is left alone.
-    private static let markdownLinkRegex = try? NSRegularExpression(
-        pattern: #"!?\[([^\[\]\n]*)\]\(\s*<?(?:https?://|mailto:)[^\s()<>]*>?\s*\)"#,
-        options: [.caseInsensitive]
-    )
-
     private let lineProcessor: PreviewLineProcessor
     private let shouldSkipLine: (String) -> Bool
     private let lineLooksLikePreviewNoise: (String) -> Bool
@@ -62,17 +53,19 @@ struct NewsletterLineAnalyzer {
     func previewLines(from rawText: String) -> [String] {
         guard !rawText.isEmpty else { return [] }
 
-        // Keep only each Markdown link's label. An image-only campaign's HTML
-        // carries almost no text, so its plain-text lines supply the card's
-        // subtitle and snippet, and with the links left in those read as
-        // `[label](https://...)`.
-        let rawLines = RegexSanitizer.replace(in: rawText, regex: Self.markdownLinkRegex, with: "$1")
-            .components(separatedBy: .newlines)
+        let rawLines = rawText.components(separatedBy: .newlines)
         var lines: [String] = []
         var leadingURLFallbackLines: [String] = []
 
         for line in rawLines {
-            let normalizedLine = PreviewTextUtilities.normalizedText(line)
+            // Keep only each Markdown link's label (`MarkdownLinkLabels`). Its
+            // target is not shown but still judged with the line: before the
+            // links were stripped, a footer link (`[Click here](…/unsubscribe)`)
+            // stopped the scan and a social link (`[tiktok](…instagram.com/…)`)
+            // was skipped on its URL alone, and a label-only line must not
+            // bring that footer text or that link into the card.
+            let linkLabels = MarkdownLinkLabels.replacingLinks(in: line)
+            let normalizedLine = PreviewTextUtilities.normalizedText(linkLabels.text)
             guard !normalizedLine.isEmpty else {
                 continue
             }
@@ -85,11 +78,16 @@ struct NewsletterLineAnalyzer {
                 continue
             }
 
-            if lineProcessor.shouldStopAtFooter(candidateLine), !lines.isEmpty || !leadingURLFallbackLines.isEmpty {
+            let stopsAtFooter = lineProcessor.shouldStopAtFooter(candidateLine)
+                || linkLabels.targets.contains(where: lineProcessor.shouldStopAtFooter)
+            if stopsAtFooter, !lines.isEmpty || !leadingURLFallbackLines.isEmpty {
                 break
             }
 
-            if shouldSkipLine(candidateLine) {
+            // The targets go after the label, so the URL-prefix noise check
+            // still sees only how the line itself starts.
+            if shouldSkipLine(candidateLine)
+                || (!linkLabels.targets.isEmpty && shouldSkipLine(([candidateLine] + linkLabels.targets).joined(separator: " "))) {
                 continue
             }
 
