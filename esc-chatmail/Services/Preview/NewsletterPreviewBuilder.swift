@@ -223,16 +223,22 @@ struct NewsletterPreviewBuilder {
         excluding excluded: [String?],
         excludedValues: Set<String>
     ) -> String? {
-        var normalized = trimmedPreviewBoundaryText(PreviewTextUtilities.normalizedText(text))
+        let linkLabels = previewSummaryLinkLabels(in: PreviewTextUtilities.normalizedText(text))
+        var normalized = trimmedPreviewBoundaryText(PreviewTextUtilities.normalizedText(linkLabels.text))
         normalized = trimmingLeadingPreviewURLNoise(from: normalized, requiringTrackingURL: true)
         normalized = trimmingLeadingExcludedText(from: normalized, excluded: excluded)
         normalized = trimmingFooterContent(from: normalized)
 
+        // The removed links' targets are judged with the snippet, as they were
+        // before links were stripped: a stored snippet that links a social
+        // profile is still rejected, so the card falls back to its lines rather
+        // than showing a run of image-link labels.
         guard !normalized.isEmpty,
               normalized.count >= 24,
               !lineLooksLikePreviewNoise(normalized),
               !looksLikeShortTitleCluster(normalized),
               !shouldSkipLine(normalized),
+              linkLabels.targets.isEmpty || !shouldSkipLine(([normalized] + linkLabels.targets).joined(separator: " ")),
               !lineProcessor.shouldStopAtFooter(normalized) else {
             return nil
         }
@@ -243,6 +249,23 @@ struct NewsletterPreviewBuilder {
         }
 
         return normalized
+    }
+
+    /// A stored snippet reduced to its Markdown link labels (`MarkdownLinkLabels`).
+    /// `MessageProcessor` stores the plain-text part as the snippet when the
+    /// HTML shows no text, which for an image-only campaign is all links. The
+    /// footer trim runs on the snippet as stored first, so a footer phrase in a
+    /// link's target (`[Click here](…/unsubscribe)`) still ends the snippet there,
+    /// and a link that trim cuts open is dropped whole. Text with no links passes
+    /// through unchanged.
+    private func previewSummaryLinkLabels(in text: String) -> MarkdownLinkLabels.Result {
+        guard MarkdownLinkLabels.containsLink(in: text) else {
+            return MarkdownLinkLabels.Result(text: text, targets: [])
+        }
+
+        return MarkdownLinkLabels.replacingLinks(
+            in: MarkdownLinkLabels.removingTrailingPartialLink(from: trimmingFooterContent(from: text))
+        )
     }
 
     private func trimmingLeadingExcludedText(from text: String, excluded: [String?]) -> String {
@@ -531,6 +554,11 @@ struct NewsletterPreviewBuilder {
 }
 
 private let footerStopPatterns = [
+    // The lead-in ESPs put before their unsubscribe link ("No longer want to
+    // receive these emails? Unsubscribe."): cutting only at "unsubscribe" left
+    // it standing as a stored snippet's whole text.
+    "no longer want to receive",
+    "no longer wish to receive",
     "unsubscribe",
     "manage preferences",
     "manage subscriptions",

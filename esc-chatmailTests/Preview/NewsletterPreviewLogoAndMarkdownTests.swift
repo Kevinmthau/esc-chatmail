@@ -15,18 +15,30 @@ final class NewsletterPreviewLogoAndMarkdownTests: XCTestCase {
     /// `[Manhattan Vintage ](https://manhattanvintage.com/)` and a snippet of
     /// raw Markdown links.
     ///
+    /// The card is built with the snippet the app stores for this email, as the
+    /// pipeline builds it: the HTML's footer text, "No longer want to receive
+    /// these emails? Unsubscribe. …", which is no snippet at all.
+    ///
     /// Revert-check: the snippet assertion fails without
-    /// `NewsletterLineAnalyzer.markdownLinkRegex`'s replacement in
-    /// `previewLines`, and the subtitle assertion fails without the builder's
-    /// `displayedSubtitle` (it repeats the snippet).
+    /// `MarkdownLinkLabels.replacingLinks` in `NewsletterLineAnalyzer.previewLines`,
+    /// and without the "no longer want to receive" footer stop pattern (the
+    /// stored footer's lead-in becomes the snippet). The subtitle assertion
+    /// fails without the builder's `displayedSubtitle` (it repeats the snippet).
     /// HONEST SCOPE: the hero assertion fails only when both logo signals are
     /// reverted, `EmailPreviewDOMQuery.enclosingLogoContainerName` and
     /// `NewsletterHeroImageSelector.isNamedOnlyForBrand`, since either alone
     /// demotes this logo; each has its own test below.
-    func testBuildPreview_klaviyoHeaderLogoEmail_usesFirstContentImageAndLinkLabels() {
+    func testBuildPreview_klaviyoHeaderLogoEmail_usesFirstContentImageAndLinkLabels() async throws {
+        let storedSnippet = try await storedCleanedSnippet(
+            html: Self.klaviyoShoppingListHTML,
+            plainText: Self.klaviyoShoppingListPlainText
+        )
+        XCTAssertEqual(storedSnippet?.hasPrefix("No longer want to receive these emails? Unsubscribe."), true, storedSnippet ?? "nil")
+
         let result = sut.buildPreview(
             canonicalHTML: Self.klaviyoShoppingListHTML,
             bodyText: Self.klaviyoShoppingListPlainText,
+            cleanedSnippet: storedSnippet,
             senderName: "Manhattan Vintage",
             senderEmail: "hello@manhattanvintage.com",
             subject: "Your UES Shopping List is here"
@@ -148,7 +160,9 @@ final class NewsletterPreviewLogoAndMarkdownTests: XCTestCase {
 
     // MARK: - Markdown links in plain text
 
-    /// Revert-check: removing the `markdownLinkRegex` replacement in
+    /// No stored snippet, so the card's text comes from its lines.
+    ///
+    /// Revert-check: removing the `MarkdownLinkLabels.replacingLinks` call in
     /// `NewsletterLineAnalyzer.previewLines` leaves the link and image syntax in
     /// the snippet.
     func testBuildPreview_plainTextMarkdownLinks_keepOnlyTheirLabels() {
@@ -190,7 +204,7 @@ final class NewsletterPreviewLogoAndMarkdownTests: XCTestCase {
     /// link and keeps its brackets.
     ///
     /// HONEST SCOPE: passes without the fix too; it guards
-    /// `markdownLinkRegex` against matching ordinary bracketed copy.
+    /// `MarkdownLinkLabels`' link pattern against matching ordinary bracketed copy.
     func testBuildPreview_bracketedTextWithoutURL_isLeftAlone() {
         let html = """
         <!DOCTYPE html>
@@ -218,7 +232,225 @@ final class NewsletterPreviewLogoAndMarkdownTests: XCTestCase {
         )
     }
 
+    /// A linked image (`[![alt](src)](href)`) is a link around an image, and
+    /// keeps only the image's alt. No stored snippet, so the card's text comes
+    /// from its lines.
+    ///
+    /// Revert-check: limiting `MarkdownLinkLabels.replacingLinks` to one pass
+    /// leaves `[Twelve layers for changeable weather](https://acme.example.com/fall)`,
+    /// too long for a subtitle.
+    func testBuildPreview_plainTextLinkedImage_keepsOnlyItsAlt() {
+        let bodyText = """
+        [![Twelve layers for changeable weather](https://cdn.example.com/fall-collection.jpg)](https://acme.example.com/fall)
+        Our fall edit is live, with twelve layering pieces picked for changeable weather.
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: bodyText,
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        XCTAssertEqual(result?.subtitle, "Twelve layers for changeable weather")
+        XCTAssertEqual(result?.snippet, "Our fall edit is live, with twelve layering pieces picked for changeable weather.")
+    }
+
+    /// A link whose target is the unsubscribe URL ends the card's text there,
+    /// as it did before links were stripped, though its label names no footer.
+    /// No stored snippet, so the card's text comes from its lines.
+    ///
+    /// Revert-check: dropping the targets from `NewsletterLineAnalyzer.previewLines`'s
+    /// footer check lets the scan run past the link (whose line is still
+    /// skipped on its target), and the postal address becomes the subtitle.
+    func testBuildPreview_plainTextFooterLinkLabelNamingNoFooter_stopsAtTheLink() {
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: Self.acmeFooterLinkPlainText,
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        XCTAssertNil(result?.subtitle)
+        XCTAssertEqual(result?.snippet, "Our fall edit is live, with twelve layering pieces picked for changeable weather.")
+    }
+
+    /// A line linking a social profile is skipped on its target, as it was
+    /// before links were stripped, though its label names no network. No
+    /// stored snippet, so the card's text comes from its lines.
+    ///
+    /// Revert-check: dropping the targets from `NewsletterLineAnalyzer.previewLines`'s
+    /// `shouldSkipLine` check makes "Watch the fall lookbook reel" the subtitle.
+    func testBuildPreview_plainTextSocialLinkLabelNamingNoNetwork_isSkipped() {
+        let bodyText = """
+        [Watch the fall lookbook reel](https://www.instagram.com/acme/reel/1)
+        Our fall edit is live, with twelve layering pieces picked for changeable weather.
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: bodyText,
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        XCTAssertNil(result?.subtitle)
+        XCTAssertEqual(result?.snippet, "Our fall edit is live, with twelve layering pieces picked for changeable weather.")
+    }
+
+    // MARK: - Markdown links in the stored snippet
+
+    /// When the HTML shows no text, the app stores the plain-text part as the
+    /// snippet, Markdown links and all, and the card prefers it to its lines.
+    ///
+    /// Revert-check: without `previewSummaryLinkLabels` in the builder's
+    /// `normalizedPreviewSummary` the snippet keeps the link syntax.
+    func testBuildPreview_storedMarkdownSnippet_keepsOnlyLinkLabels() async throws {
+        let bodyText = """
+        Our fall edit is live: [twelve layering pieces](https://acme.example.com/fall?utm_source=email) picked for changeable weather, from waxed jackets to merino.
+        """
+        let storedSnippet = try await storedCleanedSnippet(html: Self.acmeImageOnlyHTML, plainText: bodyText)
+        XCTAssertEqual(storedSnippet?.contains("](https://"), true, storedSnippet ?? "nil")
+
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: bodyText,
+            cleanedSnippet: storedSnippet,
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        // No trailing period: the stored snippet, not the line, supplied it.
+        XCTAssertEqual(
+            result?.snippet,
+            "Our fall edit is live: twelve layering pieces picked for changeable weather, from waxed jackets to merino"
+        )
+    }
+
+    /// A footer link's target ends the stored snippet at that link, label and
+    /// all, as it did before links were stripped.
+    ///
+    /// Revert-check: without the `trimmingFooterContent` call in
+    /// `previewSummaryLinkLabels` the footer link survives and its target
+    /// rejects the whole stored snippet, so the card falls back to its line
+    /// (trailing period kept); without
+    /// `MarkdownLinkLabels.removingTrailingPartialLink` it ends in
+    /// `[Click here](https://acme.example.com/`.
+    func testBuildPreview_storedMarkdownSnippetWithFooterLink_endsBeforeTheLink() async throws {
+        let storedSnippet = try await storedCleanedSnippet(
+            html: Self.acmeImageOnlyHTML,
+            plainText: Self.acmeFooterLinkPlainText
+        )
+        XCTAssertEqual(storedSnippet?.contains("[Click here](https://"), true, storedSnippet ?? "nil")
+
+        let result = sut.buildPreview(
+            canonicalHTML: Self.acmeImageOnlyHTML,
+            bodyText: Self.acmeFooterLinkPlainText,
+            cleanedSnippet: storedSnippet,
+            senderName: "Acme Outfitters",
+            senderEmail: "hello@acme.example.com",
+            subject: "Fall layers"
+        )
+
+        XCTAssertEqual(result?.snippet, "Our fall edit is live, with twelve layering pieces picked for changeable weather")
+        XCTAssertNil(result?.subtitle)
+    }
+
+    /// The reported campaign, had its HTML shown no text: the stored snippet is
+    /// the whole Markdown plain text. It links a social profile, which rejected
+    /// it before links were stripped, so the card still takes its text from its
+    /// lines rather than from a run of image-link labels.
+    ///
+    /// Revert-check: dropping the targets from `normalizedPreviewSummary`'s
+    /// `shouldSkipLine` check makes the snippet "The inspiration The
+    /// inspiration Material Matters tiktok Tiktok Manhattan Vintage".
+    func testBuildPreview_storedMarkdownSnippetLinkingSocialProfile_fallsBackToLines() async throws {
+        let storedSnippet = try await storedCleanedSnippet(
+            html: Self.klaviyoImageOnlyHTML,
+            plainText: Self.klaviyoShoppingListPlainText
+        )
+        XCTAssertEqual(storedSnippet?.hasPrefix("[Manhattan Vintage ](https://manhattanvintage.com/)"), true, storedSnippet ?? "nil")
+
+        let result = sut.buildPreview(
+            canonicalHTML: Self.klaviyoImageOnlyHTML,
+            bodyText: Self.klaviyoShoppingListPlainText,
+            cleanedSnippet: storedSnippet,
+            senderName: "Manhattan Vintage",
+            senderEmail: "hello@manhattanvintage.com",
+            subject: "Your UES Shopping List is here"
+        )
+
+        XCTAssertEqual(result?.snippet, "our upper east side shopping list")
+        XCTAssertNil(result?.subtitle)
+    }
+
+    // MARK: - Helpers
+
+    /// The `cleanedSnippet` the app stores for a message with these parts, from
+    /// its production ingest caller (`MessageProcessor.processGmailMessage`), as
+    /// `GoldenCorpusReplayTests` pins it. The pipeline always passes it and it
+    /// wins over the card's own lines, so a card built without it is not the
+    /// card the app shows.
+    private func storedCleanedSnippet(html: String?, plainText: String?) async throws -> String? {
+        let messageID = "newsletter-markdown-\(UUID().uuidString)"
+        let parts = [("text/html", html), ("text/plain", plainText)]
+            .enumerated().compactMap { index, item -> MessagePart? in
+                guard let content = item.1 else { return nil }
+                return MessagePart(
+                    partId: "0.\(index)", mimeType: item.0, filename: nil, headers: nil,
+                    body: MessageBody(size: content.utf8.count,
+                                      data: Data(content.utf8).base64EncodedString(), attachmentId: nil),
+                    parts: nil
+                )
+            }
+        let message = GmailMessage(
+            id: messageID, threadId: messageID, labelIds: ["INBOX"],
+            snippet: nil, historyId: nil, internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0", mimeType: "multipart/alternative", filename: nil,
+                headers: [MessageHeader(name: "From", value: "newsletter@example.com"),
+                          MessageHeader(name: "To", value: "me@example.com")],
+                body: nil, parts: parts
+            ), sizeEstimate: nil
+        )
+
+        let processed = try await MessageProcessor().processGmailMessage(message, myAliases: ["me@example.com"])
+        return processed?.cleanedSnippet
+    }
+
     // MARK: - Fixtures
+
+    /// An image-only body: its HTML shows no text, so the app stores the
+    /// plain-text part as the snippet.
+    private static let acmeImageOnlyHTML = """
+    <!DOCTYPE html>
+    <html>
+    <body>
+        <a href="https://acme.example.com/fall"><img src="https://cdn.example.com/fall-collection.jpg" width="600" alt="Fall collection"></a>
+    </body>
+    </html>
+    """
+
+    /// A footer link whose label names no footer; only its target does.
+    private static let acmeFooterLinkPlainText = """
+    Our fall edit is live, with twelve layering pieces picked for changeable weather.
+    [Click here](https://acme.example.com/unsubscribe?u=1) to stop getting these emails.
+    Acme Outfitters, 12 Harbor Street, Portland ME 04101
+    """
+
+    /// The reported campaign's content images without its footer text, so its
+    /// HTML shows no text, as when a campaign's footer is hidden from snippet
+    /// extraction, and the app stores the Markdown plain text as the snippet.
+    private static let klaviyoImageOnlyHTML = """
+    <!DOCTYPE html><html><body>
+    \(klaviyoImageBlock(alt: "our upper east side shopping list", source: "https://cdn.klaviyomail.com/company/SFVm5h/images/37021e6e-0ff6-461b-9dc5-86d989b0231a.png", link: 1))
+    \(klaviyoImageBlock(alt: "The inspiration", source: "https://cdn.klaviyomail.com/company/SFVm5h/images/34e66c84-0de9-46ee-810c-2c181234c4f7.png", link: 3))
+    </body></html>
+    """
 
     /// A trimmed copy of a real Klaviyo campaign (Manhattan Vintage, Oct 2026).
     /// The header-link-bar logo and the content images keep Klaviyo's exact
