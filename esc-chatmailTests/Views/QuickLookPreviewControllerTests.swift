@@ -158,8 +158,8 @@ final class QuickLookPreviewControllerTests: XCTestCase {
 
     /// Revert-check: `QuickLookPreviewController.previewControllerDidDismiss` forwarding to
     /// `onDismiss` is what clears `AttachmentGridView`'s presentation state after a Done
-    /// tap or pull-down; without it the next tap on the same attachment is a no-op
-    /// because the `.task(id:)` key never changes.
+    /// tap or pull-down, releasing the snapshot's `Attachment` objects. (A stale state
+    /// would not block the next tap: each tap stores a presentation with a new id.)
     func testController_dismissedByQuickLook_invokesOnDismissAndServesSnapshot() throws {
         let stack = TestCoreDataStack()
         let context = stack.viewContext

@@ -1,26 +1,5 @@
-import SwiftUI
+import UIKit
 import QuickLook
-import CoreData
-
-struct QuickLookPresentation: Identifiable {
-    let id = UUID()
-    let previewItems: [AttachmentPreviewItem]
-    let selectedIndex: Int
-
-    init?(attachments: [Attachment], selectedAttachment: Attachment) {
-        let previewItems = attachments.compactMap { attachment in
-            AttachmentPreviewItem(attachment: attachment)
-        }
-        guard let selectedIndex = previewItems.firstIndex(where: {
-            $0.attachment == selectedAttachment
-        }) else {
-            return nil
-        }
-
-        self.previewItems = previewItems
-        self.selectedIndex = selectedIndex
-    }
-}
 
 /// Quick Look presented as its own UIKit modal, the way Mail and Files show it.
 ///
@@ -72,7 +51,6 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
     ///
     /// - Parameter present: Presents the controller and reports whether it did;
     ///   tests inject one that presents from a test window.
-    @MainActor
     @discardableResult
     static func present(
         _ presentation: QuickLookPresentation,
@@ -95,7 +73,6 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
     /// revoked credential left the previous account's document on screen over
     /// the sign-in view, its preview items still holding that account's
     /// `Attachment` objects. `ContentView` calls it when the mailbox closes.
-    @MainActor
     static func dismissAll() {
         for controller in presentedControllers.allObjects {
             controller.presentingViewController?.dismiss(animated: false)
@@ -117,40 +94,5 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
 
     func previewControllerDidDismiss(_ controller: QLPreviewController) {
         onDismiss?()
-    }
-}
-
-class AttachmentPreviewItem: NSObject, QLPreviewItem {
-    let attachment: Attachment
-    private var _fileURL: URL?
-    
-    init?(attachment: Attachment) {
-        self.attachment = attachment
-        super.init()
-
-        guard let url = Self.fileURL(for: attachment) else {
-            return nil
-        }
-        self._fileURL = url
-    }
-
-    static func fileURL(for attachment: Attachment) -> URL? {
-        // Remote paths must prove the composite message/attachment identity;
-        // an ID-only legacy path may point at a sibling message's bytes.
-        let readablePaths = [
-            attachment.readableLocalURLValue,
-            attachment.readablePreviewURLValue
-        ].compactMap { $0 }
-        return readablePaths.lazy
-            .compactMap({ AttachmentPaths.fullURL(for: $0) })
-            .first(where: { FileManager.default.fileExists(atPath: $0.path) })
-    }
-    
-    var previewItemURL: URL? {
-        return _fileURL
-    }
-    
-    var previewItemTitle: String? {
-        return attachment.filename
     }
 }

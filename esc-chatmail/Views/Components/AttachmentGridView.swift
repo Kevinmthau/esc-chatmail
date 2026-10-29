@@ -64,15 +64,24 @@ struct AttachmentGridView: View {
         // sheet: inside a sheet it had no Done button and a drag on the document
         // only scrolled it (see `QuickLookPreviewController`). Its dismissal clears
         // the state; a failed presentation clears it too so the next tap retries.
+        // Neither may clear a newer tap's presentation (`QuickLookPresentationPolicy`).
         .task(id: quickLookPresentation?.id) {
             guard let presentation = quickLookPresentation else { return }
-            let presented = await QuickLookPreviewController.present(presentation) {
+            let didPresent = await QuickLookPreviewController.present(presentation) {
+                guard QuickLookPresentationPolicy.shouldClearOnDismiss(
+                    of: presentation.id,
+                    current: quickLookPresentation?.id
+                ) else { return }
                 quickLookPresentation = nil
             }
-            if !presented {
-                Log.error("Quick Look found no presenter for attachment preview", category: .ui)
-                quickLookPresentation = nil
-            }
+            guard QuickLookPresentationPolicy.shouldClearAfterPresentAttempt(
+                presentation.id,
+                didPresent: didPresent,
+                wasCancelled: Task.isCancelled,
+                current: quickLookPresentation?.id
+            ) else { return }
+            Log.error("Quick Look found no presenter for attachment preview", category: .ui)
+            quickLookPresentation = nil
         }
     }
 
