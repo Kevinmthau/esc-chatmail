@@ -10,6 +10,17 @@ import UIKit
 /// screen. Extracted from `ContactPresenter` so the Settings-app sign-out
 /// prompt (`SettingsAppSignOutPrompter`) shares the same resolution and retry.
 enum TopPresentableViewController {
+    /// What `present` did. Not a `Bool`: a cancelled attempt is not a missing
+    /// presenter, and a caller that cannot tell them apart logs a bogus failure
+    /// for a task that was merely replaced or torn down.
+    enum Outcome: Equatable {
+        case presented
+        /// No presenter appeared within the retry window.
+        case noPresenter
+        /// The calling task was cancelled while waiting for a presenter.
+        case cancelled
+    }
+
     @MainActor
     static func resolve(startingFrom rootViewController: UIViewController) -> UIViewController {
         var topViewController = visibleContentViewController(from: rootViewController)
@@ -38,20 +49,31 @@ enum TopPresentableViewController {
     /// Presents `viewController` from `preferredPresenter` while it can still
     /// present, otherwise from the topmost presentable controller, retrying for
     /// up to a second (20 × 50ms) while a transition leaves no presenter.
-    /// Returns `false` when no presenter appeared or the task was cancelled.
     @MainActor
     @discardableResult
-    static func present(_ viewController: UIViewController, preferredPresenter: UIViewController? = nil) async -> Bool {
+    static func present(_ viewController: UIViewController, preferredPresenter: UIViewController? = nil) async -> Outcome {
+        await present(viewController) { resolvePresenter(preferredPresenter: preferredPresenter) }
+    }
+
+    /// The retry loop behind `present(_:preferredPresenter:)`.
+    ///
+    /// - Parameter resolvePresenter: Returns the controller to present from, or
+    ///   nil while none can; tests inject one to drive the outcomes without a window.
+    @MainActor
+    static func present(
+        _ viewController: UIViewController,
+        resolvePresenter: @MainActor () -> UIViewController?
+    ) async -> Outcome {
         for _ in 0..<20 {
-            if let presenter = resolvePresenter(preferredPresenter: preferredPresenter) {
+            if let presenter = resolvePresenter() {
                 presenter.present(viewController, animated: true)
-                return true
+                return .presented
             }
 
-            guard await Task.sleepUnlessCancelled(nanoseconds: 50_000_000) else { return false }
+            guard await Task.sleepUnlessCancelled(nanoseconds: 50_000_000) else { return .cancelled }
         }
 
-        return false
+        return .noPresenter
     }
 
     @MainActor

@@ -3,16 +3,15 @@ import QuickLook
 
 class AttachmentPreviewItem: NSObject, QLPreviewItem {
     let attachment: Attachment
-    private var _fileURL: URL?
-    
-    init?(attachment: Attachment) {
-        self.attachment = attachment
-        super.init()
+    let previewItemURL: URL?
 
+    init?(attachment: Attachment) {
         guard let url = Self.fileURL(for: attachment) else {
             return nil
         }
-        self._fileURL = url
+        self.attachment = attachment
+        self.previewItemURL = url
+        super.init()
     }
 
     static func fileURL(for attachment: Attachment) -> URL? {
@@ -26,11 +25,7 @@ class AttachmentPreviewItem: NSObject, QLPreviewItem {
             .compactMap({ AttachmentPaths.fullURL(for: $0) })
             .first(where: { FileManager.default.fileExists(atPath: $0.path) })
     }
-    
-    var previewItemURL: URL? {
-        return _fileURL
-    }
-    
+
     var previewItemTitle: String? {
         return attachment.filename
     }

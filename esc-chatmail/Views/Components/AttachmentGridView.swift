@@ -63,24 +63,26 @@ struct AttachmentGridView: View {
         // Quick Look presents itself as a UIKit modal rather than in a SwiftUI
         // sheet: inside a sheet it had no Done button and a drag on the document
         // only scrolled it (see `QuickLookPreviewController`). Its dismissal clears
-        // the state; a failed presentation clears it too so the next tap retries.
-        // Neither may clear a newer tap's presentation (`QuickLookPresentationPolicy`).
+        // the state, and so does a presentation that never appeared, or the task
+        // would present it unprompted when the view reappears. Neither may clear a
+        // newer tap's presentation (`QuickLookPresentationPolicy`).
         .task(id: quickLookPresentation?.id) {
             guard let presentation = quickLookPresentation else { return }
-            let didPresent = await QuickLookPreviewController.present(presentation) {
+            let outcome = await QuickLookPreviewController.present(presentation) {
                 guard QuickLookPresentationPolicy.shouldClearOnDismiss(
                     of: presentation.id,
                     current: quickLookPresentation?.id
                 ) else { return }
                 quickLookPresentation = nil
             }
+            if outcome == .noPresenter {
+                Log.error("Quick Look found no presenter for attachment preview", category: .ui)
+            }
             guard QuickLookPresentationPolicy.shouldClearAfterPresentAttempt(
                 presentation.id,
-                didPresent: didPresent,
-                wasCancelled: Task.isCancelled,
+                outcome: outcome,
                 current: quickLookPresentation?.id
             ) else { return }
-            Log.error("Quick Look found no presenter for attachment preview", category: .ui)
             quickLookPresentation = nil
         }
     }

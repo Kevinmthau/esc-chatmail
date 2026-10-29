@@ -155,9 +155,9 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
 
     @MainActor
     private func present(_ viewController: UIViewController, preferredPresenter: UIViewController? = nil) async {
-        guard await TopPresentableViewController.present(viewController, preferredPresenter: preferredPresenter) else {
+        let outcome = await TopPresentableViewController.present(viewController, preferredPresenter: preferredPresenter)
+        if outcome == .noPresenter {
             Log.error("Failed to find active presenter for contact UI", category: .ui)
-            return
         }
     }
 

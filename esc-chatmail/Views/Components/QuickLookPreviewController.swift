@@ -46,22 +46,25 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
 
     /// Presents `presentation` over whatever is on screen, from the topmost
     /// presentable controller (`TopPresentableViewController`, which retries
-    /// briefly through a transition). Returns `false` when nothing could present,
-    /// so the caller can clear its state and let the next tap try again.
+    /// briefly through a transition). Reports whether it presented, or why not,
+    /// so the caller can clear the state of a presentation that never appeared.
     ///
-    /// - Parameter present: Presents the controller and reports whether it did;
+    /// - Parameter present: Presents the controller and reports what it did;
     ///   tests inject one that presents from a test window.
     @discardableResult
     static func present(
         _ presentation: QuickLookPresentation,
         onDismiss: @escaping () -> Void,
-        present: @MainActor (UIViewController) async -> Bool = { await TopPresentableViewController.present($0) }
-    ) async -> Bool {
+        present: @MainActor (UIViewController) async -> TopPresentableViewController.Outcome = {
+            await TopPresentableViewController.present($0)
+        }
+    ) async -> TopPresentableViewController.Outcome {
         let controller = QuickLookPreviewController(presentation: presentation)
         controller.onDismiss = onDismiss
-        guard await present(controller) else { return false }
+        let outcome = await present(controller)
+        guard outcome == .presented else { return outcome }
         presentedControllers.add(controller)
-        return true
+        return outcome
     }
 
     /// Dismisses every Quick Look `present` showed that is still on screen, along

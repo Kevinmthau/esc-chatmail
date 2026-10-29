@@ -251,11 +251,11 @@ final class QuickLookPreviewControllerTests: XCTestCase {
             window.isHidden = true
         }
 
-        let presented = await QuickLookPreviewController.present(presentation, onDismiss: {}) { controller in
+        let outcome = await QuickLookPreviewController.present(presentation, onDismiss: {}) { controller in
             rootViewController.present(controller, animated: false)
-            return true
+            return .presented
         }
-        XCTAssertTrue(presented)
+        XCTAssertEqual(outcome, .presented)
         await waitUntil { rootViewController.presentedViewController is QuickLookPreviewController }
 
         QuickLookPreviewController.dismissAll()

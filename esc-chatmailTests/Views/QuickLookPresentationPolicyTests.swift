@@ -5,36 +5,40 @@ import XCTest
 /// run or dismissal belongs to, so a tap that replaced it keeps its own.
 ///
 /// HONEST SCOPE: `AttachmentGridView`'s `.task(id:)` wiring that feeds these the
-/// run's `Task.isCancelled` and the current state is not exercised here.
+/// run's outcome and the current state is not exercised here.
 final class QuickLookPresentationPolicyTests: XCTestCase {
     private let attempted = UUID()
     private let newer = UUID()
 
-    /// Revert-check: removing `!wasCancelled` from
+    /// Revert-check: removing `current == attempted` from
     /// `QuickLookPresentationPolicy.shouldClearAfterPresentAttempt` makes this fail.
-    func testShouldClearAfterPresentAttempt_cancelledRun_keepsState() {
+    func testShouldClearAfterPresentAttempt_runCancelledByNewerTap_keepsState() {
         XCTAssertFalse(QuickLookPresentationPolicy.shouldClearAfterPresentAttempt(
-            attempted, didPresent: false, wasCancelled: true, current: attempted
+            attempted, outcome: .cancelled, current: newer
         ))
     }
 
-    /// Revert-check: removing `current == attempted` from
-    /// `QuickLookPresentationPolicy.shouldClearAfterPresentAttempt` makes this fail.
-    func testShouldClearAfterPresentAttempt_stateReplacedByNewerTap_keepsState() {
-        XCTAssertFalse(QuickLookPresentationPolicy.shouldClearAfterPresentAttempt(
-            attempted, didPresent: false, wasCancelled: false, current: newer
+    /// A run cancelled because the view disappeared must not leave its presentation
+    /// behind, or the `.task(id:)` restarts on reappear and opens Quick Look unprompted.
+    ///
+    /// Revert-check: exempting `.cancelled` in
+    /// `QuickLookPresentationPolicy.shouldClearAfterPresentAttempt` (the earlier
+    /// `!wasCancelled` term) makes this fail.
+    func testShouldClearAfterPresentAttempt_runCancelledWhileOwningState_clearsState() {
+        XCTAssertTrue(QuickLookPresentationPolicy.shouldClearAfterPresentAttempt(
+            attempted, outcome: .cancelled, current: attempted
         ))
     }
 
     func testShouldClearAfterPresentAttempt_noPresenterForCurrentRun_clearsState() {
         XCTAssertTrue(QuickLookPresentationPolicy.shouldClearAfterPresentAttempt(
-            attempted, didPresent: false, wasCancelled: false, current: attempted
+            attempted, outcome: .noPresenter, current: attempted
         ))
     }
 
     func testShouldClearAfterPresentAttempt_presented_keepsState() {
         XCTAssertFalse(QuickLookPresentationPolicy.shouldClearAfterPresentAttempt(
-            attempted, didPresent: true, wasCancelled: false, current: attempted
+            attempted, outcome: .presented, current: attempted
         ))
     }
 
