@@ -43,6 +43,7 @@ final class InitialSyncOrchestrator {
     private let coreDataStack: CoreDataStack
     private let failureTracker: SyncFailureTracker
     private let failureCounterStore: SyncFailureCounterCheckpointStore
+    private let windowCheckpointStore: SyncWindowCheckpointStore
     private let performanceLogger: CoreDataPerformanceLogger
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
     /// Creates the run's sync context. Injectable so tests can drive a full
@@ -65,6 +66,7 @@ final class InitialSyncOrchestrator {
         coreDataStack: CoreDataStack,
         failureTracker: SyncFailureTracker = .shared,
         failureCounterStore: SyncFailureCounterCheckpointStore = SyncFailureCounterCheckpointStore(),
+        windowCheckpointStore: SyncWindowCheckpointStore = .initialSync,
         performanceLogger: CoreDataPerformanceLogger = .shared,
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
         makeSyncContext: (() -> NSManagedObjectContext)? = nil
@@ -77,6 +79,7 @@ final class InitialSyncOrchestrator {
         self.coreDataStack = coreDataStack
         self.failureTracker = failureTracker
         self.failureCounterStore = failureCounterStore
+        self.windowCheckpointStore = windowCheckpointStore
         self.performanceLogger = performanceLogger
         self.rollupMutationSerializer = rollupMutationSerializer
         self.makeSyncContext = makeSyncContext ?? { coreDataStack.newBackgroundContext() }
@@ -139,7 +142,10 @@ final class InitialSyncOrchestrator {
 
             // Phase 3: Fetch and process messages
             progressHandler(0.2, "Fetching messages...")
-            let query = buildInitialSyncQuery()
+            let query = try await resolveInitialSyncQuery(
+                accountEmail: profile.emailAddress,
+                in: context
+            )
             log.info("Initial sync query: \(query)")
 
             let messagesTimer = timing.start("fetchAndProcessMessages")
@@ -285,16 +291,42 @@ final class InitialSyncOrchestrator {
         return (profile, aliases, sendAsAliases)
     }
 
-    private func buildInitialSyncQuery() -> String {
-        let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
+    /// Reuses the window frozen by an earlier attempt of this initial sync,
+    /// or computes the capped window and stages its freeze, which commits
+    /// with the first page's save.
+    private func resolveInitialSyncQuery(
+        accountEmail: String,
+        in context: NSManagedObjectContext
+    ) async throws -> String {
+        if let frozen = try await windowCheckpointStore.load(accountEmail: accountEmail, in: context) {
+            log.info("Resuming initial sync window frozen at \(Date(timeIntervalSince1970: frozen.windowStart))")
+            return SyncTimeCalculator.buildSyncQuery(startTime: frozen.windowStart)
+        }
 
+        let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
         if installTimestamp > 0 {
-            log.info("Fetching messages after install time: \(Date(timeIntervalSince1970: installTimestamp))")
+            log.info("Fetching messages after install time: \(Date(timeIntervalSince1970: installTimestamp)), capped to the initial-sync window")
         } else {
             log.warning("No install timestamp found, using fallback window")
         }
 
-        return SyncTimeCalculator.buildSyncQuery(config: .initialSync)
+        let windowStart = SyncTimeCalculator.calculateStartTime(config: .initialSync)
+        try await windowCheckpointStore.stageFreeze(
+            windowStart: windowStart,
+            accountEmail: accountEmail,
+            in: context
+        )
+        return SyncTimeCalculator.buildSyncQuery(startTime: windowStart)
+    }
+
+    /// Stages the cursor and the deletion of the frozen window together: the
+    /// next initial sync (a later sign-in or store reset) computes its own.
+    private func stageHistoryAdvance(
+        to historyId: String,
+        in context: NSManagedObjectContext
+    ) async throws {
+        try await windowCheckpointStore.stageClear(in: context)
+        await messagePersister.setAccountHistoryId(historyId, in: context)
     }
 
     private func fetchAndProcessMessages(
@@ -341,7 +373,9 @@ final class InitialSyncOrchestrator {
                         in: context
                     )
                 }
+                let pageObjects = try await SyncContextPageObjectRelease.capture(in: context)
                 try await coreDataStack.saveAsync(context: context)
+                await SyncContextPageObjectRelease.release(pageObjects, in: context)
             }
         }
     }
@@ -418,7 +452,7 @@ final class InitialSyncOrchestrator {
                 )
                 if advancePlan.shouldAdvance {
                     log.warning("Initial-sync failure threshold reached - advancing historyId with failed messages staged for abandonment")
-                    await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+                    try await stageHistoryAdvance(to: profile.historyId, in: context)
                 } else {
                     log.warning("Keeping historyId unset so initial sync can retry failed messages")
                 }
@@ -440,7 +474,7 @@ final class InitialSyncOrchestrator {
                     in: context
                 )
                 log.info("All failed messages recovered on retry - advancing historyId")
-                await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+                try await stageHistoryAdvance(to: profile.historyId, in: context)
             } else {
                 log.error("Recovered messages but failure-ledger cleanup could not be planned - keeping historyId unset")
             }
@@ -462,7 +496,7 @@ final class InitialSyncOrchestrator {
                 in: context
             )
             log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
-            await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+            try await stageHistoryAdvance(to: profile.historyId, in: context)
         } else {
             log.error("Initial sync succeeded but failure-ledger cleanup could not be planned - keeping historyId unset")
         }

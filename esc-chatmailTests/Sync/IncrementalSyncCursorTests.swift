@@ -1495,7 +1495,167 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertNil(lastSuccess)
     }
 
+    /// Without `lastSuccessfulSyncTime` (teardown cleared it but kept the
+    /// store and the expired cursor), recovery starts just before the newest
+    /// RECEIVED row instead of re-listing everything since install, and
+    /// freezes that bound: a held retry reuses it even though the store now
+    /// holds a newer received row. The advancing run deletes it.
+    ///
+    /// Revert-check: remove the `recoveryWindowCheckpointStore.load` branch
+    /// from `resolveHistoryRecoveryQuery` and the second run starts after
+    /// the newer row. Revert-check: pass `newestReceivedInternalDate: nil`
+    /// there and the first run lists from the 400-day-old install time.
+    @MainActor
+    func testRecoveryWithoutLastSuccessfulSyncStartsAtNewestReceivedRowAndFreezesIt() async throws {
+        let standard = UserDefaults.standard
+        let savedInstall = standard.object(forKey: "installTimestamp")
+        let savedLastSuccess = standard.object(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        defer {
+            if let savedInstall {
+                standard.set(savedInstall, forKey: "installTimestamp")
+            } else {
+                standard.removeObject(forKey: "installTimestamp")
+            }
+            if let savedLastSuccess {
+                standard.set(savedLastSuccess, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            } else {
+                standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            }
+        }
+        let now = Date().timeIntervalSince1970
+        standard.set(now - 400 * 86_400, forKey: "installTimestamp")
+        standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+
+        let newestReceived = Date(timeIntervalSince1970: TimeInterval(Int(now - 2 * 86_400)))
+        try await seedStoredMessage(id: "stored-received", internalDate: newestReceived, isFromMe: false)
+        // An optimistic send stamps a local `now`; it must not anchor the bound.
+        try await seedStoredMessage(
+            id: "stored-sent",
+            internalDate: Date(timeIntervalSince1970: now - 3600),
+            isFromMe: true
+        )
+
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec", threadId: "t-m-rec")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageErrors["m-rec"] = APIError.timeout
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let expectedStart = Int(newestReceived.timeIntervalSince1970 - SyncConfig.recoveryBufferSeconds)
+        let firstRecoveryQuery = apiClient.listMessagesQueries.first ?? nil
+        XCTAssertEqual(firstRecoveryQuery?.hasPrefix("after:\(expectedStart) "), true,
+                       "Recovery must start before the newest received row; got \(firstRecoveryQuery ?? "nil")")
+        let heldHistoryId = await fetchAccountHistoryId()
+        XCTAssertEqual(heldHistoryId, Self.startingHistoryId, "Positive control: the first attempt is held")
+
+        try await seedStoredMessage(
+            id: "stored-newer-received",
+            internalDate: Date(timeIntervalSince1970: now - 600),
+            isFromMe: false
+        )
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.getMessageErrors["m-rec"] = nil
+        apiClient.getMessageResponses["m-rec"] = makeFullMessage(id: "m-rec")
+        apiClient.listMessagesQueries = []
+        await ModificationTracker.shared.reset()
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let retryRecoveryQuery = apiClient.listMessagesQueries.first ?? nil
+        XCTAssertEqual(retryRecoveryQuery?.hasPrefix("after:\(expectedStart) "), true,
+                       "The retry must reuse the frozen bound; got \(retryRecoveryQuery ?? "nil")")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777")
+        let frozen = try await SyncWindowCheckpointStore.historyRecovery.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )
+        XCTAssertNil(frozen, "The advancing recovery deletes its frozen window")
+    }
+
+    /// History recovery reuses one sync context for every listed page, like
+    /// initial sync; each saved page must be turned back into faults so the
+    /// context does not keep every recovered message realized.
+    ///
+    /// Revert-check: remove `SyncContextPageObjectRelease.release` from the
+    /// recovery page completion and all 12 recovered messages stay realized.
+    @MainActor
+    func testRecoveryReleasesEachSavedPageFromTheSyncContext() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        let pages = (0..<3).map { page in (0..<4).map { "rec-p\(page)-m\($0)" } }
+        var responses: [String: MessagesListResponse] = [:]
+        for (index, ids) in pages.enumerated() {
+            let key = index == 0 ? "__first_page__" : "page-\(index + 1)"
+            responses[key] = MessagesListResponse(
+                messages: ids.map { MessageListItem(id: $0, threadId: "t-\($0)") },
+                nextPageToken: index == pages.count - 1 ? nil : "page-\(index + 2)",
+                resultSizeEstimate: 12
+            )
+        }
+        apiClient.paginatedListMessagesResponses = responses
+        for (offset, id) in pages.joined().enumerated() {
+            apiClient.getMessageResponses[id] = GmailMessageBuilder()
+                .withId(id)
+                .withThreadId("t-\(id)")
+                .withLabels(["INBOX"])
+                .withFrom("sender\(offset)@example.com", name: "Sender \(offset)")
+                .withTo([Self.myEmail])
+                .build()
+        }
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 12,
+            threadsTotal: 12,
+            historyId: "7777"
+        )
+        let syncContext = coreDataStack.newBackgroundContext()
+
+        _ = try await makeOrchestrator(makeSyncContext: { syncContext }).performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777", "Positive control: the recovery completed")
+        let recovered = await messageExists(id: "rec-p2-m3")
+        XCTAssertTrue(recovered)
+        let realizedMessages = await syncContext.perform {
+            syncContext.registeredObjects.filter { $0 is Message && !$0.isFault }.count
+        }
+        XCTAssertLessThanOrEqual(
+            realizedMessages, 4,
+            "The recovery context must not keep every saved message of the run realized"
+        )
+    }
+
     // MARK: - Fixture
+
+    private func seedStoredMessage(id: String, internalDate: Date, isFromMe: Bool) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            let builder = MessageBuilder()
+                .withId(id)
+                .withDate(internalDate)
+            _ = (isFromMe ? builder.fromMe() : builder).build(in: context)
+        }
+        try await coreDataStack.saveAsync(context: context)
+    }
 
     private func seedAccount() async throws {
         let context = coreDataStack.newBackgroundContext()

@@ -83,7 +83,8 @@ struct MessageListPaginator {
     ///   - messageHandler: Called with each successfully fetched group of messages,
     ///     sorted into chronological order
     ///   - pageCompletion: Called after each listed page is fully processed
-    /// - Returns: BatchProcessingResult with success/failure counts
+    /// - Returns: BatchProcessingResult with success/failure counts; only the
+    ///   failure buckets keep their IDs
     /// - Throws: Cancellation errors or API errors
     static func fetchAndProcess(
         query: String,
@@ -115,8 +116,7 @@ struct MessageListPaginator {
         var processedCount = 0
         var successfulCount = 0
         var failedIds: [String] = []
-        var goneIds: [String] = []
-        var persistence = MessagePersistenceReport()
+        var persistenceFailures = MessagePersistenceReport()
 
         let stream = MessageIDPageStream(query: query, messageFetcher: messageFetcher)
         try await stream.forEachPage { page in
@@ -161,8 +161,7 @@ struct MessageListPaginator {
             processedCount += pageResult.totalProcessed
             successfulCount += pageResult.successfulCount
             failedIds.append(contentsOf: pageResult.failedIds)
-            goneIds.append(contentsOf: pageResult.goneIds)
-            persistence.merge(pageResult.persistence)
+            persistenceFailures.merge(pageResult.persistence.retainingOnlyFailures)
 
             await progressHandler(
                 PagedSyncCheckpoint(
@@ -184,8 +183,7 @@ struct MessageListPaginator {
             totalProcessed: processedCount,
             successfulCount: successfulCount,
             failedIds: failedIds,
-            goneIds: goneIds,
-            persistence: persistence
+            persistence: persistenceFailures
         )
     }
 }

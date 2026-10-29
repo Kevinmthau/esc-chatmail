@@ -205,6 +205,13 @@ struct SyncConfig {
     /// Fallback window when no sync history exists - initial sync (30 days)
     static let initialSyncFallbackWindow: TimeInterval = 30 * 24 * 60 * 60
 
+    /// Furthest back any initial sync lists (30 days). A first install's
+    /// since-install window is minutes long; this cap only binds a re-initial
+    /// sync on a long-lived install (sign-out/sign-in, store reset), which
+    /// would otherwise re-list and full-fetch every message since the
+    /// original install in one run.
+    static let initialSyncMaxWindow: TimeInterval = 30 * 24 * 60 * 60
+
     /// Fallback window for history recovery sync (7 days)
     static let recoveryFallbackWindow: TimeInterval = 7 * 24 * 60 * 60
 }

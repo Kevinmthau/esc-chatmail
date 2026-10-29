@@ -48,6 +48,7 @@ final class IncrementalSyncOrchestrator {
     private let failureTracker: SyncFailureTracker
     private let historyCheckpointStore: ForegroundHistoryCheckpointStore
     private let failureCounterStore: SyncFailureCounterCheckpointStore
+    private let recoveryWindowCheckpointStore: SyncWindowCheckpointStore
     private let aliasRefreshPolicy: SendAsAliasRefreshPolicy
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
     private let historyPageLimit: Int
@@ -99,6 +100,7 @@ final class IncrementalSyncOrchestrator {
         failureTracker: SyncFailureTracker = .shared,
         historyCheckpointStore: ForegroundHistoryCheckpointStore = ForegroundHistoryCheckpointStore(),
         failureCounterStore: SyncFailureCounterCheckpointStore = SyncFailureCounterCheckpointStore(),
+        recoveryWindowCheckpointStore: SyncWindowCheckpointStore = .historyRecovery,
         aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy(),
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
         historyPageLimit: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
@@ -116,6 +118,7 @@ final class IncrementalSyncOrchestrator {
         self.failureTracker = failureTracker
         self.historyCheckpointStore = historyCheckpointStore
         self.failureCounterStore = failureCounterStore
+        self.recoveryWindowCheckpointStore = recoveryWindowCheckpointStore
         self.aliasRefreshPolicy = aliasRefreshPolicy
         self.rollupMutationSerializer = rollupMutationSerializer
         self.historyPageLimit = historyPageLimit
@@ -691,10 +694,6 @@ final class IncrementalSyncOrchestrator {
         var committedModificationTransaction = false
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
 
-        let query = SyncTimeCalculator.buildSyncQuery(config: .historyRecovery)
-
-        log.info("Recovery query: \(query)")
-
         progressHandler(0.1, "Recovering missed messages...")
 
         do {
@@ -711,6 +710,12 @@ final class IncrementalSyncOrchestrator {
                     stored: accountEmail
                 )
             }
+
+            let query = try await resolveHistoryRecoveryQuery(
+                accountEmail: accountEmail,
+                in: context
+            )
+            log.info("Recovery query: \(query)")
 
             let result = try await MessageListPaginator.fetchAndProcess(
                 query: query,
@@ -749,7 +754,9 @@ final class IncrementalSyncOrchestrator {
                             in: context
                         )
                     }
+                    let pageObjects = try await SyncContextPageObjectRelease.capture(in: context)
                     try await coreDataStack.saveAsync(context: context)
+                    await SyncContextPageObjectRelease.release(pageObjects, in: context)
                 }
             }
 
@@ -792,7 +799,9 @@ final class IncrementalSyncOrchestrator {
             try await historyCheckpointStore.stageClear(in: context)
             if advancePlan.shouldAdvance {
                 // The replacement cursor and deletion of every state derived
-                // from the expired cursor commit together.
+                // from the expired cursor commit together. A held recovery
+                // keeps its frozen window so the retry re-lists the same span.
+                try await recoveryWindowCheckpointStore.stageClear(in: context)
                 await messagePersister.setAccountHistoryId(profile.historyId, in: context)
             } else {
                 log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
@@ -844,6 +853,56 @@ final class IncrementalSyncOrchestrator {
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
             }
             throw error
+        }
+    }
+
+    /// Recovery normally starts just before `lastSuccessfulSyncTime`. Without
+    /// it (teardown clears it, including the paths that keep the store and
+    /// the expired cursor), the install branch would re-list the whole
+    /// mailbox, so that branch is bounded by the newest received row and
+    /// frozen at the first attempt; a retry reuses the frozen bound.
+    private func resolveHistoryRecoveryQuery(
+        accountEmail: String,
+        in context: NSManagedObjectContext
+    ) async throws -> String {
+        if let frozen = try await recoveryWindowCheckpointStore.load(
+            accountEmail: accountEmail,
+            in: context
+        ) {
+            log.info("Resuming history recovery window frozen at \(Date(timeIntervalSince1970: frozen.windowStart))")
+            return SyncTimeCalculator.buildSyncQuery(startTime: frozen.windowStart)
+        }
+
+        if UserDefaults.standard.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey) > 0 {
+            return SyncTimeCalculator.buildSyncQuery(config: .historyRecovery)
+        }
+
+        // A failed read throws and holds the run: falling back to the
+        // unbounded install branch is the whole-mailbox re-list this bounds.
+        let newestReceived = try await Self.newestReceivedInternalDate(in: context)
+        let windowStart = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
+            newestReceivedInternalDate: newestReceived
+        )
+        try await recoveryWindowCheckpointStore.stageFreeze(
+            windowStart: windowStart,
+            accountEmail: accountEmail,
+            in: context
+        )
+        return SyncTimeCalculator.buildSyncQuery(startTime: windowStart)
+    }
+
+    nonisolated private static func newestReceivedInternalDate(
+        in context: NSManagedObjectContext
+    ) async throws -> TimeInterval? {
+        try await context.perform {
+            let request = NSFetchRequest<NSDictionary>(entityName: "Message")
+            request.predicate = NSPredicate(format: "isFromMe == NO")
+            request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
+            request.fetchLimit = 1
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["internalDate"]
+            let newest = try context.fetch(request).first?["internalDate"] as? Date
+            return newest?.timeIntervalSince1970
         }
     }
 

@@ -182,6 +182,87 @@ final class BatchProcessorTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
     }
+
+    // MARK: - retryFailedMessages
+
+    /// The completion retry gets every blocking failure of a whole run; it
+    /// must fetch and persist them a chunk at a time, not in one batch held
+    /// in memory, and still land every ID in exactly one bucket.
+    ///
+    /// Revert-check: call `fetchBatch(failedIds)` once in
+    /// `retryFailedMessages` instead of looping over `chunked(into:)` and the
+    /// largest persisted group is 120.
+    func testRetryFailedMessages_fetchesInChunksAndPartitionsEveryIdOnce() async throws {
+        let ids = (0..<120).map { "retry-\($0)" }
+        let api = MockGmailAPIClient()
+        let fetcher = makeFetcher(ids: Array(ids.dropLast(2)), api: api)
+        api.getMessageErrors["retry-118"] = APIError.notFound("retry-118")
+        api.getMessageErrors["retry-119"] = APIError.invalidData("retry-119")
+        let groups = GroupLog()
+
+        let outcome = try await BatchProcessor.retryFailedMessages(
+            failedIds: ids,
+            batchSize: 50,
+            messageFetcher: fetcher
+        ) { messages in
+            await groups.append(messages.map(\.id))
+            var report = MessagePersistenceReport()
+            for message in messages { report.record(message.id, .persisted) }
+            return report
+        }
+
+        let persistedGroups = await groups.groups
+        XCTAssertLessThanOrEqual(persistedGroups.map(\.count).max() ?? 0, 50)
+        XCTAssertEqual(outcome.persistence.persistedIds.count, 118)
+        XCTAssertEqual(outcome.goneIds, ["retry-118"])
+        XCTAssertEqual(outcome.fetchFailedIds, ["retry-119"])
+        let partitioned = outcome.persistence.persistedIds + outcome.goneIds + outcome.fetchFailedIds
+        XCTAssertEqual(Set(partitioned), Set(ids))
+        XCTAssertEqual(partitioned.count, ids.count, "No ID may land in two buckets")
+    }
+
+    /// An account-scoped abort in a later chunk propagates and leaves the
+    /// remaining chunks unrequested; earlier chunks were already persisted.
+    /// (Within the aborting chunk, `fetchBatch` still persists the fetches
+    /// that completed before it rethrows.)
+    func testRetryFailedMessages_quotaAbortInLaterChunkPropagates() async throws {
+        let ids = (0..<120).map { "retry-\($0)" }
+        let api = MockGmailAPIClient()
+        let fetcher = makeFetcher(ids: ids, api: api)
+        api.getMessageErrors["retry-75"] = APIError.quotaExhausted("daily limit")
+        let groups = GroupLog()
+
+        do {
+            _ = try await BatchProcessor.retryFailedMessages(
+                failedIds: ids,
+                batchSize: 50,
+                messageFetcher: fetcher
+            ) { messages in
+                await groups.append(messages.map(\.id))
+                var report = MessagePersistenceReport()
+                for message in messages { report.record(message.id, .persisted) }
+                return report
+            }
+            XCTFail("A quota abort must propagate")
+        } catch APIError.quotaExhausted {
+            // Expected.
+        }
+
+        let persisted = Set(await groups.groups.flatMap { $0 })
+        XCTAssertTrue(Set(ids.prefix(50)).isSubset(of: persisted), "The chunk before the abort is persisted")
+        XCTAssertFalse(persisted.contains("retry-75"), "The aborting ID gets no verdict")
+        XCTAssertTrue(
+            persisted.isDisjoint(with: ids.suffix(20)),
+            "No chunk after the abort may be fetched or persisted"
+        )
+    }
+}
+
+private actor GroupLog {
+    private(set) var groups: [[String]] = []
+    func append(_ group: [String]) {
+        groups.append(group)
+    }
 }
 
 private actor EventLog {

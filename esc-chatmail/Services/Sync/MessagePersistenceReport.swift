@@ -37,6 +37,15 @@ struct MessagePersistenceReport: Sendable {
         }
     }
 
+    /// This report with only `failedIds` kept. A run-wide aggregate needs the
+    /// failed IDs (they freeze the cursor and seed the failure ledger) but
+    /// only counts of the other buckets.
+    var retainingOnlyFailures: MessagePersistenceReport {
+        var report = MessagePersistenceReport()
+        report.failedIds = failedIds
+        return report
+    }
+
     mutating func merge(_ other: MessagePersistenceReport) {
         persistedIds.append(contentsOf: other.persistedIds)
         excludedIds.append(contentsOf: other.excludedIds)
