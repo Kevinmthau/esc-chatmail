@@ -79,12 +79,12 @@ struct MessageListPaginator {
     /// - Parameters:
     ///   - query: Gmail search query
     ///   - messageFetcher: The fetcher to use for API calls
+    ///   - trackedIds: IDs whose resolution the caller needs back (the
+    ///     deferred ledger), reported in `resolvedTrackedIds`
     ///   - progressHandler: Called as batches complete with a cumulative checkpoint
     ///   - messageHandler: Called with each successfully fetched group of messages,
     ///     sorted into chronological order
     ///   - pageCompletion: Called after each listed page is fully processed
-    ///   - trackedIds: IDs whose resolution the caller needs back (the
-    ///     deferred ledger), reported in `resolvedTrackedIds`
     /// - Returns: BatchProcessingResult with success/failure counts; only the
     ///   failure buckets and the resolved tracked IDs keep their IDs
     /// - Throws: Cancellation errors or API errors
@@ -169,11 +169,14 @@ struct MessageListPaginator {
             failedIds.append(contentsOf: pageResult.failedIds)
             persistenceFailures.merge(pageResult.persistence.retainingOnlyFailures)
             if !trackedIds.isEmpty {
-                let resolved = pageResult.persistence.persistedIds
-                    + pageResult.persistence.excludedIds
-                    + pageResult.persistence.unprocessableIds
-                    + pageResult.goneIds
-                resolvedTrackedIds.formUnion(resolved.lazy.filter(trackedIds.contains))
+                for resolved in [
+                    pageResult.persistence.persistedIds,
+                    pageResult.persistence.excludedIds,
+                    pageResult.persistence.unprocessableIds,
+                    pageResult.goneIds
+                ] {
+                    resolvedTrackedIds.formUnion(resolved.lazy.filter(trackedIds.contains))
+                }
             }
 
             await progressHandler(

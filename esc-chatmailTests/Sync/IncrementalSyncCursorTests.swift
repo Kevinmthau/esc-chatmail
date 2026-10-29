@@ -2274,17 +2274,3 @@ final class IncrementalSyncCursorTests: XCTestCase {
         }
     }
 }
-
-/// Counts full-format `getMessage` calls per message ID.
-private actor FullFetchCounter {
-    private var counts: [String: Int] = [:]
-
-    func increment(_ id: String) -> Int {
-        counts[id, default: 0] += 1
-        return counts[id, default: 0]
-    }
-
-    func count(for id: String) -> Int {
-        counts[id, default: 0]
-    }
-}
