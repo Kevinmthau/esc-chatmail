@@ -4,12 +4,22 @@ import Foundation
 /// that actually reached the persistence layer as persisted — not merely
 /// fetched. `failedIds` are blocking fetch failures; persistence failures ride
 /// in `persistence.failedIds`; both gate cursor advancement via `hasFailures`.
+///
+/// A run-wide result from `MessageListPaginator` keeps IDs for the failure
+/// buckets only: `goneIds` and the persisted/excluded/unprocessable IDs are
+/// empty there, because a since-install re-list would otherwise hold every
+/// listed ID until the run ends while callers read only counts and failures.
+/// The one exception is `resolvedTrackedIds`, bounded by the IDs the caller
+/// asked it to track.
 struct BatchProcessingResult {
     let totalProcessed: Int
     let successfulCount: Int
     let failedIds: [String]
     var goneIds: [String] = []
     var persistence: MessagePersistenceReport = .empty
+    /// The paginator's `trackedIds` that this run resolved: persisted,
+    /// excluded, unprocessable or gone (404).
+    var resolvedTrackedIds: Set<String> = []
 
     var hasFailures: Bool { !failedIds.isEmpty || !persistence.failedIds.isEmpty }
 
@@ -74,8 +84,15 @@ struct BatchProcessor {
     }
 
     /// Retries fetching failed message IDs
+    ///
+    /// Fetches in `batchSize` chunks, like the first pass: the IDs accumulate
+    /// across a whole run, and one fetch over all of them held every refetched
+    /// payload (and its prepared form) in memory at once. The persisted rows
+    /// still stay in the caller's context until its next save.
+    ///
     /// - Parameters:
     ///   - failedIds: IDs that failed in the initial attempt
+    ///   - batchSize: IDs fetched and persisted per chunk
     ///   - messageFetcher: The fetcher to use
     ///   - messageHandler: Handler for successfully fetched groups of messages,
     ///     sorted into chronological order; returns the persistence report
@@ -84,6 +101,7 @@ struct BatchProcessor {
     ///   record the remaining IDs as failures
     static func retryFailedMessages(
         failedIds: [String],
+        batchSize: Int = SyncConfig.messageBatchSize,
         messageFetcher: MessageFetcher,
         messageHandler: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport
     ) async throws -> MessageBatchOutcome {
@@ -91,9 +109,26 @@ struct BatchProcessor {
 
         Log.debug("Retrying \(failedIds.count) failed messages...", category: .sync)
 
-        let outcome = try await messageFetcher.fetchBatch(failedIds) { messages in
-            try await messageHandler(messages)
+        var fetchFailedIds: [String] = []
+        var goneIds: [String] = []
+        var persistence = MessagePersistenceReport()
+        for chunk in failedIds.chunked(into: batchSize) {
+            try Task.checkCancellation()
+
+            // An account-scoped abort propagates and leaves the remaining
+            // chunks unclassified, as in `processMessages`.
+            let chunkOutcome = try await messageFetcher.fetchBatch(chunk) { messages in
+                try await messageHandler(messages)
+            }
+            fetchFailedIds.append(contentsOf: chunkOutcome.fetchFailedIds)
+            goneIds.append(contentsOf: chunkOutcome.goneIds)
+            persistence.merge(chunkOutcome.persistence)
         }
+        let outcome = MessageBatchOutcome(
+            fetchFailedIds: fetchFailedIds,
+            goneIds: goneIds,
+            persistence: persistence
+        )
 
         if outcome.hasBlockingFailures {
             Log.warning("\(outcome.blockingFailureIds.count) messages still failed after retry", category: .sync)

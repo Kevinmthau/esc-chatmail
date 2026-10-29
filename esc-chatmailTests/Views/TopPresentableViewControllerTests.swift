@@ -50,12 +50,49 @@ final class TopPresentableViewControllerTests: XCTestCase {
 
         XCTAssertTrue(resolved === rootViewController)
     }
+
+    /// A cancelled wait for a presenter must report `.cancelled`, not a missing
+    /// presenter: `AttachmentGridView` and `EditContactView` log a failure only for
+    /// `.noPresenter`, so a run replaced by a newer tap used to log a bogus error.
+    ///
+    /// Revert-check: returning `.noPresenter` from the `Task.sleepUnlessCancelled`
+    /// guard in `TopPresentableViewController.present(_:resolvePresenter:)` makes
+    /// this fail.
+    func testPresent_cancelledWhileNoPresenter_reportsCancelled() async {
+        let task = Task { @MainActor in
+            await TopPresentableViewController.present(UIViewController()) { nil }
+        }
+        task.cancel()
+
+        let outcome = await task.value
+
+        XCTAssertEqual(outcome, .cancelled)
+    }
+
+    func testPresent_presenterAvailable_presentsAndReportsPresented() async {
+        let presenter = TestViewController()
+        let viewController = UIViewController()
+
+        let outcome = await TopPresentableViewController.present(viewController) { presenter }
+
+        XCTAssertEqual(outcome, .presented)
+        XCTAssertTrue(presenter.lastPresented === viewController)
+    }
 }
 
 private final class TestViewController: UIViewController {
     var stubPresentedViewController: UIViewController?
+    private(set) var lastPresented: UIViewController?
 
     override var presentedViewController: UIViewController? {
         stubPresentedViewController
+    }
+
+    override func present(
+        _ viewControllerToPresent: UIViewController,
+        animated flag: Bool,
+        completion: (() -> Void)? = nil
+    ) {
+        lastPresented = viewControllerToPresent
     }
 }

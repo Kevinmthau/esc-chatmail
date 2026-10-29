@@ -325,6 +325,26 @@ actor SyncFailureTracker {
         }
     }
 
+    /// The Gmail IDs of every `deferred` ledger row, read in the caller's
+    /// context. Throws when the ledger cannot be read: an unreadable ledger
+    /// is never "empty".
+    ///
+    /// A clean advance (and `recordFailure`'s reconcile) deletes every
+    /// deferred row on the assumption that the run's re-scan listed it. A run
+    /// whose list window can start after a deferred message (initial sync's
+    /// capped window, recovery's newest-received bound) must re-fetch these
+    /// IDs explicitly and fold the outcome into its failures first.
+    func deferredMessageIds(in context: NSManagedObjectContext) async throws -> [String] {
+        try await context.perform {
+            let request = AbandonedSyncMessage.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "state == %@",
+                AbandonedSyncMessage.State.deferred.rawValue
+            )
+            return try context.fetch(request).map(\.gmailMessageId)
+        }
+    }
+
     /// Stages deletion of every deferred row in the caller's context.
     /// - Returns: the number of rows staged for deletion, or `nil` when the
     ///   ledger could not be read.

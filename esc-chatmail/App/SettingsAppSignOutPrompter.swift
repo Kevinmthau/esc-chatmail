@@ -24,7 +24,7 @@ final class SettingsAppSignOutPrompter: SettingsAppSignOutPrompting {
 
     /// - Parameter present: Presents an alert and reports whether it did;
     ///   tests inject one to drive the confirmation gate without a window.
-    init(present: @escaping Present = { await TopPresentableViewController.present($0) }) {
+    init(present: @escaping Present = { await TopPresentableViewController.present($0) == .presented }) {
         self.present = present
     }
 

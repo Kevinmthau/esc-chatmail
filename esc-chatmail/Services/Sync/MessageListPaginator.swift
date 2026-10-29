@@ -79,15 +79,19 @@ struct MessageListPaginator {
     /// - Parameters:
     ///   - query: Gmail search query
     ///   - messageFetcher: The fetcher to use for API calls
+    ///   - trackedIds: IDs whose resolution the caller needs back (the
+    ///     deferred ledger), reported in `resolvedTrackedIds`
     ///   - progressHandler: Called as batches complete with a cumulative checkpoint
     ///   - messageHandler: Called with each successfully fetched group of messages,
     ///     sorted into chronological order
     ///   - pageCompletion: Called after each listed page is fully processed
-    /// - Returns: BatchProcessingResult with success/failure counts
+    /// - Returns: BatchProcessingResult with success/failure counts; only the
+    ///   failure buckets and the resolved tracked IDs keep their IDs
     /// - Throws: Cancellation errors or API errors
     static func fetchAndProcess(
         query: String,
         messageFetcher: MessageFetcher,
+        trackedIds: Set<String> = [],
         progressHandler: @escaping (PagedSyncCheckpoint) async -> Void,
         messageHandler: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport,
         pageCompletion: (() async throws -> Void)? = nil
@@ -96,6 +100,7 @@ struct MessageListPaginator {
             query: query,
             batchSize: SyncConfig.messageBatchSize,
             messageFetcher: messageFetcher,
+            trackedIds: trackedIds,
             progressHandler: progressHandler,
             messageHandler: messageHandler,
             pageCompletion: pageCompletion
@@ -107,6 +112,7 @@ struct MessageListPaginator {
         query: String,
         batchSize: Int,
         messageFetcher: MessageFetcher,
+        trackedIds: Set<String> = [],
         progressHandler: @escaping (PagedSyncCheckpoint) async -> Void,
         messageHandler: @escaping @Sendable ([GmailMessage]) async throws -> MessagePersistenceReport,
         pageCompletion: (() async throws -> Void)? = nil
@@ -115,8 +121,8 @@ struct MessageListPaginator {
         var processedCount = 0
         var successfulCount = 0
         var failedIds: [String] = []
-        var goneIds: [String] = []
-        var persistence = MessagePersistenceReport()
+        var persistenceFailures = MessagePersistenceReport()
+        var resolvedTrackedIds = Set<String>()
 
         let stream = MessageIDPageStream(query: query, messageFetcher: messageFetcher)
         try await stream.forEachPage { page in
@@ -161,8 +167,17 @@ struct MessageListPaginator {
             processedCount += pageResult.totalProcessed
             successfulCount += pageResult.successfulCount
             failedIds.append(contentsOf: pageResult.failedIds)
-            goneIds.append(contentsOf: pageResult.goneIds)
-            persistence.merge(pageResult.persistence)
+            persistenceFailures.merge(pageResult.persistence.retainingOnlyFailures)
+            if !trackedIds.isEmpty {
+                for resolved in [
+                    pageResult.persistence.persistedIds,
+                    pageResult.persistence.excludedIds,
+                    pageResult.persistence.unprocessableIds,
+                    pageResult.goneIds
+                ] {
+                    resolvedTrackedIds.formUnion(resolved.lazy.filter(trackedIds.contains))
+                }
+            }
 
             await progressHandler(
                 PagedSyncCheckpoint(
@@ -184,8 +199,8 @@ struct MessageListPaginator {
             totalProcessed: processedCount,
             successfulCount: successfulCount,
             failedIds: failedIds,
-            goneIds: goneIds,
-            persistence: persistence
+            persistence: persistenceFailures,
+            resolvedTrackedIds: resolvedTrackedIds
         )
     }
 }

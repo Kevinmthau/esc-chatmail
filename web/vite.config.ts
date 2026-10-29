@@ -19,6 +19,9 @@ export default defineConfig({
       // it (registerServiceWorker), even mid-send. Go back to 'prompt' with a
       // reload toast once the app has real users.
       registerType: 'autoUpdate',
+      // Manifest icons are precached automatically; the tab favicon is not,
+      // and without this an offline launch shows no tab icon.
+      includeAssets: ['icons/favicon-32.png'],
       manifest: {
         name: 'MushMail',
         short_name: 'MushMail',

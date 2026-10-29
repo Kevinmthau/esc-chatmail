@@ -301,17 +301,21 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         let failingContext = try FailingReadStore.makeFailingContext()
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
 
-        let completion = try await sut.handleSyncCompletion(
-            result: BatchProcessingResult(totalProcessed: 0, successfulCount: 0, failedIds: []),
-            profile: profile,
-            labelIds: [],
-            modificationTransaction: modificationTransaction,
-            context: failingContext
-        )
-
-        XCTAssertTrue(completion.hadWarnings)
-        let plan = try XCTUnwrap(completion.advancePlan)
-        XCTAssertEqual(plan.outcome, .held)
+        // The deferred-ledger read that precedes the advance plan throws:
+        // an unreadable ledger aborts the run rather than advancing past
+        // deferred IDs it could not retry.
+        do {
+            _ = try await sut.handleSyncCompletion(
+                result: BatchProcessingResult(totalProcessed: 0, successfulCount: 0, failedIds: []),
+                profile: profile,
+                labelIds: [],
+                modificationTransaction: modificationTransaction,
+                context: failingContext
+            )
+            XCTFail("An unreadable failure ledger must not let a clean run complete")
+        } catch {
+            // Expected.
+        }
 
         let store = try XCTUnwrap(
             failingContext.persistentStoreCoordinator?.persistentStores.first as? FailingReadStore
@@ -319,7 +323,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         XCTAssertEqual(
             store.requestTypes,
             [.fetchRequestType],
-            "A held plan must prevent the subsequent account-history mutation"
+            "A failed ledger read must prevent the subsequent account-history mutation"
         )
 
         await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
