@@ -1,6 +1,5 @@
 import SwiftUI
 import CoreData
-import QuickLook
 
 struct AttachmentGridView: View {
     let attachments: [ChatMessageAttachmentModel]
@@ -61,8 +60,19 @@ struct AttachmentGridView: View {
                 AttachmentIndicator(count: attachments.filter { inlineImagePresentations[$0.objectID] != .collapsed }.count)
             }
         }
-        .sheet(item: $quickLookPresentation) { presentation in
-            QuickLookView(presentation: presentation)
+        // Quick Look presents itself as a UIKit modal rather than in a SwiftUI
+        // sheet: inside a sheet it had no Done button and a drag on the document
+        // only scrolled it (see `QuickLookPreviewController`). Its dismissal clears
+        // the state; a failed presentation clears it too so the next tap retries.
+        .task(id: quickLookPresentation?.id) {
+            guard let presentation = quickLookPresentation else { return }
+            let presented = await QuickLookPreviewController.present(presentation) {
+                quickLookPresentation = nil
+            }
+            if !presented {
+                Log.error("Quick Look found no presenter for attachment preview", category: .ui)
+                quickLookPresentation = nil
+            }
         }
     }
 
