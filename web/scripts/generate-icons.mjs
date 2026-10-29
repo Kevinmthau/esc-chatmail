@@ -152,9 +152,12 @@ function resize(source, size) {
       const x1 = x0 + scale
       const sum = [0, 0, 0, 0]
       let total = 0
-      for (let sy = Math.floor(y0); sy < Math.ceil(y1); sy++) {
+      // Clamped: for some sizes (182, 186, ... of a 1024 source) the last
+      // pixel's float edge lands a hair past the source, and reading past it
+      // would turn the whole edge row/column NaN, i.e. transparent black.
+      for (let sy = Math.floor(y0); sy < Math.min(Math.ceil(y1), source.height); sy++) {
         const wy = Math.min(y1, sy + 1) - Math.max(y0, sy)
-        for (let sx = Math.floor(x0); sx < Math.ceil(x1); sx++) {
+        for (let sx = Math.floor(x0); sx < Math.min(Math.ceil(x1), source.width); sx++) {
           const w = wy * (Math.min(x1, sx + 1) - Math.max(x0, sx))
           const i = (sy * source.width + sx) * 4
           for (let k = 0; k < 4; k++) sum[k] += source.rgba[i + k] * w

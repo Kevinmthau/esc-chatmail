@@ -17,6 +17,9 @@ export default defineConfig({
       // A long-lived SPA holding sync state must never be yanked mid-send:
       // updates wait for the user's go-ahead (ReloadPrompt toast).
       registerType: 'prompt',
+      // Manifest icons are precached automatically; the tab favicon is not,
+      // and without this an offline launch shows no tab icon.
+      includeAssets: ['icons/favicon-32.png'],
       manifest: {
         name: 'MushMail',
         short_name: 'MushMail',
