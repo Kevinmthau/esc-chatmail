@@ -8,24 +8,31 @@ import Foundation
 /// Extracted from `NewsletterPreviewBuilder` so the line-preparation and
 /// source-selection logic lives in one focused, independently testable unit. The
 /// shared predicates it relies on — footer detection via `PreviewLineProcessor`,
-/// plus the builder's `shouldSkipLine` / `lineLooksLikePreviewNoise` helpers and
-/// the leading-tracking-URL trimmer — are injected so the analyzer carries no
+/// plus the builder's `shouldSkipLine` / `lineLooksLikePreviewNoise` /
+/// `isSkippedLinkTarget` / `isFooterLeadInQuestion` helpers and the
+/// leading-tracking-URL trimmer — are injected so the analyzer carries no
 /// builder state.
 struct NewsletterLineAnalyzer {
     private let lineProcessor: PreviewLineProcessor
     private let shouldSkipLine: (String) -> Bool
     private let lineLooksLikePreviewNoise: (String) -> Bool
+    private let isSkippedLinkTarget: (String) -> Bool
+    private let isFooterLeadInQuestion: (String) -> Bool
     private let trimmingLeadingPreviewURLNoise: (String, Bool) -> String
 
     init(
         lineProcessor: PreviewLineProcessor,
         shouldSkipLine: @escaping (String) -> Bool,
         lineLooksLikePreviewNoise: @escaping (String) -> Bool,
+        isSkippedLinkTarget: @escaping (String) -> Bool,
+        isFooterLeadInQuestion: @escaping (String) -> Bool,
         trimmingLeadingPreviewURLNoise: @escaping (String, Bool) -> String
     ) {
         self.lineProcessor = lineProcessor
         self.shouldSkipLine = shouldSkipLine
         self.lineLooksLikePreviewNoise = lineLooksLikePreviewNoise
+        self.isSkippedLinkTarget = isSkippedLinkTarget
+        self.isFooterLeadInQuestion = isFooterLeadInQuestion
         self.trimmingLeadingPreviewURLNoise = trimmingLeadingPreviewURLNoise
     }
 
@@ -53,7 +60,8 @@ struct NewsletterLineAnalyzer {
     func previewLines(from rawText: String) -> [String] {
         guard !rawText.isEmpty else { return [] }
 
-        let rawLines = rawText.components(separatedBy: .newlines)
+        let rawLines = MarkdownLinkLabels.joiningLinksSplitAcrossLines(in: rawText)
+            .components(separatedBy: .newlines)
         var lines: [String] = []
         var leadingURLFallbackLines: [String] = []
 
@@ -81,13 +89,19 @@ struct NewsletterLineAnalyzer {
             let stopsAtFooter = lineProcessor.shouldStopAtFooter(candidateLine)
                 || linkLabels.targets.contains(where: lineProcessor.shouldStopAtFooter)
             if stopsAtFooter, !lines.isEmpty || !leadingURLFallbackLines.isEmpty {
+                // The footer's lead-in question on the line before it ("No
+                // longer wish to receive our emails?") goes with it, whatever
+                // its wording: the footer patterns name only Klaviyo's.
+                if let lastLine = lines.last, isFooterLeadInQuestion(lastLine) {
+                    lines.removeLast()
+                }
                 break
             }
 
-            // The targets go after the label, so the URL-prefix noise check
-            // still sees only how the line itself starts.
-            if shouldSkipLine(candidateLine)
-                || (!linkLabels.targets.isEmpty && shouldSkipLine(([candidateLine] + linkLabels.targets).joined(separator: " "))) {
+            // Targets are judged only for what a URL can say (a social network,
+            // an unsubscribe page), never by the text-noise heuristics, which
+            // read `target=` or `{{…}}` in a query string as markup.
+            if shouldSkipLine(candidateLine) || linkLabels.targets.contains(where: isSkippedLinkTarget) {
                 continue
             }
 
