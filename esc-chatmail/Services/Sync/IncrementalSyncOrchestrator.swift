@@ -717,9 +717,20 @@ final class IncrementalSyncOrchestrator {
             )
             log.info("Recovery query: \(query)")
 
+            // The recovery window can start after a message the ledger
+            // deferred earlier (it is bounded by the newest received row
+            // when lastSuccessfulSyncTime is gone), and both the clean
+            // advance and recordFailure's reconcile delete every deferred row
+            // they do not see failing. Read those IDs up front: the listing
+            // reports which of them it resolves, and the rest are re-fetched
+            // explicitly below so none is dropped unfetched. Read before the
+            // listing; nothing in it touches the ledger.
+            let deferredLedgerIds = Set(try await failureTracker.deferredMessageIds(in: context))
+
             let result = try await MessageListPaginator.fetchAndProcess(
                 query: query,
-                messageFetcher: messageFetcher
+                messageFetcher: messageFetcher,
+                trackedIds: deferredLedgerIds
             ) { checkpoint in
                 let progress = 0.1 + Self.streamingRecoveryProgressFraction(for: checkpoint) * 0.7
                 await MainActor.run {
@@ -764,17 +775,15 @@ final class IncrementalSyncOrchestrator {
                 "Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.blockingFailureIds.count)"
             )
 
-            // The recovery window can start after a message the ledger
-            // deferred earlier (it is bounded by the newest received row
-            // when lastSuccessfulSyncTime is gone), and both the clean
-            // advance and recordFailure's reconcile delete every deferred row
-            // they do not see failing. Re-fetch those IDs explicitly so none
-            // is dropped unfetched.
+            // Skip deferred IDs the listing already failed (they are in this
+            // run's failures) or resolved: a transient failure on a redundant
+            // fetch would hold the run for a message that is already stored.
             let alreadyFailing = Set(result.blockingFailureIds)
-            let deferredLedgerIds = try await failureTracker.deferredMessageIds(in: context)
-                .filter { !alreadyFailing.contains($0) }
+            let unresolvedDeferredIds = deferredLedgerIds
+                .filter { !alreadyFailing.contains($0) && !result.resolvedTrackedIds.contains($0) }
+                .sorted()
             let deferredRetry = try await BatchProcessor.retryFailedMessages(
-                failedIds: deferredLedgerIds,
+                failedIds: unresolvedDeferredIds,
                 messageFetcher: messageFetcher
             ) { [messagePersister, myAliases, sendAsAliases] messages in
                 try await messagePersister.saveMessages(

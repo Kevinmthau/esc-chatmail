@@ -1652,6 +1652,126 @@ final class IncrementalSyncCursorTests: XCTestCase {
         }
     }
 
+    /// A deferred ID that the recovery listing itself re-lists and stores
+    /// must not be fetched a second time: a transient failure on that
+    /// redundant fetch would hold the run for a message already on disk.
+    ///
+    /// Revert-check: drop the `resolvedTrackedIds` filter from the deferred
+    /// retry in `performHistoryRecoverySync` and the second full fetch times
+    /// out, holding the cursor at the starting history ID.
+    @MainActor
+    func testRecoveryDoesNotRefetchADeferredIdItsListingAlreadyStored() async throws {
+        try await withRecoveryInstallBranch(newestReceivedAgo: 2 * 86_400) {
+            try await seedLedgerRow(id: "m-rec", state: .deferred)
+            configureCleanRecoveryListing()
+            let message = makeFullMessage(id: "m-rec")
+            let fullFetches = FullFetchCounter()
+            apiClient.getMessageOperation = { id, format in
+                guard format == "full" else { return message }
+                let count = await fullFetches.increment(id)
+                guard count == 1 else { throw APIError.timeout }
+                return message
+            }
+
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+
+            let fetchCount = await fullFetches.count(for: "m-rec")
+            XCTAssertEqual(fetchCount, 1, "The listing's fetch resolved the deferred ID")
+            let historyId = await fetchAccountHistoryId()
+            XCTAssertEqual(historyId, "7777")
+            let rows = await fetchLedgerRows()
+            XCTAssertTrue(rows.isEmpty)
+        }
+    }
+
+    /// An unreadable ledger aborts recovery before it lists anything, with
+    /// the expired cursor, the counter and the ledger untouched.
+    ///
+    /// Revert-check: read `(try? await failureTracker.deferredMessageIds(in: context)) ?? []`
+    /// in `performHistoryRecoverySync` and the listing runs.
+    /// HONEST SCOPE: the cursor, counter and ledger assertions also hold on
+    /// that revert, because `planHistoryAdvance` independently holds on an
+    /// unreadable ledger; only the listing assertion pins the early abort.
+    @MainActor
+    func testRecoveryAbortsWhenTheDeferredLedgerCannotBeRead() async throws {
+        try await withRecoveryInstallBranch(newestReceivedAgo: 2 * 86_400) {
+            try await seedLedgerRow(id: "old-deferred", state: .deferred)
+            try await seedFailureCounter(1)
+            configureCleanRecoveryListing()
+            let coordinator = testStack.persistentContainer.persistentStoreCoordinator
+            let ledgerFailingContext = EntityFetchFailingContext(
+                failingEntityName: "AbandonedSyncMessage",
+                coordinator: coordinator
+            )
+            var contextCount = 0
+            // The incremental run's own context first; recovery builds the second.
+            let sut = makeOrchestrator(makeSyncContext: { [coreDataStack] in
+                contextCount += 1
+                return contextCount == 1 ? coreDataStack!.newBackgroundContext() : ledgerFailingContext
+            })
+
+            do {
+                _ = try await sut.performSync(
+                    progressHandler: { _, _ in },
+                    initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+                )
+                XCTFail("An unreadable ledger must abort the recovery")
+            } catch {
+                // Expected.
+            }
+
+            XCTAssertGreaterThan(ledgerFailingContext.failedFetches, 0, "Positive control: the ledger read failed")
+            XCTAssertEqual(apiClient.listMessagesCallCount, 0, "Recovery must not list after an unreadable ledger")
+            let historyId = await fetchAccountHistoryId()
+            XCTAssertEqual(historyId, Self.startingHistoryId)
+            let counter = try await fetchFailureCounter()
+            XCTAssertEqual(counter, 1)
+            let rows = await fetchLedgerRows()
+            XCTAssertEqual(rows.map(\.gmailMessageId), ["old-deferred"])
+            XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue)
+        }
+    }
+
+    /// A quota abort while re-fetching a deferred ID is account-scoped: the
+    /// run rethrows and stages nothing, so the row stays deferred and the
+    /// cursor and counter are untouched. The listing's page save stands.
+    ///
+    /// Revert-check: treat the deferred `retryFailedMessages` call as
+    /// `(try? await ...) ?? .empty` in `performHistoryRecoverySync` and the
+    /// run advances to "7777" with the deferred row deleted.
+    @MainActor
+    func testRecoveryQuotaAbortOnADeferredIdStagesNothing() async throws {
+        try await withRecoveryInstallBranch(newestReceivedAgo: 2 * 86_400) {
+            try await seedLedgerRow(id: "old-deferred", state: .deferred)
+            try await seedFailureCounter(1)
+            configureCleanRecoveryListing()
+            apiClient.getMessageErrors["old-deferred"] = APIError.quotaExhausted("daily limit")
+
+            do {
+                _ = try await makeOrchestrator().performSync(
+                    progressHandler: { _, _ in },
+                    initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+                )
+                XCTFail("A quota abort must propagate out of the recovery")
+            } catch {
+                // Expected.
+            }
+
+            let pageSaved = await messageExists(id: "m-rec")
+            XCTAssertTrue(pageSaved, "Positive control: the listing's page save landed")
+            let historyId = await fetchAccountHistoryId()
+            XCTAssertEqual(historyId, Self.startingHistoryId)
+            let counter = try await fetchFailureCounter()
+            XCTAssertEqual(counter, 1)
+            let rows = await fetchLedgerRows()
+            XCTAssertEqual(rows.map(\.gmailMessageId), ["old-deferred"])
+            XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue)
+        }
+    }
+
     /// The `lastSuccessfulSyncTime` branch is frozen too: a store-preserving
     /// teardown between attempts clears that time, and the retry would
     /// otherwise anchor on the newest page the first attempt saved.
@@ -2152,5 +2272,19 @@ final class IncrementalSyncCursorTests: XCTestCase {
             request.includesPendingChanges = false
             return ((try? context.count(for: request)) ?? 0) > 0
         }
+    }
+}
+
+/// Counts full-format `getMessage` calls per message ID.
+private actor FullFetchCounter {
+    private var counts: [String: Int] = [:]
+
+    func increment(_ id: String) -> Int {
+        counts[id, default: 0] += 1
+        return counts[id, default: 0]
+    }
+
+    func count(for id: String) -> Int {
+        counts[id, default: 0]
     }
 }
