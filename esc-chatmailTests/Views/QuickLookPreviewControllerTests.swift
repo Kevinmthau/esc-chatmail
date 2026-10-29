@@ -2,7 +2,7 @@ import XCTest
 @testable import esc_chatmail
 
 @MainActor
-final class QuickLookViewTests: XCTestCase {
+final class QuickLookPreviewControllerTests: XCTestCase {
     func testPresentationKeepsSelectionIndexAlignedAfterRejectingLegacyPath() throws {
         let stack = TestCoreDataStack()
         let context = stack.viewContext
@@ -155,12 +155,62 @@ final class QuickLookViewTests: XCTestCase {
         )
     }
 
+    /// Revert-check: `QuickLookPreviewController.previewControllerDidDismiss` forwarding to
+    /// `onDismiss` is what clears `AttachmentGridView`'s presentation state after a Done
+    /// tap or pull-down; without it the next tap on the same attachment is a no-op
+    /// because the `.task(id:)` key never changes.
+    func testController_dismissedByQuickLook_invokesOnDismissAndServesSnapshot() throws {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let message = MessageBuilder()
+            .withId("quick-look-dismiss-message")
+            .withAttachments()
+            .build(in: context)
+        let attachmentID = "quick-look-dismiss"
+        let path = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentID,
+            ext: "pdf"
+        )
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("dismiss.pdf")
+            .withMimeType("application/pdf")
+            .withLocalURL(path)
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(Data("dismiss".utf8), to: path))
+        defer { AttachmentPaths.deleteFile(at: path) }
+
+        let presentation = try XCTUnwrap(
+            QuickLookPresentation(attachments: [attachment], selectedAttachment: attachment)
+        )
+        let controller = QuickLookPreviewController(presentation: presentation)
+        var dismissCount = 0
+        controller.onDismiss = { dismissCount += 1 }
+
+        XCTAssertTrue(controller.dataSource === controller)
+        XCTAssertTrue(controller.delegate === controller)
+        XCTAssertEqual(controller.numberOfPreviewItems(in: controller), 1)
+        let item = try XCTUnwrap(
+            controller.previewController(controller, previewItemAt: 0) as? AttachmentPreviewItem
+        )
+        XCTAssertEqual(item.previewItemTitle, "dismiss.pdf")
+
+        controller.previewControllerDidDismiss(controller)
+
+        XCTAssertEqual(dismissCount, 1)
+    }
+
     func testPreviewIndexIsClampedToSnapshotBounds() {
-        XCTAssertEqual(QuickLookView.clampedPreviewIndex(-1, itemCount: 2), 0)
-        XCTAssertEqual(QuickLookView.clampedPreviewIndex(0, itemCount: 2), 0)
-        XCTAssertEqual(QuickLookView.clampedPreviewIndex(1, itemCount: 2), 1)
-        XCTAssertEqual(QuickLookView.clampedPreviewIndex(2, itemCount: 2), 1)
-        XCTAssertEqual(QuickLookView.clampedPreviewIndex(.max, itemCount: 2), 1)
-        XCTAssertEqual(QuickLookView.clampedPreviewIndex(1, itemCount: 0), 0)
+        XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(-1, itemCount: 2), 0)
+        XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(0, itemCount: 2), 0)
+        XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(1, itemCount: 2), 1)
+        XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(2, itemCount: 2), 1)
+        XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(.max, itemCount: 2), 1)
+        XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(1, itemCount: 0), 0)
     }
 }
