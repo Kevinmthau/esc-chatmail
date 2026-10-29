@@ -191,7 +191,7 @@ final class BatchProcessorTests: XCTestCase {
     ///
     /// Revert-check: call `fetchBatch(failedIds)` once in
     /// `retryFailedMessages` instead of looping over `chunked(into:)` and the
-    /// largest persisted group is 120.
+    /// largest persisted group is 118.
     func testRetryFailedMessages_fetchesInChunksAndPartitionsEveryIdOnce() async throws {
         let ids = (0..<120).map { "retry-\($0)" }
         let api = MockGmailAPIClient()

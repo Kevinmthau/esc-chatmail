@@ -85,6 +85,54 @@ final class InitialSyncScaleBoundTests: XCTestCase {
         XCTAssertNil(cleared, "The advancing save deletes the frozen window")
     }
 
+    /// A kept store can hold deferred ledger rows older than the capped
+    /// window; the clean advance deletes every deferred row, so the initial
+    /// sync must re-fetch them explicitly before advancing.
+    ///
+    /// Revert-check: drop `deferredLedgerIds` from the retry set in
+    /// `InitialSyncOrchestrator.handleSyncCompletion` and "old-deferred" is
+    /// never stored while its row is deleted.
+    @MainActor
+    func testPerformSync_fetchesDeferredLedgerRowsOutsideTheCappedWindow() async throws {
+        UserDefaults.standard.set(Date().timeIntervalSince1970 - 400 * 86_400, forKey: "installTimestamp")
+        configureMailbox(pages: [["m1"]])
+        apiClient.getMessageResponses["old-deferred"] = GmailMessageBuilder()
+            .withId("old-deferred")
+            .withThreadId("t-old-deferred")
+            .withLabels(["INBOX"])
+            .withFrom("old@example.com", name: "Old Sender")
+            .withTo([Self.myEmail])
+            .build()
+        let seedContext = coreDataStack.newBackgroundContext()
+        try await seedContext.perform {
+            let row = AbandonedSyncMessage(context: seedContext)
+            row.setValue(UUID(), forKey: "id")
+            row.setValue("old-deferred", forKey: "gmailMessageId")
+            row.setValue(Date(timeIntervalSinceNow: -3600), forKey: "abandonedAt")
+            row.setValue(Int16(0), forKey: "retryCount")
+            row.setValue(AbandonedSyncMessage.State.deferred.rawValue, forKey: "state")
+            try seedContext.save()
+        }
+
+        let result = try await makeOrchestrator().performSync { _, _ in }
+
+        XCTAssertFalse(result.hadWarnings)
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "history-500")
+        let context = coreDataStack.newBackgroundContext()
+        let (stored, ledgerRows): (Bool, Int) = await context.perform {
+            let messages = Message.fetchRequest()
+            messages.predicate = NSPredicate(format: "id == %@", "old-deferred")
+            let ledger = NSFetchRequest<NSManagedObject>(entityName: "AbandonedSyncMessage")
+            return (
+                ((try? context.count(for: messages)) ?? 0) == 1,
+                (try? context.count(for: ledger)) ?? -1
+            )
+        }
+        XCTAssertTrue(stored, "The deferred message must be fetched, not just forgotten")
+        XCTAssertEqual(ledgerRows, 0)
+    }
+
     /// Each page's saved rows are turned back into faults after the page
     /// save, so the run's context holds at most about one page of realized
     /// messages rather than every message of the run.

@@ -1528,6 +1528,15 @@ final class IncrementalSyncCursorTests: XCTestCase {
 
         let newestReceived = Date(timeIntervalSince1970: TimeInterval(Int(now - 2 * 86_400)))
         try await seedStoredMessage(id: "stored-received", internalDate: newestReceived, isFromMe: false)
+        // A future-dated received row (skewed sender clock) must not anchor
+        // the window at now and skip the whole gap.
+        // Revert-check: drop `internalDate <= %@` from
+        // `newestReceivedInternalDate` and the first run starts at now.
+        try await seedStoredMessage(
+            id: "stored-future-received",
+            internalDate: Date(timeIntervalSince1970: now + 30 * 86_400),
+            isFromMe: false
+        )
         // An optimistic send stamps a local `now`; it must not anchor the bound.
         try await seedStoredMessage(
             id: "stored-sent",
@@ -1587,6 +1596,149 @@ final class IncrementalSyncCursorTests: XCTestCase {
             in: coreDataStack.newBackgroundContext()
         )
         XCTAssertNil(frozen, "The advancing recovery deletes its frozen window")
+    }
+
+    /// A deferred ledger row older than the bounded recovery window is not
+    /// re-listed, yet a clean advance deletes every deferred row on the
+    /// assumption that the re-scan covered it. Recovery must re-fetch those
+    /// IDs explicitly: one that still fails holds the cursor and keeps its row.
+    ///
+    /// Revert-check: remove the `deferredMessageIds` retry from
+    /// `performHistoryRecoverySync` and the run advances to "7777" with the
+    /// deferred row deleted unfetched.
+    @MainActor
+    func testRecoveryHoldsForAnUnfetchableDeferredRowOlderThanItsWindow() async throws {
+        try await withRecoveryInstallBranch(newestReceivedAgo: 2 * 86_400) {
+            try await seedLedgerRow(id: "old-deferred", state: .deferred)
+            configureCleanRecoveryListing()
+            apiClient.getMessageErrors["old-deferred"] = APIError.timeout
+
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+
+            let historyId = await fetchAccountHistoryId()
+            XCTAssertEqual(historyId, Self.startingHistoryId, "An unfetched deferred ID must hold the cursor")
+            let rows = await fetchLedgerRows()
+            XCTAssertEqual(rows.map(\.gmailMessageId), ["old-deferred"])
+            XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.deferred.rawValue)
+        }
+    }
+
+    /// The fetchable counterpart: the deferred ID is persisted before the
+    /// clean advance deletes its row.
+    ///
+    /// Revert-check: remove the `deferredMessageIds` retry from
+    /// `performHistoryRecoverySync` and "old-deferred" is never stored.
+    @MainActor
+    func testRecoveryFetchesADeferredRowOlderThanItsWindowBeforeAdvancing() async throws {
+        try await withRecoveryInstallBranch(newestReceivedAgo: 2 * 86_400) {
+            try await seedLedgerRow(id: "old-deferred", state: .deferred)
+            configureCleanRecoveryListing()
+            apiClient.getMessageResponses["old-deferred"] = makeFullMessage(id: "old-deferred")
+
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+
+            let historyId = await fetchAccountHistoryId()
+            XCTAssertEqual(historyId, "7777")
+            let stored = await messageExists(id: "old-deferred")
+            XCTAssertTrue(stored, "The deferred message must be fetched, not just forgotten")
+            let rows = await fetchLedgerRows()
+            XCTAssertTrue(rows.isEmpty)
+        }
+    }
+
+    /// The `lastSuccessfulSyncTime` branch is frozen too: a store-preserving
+    /// teardown between attempts clears that time, and the retry would
+    /// otherwise anchor on the newest page the first attempt saved.
+    ///
+    /// Revert-check: return the `.historyRecovery` query directly from the
+    /// last-sync branch of `resolveHistoryRecoveryQuery` (no freeze) and the
+    /// second run starts at the newest received row.
+    @MainActor
+    func testRecoveryFreezesTheLastSuccessfulSyncBranchAcrossATeardown() async throws {
+        let now = Date().timeIntervalSince1970
+        let lastSuccess = TimeInterval(Int(now - 10 * 86_400))
+        try await withRecoveryInstallBranch(newestReceivedAgo: 3600) {
+            UserDefaults.standard.set(lastSuccess, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            configureCleanRecoveryListing()
+            apiClient.getMessageErrors["m-rec"] = APIError.timeout
+
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            let expected = "after:\(Int(lastSuccess - SyncConfig.recoveryBufferSeconds)) "
+            XCTAssertEqual(apiClient.listMessagesQueries.first??.hasPrefix(expected), true)
+
+            UserDefaults.standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            apiClient.listHistoryError = APIError.historyIdExpired
+            apiClient.listMessagesQueries = []
+            await ModificationTracker.shared.reset()
+
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            let retryQuery = apiClient.listMessagesQueries.first ?? nil
+            XCTAssertEqual(retryQuery?.hasPrefix(expected), true,
+                           "The retry must reuse the frozen last-sync bound; got \(retryQuery ?? "nil")")
+        }
+    }
+
+    /// Runs `body` with a 400-day-old install time, no
+    /// `lastSuccessfulSyncTime`, and one stored received row
+    /// `newestReceivedAgo` seconds old, restoring the standard defaults after.
+    @MainActor
+    private func withRecoveryInstallBranch(
+        newestReceivedAgo: TimeInterval,
+        _ body: () async throws -> Void
+    ) async throws {
+        let standard = UserDefaults.standard
+        let savedInstall = standard.object(forKey: "installTimestamp")
+        let savedLastSuccess = standard.object(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        defer {
+            if let savedInstall {
+                standard.set(savedInstall, forKey: "installTimestamp")
+            } else {
+                standard.removeObject(forKey: "installTimestamp")
+            }
+            if let savedLastSuccess {
+                standard.set(savedLastSuccess, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            } else {
+                standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            }
+        }
+        let now = Date().timeIntervalSince1970
+        standard.set(now - 400 * 86_400, forKey: "installTimestamp")
+        standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        try await seedStoredMessage(
+            id: "stored-received",
+            internalDate: Date(timeIntervalSince1970: now - newestReceivedAgo),
+            isFromMe: false
+        )
+        try await body()
+    }
+
+    /// History has expired and recovery lists one fetchable message, "m-rec".
+    private func configureCleanRecoveryListing() {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "m-rec", threadId: "t-m-rec")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        apiClient.getMessageResponses["m-rec"] = makeFullMessage(id: "m-rec")
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 1,
+            threadsTotal: 1,
+            historyId: "7777"
+        )
     }
 
     /// History recovery reuses one sync context for every listed page, like

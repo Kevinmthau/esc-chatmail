@@ -396,15 +396,25 @@ final class InitialSyncOrchestrator {
         priorFailureCount: Int = 0,
         context: NSManagedObjectContext
     ) async throws -> InitialSyncCompletionOutcome {
-        if result.hasFailures {
-            log.warning("Initial sync has \(result.blockingFailureIds.count) failed messages")
+        // The capped window need not list a message the ledger deferred
+        // earlier (a kept store, or a run held before the window was frozen),
+        // and both the clean advance and recordFailure's reconcile delete
+        // every deferred row they do not see failing. Retry those IDs
+        // explicitly so none is dropped unfetched.
+        let deferredLedgerIds = try await failureTracker.deferredMessageIds(in: context)
+        var retryIdSet = Set<String>()
+        let retryIds = (result.blockingFailureIds + deferredLedgerIds).filter {
+            retryIdSet.insert($0).inserted
+        }
+        if !retryIds.isEmpty {
+            log.warning("Initial sync retrying \(result.blockingFailureIds.count) failed and \(deferredLedgerIds.count) deferred messages")
 
             // Retry failed messages (fetch failures and persistence failures
             // alike). Quota exhaustion propagates: the initial sync aborts
             // without advancing historyId or recording the remaining IDs as
             // failures, and resumes on a later run.
             let retryOutcome = try await BatchProcessor.retryFailedMessages(
-                failedIds: result.blockingFailureIds,
+                failedIds: retryIds,
                 messageFetcher: messageFetcher
             ) { [messagePersister, myAliases, sendAsAliases] messages in
                 // Capture dependencies strongly to prevent message loss if orchestrator is deallocated

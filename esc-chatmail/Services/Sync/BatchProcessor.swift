@@ -82,7 +82,8 @@ struct BatchProcessor {
     ///
     /// Fetches in `batchSize` chunks, like the first pass: the IDs accumulate
     /// across a whole run, and one fetch over all of them held every refetched
-    /// message (and its prepared form) in memory at once.
+    /// payload (and its prepared form) in memory at once. The persisted rows
+    /// still stay in the caller's context until its next save.
     ///
     /// - Parameters:
     ///   - failedIds: IDs that failed in the initial attempt

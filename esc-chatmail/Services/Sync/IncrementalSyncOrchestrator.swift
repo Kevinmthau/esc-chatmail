@@ -764,12 +764,38 @@ final class IncrementalSyncOrchestrator {
                 "Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.blockingFailureIds.count)"
             )
 
-            if result.hasFailures {
+            // The recovery window can start after a message the ledger
+            // deferred earlier (it is bounded by the newest received row
+            // when lastSuccessfulSyncTime is gone), and both the clean
+            // advance and recordFailure's reconcile delete every deferred row
+            // they do not see failing. Re-fetch those IDs explicitly so none
+            // is dropped unfetched.
+            let alreadyFailing = Set(result.blockingFailureIds)
+            let deferredLedgerIds = try await failureTracker.deferredMessageIds(in: context)
+                .filter { !alreadyFailing.contains($0) }
+            let deferredRetry = try await BatchProcessor.retryFailedMessages(
+                failedIds: deferredLedgerIds,
+                messageFetcher: messageFetcher
+            ) { [messagePersister, myAliases, sendAsAliases] messages in
+                try await messagePersister.saveMessages(
+                    messages,
+                    labelIds: labelIds,
+                    myAliases: myAliases,
+                    sendAsAliases: sendAsAliases,
+                    modificationTransaction: modificationTransaction,
+                    in: context
+                )
+            }
+            let fetchFailedIds = result.failedIds + deferredRetry.fetchFailedIds
+            let persistenceFailedIds = result.persistence.failedIds + deferredRetry.persistence.failedIds
+            let hadFailures = !fetchFailedIds.isEmpty || !persistenceFailedIds.isEmpty
+
+            if hadFailures {
                 // Recovery runs because the old cursor expired; there is no
                 // meaningful source position to stamp on the deferred rows.
                 await failureTracker.recordFailure(
-                    fetchFailedIds: result.failedIds,
-                    persistenceFailedIds: result.persistence.failedIds,
+                    fetchFailedIds: fetchFailedIds,
+                    persistenceFailedIds: persistenceFailedIds,
                     sourceHistoryId: nil,
                     in: context
                 )
@@ -778,18 +804,18 @@ final class IncrementalSyncOrchestrator {
             // Advance only to the PRE-SCAN watermark and only when failure
             // policy allows it — this prevents data loss when recovery
             // fetched a partial set of messages.
-            let proposedFailureCount = result.hasFailures
+            let proposedFailureCount = hadFailures
                 ? Self.incrementedFailureCount(after: priorFailureCount)
                 : 0
             let advancePlan = await failureTracker.planHistoryAdvance(
-                hadFailures: result.hasFailures,
+                hadFailures: hadFailures,
                 consecutiveFailureCount: proposedFailureCount,
                 in: context
             )
             try await failureCounterStore.stage(
                 consecutiveFailureCount: advancePlan.shouldAdvance
                     ? 0
-                    : (result.hasFailures ? proposedFailureCount : priorFailureCount),
+                    : (hadFailures ? proposedFailureCount : priorFailureCount),
                 accountEmail: accountEmail,
                 in: context
             )
@@ -859,8 +885,8 @@ final class IncrementalSyncOrchestrator {
     /// Recovery normally starts just before `lastSuccessfulSyncTime`. Without
     /// it (teardown clears it, including the paths that keep the store and
     /// the expired cursor), the install branch would re-list the whole
-    /// mailbox, so that branch is bounded by the newest received row and
-    /// frozen at the first attempt; a retry reuses the frozen bound.
+    /// mailbox, so that branch is bounded by the newest received row. The
+    /// bound is frozen at the first attempt; a retry reuses it.
     private func resolveHistoryRecoveryQuery(
         accountEmail: String,
         in context: NSManagedObjectContext
@@ -873,16 +899,20 @@ final class IncrementalSyncOrchestrator {
             return SyncTimeCalculator.buildSyncQuery(startTime: frozen.windowStart)
         }
 
+        let windowStart: TimeInterval
         if UserDefaults.standard.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey) > 0 {
-            return SyncTimeCalculator.buildSyncQuery(config: .historyRecovery)
+            windowStart = SyncTimeCalculator.calculateStartTime(config: .historyRecovery)
+        } else {
+            // A failed read throws and holds the run: falling back to the
+            // unbounded install branch is the whole-mailbox re-list this bounds.
+            let newestReceived = try await Self.newestReceivedInternalDate(in: context)
+            windowStart = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
+                newestReceivedInternalDate: newestReceived
+            )
         }
-
-        // A failed read throws and holds the run: falling back to the
-        // unbounded install branch is the whole-mailbox re-list this bounds.
-        let newestReceived = try await Self.newestReceivedInternalDate(in: context)
-        let windowStart = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
-            newestReceivedInternalDate: newestReceived
-        )
+        // Frozen in either branch: a teardown between attempts can clear
+        // lastSuccessfulSyncTime, and the install branch would then anchor on
+        // the newest page the interrupted attempt saved.
         try await recoveryWindowCheckpointStore.stageFreeze(
             windowStart: windowStart,
             accountEmail: accountEmail,
@@ -896,7 +926,12 @@ final class IncrementalSyncOrchestrator {
     ) async throws -> TimeInterval? {
         try await context.perform {
             let request = NSFetchRequest<NSDictionary>(entityName: "Message")
-            request.predicate = NSPredicate(format: "isFromMe == NO")
+            // A future-dated row (skewed sender clock, imported mail) would
+            // anchor the window at now and skip the whole gap.
+            request.predicate = NSPredicate(
+                format: "isFromMe == NO AND internalDate <= %@",
+                Date() as NSDate
+            )
             request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
             request.fetchLimit = 1
             request.resultType = .dictionaryResultType
