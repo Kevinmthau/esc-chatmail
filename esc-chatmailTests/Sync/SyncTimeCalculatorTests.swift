@@ -66,6 +66,88 @@ final class SyncTimeCalculatorTests: XCTestCase {
         XCTAssertEqual(result, expected, accuracy: 1.0)
     }
 
+    /// A re-initial sync on a long-lived install (sign-out/sign-in, store
+    /// reset) must not re-list every message since the original install.
+    ///
+    /// Revert-check: drop `maxWindow` from `SyncTimeCalculator.Config.initialSync`
+    /// and the start falls back to the 400-day-old install time.
+    func testInitialSync_withOldInstallTimestamp_capsAtMaxWindow() {
+        let now: TimeInterval = 1_800_000_000
+        let installTime = now - 400 * 86_400
+
+        let result = SyncTimeCalculator.calculateStartTime(
+            config: .initialSync,
+            installTimestamp: installTime,
+            now: now
+        )
+
+        XCTAssertEqual(result, now - SyncConfig.initialSyncMaxWindow)
+    }
+
+    // MARK: - History Recovery Install Branch Tests
+
+    /// Without `lastSuccessfulSyncTime`, recovery starts just before the
+    /// newest received row instead of re-listing everything since install.
+    ///
+    /// Revert-check: make `historyRecoveryInstallBranchStartTime` ignore
+    /// `newestReceivedInternalDate` and the start falls back to install.
+    func testHistoryRecoveryInstallBranch_withReceivedRow_startsBeforeNewestReceived() {
+        let now: TimeInterval = 1_800_000_000
+        let newestReceived = now - 3 * 86_400
+
+        let result = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
+            newestReceivedInternalDate: newestReceived,
+            installTimestamp: now - 400 * 86_400,
+            now: now
+        )
+
+        XCTAssertEqual(result, newestReceived - SyncConfig.recoveryBufferSeconds)
+    }
+
+    func testHistoryRecoveryInstallBranch_neverStartsBeforeInstallCutoff() {
+        let now: TimeInterval = 1_800_000_000
+        let installTime = now - 3600
+
+        let result = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
+            newestReceivedInternalDate: installTime - 86_400,
+            installTimestamp: installTime,
+            now: now
+        )
+
+        XCTAssertEqual(result, installTime - SyncConfig.timestampBufferSeconds)
+    }
+
+    func testHistoryRecoveryInstallBranch_futureDatedRowIsClampedToNow() {
+        let now: TimeInterval = 1_800_000_000
+
+        let result = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
+            newestReceivedInternalDate: now + 86_400,
+            installTimestamp: now - 400 * 86_400,
+            now: now
+        )
+
+        XCTAssertEqual(result, now - SyncConfig.recoveryBufferSeconds)
+    }
+
+    func testHistoryRecoveryInstallBranch_withoutReceivedRows_keepsInstallBranch() {
+        let now: TimeInterval = 1_800_000_000
+        let installTime = now - 400 * 86_400
+
+        let withInstall = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
+            newestReceivedInternalDate: nil,
+            installTimestamp: installTime,
+            now: now
+        )
+        let withoutInstall = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
+            newestReceivedInternalDate: nil,
+            installTimestamp: 0,
+            now: now
+        )
+
+        XCTAssertEqual(withInstall, installTime - SyncConfig.timestampBufferSeconds)
+        XCTAssertEqual(withoutInstall, now - SyncConfig.recoveryFallbackWindow)
+    }
+
     // MARK: - History Recovery Config Tests
 
     func testHistoryRecovery_withLastSyncTime_usesLastSyncWithBuffer() {
@@ -227,7 +309,7 @@ final class SyncTimeCalculatorTests: XCTestCase {
         XCTAssertEqual(config.primaryBuffer, SyncConfig.timestampBufferSeconds)
         XCTAssertEqual(config.installBuffer, SyncConfig.timestampBufferSeconds)
         XCTAssertEqual(config.fallbackWindow, SyncConfig.initialSyncFallbackWindow)
-        XCTAssertNil(config.maxWindow)
+        XCTAssertEqual(config.maxWindow, SyncConfig.initialSyncMaxWindow)
         XCTAssertFalse(config.useLastSyncAsPrimary)
     }
 

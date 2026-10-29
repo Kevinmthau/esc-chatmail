@@ -1834,8 +1834,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// `lastReconciliationTime` gates `shouldSkipLabelReconciliation`. Leaving
     /// either behind lets a new account start — or skip — reconciliation as if
     /// work had already run against a store that has never synced. Clearing
-    /// them only ever widens the next window, so it is also safe on the paths
-    /// that deliberately retain the local store for a same-account retry.
+    /// them widens reconciliation's next window, so it is also safe on the
+    /// paths that deliberately retain the local store for a same-account
+    /// retry. A recovery that then finds no `lastSuccessfulSyncTime` starts at
+    /// the newest received row, not at install
+    /// (`SyncTimeCalculator.historyRecoveryInstallBranchStartTime`).
     private func clearAccountScopedSyncDefaults() {
         userDefaults.removeObject(forKey: SyncConfig.consecutiveFailuresKey)
         userDefaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)

@@ -113,6 +113,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     private(set) var listMessagesCallCount = 0
     private(set) var listMessagesLastQuery: String?
+    /// Every listMessages() query in call order (a run can list more than
+    /// once, e.g. history recovery and then reconciliation).
+    var listMessagesQueries: [String?] = []
     private(set) var listMessagesLastMaxResults: Int?
     private(set) var listMessagesLastPageToken: String?
 
@@ -216,6 +219,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             // Call tracking
             listMessagesCallCount = 0
             listMessagesLastQuery = nil
+            listMessagesQueries = []
             listMessagesLastMaxResults = nil
             listMessagesLastPageToken = nil
             getMessageCallCount = 0
@@ -251,6 +255,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         let delay = withStateLock {
             listMessagesCallCount += 1
             listMessagesLastQuery = query
+            listMessagesQueries.append(query)
             listMessagesLastMaxResults = maxResults
             listMessagesLastPageToken = pageToken
             endpointCallOrder.append("listMessages")

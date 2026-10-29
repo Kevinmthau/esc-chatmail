@@ -28,17 +28,32 @@ struct SyncTimeCalculator {
         let useLastSyncAsPrimary: Bool
 
         /// Configuration for initial sync
-        /// Uses install timestamp only, with 30-day fallback
+        /// Uses install timestamp only, with 30-day fallback, capped at 30 days.
+        ///
+        /// Sign-out leaves `installTimestamp` in place: it marks the app's
+        /// first launch (written by `FreshInstallHandler`), not the sign-in.
+        /// Uncapped, the install branch therefore made every re-initial sync
+        /// on a long-lived install (sign-out/sign-in, store reset, missing
+        /// cursor) re-list and full-fetch the whole multi-year window in one
+        /// run. The cap bounds that run; resetting the timestamp at sign-out
+        /// would not cover a store reset or a missing cursor. Callers freeze
+        /// the result at a run's first attempt (`SyncWindowCheckpointStore`),
+        /// so a retry never slides the lower bound past mail it still owes.
         static let initialSync = Config(
             primaryBuffer: SyncConfig.timestampBufferSeconds,
             installBuffer: SyncConfig.timestampBufferSeconds,
             fallbackWindow: SyncConfig.initialSyncFallbackWindow,
-            maxWindow: nil,
+            maxWindow: SyncConfig.initialSyncMaxWindow,
             useLastSyncAsPrimary: false
         )
 
         /// Configuration for history recovery sync
-        /// Tries last sync first (10-min buffer), then install (5-min buffer), with 7-day fallback
+        /// Tries last sync first (10-min buffer), then install (5-min buffer), with 7-day fallback.
+        ///
+        /// Deliberately uncapped: `maxWindow` also caps the last-sync branch,
+        /// so an ordinary absence longer than the cap would skip mail and
+        /// advance the cursor past the gap. Only the install branch is bounded,
+        /// by `historyRecoveryInstallBranchStartTime`.
         static let historyRecovery = Config(
             primaryBuffer: SyncConfig.recoveryBufferSeconds,
             installBuffer: SyncConfig.timestampBufferSeconds,
@@ -72,13 +87,15 @@ struct SyncTimeCalculator {
     /// - Parameters:
     ///   - config: Configuration determining which timestamps to check and buffers to apply
     ///   - installTimestamp: Optional explicit install timestamp (defaults to UserDefaults value)
+    ///   - now: Optional explicit current time (defaults to the system clock)
     /// - Returns: The calculated start timestamp as TimeInterval since 1970
     static func calculateStartTime(
         config: Config,
-        installTimestamp: TimeInterval? = nil
+        installTimestamp: TimeInterval? = nil,
+        now: TimeInterval? = nil
     ) -> TimeInterval {
         let defaults = UserDefaults.standard
-        let now = Date().timeIntervalSince1970
+        let now = now ?? Date().timeIntervalSince1970
         let install = installTimestamp ?? defaults.double(forKey: "installTimestamp")
 
         // Try last successful sync first (if configured)
@@ -131,6 +148,40 @@ struct SyncTimeCalculator {
         return Date(timeIntervalSince1970: timestamp)
     }
 
+    /// Lower bound for a history recovery that has no `lastSuccessfulSyncTime`
+    /// (teardown clears it, including the store-preserving paths that keep the
+    /// expired cursor). The install branch would re-list every message since
+    /// install; the newest received row already in the store marks how far
+    /// earlier syncs got, so recovery starts there, less the recovery buffer.
+    ///
+    /// Received rows only: an optimistic send stamps a local `now` and would
+    /// skip mail that arrived before it. The caller must derive this once, on
+    /// a recovery's first attempt, and freeze it: recovery saves pages
+    /// newest-first, so re-deriving on a retry would start after the gap the
+    /// interrupted attempt never finished. With no received row there is
+    /// nothing to anchor on and the unbounded install branch stands.
+    static func historyRecoveryInstallBranchStartTime(
+        newestReceivedInternalDate: TimeInterval?,
+        installTimestamp: TimeInterval? = nil,
+        now: TimeInterval? = nil
+    ) -> TimeInterval {
+        let config = Config.historyRecovery
+        let install = installTimestamp ?? UserDefaults.standard.double(forKey: "installTimestamp")
+        let now = now ?? Date().timeIntervalSince1970
+        guard let newestReceivedInternalDate else {
+            if install > 0 {
+                return install - config.installBuffer
+            }
+            return now - config.fallbackWindow
+        }
+
+        var startTime = min(newestReceivedInternalDate, now) - config.primaryBuffer
+        if install > 0 {
+            startTime = max(startTime, install - config.installBuffer)
+        }
+        return startTime
+    }
+
     /// Builds a Gmail API query string with the calculated start time
     ///
     /// Query format: `after:{timestamp} -label:spam -label:drafts -label:trash`
@@ -143,7 +194,11 @@ struct SyncTimeCalculator {
         config: Config,
         installTimestamp: TimeInterval? = nil
     ) -> String {
-        let startTime = Int(calculateStartTime(config: config, installTimestamp: installTimestamp))
-        return "after:\(startTime) -label:spam -label:drafts -label:trash"
+        buildSyncQuery(startTime: calculateStartTime(config: config, installTimestamp: installTimestamp))
+    }
+
+    /// Builds the Gmail API query string for an already-resolved start time.
+    static func buildSyncQuery(startTime: TimeInterval) -> String {
+        "after:\(Int(startTime)) -label:spam -label:drafts -label:trash"
     }
 }
