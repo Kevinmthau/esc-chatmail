@@ -88,6 +88,48 @@ final class MessageListPaginatorTests: XCTestCase {
         XCTAssertTrue(result.goneIds.isEmpty)
     }
 
+    /// `resolvedTrackedIds` reports every tracked ID the listing settled —
+    /// persisted, excluded, unprocessable or gone — across pages, and nothing
+    /// else: not a tracked ID that failed, nor any untracked ID.
+    ///
+    /// Revert-check: drop any one bucket from the `resolvedTrackedIds`
+    /// aggregation in `fetchAndProcess` and its tracked ID goes missing;
+    /// drop the `trackedIds.contains` filter and the untracked IDs appear.
+    func testFetchAndProcess_reportsResolvedTrackedIdsFromEveryResolvingBucket() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageListWithPagination(
+            [["t-kept", "t-excluded", "untracked"], ["t-junk", "t-gone", "t-failed"]],
+            pageTokens: ["page-2", nil]
+        )
+        for id in ["t-kept", "t-excluded", "untracked", "t-junk", "t-failed"] {
+            mockAPI.getMessageResponses[id] = GmailMessageBuilder().withId(id).build()
+        }
+        mockAPI.getMessageErrors["t-gone"] = APIError.notFound("gone")
+        let dispositions: [String: MessagePersistDisposition] = [
+            "t-excluded": .excluded,
+            "t-junk": .unprocessable,
+            "t-failed": .failed
+        ]
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI, clock: FakeSyncClock()) }
+        let result = try await MessageListPaginator.fetchAndProcess(
+            query: "after:1",
+            batchSize: 3,
+            messageFetcher: fetcher,
+            trackedIds: ["t-kept", "t-excluded", "t-junk", "t-gone", "t-failed", "t-unlisted"]
+        ) { _ in
+        } messageHandler: { messages in
+            var report = MessagePersistenceReport()
+            for message in messages {
+                report.record(message.id, dispositions[message.id] ?? .persisted)
+            }
+            return report
+        }
+
+        XCTAssertEqual(result.resolvedTrackedIds, ["t-kept", "t-excluded", "t-junk", "t-gone"])
+        XCTAssertEqual(result.blockingFailureIds, ["t-failed"], "Positive control: the failure was attempted")
+    }
+
     func testMessageIDPageStreamReportsEachPageTokenInOrder() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.setMessageListWithPagination(

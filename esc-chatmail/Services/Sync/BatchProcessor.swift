@@ -9,12 +9,17 @@ import Foundation
 /// buckets only: `goneIds` and the persisted/excluded/unprocessable IDs are
 /// empty there, because a since-install re-list would otherwise hold every
 /// listed ID until the run ends while callers read only counts and failures.
+/// The one exception is `resolvedTrackedIds`, bounded by the IDs the caller
+/// asked it to track.
 struct BatchProcessingResult {
     let totalProcessed: Int
     let successfulCount: Int
     let failedIds: [String]
     var goneIds: [String] = []
     var persistence: MessagePersistenceReport = .empty
+    /// The paginator's `trackedIds` that this run resolved: persisted,
+    /// excluded, unprocessable or gone (404).
+    var resolvedTrackedIds: Set<String> = []
 
     var hasFailures: Bool { !failedIds.isEmpty || !persistence.failedIds.isEmpty }
 

@@ -103,16 +103,7 @@ final class InitialSyncScaleBoundTests: XCTestCase {
             .withFrom("old@example.com", name: "Old Sender")
             .withTo([Self.myEmail])
             .build()
-        let seedContext = coreDataStack.newBackgroundContext()
-        try await seedContext.perform {
-            let row = AbandonedSyncMessage(context: seedContext)
-            row.setValue(UUID(), forKey: "id")
-            row.setValue("old-deferred", forKey: "gmailMessageId")
-            row.setValue(Date(timeIntervalSinceNow: -3600), forKey: "abandonedAt")
-            row.setValue(Int16(0), forKey: "retryCount")
-            row.setValue(AbandonedSyncMessage.State.deferred.rawValue, forKey: "state")
-            try seedContext.save()
-        }
+        try await seedDeferredLedgerRow(id: "old-deferred")
 
         let result = try await makeOrchestrator().performSync { _, _ in }
 
@@ -131,6 +122,66 @@ final class InitialSyncScaleBoundTests: XCTestCase {
         }
         XCTAssertTrue(stored, "The deferred message must be fetched, not just forgotten")
         XCTAssertEqual(ledgerRows, 0)
+    }
+
+    /// A deferred ID that the initial listing itself stores must not be
+    /// fetched again by the completion retry: a transient failure on that
+    /// redundant fetch would hold the run for a message already on disk.
+    ///
+    /// Revert-check: drop the `resolvedTrackedIds` filter from
+    /// `InitialSyncOrchestrator.handleSyncCompletion` and the second full
+    /// fetch times out, leaving historyId unset.
+    @MainActor
+    func testPerformSync_doesNotRefetchADeferredIdItsListingAlreadyStored() async throws {
+        UserDefaults.standard.set(Date().timeIntervalSince1970 - 3600, forKey: "installTimestamp")
+        configureMailbox(pages: [["m1"]])
+        try await seedDeferredLedgerRow(id: "m1")
+        let message = try XCTUnwrap(apiClient.getMessageResponses["m1"])
+        let fullFetches = FullFetchCounter()
+        apiClient.getMessageOperation = { id, format in
+            guard format == "full" else { return message }
+            guard await fullFetches.increment(id) == 1 else { throw APIError.timeout }
+            return message
+        }
+
+        let result = try await makeOrchestrator().performSync { _, _ in }
+
+        let fetchCount = await fullFetches.count(for: "m1")
+        XCTAssertEqual(fetchCount, 1, "The listing's fetch resolved the deferred ID")
+        XCTAssertFalse(result.hadWarnings)
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "history-500")
+    }
+
+    /// An unreadable ledger aborts the initial sync before it lists the
+    /// window, rather than after re-listing and persisting all of it.
+    ///
+    /// Revert-check: read `(try? await failureTracker.deferredMessageIds(in: context)) ?? []`
+    /// up front in `InitialSyncOrchestrator.performSync` and the listing runs.
+    /// HONEST SCOPE: the cursor assertion also holds on that revert, because
+    /// `handleSyncCompletion`'s own ledger read throws; only the listing
+    /// assertion pins the early abort.
+    @MainActor
+    func testPerformSync_unreadableDeferredLedger_abortsBeforeListing() async throws {
+        UserDefaults.standard.set(Date().timeIntervalSince1970 - 3600, forKey: "installTimestamp")
+        configureMailbox(pages: [["m1"]])
+        try await seedDeferredLedgerRow(id: "old-deferred")
+        let ledgerFailingContext = EntityFetchFailingContext(
+            failingEntityName: "AbandonedSyncMessage",
+            coordinator: testStack.persistentContainer.persistentStoreCoordinator
+        )
+
+        do {
+            _ = try await makeOrchestrator(makeSyncContext: { ledgerFailingContext }).performSync { _, _ in }
+            XCTFail("An unreadable ledger must abort the initial sync")
+        } catch {
+            // Expected.
+        }
+
+        XCTAssertGreaterThan(ledgerFailingContext.failedFetches, 0, "Positive control: the ledger read failed")
+        XCTAssertEqual(apiClient.listMessagesCallCount, 0, "Initial sync must not list after an unreadable ledger")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertNil(historyId)
     }
 
     /// Each page's saved rows are turned back into faults after the page
@@ -231,6 +282,19 @@ final class InitialSyncScaleBoundTests: XCTestCase {
             performanceLogger: .shared,
             makeSyncContext: makeSyncContext
         )
+    }
+
+    private func seedDeferredLedgerRow(id: String) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await context.perform {
+            let row = AbandonedSyncMessage(context: context)
+            row.setValue(UUID(), forKey: "id")
+            row.setValue(id, forKey: "gmailMessageId")
+            row.setValue(Date(timeIntervalSinceNow: -3600), forKey: "abandonedAt")
+            row.setValue(Int16(0), forKey: "retryCount")
+            row.setValue(AbandonedSyncMessage.State.deferred.rawValue, forKey: "state")
+            try context.save()
+        }
     }
 
     /// The `after:` bound of the most recent message-list query.

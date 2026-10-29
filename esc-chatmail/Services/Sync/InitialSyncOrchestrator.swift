@@ -148,9 +148,14 @@ final class InitialSyncOrchestrator {
             )
             log.info("Initial sync query: \(query)")
 
+            // Tracked so the completion retry does not fetch a deferred ID
+            // again after this run's listing already resolved it.
+            let deferredLedgerIds = Set(try await failureTracker.deferredMessageIds(in: context))
+
             let messagesTimer = timing.start("fetchAndProcessMessages")
             let result = try await fetchAndProcessMessages(
                 query: query,
+                trackedIds: deferredLedgerIds,
                 labelIds: labelIds,
                 modificationTransaction: modificationTransaction,
                 context: context,
@@ -331,6 +336,7 @@ final class InitialSyncOrchestrator {
 
     private func fetchAndProcessMessages(
         query: String,
+        trackedIds: Set<String>,
         labelIds: Set<String>,
         modificationTransaction: ModificationTracker.Transaction,
         context: NSManagedObjectContext,
@@ -338,7 +344,8 @@ final class InitialSyncOrchestrator {
     ) async throws -> BatchProcessingResult {
         return try await MessageListPaginator.fetchAndProcess(
             query: query,
-            messageFetcher: messageFetcher
+            messageFetcher: messageFetcher,
+            trackedIds: trackedIds
         ) { checkpoint in
             let progress = Self.streamingProgressFraction(for: checkpoint)
             await MainActor.run {
@@ -400,8 +407,11 @@ final class InitialSyncOrchestrator {
         // earlier (a kept store, or a run held before the window was frozen),
         // and both the clean advance and recordFailure's reconcile delete
         // every deferred row they do not see failing. Retry those IDs
-        // explicitly so none is dropped unfetched.
+        // explicitly so none is dropped unfetched, except the ones this run's
+        // listing already resolved: a transient failure on a redundant fetch
+        // would hold the run for a message that is already stored.
         let deferredLedgerIds = try await failureTracker.deferredMessageIds(in: context)
+            .filter { !result.resolvedTrackedIds.contains($0) }
         var retryIdSet = Set<String>()
         let retryIds = (result.blockingFailureIds + deferredLedgerIds).filter {
             retryIdSet.insert($0).inserted
