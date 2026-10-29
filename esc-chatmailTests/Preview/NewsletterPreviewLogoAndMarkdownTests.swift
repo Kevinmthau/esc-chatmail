@@ -638,9 +638,10 @@ final class NewsletterPreviewLogoAndMarkdownTests: XCTestCase {
     /// not on the stored text with the first link's URL in it.
     ///
     /// Revert-check: stepping back over the lead-in on the stored text in
-    /// `previewSummaryLinkLabels` (before `MarkdownLinkLabels.replacingLinks`)
-    /// puts "You can [update your preferences](https://…) or " over the cap,
-    /// and the snippet ends "…weather. You can update your preferences or".
+    /// `previewSummaryLinkLabels` instead of on the label text (the
+    /// `footerCutLocation` call after `MarkdownLinkLabels.replacingLinks`) puts
+    /// "You can [update your preferences](https://…) or " over the cap, and the
+    /// snippet ends "…weather. You can update your preferences or".
     func testBuildPreview_storedMarkdownSnippetFooterLinksInLeadIn_isCutWithTheFooter() async throws {
         let bodyText = """
         Our fall edit is live, with twelve layering pieces picked for changeable weather.
