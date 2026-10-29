@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import esc_chatmail
 
 @MainActor
@@ -205,6 +206,63 @@ final class QuickLookPreviewControllerTests: XCTestCase {
         XCTAssertEqual(dismissCount, 1)
     }
 
+    /// The mailbox closing (sign-out, revoked credentials) must take Quick Look down: it is a
+    /// UIKit modal over the root hosting controller, so removing the mailbox view does not.
+    ///
+    /// Revert-check: removing `presentedControllers.add(controller)` from
+    /// `QuickLookPreviewController.present`, or the dismissal loop in
+    /// `QuickLookPreviewController.dismissAll`, makes this fail.
+    /// HONEST SCOPE: `ContentView`'s `canAccessMailbox` hook that calls `dismissAll` is
+    /// not exercised here.
+    func testDismissAll_presentedQuickLook_isDismissed() async throws {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+        let message = MessageBuilder()
+            .withId("quick-look-dismiss-all-message")
+            .withAttachments()
+            .build(in: context)
+        let attachmentID = "quick-look-dismiss-all"
+        let path = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentID,
+            ext: "pdf"
+        )
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("dismiss-all.pdf")
+            .withMimeType("application/pdf")
+            .withLocalURL(path)
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(Data("dismiss-all".utf8), to: path))
+        defer { AttachmentPaths.deleteFile(at: path) }
+
+        let presentation = try XCTUnwrap(
+            QuickLookPresentation(attachments: [attachment], selectedAttachment: attachment)
+        )
+        let rootViewController = UIViewController()
+        let window = try makeTestHostWindow()
+        window.rootViewController = rootViewController
+        window.isHidden = false
+        addTeardownBlock { @MainActor in
+            window.isHidden = true
+        }
+
+        let presented = await QuickLookPreviewController.present(presentation, onDismiss: {}) { controller in
+            rootViewController.present(controller, animated: false)
+            return true
+        }
+        XCTAssertTrue(presented)
+        await waitUntil { rootViewController.presentedViewController is QuickLookPreviewController }
+
+        QuickLookPreviewController.dismissAll()
+
+        await waitUntil { rootViewController.presentedViewController == nil }
+    }
+
     func testPreviewIndexIsClampedToSnapshotBounds() {
         XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(-1, itemCount: 2), 0)
         XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(0, itemCount: 2), 0)
@@ -212,5 +270,22 @@ final class QuickLookPreviewControllerTests: XCTestCase {
         XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(2, itemCount: 2), 1)
         XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(.max, itemCount: 2), 1)
         XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(1, itemCount: 0), 0)
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
     }
 }

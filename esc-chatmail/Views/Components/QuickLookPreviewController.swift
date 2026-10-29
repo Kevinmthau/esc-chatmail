@@ -61,19 +61,46 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
         return min(max(index, 0), itemCount - 1)
     }
 
+    /// Every controller `present` showed, held weakly so a dismissed one is not
+    /// kept alive. `dismissAll()` walks it at the account boundary.
+    private static let presentedControllers = NSHashTable<QuickLookPreviewController>.weakObjects()
+
     /// Presents `presentation` over whatever is on screen, from the topmost
     /// presentable controller (`TopPresentableViewController`, which retries
     /// briefly through a transition). Returns `false` when nothing could present,
     /// so the caller can clear its state and let the next tap try again.
+    ///
+    /// - Parameter present: Presents the controller and reports whether it did;
+    ///   tests inject one that presents from a test window.
     @MainActor
     @discardableResult
     static func present(
         _ presentation: QuickLookPresentation,
-        onDismiss: @escaping () -> Void
+        onDismiss: @escaping () -> Void,
+        present: @MainActor (UIViewController) async -> Bool = { await TopPresentableViewController.present($0) }
     ) async -> Bool {
         let controller = QuickLookPreviewController(presentation: presentation)
         controller.onDismiss = onDismiss
-        return await TopPresentableViewController.present(controller)
+        guard await present(controller) else { return false }
+        presentedControllers.add(controller)
+        return true
+    }
+
+    /// Dismisses every Quick Look `present` showed that is still on screen, along
+    /// with anything presented over it.
+    ///
+    /// The `.sheet` this replaced went away with the mailbox it hung from. This
+    /// modal hangs from the topmost controller, usually the root hosting
+    /// controller, which outlives the mailbox, so without this a sign-out or a
+    /// revoked credential left the previous account's document on screen over
+    /// the sign-in view, its preview items still holding that account's
+    /// `Attachment` objects. `ContentView` calls it when the mailbox closes.
+    @MainActor
+    static func dismissAll() {
+        for controller in presentedControllers.allObjects {
+            controller.presentingViewController?.dismiss(animated: false)
+        }
+        presentedControllers.removeAllObjects()
     }
 
     // MARK: - QLPreviewControllerDataSource

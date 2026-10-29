@@ -50,6 +50,14 @@ struct ContentView: View {
         .onChange(of: authSession.isAuthenticated) {
             evaluateSettingsAppSignOutRequest(isSceneActive: scenePhase == .active)
         }
+        // Quick Look is a UIKit modal over the root hosting controller, not a
+        // sheet inside the mailbox, so removing the mailbox does not take it
+        // down; close it here or the previous account's attachment stays on
+        // screen over the sign-in view.
+        .onChange(of: authSession.canAccessMailbox) { _, canAccessMailbox in
+            guard !canAccessMailbox else { return }
+            QuickLookPreviewController.dismissAll()
+        }
     }
 
     /// Stands in for the old in-app Settings screen's "Signing Out..." state
