@@ -33,6 +33,24 @@ describe('sanitizeEmailHtml private-network links by resolved URL', () => {
     expect(await hrefAfterSanitize('  http://127.0.0.1:8080/reboot')).toBeNull()
   })
 
+  // Revert-check: resolving the href against RELATIVE_HREF_BASE in
+  // isBlockedPrivateNetworkLink (the earlier literal "//" prefix test read
+  // every one of these as a relative link and let it through, and the frame
+  // resolves a backslash as a slash in an http(s) URL).
+  it('sanitizeEmailHtml_backslashSchemeRelativePrivateHost_dropsTheHref', async () => {
+    expect(await hrefAfterSanitize('\\\\192.168.1.1/admin')).toBeNull()
+    expect(await hrefAfterSanitize('/\\10.0.0.1/')).toBeNull()
+    expect(await hrefAfterSanitize('\\/127.0.0.1/reboot')).toBeNull()
+    expect(await hrefAfterSanitize('///169.254.169.254/latest/meta-data/')).toBeNull()
+    expect(await hrefAfterSanitize('\\\\\\\\[fd00::1]/')).toBeNull()
+  })
+
+  it('sanitizeEmailHtml_backslashSchemeRelativePublicHost_keepsTheHref', async () => {
+    expect(await hrefAfterSanitize('\\\\cdn.public-site.com/doc')).toBe(
+      '\\\\cdn.public-site.com/doc',
+    )
+  })
+
   it('sanitizeEmailHtml_publicAndNonHttpHrefs_keepTheirHref', async () => {
     expect(await hrefAfterSanitize('//cdn.public-site.com/doc')).toBe('//cdn.public-site.com/doc')
     expect(await hrefAfterSanitize('https://public-site.com/doc')).toBe(
@@ -42,5 +60,8 @@ describe('sanitizeEmailHtml private-network links by resolved URL', () => {
       'mailto:someone@public-site.com',
     )
     expect(await hrefAfterSanitize('#section-2')).toBe('#section-2')
+    expect(await hrefAfterSanitize('?page=2')).toBe('?page=2')
+    expect(await hrefAfterSanitize('invoices/2026.pdf')).toBe('invoices/2026.pdf')
+    expect(await hrefAfterSanitize('/invoices/2026.pdf')).toBe('/invoices/2026.pdf')
   })
 })

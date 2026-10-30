@@ -76,31 +76,37 @@ function normalizeCid(rawCid: string): string {
 }
 
 /**
+ * Stand-in for the email frame's own https origin when resolving an href. A
+ * result still on this host is a same-document or same-origin link, which no
+ * email can aim at a private host, so only a result elsewhere is classified.
+ */
+const RELATIVE_HREF_BASE = new URL('https://relative-href.email-frame.invalid/')
+
+/**
  * iOS parity (FullInteractiveEmailWebView.navigationDecision →
  * .blockedPrivateNetwork): an http(s) link whose host is private, loopback,
  * link-local or otherwise reserved is refused rather than opened — a phishing
  * mail's "View invoice" must not land on the user's router admin page or a
  * cloud metadata endpoint. Links only: iOS applies no such check to in-page
- * image loads, and neither does the frame CSP. An absolute http(s) href the
- * URL parser rejects is refused too, as a nil URL(string:) is on iOS.
+ * image loads, and neither does the frame CSP. An http(s) href the URL parser
+ * rejects is refused too, as a nil URL(string:) is on iOS.
  */
 function isBlockedPrivateNetworkLink(href: string): boolean {
-  // The URL parser strips ASCII tab/LF/CR anywhere in the input, and the
-  // frame resolves a scheme-relative href against its own https origin, so
-  // classify what the browser will navigate to, not the attribute's spelling.
-  const spelled = href.replace(/[\t\n\r]/g, '').trim()
-  const absolute = /^https?:/i.test(spelled)
-    ? spelled
-    : spelled.startsWith('//')
-      ? `https:${spelled}`
-      : null
-  if (absolute === null) return false
+  // Classify what the browser will navigate to, not the attribute's spelling.
+  // The frame resolves every href against its own https origin, and the URL
+  // parser strips ASCII tab/LF/CR anywhere in the input and reads a backslash
+  // as a slash in an http(s) URL, so "\\10.0.0.1/" and "/\\10.0.0.1/" open
+  // https://10.0.0.1/ exactly as "//10.0.0.1/" does. A literal prefix test on
+  // the raw href missed the backslash spellings; resolving against a stand-in
+  // base applies the parser's own rules instead.
   let url: URL
   try {
-    url = new URL(absolute)
+    url = new URL(href, RELATIVE_HREF_BASE)
   } catch {
     return true
   }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  if (url.hostname === RELATIVE_HREF_BASE.hostname) return false
   return isPrivateOrReservedUrl(url)
 }
 

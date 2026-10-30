@@ -36,7 +36,8 @@ import type { MessageRow } from '@/db/types'
 import { createChatPreviewText, createCleanedSnippet } from '@/mime/preview'
 import { rollupConversation } from '@/rollup/rollup'
 
-export const CHAT_PREVIEW_DERIVATION_VERSION = '2026-10-27-signature-mvpn-unicode-digits-v1'
+export const CHAT_PREVIEW_DERIVATION_VERSION =
+  '2026-10-30-bottom-posted-rescue-repeated-signature-text-node-whitespace-v1'
 export const CHAT_PREVIEW_REPAIR_KEY = 'chatPreviewRepair'
 export const CHAT_PREVIEW_REPAIR_BATCH_SIZE = 100
 export const CHAT_PREVIEW_REPAIR_MESSAGES_PER_RUN = 1000
