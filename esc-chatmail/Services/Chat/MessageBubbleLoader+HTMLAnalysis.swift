@@ -2,6 +2,24 @@ import CryptoKit
 import Foundation
 
 extension MessageBubbleLoader {
+    func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) -> MessageBubbleHTMLAnalysis? {
+        guard let contentGeneration = htmlContentHandler.captureAccountGeneration(),
+              let analysisGeneration = htmlAnalysisCache.captureAccountGeneration(),
+              let sourceSignature = htmlContentHandler.cachedHTMLSourceSignature(
+                messageId: request.messageID,
+                bodyStorageURI: request.bodyStorageURI,
+                expectedGeneration: contentGeneration
+              ) else { return nil }
+
+        let analysis = htmlAnalysisCache.value(
+            forKey: htmlAnalysisCacheKey(for: request, htmlSourceSignature: sourceSignature),
+            expectedGeneration: analysisGeneration
+        )
+        guard htmlContentHandler.isAccountGenerationCurrent(contentGeneration),
+              htmlAnalysisCache.isAccountGenerationCurrent(analysisGeneration) else { return nil }
+        return analysis
+    }
+
     func loadHTMLAnalysis(
         for request: MessageBubbleContentRequest,
         accountContext: MessageBubbleAccountWorkContext
@@ -28,7 +46,11 @@ extension MessageBubbleLoader {
         }
         let variantKey = RenderedMessageVariantKey(htmlAnalysisCacheKey(
             for: request,
-            accountContext: accountContext
+            htmlSourceSignature: htmlContentHandler.htmlSourceSignature(
+                messageId: request.messageID,
+                bodyStorageURI: request.bodyStorageURI,
+                expectedGeneration: accountContext.htmlContent
+            )
         ))
         let sourceSignature = renderedSourceSignature(
             for: request,
@@ -152,13 +174,8 @@ extension MessageBubbleLoader {
 
     private func htmlAnalysisCacheKey(
         for request: MessageBubbleContentRequest,
-        accountContext: MessageBubbleAccountWorkContext
+        htmlSourceSignature: String
     ) -> String {
-        let htmlSourceSignature = htmlContentHandler.htmlSourceSignature(
-            messageId: request.messageID,
-            bodyStorageURI: request.bodyStorageURI,
-            expectedGeneration: accountContext.htmlContent
-        )
         // Sender identity is deliberately absent: the analysis output does not
         // depend on it (calendar-card eligibility is sender-independent).
         return [

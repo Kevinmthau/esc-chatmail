@@ -60,6 +60,77 @@ final class MessageBubbleViewModelTests: XCTestCase {
         )
     }
 
+    func testWarmMount_keepsAttachmentFilteringAndPresentationWhileContentLoads() async {
+        let context = makeContext(hasHTMLSource: true, prefetchedSenderName: nil)
+        let analysis = MessageBubbleHTMLAnalysis(
+            hasHTMLSource: true,
+            referencedInlineContentIDs: ["hidden", "badge"],
+            nonDisplayableInlineContentIDs: ["hidden"],
+            supportsCalendarInvitePreviewCard: false
+        )
+        let gate = GatedMessageBubbleLoader(
+            senderResults: [], contentResults: [], gatedCallIndex: 1
+        )
+        let loader = CachedAnalysisMessageBubbleLoader(
+            messageID: context.messageID, analysis: analysis, underlying: gate
+        )
+        let viewModel = MessageBubbleViewModel(
+            loader: loader, initialContentRequest: context.contentRequest
+        )
+        XCTAssertEqual(viewModel.htmlAnalysis, analysis)
+        XCTAssertTrue(viewModel.hasResolvedHTMLAnalysis)
+        XCTAssertFalse(viewModel.hasLoadedContent)
+
+        let stack = TestCoreDataStack()
+        let viewContext = stack.makeMainQueueViewContext()
+        let message = MessageBuilder().withId(context.messageID).withAttachments().build(in: viewContext)
+        for cid in ["hidden", "badge"] {
+            _ = AttachmentBuilder().withId(cid).withContentId(cid).withFilename("\(cid).png")
+                .asImage(width: 300, height: 300).withByteSize(50_000).downloaded()
+                .forMessage(message).build(in: viewContext)
+        }
+        let row = ChatMessageRowModelMapper.map(message)
+        let displayed = row.displayableAttachments(using: viewModel.htmlAnalysis, hidingInlineReferencedInHTML: false)
+        XCTAssertEqual(displayed.compactMap(\.attachmentID), ["badge"])
+        if let badge = displayed.first {
+            XCTAssertEqual(InlineImagePresentationPolicy.resolve(
+                attachment: badge, isFromMe: false, isHTMLPreview: false,
+                bodyContentIDs: viewModel.htmlAnalysis.bodyInlineContentIDs,
+                hasLoadedAnalysis: viewModel.hasResolvedHTMLAnalysis
+            ), .compact)
+        }
+
+        let stateBeforeLoad = publishedState(of: viewModel)
+        let load = Task { await viewModel.loadIfNeeded(using: context) }
+        let entered = await gate.waitForGateEntry()
+        XCTAssertTrue(entered)
+        XCTAssertEqual(publishedState(of: viewModel), stateBeforeLoad)
+        await gate.release()
+        await load.value
+    }
+
+    func testSeededAnalysis_isRevalidatedWhenInitialLoadTargetsAnotherMessage() async {
+        let initialContext = makeContext(hasHTMLSource: true)
+        let nextContext = makeContext(messageID: "different-message", hasHTMLSource: false)
+        let gate = GatedMessageBubbleLoader(senderResults: [], contentResults: [], gatedCallIndex: 1)
+        let loader = CachedAnalysisMessageBubbleLoader(
+            messageID: initialContext.messageID,
+            analysis: Self.makeContentResult(text: "", inlineContentID: "old-cid").htmlAnalysis,
+            underlying: gate
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader, initialContentRequest: initialContext.contentRequest)
+        XCTAssertTrue(viewModel.hasResolvedHTMLAnalysis)
+
+        let load = Task { await viewModel.loadIfNeeded(using: nextContext) }
+        let entered = await gate.waitForGateEntry()
+        XCTAssertTrue(entered)
+        XCTAssertFalse(viewModel.hasResolvedHTMLAnalysis)
+        XCTAssertEqual(viewModel.htmlAnalysis, .placeholder(hasHTMLSource: false))
+        await gate.release()
+        await load.value
+        XCTAssertTrue(viewModel.hasResolvedHTMLAnalysis)
+    }
+
     func testLoadIfNeeded_appliesSenderAndContentState() async {
         let expectedLink = SharedDocumentLink(
             id: "google-doc",
@@ -1377,6 +1448,7 @@ final class MessageBubbleViewModelTests: XCTestCase {
         let hasRichHTMLContent: Bool
         let fullTextContent: String?
         let hasLoadedContent: Bool
+        let hasResolvedHTMLAnalysis: Bool
         let sharedDocumentLinks: [SharedDocumentLink]
         let forwardedDisplayContent: ForwardedMessageDisplayContent?
         let htmlAnalysis: MessageBubbleHTMLAnalysis
@@ -1390,6 +1462,7 @@ final class MessageBubbleViewModelTests: XCTestCase {
             hasRichHTMLContent: viewModel.hasRichHTMLContent,
             fullTextContent: viewModel.fullTextContent,
             hasLoadedContent: viewModel.hasLoadedContent,
+            hasResolvedHTMLAnalysis: viewModel.hasResolvedHTMLAnalysis,
             sharedDocumentLinks: viewModel.sharedDocumentLinks,
             forwardedDisplayContent: viewModel.forwardedDisplayContent,
             htmlAnalysis: viewModel.htmlAnalysis
@@ -1432,6 +1505,24 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 attachmentSnapshots: []
             )
         )
+    }
+}
+
+private struct CachedAnalysisMessageBubbleLoader: MessageBubbleLoading {
+    let messageID: String
+    let analysis: MessageBubbleHTMLAnalysis
+    let underlying: any MessageBubbleLoading
+
+    func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) -> MessageBubbleHTMLAnalysis? {
+        request.messageID == messageID ? analysis : nil
+    }
+
+    func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult {
+        await underlying.loadSenderInfo(from: request)
+    }
+
+    func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
+        await underlying.loadContent(from: request)
     }
 }
 

@@ -20,6 +20,9 @@ struct SingleAttachmentView: View {
                         }
                     }
                 )
+                // The reserved geometry and loader belong to this attachment,
+                // even if the message replaces its only attachment in place.
+                .id(attachment.objectID)
             } else if attachment.isVideo {
                 VideoAttachmentCard(
                     attachment: attachment,
