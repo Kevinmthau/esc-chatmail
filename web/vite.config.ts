@@ -14,9 +14,11 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
-      // A long-lived SPA holding sync state must never be yanked mid-send:
-      // updates wait for the user's go-ahead (ReloadPrompt toast).
-      registerType: 'prompt',
+      // There is no installed user base to protect, so updates apply without
+      // asking: a new deploy's worker skips waiting and the page reloads onto
+      // it (registerServiceWorker), even mid-send. Go back to 'prompt' with a
+      // reload toast once the app has real users.
+      registerType: 'autoUpdate',
       // Manifest icons are precached automatically; the tab favicon is not,
       // and without this an offline launch shows no tab icon.
       includeAssets: ['icons/favicon-32.png'],
