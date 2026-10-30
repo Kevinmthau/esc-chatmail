@@ -3,6 +3,12 @@
 // '+N' overlay on the 4th); non-images → filename/size cards. Every
 // not-yet-downloaded item shows a download/spinner/retry overlay.
 //
+// "Image" is the raster allowlist (attachmentObjectUrl.isRasterImageType), not
+// every `image/*`: an image/svg+xml part is a document with scripts, and an
+// `<img>` tile plus a Lightbox link would hand its object URL to "Open image
+// in new tab" on the app origin. It takes the file card instead. iOS's
+// `mimeType.hasPrefix("image/")` has no such exposure (files + QuickLook).
+//
 // Presence of the BYTES — not the row's state — decides whether a tile renders
 // its content: an outbound attachment this device staged is 'queued' /
 // 'uploading' / 'uploaded', never 'downloaded', yet its blob has been local
@@ -18,6 +24,7 @@ import { useAccountLiveQuery } from '@/live/hooks'
 import { isCalendarInviteAttachment } from '@/mime/calendarInvite'
 import { isLocalAttachmentId } from '@/outbox/outboundAttachments'
 import { Lightbox } from './Lightbox'
+import { isRasterImageType } from './attachmentObjectUrl'
 import { formatByteSize } from './formatByteSize'
 import { downloadAttachment, isAttachmentDownloadInFlight } from './download'
 import { useAttachmentUrl } from './useAttachmentUrl'
@@ -48,8 +55,8 @@ export function AttachmentContent({
     : rows
   if (attachments.length === 0) return null
 
-  const images = attachments.filter((a) => a.mimeType.startsWith('image/'))
-  const files = attachments.filter((a) => !a.mimeType.startsWith('image/'))
+  const images = attachments.filter((a) => isRasterImageType(a.mimeType))
+  const files = attachments.filter((a) => !isRasterImageType(a.mimeType))
 
   return (
     <div className="flex w-full max-w-[280px] flex-col gap-1.5">

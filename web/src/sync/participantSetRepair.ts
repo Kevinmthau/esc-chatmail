@@ -278,8 +278,12 @@ export async function repairParticipantSetConversations(
       const names = personNames(people)
       const identityByMessageId = new Map<string, ParticipantSetIdentity>()
       const conversationsById = new Map(initialConversations.map((row) => [row.id, row]))
+      // An 'ambiguous' journal retains its row as sent under a local id until
+      // the echo adopts it; moving or merging that row away would orphan the
+      // reconciliation the same way as for a send still in flight.
       const activeOutboundSends = outboundSends.filter(
-        (row) => row.status === 'pending' || row.status === 'committed',
+        (row) =>
+          row.status === 'pending' || row.status === 'committed' || row.status === 'ambiguous',
       )
       const activeOutboundMessageIds = new Set(activeOutboundSends.map((row) => row.id))
       const activeOutboundConversationIds = new Set(

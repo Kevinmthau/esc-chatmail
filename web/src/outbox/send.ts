@@ -5,11 +5,18 @@
 // Ordering invariants carried over:
 // 0. the MIME is built BEFORE anything optimistic exists, so an address the
 //    builder refuses fails the send with nothing to roll back;
-// 1. optimistic message + conversation bump + journal write in ONE tx;
-// 2. the Gmail send call is NEVER retransmitted (endpoints.sendMessage);
+// 1. optimistic message + conversation bump + journal write in ONE tx; the
+//    row carries the deterministic Message-ID the MIME emits
+//    (mimeBuilder.messageIdForOptimisticSend), so a reply can thread onto it
+//    before sync echoes it and the echo can be matched back to it;
+// 2. the Gmail send call is NEVER retransmitted (endpoints.sendMessage), and
+//    the journal records admission (admittedAt) right before it, so cold
+//    recovery can tell a crash before the request from one after it;
 // 3. on acceptance the journal is stamped 'committed' with the remote ids
 //    BEFORE local reconciliation, so a crash between the two is recoverable
-//    at startup (replayAbandonedSends);
+//    at startup (replayAbandonedSends); a failure after admission that is not
+//    a definite rejection is recorded as 'ambiguous' and the row is retained
+//    as sent, never resent — see the outcome matrix at step (d);
 // 4. reconcile swaps the optimistic UUID PK to the Gmail id (delete+add in
 //    one tx, body row moved, attachment rows re-parented and marked
 //    'uploaded'), or deletes the optimistic row when sync already delivered
@@ -23,7 +30,7 @@
 //    of re-picking files whose bytes only exist on this device
 //    (GmailSendService+OptimisticUpdates.handleFailedOptimisticMessage).
 
-import Dexie from 'dexie'
+import Dexie, { type Table } from 'dexie'
 import { BlobQuotaExceededError, putBlob } from '@/db/blobs'
 import type { ChatmailDB } from '@/db/schema'
 import type { AttachmentRow, MessageRow, OutboundSendRow } from '@/db/types'
@@ -32,6 +39,13 @@ import {
   type EndpointOptions,
   type SendMessageParams,
 } from '@/gmail/endpoints'
+import {
+  AuthRequiredError,
+  GmailApiError,
+  NetworkError,
+  QuotaExhaustedError,
+  RateLimitError,
+} from '@/gmail/errors'
 import type { SendMessageResponse } from '@/gmail/types'
 import type { TokenBroker } from '@/gmail/gmailFetch'
 import { normalizeEmail } from '@/identity/normalizeEmail'
@@ -48,8 +62,10 @@ import {
   encodeRawForSend,
   InvalidRecipientsError,
   InvalidSenderError,
+  messageIdForOptimisticSend,
   MessageTooLargeError,
   NoValidRecipientsError,
+  optimisticSendIdFromMessageId,
   type BuildNewInput,
   type MimeAttachment,
 } from './mimeBuilder'
@@ -195,11 +211,22 @@ export interface SendDraft {
   forward?: ForwardSendPayload
   /** Files staged by the picker (outbox/outboundAttachments.prepareAttachments). */
   attachments?: readonly PendingAttachment[]
+  /**
+   * Send a NEW message into `conversationId` rather than a reply: no 'Re: '
+   * subject, no In-Reply-To/References, no threadId. retryFailedSend sets it
+   * for a retained row that first went out without a thread (a plain compose,
+   * or a reply whose target had no thread id yet), so the retry keeps the
+   * headers the first attempt had instead of threading onto whatever is newest
+   * now. Ignored without conversationId: the compose path is always new.
+   */
+  asNewMessage?: boolean
 }
 
 export interface SendOptions {
   api?: SendApi
   now?: () => number
+  /** Network-path source for the pre-transmission gate; the browser's by default. */
+  connectivity?: SendConnectivity
   /** Immutable forward semantics recovered from a failed send's journal. */
   preservedForwardEnvelope?: PreservedForwardEnvelope
   /**
@@ -224,14 +251,62 @@ export interface PreservedForwardEnvelope {
   htmlBody?: string
 }
 
-type OutboundSendWithForwardEnvelope = OutboundSendRow & {
+/**
+ * Journal status for a send Gmail may have accepted: the request was admitted
+ * and no verdict came back (OutboundSendRemoteState.ambiguousMessageID). The
+ * row is retained as sent under its local id until sync echoes the server copy
+ * (reconcileSyncedSendEcho) and is never resent. This module reads and writes
+ * the journal through journalTable, whose row type also carries the unindexed
+ * forward-retry envelope.
+ */
+export const AMBIGUOUS_SEND_STATUS = 'ambiguous'
+
+type OutboundSendJournalStatus = OutboundSendRow['status'] | typeof AMBIGUOUS_SEND_STATUS
+
+/**
+ * Unindexed additions to the journal row (no Dexie migration): the forward
+ * retry envelope, and the transmission-admission marker.
+ */
+interface OutboundSendJournalExtras {
   forwardEnvelope?: PreservedForwardEnvelope
+  /**
+   * Epoch ms the request was handed to the transport. Written immediately
+   * before api.send (iOS recordRemoteSendAdmission): a journal still 'pending'
+   * with this set may have been processed by Gmail, one without it never
+   * reached the network.
+   */
+  admittedAt?: number
+}
+
+/** The journal as this module reads it; OutboundSendRow is assignable to it. */
+type OutboundSendJournal = Omit<OutboundSendRow, 'status'> & {
+  status: OutboundSendJournalStatus
+} & OutboundSendJournalExtras
+
+/**
+ * The outbound journal with this module's wider row type. The stored shape is
+ * the same table; only the status union and the unindexed extras differ, so
+ * the one cast lives here.
+ */
+function journalTable(db: ChatmailDB): Table<OutboundSendJournal, string> {
+  return db.outboundSends
 }
 
 export interface SendResult {
-  /** The Gmail message id the send committed as. */
+  /**
+   * The Gmail message id the send committed as — or, when delivery is
+   * 'unknown', the local row id the message is retained under.
+   */
   messageId: string
   conversationId: string
+  /**
+   * 'committed' when Gmail acknowledged the send; 'unknown' when the request
+   * was admitted but no verdict came back (5xx, transport failure, lost
+   * response). Both are successful admissions to the composer: the message
+   * row stays and is never resent. sendMessage always sets it; it is optional
+   * only so a stub result predating it still satisfies the type.
+   */
+  delivery?: 'committed' | 'unknown'
 }
 
 function cloneReplyMetadata(metadata: ReplyMetadata): ReplyMetadata {
@@ -304,6 +379,13 @@ export async function sendMessage(
     newlyInserted = resolved.created
   }
 
+  // The optimistic id is minted before the MIME is built: the Message-ID the
+  // header carries derives from it, and the same value is stored on the row
+  // (makeOptimisticMessage) so the two can never disagree.
+  // newId(), not crypto.randomUUID: the latter is secure-context-only.
+  const optimisticId = newId()
+  const rfcMessageId = messageIdForOptimisticSend(optimisticId)
+
   // (b) Reply metadata + MIME, BEFORE anything optimistic exists. The builder
   // rejects smuggled/invalid addresses by throwing (InvalidSenderError /
   // InvalidRecipientsError), so building here means a rejection has nothing to
@@ -346,17 +428,24 @@ export async function sendMessage(
       )
       if (chosen !== undefined) metadata = { ...metadata, replyFrom: chosen }
     }
-    if (preservedForward === undefined && draft.forward !== undefined) {
-      // A forward is not a reply. buildReplyMetadata always targets the
-      // conversation's newest message, so forwarding to someone you already
-      // chat with would otherwise inherit that message's subject ('Re: …'),
-      // its In-Reply-To/References chain and its Gmail thread — stitching an
-      // unrelated message into their thread. Recipients and the reply-from
-      // alias still come from the ladder; everything threading-related is
-      // dropped so this goes out as a new message.
+    const isNewMessage =
+      draft.conversationId === undefined ||
+      draft.forward !== undefined ||
+      draft.asNewMessage === true
+    if (preservedForward === undefined && isNewMessage) {
+      // A compose or a forward is not a reply (iOS .compose/.forward requests
+      // carry threadId nil and no reply metadata). buildReplyMetadata targets
+      // the conversation's newest message, so a new message to someone you
+      // already chat with would otherwise inherit that message's subject
+      // ('Re: …'), its In-Reply-To/References chain and its Gmail thread —
+      // the recipient sees a subjectless note arrive as a reply stitched under
+      // a months-old mail. Recipients and the reply-from alias still come from
+      // the ladder; everything threading-related is dropped so this goes out
+      // as a new message. The web compose sheet has no subject field, so a
+      // plain compose sends '(No Subject)' exactly like iOS newMessage mode.
       metadata = {
         ...metadata,
-        subject: draft.forward.subject,
+        subject: draft.forward?.subject ?? '',
         threadId: '',
         inReplyTo: '',
         references: [],
@@ -371,6 +460,7 @@ export async function sendMessage(
         metadata,
         draft.body,
         await toMimeParts(attachments),
+        rfcMessageId,
         preservedForward?.htmlBody ?? draft.forward?.htmlBody,
       ),
     )
@@ -383,11 +473,10 @@ export async function sendMessage(
   }
 
   // (c) Optimistic insert + journal, one tx.
-  // newId(), not crypto.randomUUID: the latter is secure-context-only.
-  const optimisticId = newId()
   const sentAt = now()
   const optimistic = makeOptimisticMessage(
     optimisticId,
+    rfcMessageId,
     conversationId,
     draft.body,
     metadata,
@@ -418,7 +507,7 @@ export async function sendMessage(
                 opts.preservedForwardEnvelope?.htmlBody ?? draft.forward?.htmlBody,
               )
             : undefined
-        const journal: OutboundSendWithForwardEnvelope = {
+        const journal: OutboundSendJournal = {
           id: optimisticId,
           conversationId,
           newlyInsertedConversation: newlyInserted ? 1 : 0,
@@ -449,7 +538,7 @@ export async function sendMessage(
           lastMessageDate: sentAt,
           snippet: preview !== '' ? preview : conversation.snippet,
         })
-        await db.outboundSends.add(journal)
+        await journalTable(db).add(journal)
       },
     )
   } catch (error) {
@@ -459,9 +548,46 @@ export async function sendMessage(
     throw asSendFailure(error)
   }
 
-  // (d) Send. The endpoint never retransmits — an ambiguous failure must not
-  // risk a duplicate email.
+  // (d) Send. The endpoint never retransmits — Gmail's messages.send has no
+  // idempotency key, so an ambiguous failure must not risk a duplicate email.
+  //
+  // Outcome matrix (port of the OutboundMessageCoordinator post-barrier
+  // matrix; misclassifying a new error class here is a duplicate-send hazard):
+  //
+  //   before the optimistic insert   address/size/quota rejection → thrown as
+  //                                  SendFailedError with nothing to roll back
+  //   definite rejection             GmailApiError 4xx, RateLimitError (429 is
+  //                                  refused before processing — the transport
+  //                                  already retransmits on it for that
+  //                                  reason), QuotaExhaustedError (a 403
+  //                                  verdict), AuthRequiredError → failSend:
+  //                                  text-only rolled back, with attachments
+  //                                  kept as a retryable failed bubble
+  //   ambiguous                      GmailApiError 5xx, NetworkError (fetch
+  //                                  rejected mid-flight: the web cannot prove
+  //                                  the request never arrived), a failed
+  //                                  response parse after a 2xx, and anything
+  //                                  else thrown once admitted → the row is
+  //                                  retained as sent and the journal marked
+  //                                  'ambiguous' (recordAmbiguousSend); the
+  //                                  send SUCCEEDS to the composer so no draft
+  //                                  is restored and no retry is offered, and
+  //                                  sync's echo replaces the row later
+  //
+  // Admission is journaled first (admittedAt): a crash between here and the
+  // verdict leaves a 'pending' journal that replayAbandonedSends must treat as
+  // ambiguous, not as never sent.
+  if (!(await waitForUsablePath(opts.connectivity ?? browserConnectivity()))) {
+    const kept = await failSend(db, optimisticId, now())
+    throw new SendFailedError('No internet connection', {
+      cause: new NetworkError('The browser reports no network path'),
+      userMessage: 'You appear to be offline. Check your connection and try again.',
+      keptFailedMessage: kept,
+      conversationId,
+    })
+  }
   if (attachments.length > 0) await markAttachmentState(db, optimisticId, 'uploading')
+  await recordSendAdmission(db, optimisticId, now())
 
   let response: SendMessageResponse
   try {
@@ -470,11 +596,21 @@ export async function sendMessage(
       ...(metadata.threadId !== '' ? { threadId: metadata.threadId } : {}),
     })
   } catch (error) {
-    // (f) Failure: roll the optimistic graph back, or keep it as a retryable
-    // failed bubble when it carries attachments.
+    if (!isDefiniteSendRejection(error)) {
+      await recordAmbiguousSend(db, optimisticId, now())
+      return { messageId: optimisticId, conversationId, delivery: 'unknown' }
+    }
+    // (f) Definite rejection: roll the optimistic graph back, or keep it as a
+    // retryable failed bubble when it carries attachments.
     const kept = await failSend(db, optimisticId, now())
     throw new SendFailedError('Send failed', {
       cause: error,
+      ...(error instanceof QuotaExhaustedError
+        ? {
+            userMessage:
+              'Gmail refused the send: this account has used up its sending quota for today.',
+          }
+        : {}),
       keptFailedMessage: kept,
       conversationId,
     })
@@ -489,7 +625,197 @@ export async function sendMessage(
   })
   await reconcileCommittedSend(db, optimisticId, now())
 
-  return { messageId: response.id, conversationId }
+  return { messageId: response.id, conversationId, delivery: 'committed' }
+}
+
+/**
+ * True when Gmail refused the request without processing it, so the message
+ * was definitely not sent: a 4xx verdict, a rate limit (429 is issued before
+ * the request body is acted on, which is also why the transport retransmits
+ * sends on it), a quota refusal (a 403 verdict the transport re-types, iOS
+ * isAmbiguousSendFailure: "rate/quota rejection ... prove Gmail did not commit
+ * send"), or an authentication refusal. Everything else thrown after
+ * admission is ambiguous — including the untyped SyntaxError a lost or
+ * malformed 2xx body raises in endpoints.sendMessage, which is why this is an
+ * allow-list and not a deny-list.
+ */
+export function isDefiniteSendRejection(error: unknown): boolean {
+  if (error instanceof GmailApiError) return error.status < 500
+  return (
+    error instanceof RateLimitError ||
+    error instanceof QuotaExhaustedError ||
+    error instanceof AuthRequiredError
+  )
+}
+
+/**
+ * The browser's view of the network path, as the pre-transmission gate reads
+ * it. `isOnline` is navigator.onLine: false only when the browser KNOWS there
+ * is no path (airplane mode, every interface down); true also covers a path
+ * that may not reach Gmail, which is what the post-admission matrix is for.
+ */
+export interface SendConnectivity {
+  isOnline: () => boolean
+  /** Resolves when the browser reports a path again, or after `timeoutMs`. */
+  waitForOnline: (timeoutMs: number) => Promise<void>
+}
+
+/** NetworkConfig.sendConnectivityWaitTimeout on iOS. */
+export const SEND_CONNECTIVITY_WAIT_MS = 30_000
+
+function browserConnectivity(): SendConnectivity {
+  const nav = globalThis.navigator as { onLine?: boolean } | undefined
+  return {
+    isOnline: () => nav?.onLine !== false,
+    waitForOnline: (timeoutMs) =>
+      new Promise((resolve) => {
+        const target = globalThis as unknown as EventTarget | undefined
+        if (target === undefined || typeof target.addEventListener !== 'function') {
+          resolve()
+          return
+        }
+        const done = (): void => {
+          clearTimeout(timer)
+          target.removeEventListener('online', done)
+          resolve()
+        }
+        const timer = setTimeout(done, timeoutMs)
+        target.addEventListener('online', done)
+      }),
+  }
+}
+
+/**
+ * Pre-transmission connectivity gate (port of
+ * OutboundConnectivityGate.waitForUsablePath): on a known-absent path the
+ * send waits, bounded, for the path to return and otherwise fails BEFORE
+ * admission, so an offline tap is a definite "not sent" (text-only rolled
+ * back with the draft restored, attachments kept as a retryable bubble)
+ * rather than a request whose fetch rejection the post-admission matrix must
+ * read as ambiguous. navigator.onLine cannot tell a dropped request from no
+ * network at all, so this is the only place offline is distinguished.
+ */
+async function waitForUsablePath(connectivity: SendConnectivity): Promise<boolean> {
+  if (connectivity.isOnline()) return true
+  await connectivity.waitForOnline(SEND_CONNECTIVITY_WAIT_MS)
+  return connectivity.isOnline()
+}
+
+/** Stamps the transmission-admission marker on a pending journal. */
+async function recordSendAdmission(db: ChatmailDB, journalId: string, now: number): Promise<void> {
+  const journals = journalTable(db)
+  const journal = await journals.get(journalId)
+  if (journal === undefined || journal.status !== 'pending') return
+  await journals.put({ ...journal, admittedAt: now })
+}
+
+/**
+ * Records a send whose verdict never arrived (port of
+ * recordAmbiguousRemoteSend): the optimistic row is retained as sent under its
+ * local id, its attachment rows marked uploaded (the bytes are local and
+ * render), and the journal marked 'ambiguous'. Nothing here may invite a
+ * resend — the recipient may already have the message. Sync matches the echo
+ * by the row's deterministic Message-ID (reconcileSyncedSendEcho); until then
+ * the row shows as sent. Only a 'pending' journal transitions: a journal the
+ * echo already finalized keeps that verdict.
+ */
+async function recordAmbiguousSend(db: ChatmailDB, journalId: string, now: number): Promise<void> {
+  await db.transaction(
+    'rw',
+    [
+      db.messages,
+      db.attachments,
+      db.conversations,
+      db.convoParticipants,
+      db.people,
+      db.outboundSends,
+    ],
+    async () => {
+      const journals = journalTable(db)
+      const journal = await journals.get(journalId)
+      if (journal === undefined || journal.status !== 'pending') return
+      const optimistic = await db.messages.get(journalId)
+      if (optimistic !== undefined) {
+        await db.messages.put({ ...optimistic, sendState: 'sent' })
+        await db.attachments.where('messageId').equals(journalId).modify({ state: 'uploaded' })
+        await rollupConversation(db, journal.conversationId, now)
+      }
+      await journals.put({ ...journal, status: AMBIGUOUS_SEND_STATUS })
+    },
+  )
+}
+
+/** Echo of an own send as sync parsed it from the server copy. */
+export interface SyncedSendEcho {
+  /** Message-ID header of the synced copy (angle brackets included). */
+  rfcMessageId: string
+  /** Gmail message id of the synced copy. */
+  remoteMessageId: string
+  remoteThreadId: string
+}
+
+/**
+ * Adopts sync's echo of a send this device made, identified by the
+ * deterministic Message-ID the optimistic row was stamped with: the journal is
+ * committed with the echo's ids and reconciled exactly as an acknowledged send
+ * is (reconcileCommittedSend), which swaps the row's PK to the Gmail id and
+ * re-parents its attachment rows when the echo has not been inserted yet, or
+ * drops the local row when it has. This is how a delivery-unknown send
+ * ('ambiguous' journal) converges; it also settles a 'pending' journal whose
+ * verdict is still in flight — the later verdict finds the journal finalized
+ * and leaves it so. Returns false when the Message-ID names no live journal.
+ *
+ * Intended caller: sync/persist, before its apply transaction (this runs its
+ * own transactions and a rollup), for a from-me message whose
+ * optimisticSendIdFromMessageId is non-null.
+ */
+export async function reconcileSyncedSendEcho(
+  db: ChatmailDB,
+  echo: SyncedSendEcho,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const optimisticId = optimisticSendIdFromMessageId(echo.rfcMessageId)
+  if (optimisticId === null) return false
+  const journals = journalTable(db)
+  const journal = await journals.get(optimisticId)
+  if (journal === undefined) return false
+  if (journal.status === 'finalized' || journal.status === 'failed') return false
+  if (journal.status !== 'committed') {
+    await journals.put({
+      ...journal,
+      status: 'committed',
+      remoteCommittedMessageId: echo.remoteMessageId,
+      remoteCommittedThreadId: echo.remoteThreadId,
+    })
+  }
+  await reconcileCommittedSend(db, optimisticId, now)
+  return true
+}
+
+/**
+ * Settles a delivery-unknown send whose echo sync has already stored under
+ * its Gmail id: the server copy carries the deterministic Message-ID the row
+ * was stamped with (the messages table indexes rfcMessageId), so it is found
+ * without the sync pipeline's help and adopted through reconcileSyncedSendEcho,
+ * which drops the retained local row. Until sync/persist reconciles echoes
+ * itself this runs at startup only, so the chat shows the echo beside the
+ * retained row until the next launch. False when no echo has arrived.
+ */
+async function adoptStoredEchoOfAmbiguousSend(
+  db: ChatmailDB,
+  journal: OutboundSendJournal,
+  now: number,
+): Promise<boolean> {
+  const rfcMessageId = messageIdForOptimisticSend(journal.id)
+  const echo = (await db.messages.where('rfcMessageId').equals(rfcMessageId).toArray()).find(
+    (row) => row.id !== journal.id && row.isFromMe === 1,
+  )
+  if (echo === undefined) return false
+  return reconcileSyncedSendEcho(
+    db,
+    { rfcMessageId, remoteMessageId: echo.id, remoteThreadId: echo.gmThreadId },
+    now,
+  )
 }
 
 /** Reads the staged blobs into the byte form the MIME builder consumes. */
@@ -508,6 +834,7 @@ function buildOutboundMime(
   metadata: ReplyMetadata,
   body: string,
   attachments: readonly MimeAttachment[],
+  messageId: string,
   htmlBody?: string,
 ): string {
   const mimeInput: BuildNewInput = {
@@ -516,6 +843,7 @@ function buildOutboundMime(
       ...(metadata.replyFrom.displayName !== '' ? { name: metadata.replyFrom.displayName } : {}),
     },
     to: metadata.recipients,
+    messageId,
     textBody: body,
     ...(metadata.subject !== '' ? { subject: metadata.subject } : {}),
     // A forward's html alternative and staged attachments compose: the builder
@@ -554,8 +882,16 @@ async function deleteEmptyConversation(db: ChatmailDB, conversationId: string): 
   })
 }
 
+/**
+ * The optimistic row. Its rfcMessageId is the Message-ID the MIME went out
+ * with and its references the chain the header carried, so a reply composed
+ * before sync echoes this message threads onto it exactly as it would onto the
+ * server copy (buildReplyMetadata), and the echo is matched back to this row
+ * (reconcileSyncedSendEcho).
+ */
 function makeOptimisticMessage(
   id: string,
+  rfcMessageId: string,
   conversationId: string,
   body: string,
   metadata: ReplyMetadata,
@@ -567,8 +903,8 @@ function makeOptimisticMessage(
     id,
     conversationId,
     gmThreadId: metadata.threadId,
-    rfcMessageId: '',
-    references: '',
+    rfcMessageId,
+    references: metadata.inReplyTo !== '' ? metadata.references.join(' ') : '',
     internalDate: sentAt,
     subject: metadata.subject,
     snippet: body.slice(0, 120),
@@ -680,8 +1016,10 @@ async function deleteMessageAttachments(db: ChatmailDB, messageId: string): Prom
  * delivered.
  */
 async function failSend(db: ChatmailDB, journalId: string, now: number): Promise<boolean> {
-  const journal = await db.outboundSends.get(journalId)
-  if (journal === undefined) return false
+  const journal = await journalTable(db).get(journalId)
+  // Only a pending send can fail: a journal sync's echo already finalized
+  // (reconcileSyncedSendEcho raced the verdict) proves the message was sent.
+  if (journal === undefined || journal.status !== 'pending') return false
 
   const optimistic = await db.messages.get(journalId)
   const attachmentCount =
@@ -694,7 +1032,14 @@ async function failSend(db: ChatmailDB, journalId: string, now: number): Promise
 
   await db.transaction(
     'rw',
-    [db.messages, db.attachments, db.conversations, db.outboundSends],
+    [
+      db.messages,
+      db.attachments,
+      db.conversations,
+      db.convoParticipants,
+      db.people,
+      db.outboundSends,
+    ],
     async () => {
       await db.messages.put({ ...optimistic, sendState: 'failed' })
       await db.attachments.where('messageId').equals(journalId).modify({ state: 'failed' })
@@ -731,6 +1076,7 @@ async function rollbackFailedSend(db: ChatmailDB, journalId: string, now: number
       db.blobs,
       db.conversations,
       db.convoParticipants,
+      db.people,
       db.outboundSends,
     ],
     async () => {
@@ -770,49 +1116,67 @@ export interface ReplayOptions {
  *   exists is retained because it owns the forward retry envelope;
  * - 'committed' journals (crash between remote accept and local reconcile)
  *   re-run the reconcile;
+ * - 'ambiguous' journals are retained for as long as their row exists: the
+ *   journal is what marks the row as delivery-unknown, and sync's echo is the
+ *   only thing that settles it — adopted here when sync has already stored
+ *   it (adoptStoredEchoOfAmbiguousSend). One whose row is gone is stale
+ *   debris;
  * - 'pending' journals older than 10 minutes are abandoned sends (a crash
  *   mid-send): when the optimistic row is gone the journal is stale debris
- *   and deleted; when the row still exists it goes through the same failure
- *   path as a live send — iOS reconcileAbandonedOptimisticSendMutations routes
- *   journals with no remote-committed result through
- *   handleFailedOptimisticMessage, so a text-only message is deleted and the
- *   conversation restored, while one carrying attachments is kept as a
- *   retryable failed bubble. Otherwise the bubble would show "Sending…"
- *   forever with no code path ever resolving it.
+ *   and deleted. When the row still exists, the admission marker decides, as
+ *   iOS reconcileAbandonedOptimisticSendMutations does with its in-flight
+ *   marker: a send admitted to the transport (admittedAt set) may have been
+ *   processed by Gmail and is preserved as delivery-unknown, never retried;
+ *   one never admitted goes through the same failure path as a live definite
+ *   rejection — a text-only message is deleted and the conversation restored,
+ *   one carrying attachments is kept as a retryable failed bubble. Otherwise
+ *   the bubble would show "Sending…" forever with no code path resolving it.
+ *   Cold recovery never retries: it only converts markers.
  */
 export async function replayAbandonedSends(
   db: ChatmailDB,
   opts: ReplayOptions = {},
 ): Promise<void> {
   const now = opts.now ?? Date.now
+  const journals = journalTable(db)
 
-  const terminal = await db.outboundSends
+  const terminal = await journals
     .where('status')
     .anyOf('failed', 'finalized')
     .filter((journal) => now() - journal.createdAt >= STALE_PENDING_SEND_MS)
     .toArray()
   const terminalIdsToDelete: string[] = []
   for (const journal of terminal) {
-    const withForwardEnvelope: OutboundSendWithForwardEnvelope = journal
-    if (journal.status === 'failed' && withForwardEnvelope.forwardEnvelope !== undefined) {
+    if (journal.status === 'failed' && journal.forwardEnvelope !== undefined) {
       const message = await db.messages.get(journal.id)
       if (message?.sendState === 'failed') continue
     }
     terminalIdsToDelete.push(journal.id)
   }
-  if (terminalIdsToDelete.length > 0) await db.outboundSends.bulkDelete(terminalIdsToDelete)
+  if (terminalIdsToDelete.length > 0) await journals.bulkDelete(terminalIdsToDelete)
 
-  const committed = await db.outboundSends.where('status').equals('committed').toArray()
+  const committed = await journals.where('status').equals('committed').toArray()
   for (const journal of committed) {
     await reconcileCommittedSend(db, journal.id, now())
   }
 
-  const pending = await db.outboundSends.where('status').equals('pending').toArray()
+  const ambiguous = await journals.where('status').equals(AMBIGUOUS_SEND_STATUS).toArray()
+  for (const journal of ambiguous) {
+    if (await adoptStoredEchoOfAmbiguousSend(db, journal, now())) continue
+    if (now() - journal.createdAt < STALE_PENDING_SEND_MS) continue
+    if ((await db.messages.get(journal.id)) === undefined) {
+      await journals.delete(journal.id)
+    }
+  }
+
+  const pending = await journals.where('status').equals('pending').toArray()
   for (const journal of pending) {
     if (now() - journal.createdAt < STALE_PENDING_SEND_MS) continue
     const optimistic = await db.messages.get(journal.id)
     if (optimistic === undefined) {
-      await db.outboundSends.delete(journal.id)
+      await journals.delete(journal.id)
+    } else if (journal.admittedAt !== undefined) {
+      await recordAmbiguousSend(db, journal.id, now())
     } else {
       await failSend(db, journal.id, now())
     }
@@ -839,7 +1203,14 @@ export async function retryFailedSend(
   if (message === undefined) throw new SendFailedError('No message to retry')
   if (message.sendState !== 'failed') throw new SendFailedError('Message did not fail to send')
 
-  const journal: OutboundSendWithForwardEnvelope | undefined = await db.outboundSends.get(messageId)
+  const journal = await journalTable(db).get(messageId)
+  // A delivery-unknown send is retained as sent, so the sendState check above
+  // already refuses it; the journal is the durable word on it, and a resend of
+  // a message Gmail may have delivered is the one outcome this path must never
+  // produce.
+  if (journal?.status === AMBIGUOUS_SEND_STATUS) {
+    throw new SendFailedError('Message may already have been delivered')
+  }
   const forwardEnvelope = journal?.forwardEnvelope
   const rows = await db.attachments.where('messageId').equals(messageId).toArray()
   const rowsById = new Map(rows.map((row) => [row.id, row]))
@@ -884,6 +1255,10 @@ export async function retryFailedSend(
       conversationId: message.conversationId,
       body: message.bodyText,
       attachments,
+      // A retained row with no thread went out as a new message (a plain
+      // compose, or a reply whose target had no thread yet); the retry must
+      // not turn it into a 'Re:' threaded under whatever is newest now.
+      ...(forwardEnvelope === undefined && message.gmThreadId === '' ? { asNewMessage: true } : {}),
       ...(forwardEnvelope !== undefined
         ? {
             forward: {

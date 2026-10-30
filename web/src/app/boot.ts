@@ -23,14 +23,15 @@ import {
   type AuthBroker,
   type AuthState,
 } from '@/auth/authBroker'
-import { getSyncProgress, setSyncProgress } from '@/db/kv'
 import {
   dbNameForAccount,
-  deleteDBForAccount,
+  deleteAccountDBs,
   getDB,
+  listAccountDBNames,
   openDBForAccount,
   type ChatmailDB,
 } from '@/db/schema'
+import { setStoragePersistent } from '@/db/storagePersistence'
 
 export const DEMO_ACCOUNT_EMAIL = 'demo@example.com'
 
@@ -275,7 +276,7 @@ async function establishSession(knownEmail?: string): Promise<void> {
     // would be missed and the account's mail would survive the sign-out.
     staleWipeUnregister?.()
     staleWipeUnregister = null
-    unregisterWipe = b.registerWipeHook(() => deleteDBForAccount(email))
+    unregisterWipe = b.registerWipeHook(() => wipeAllAccountData(email))
 
     void requestPersistentStorage(db)
     await restoreBackfillWindowIfEvicted(db, email)
@@ -319,7 +320,13 @@ async function establishSession(knownEmail?: string): Promise<void> {
       import('@/sync/deps'),
     ])
     if (!current()) return bail()
-    const api = makeGmailSyncApi(b)
+    // Every sync request of this session carries the session's abort signal:
+    // teardown ends an in-flight fetch as RequestAbortedError (a run abort
+    // with no failure verdict) instead of letting a stalled request outlive
+    // the account that issued it.
+    const syncAbort = new AbortController()
+    stops.push(() => syncAbort.abort())
+    const api = makeGmailSyncApi(b, { signal: syncAbort.signal })
     // The generation check makes the closure self-invalidating: a scheduler
     // tick (or an in-flight trigger) that fires after this session was torn
     // down must never run this account's sync against a DB/token that has
@@ -369,7 +376,8 @@ function abandonSession(stops: Array<() => void>, unregisterWipe: (() => void) |
  * confirming the new account to AuthBroker and releasing token access.
  *   - match        → re-establish the same session (same DB, unchanged);
  *   - mismatch     → establishSession opens the other account's DB (the old
- *     one is closed, never wiped — it belongs to that account);
+ *     one is closed, not wiped — it belongs to that account; the sign-out
+ *     sweep reclaims it, see wipeAllAccountData);
  *   - unverifiable → stay torn down under the banner, with a bounded automatic
  *     retry for transient failures (see resolveAccountAndEstablish).
  * Suspending FIRST is the invariant: while the account is unverified there
@@ -557,19 +565,44 @@ async function fetchProfileEmail(b: AuthBroker): Promise<string> {
  * Asks for durable storage and RECORDS the answer. Without persistence the
  * whole mailbox is evictable (Safari drops script-writable storage after 7
  * days of no interaction; Chrome evicts under pressure), so the outcome is
- * kept in syncProgress.storagePersistent where the UI can surface it.
+ * kept under its own syncState key (db/storagePersistence.ts) where the UI
+ * can surface it. Not in the syncProgress row: the sync engine replaces that
+ * row wholesale, and the startup sync kicked off below it would have erased
+ * the verdict within the same boot.
  */
 async function requestPersistentStorage(db: ChatmailDB): Promise<void> {
   try {
     const manager = navigator.storage as StorageManager | undefined
     if (manager === undefined) return
     const granted = (await manager.persisted?.()) || ((await manager.persist?.()) ?? false)
-    const progress = await getSyncProgress(db)
-    if (progress.storagePersistent === granted) return
-    await setSyncProgress(db, { ...progress, storagePersistent: granted })
+    await setStoragePersistent(db, granted)
   } catch {
     // Persistence (and recording it) is best-effort.
   }
+}
+
+/**
+ * The sign-out wipe: every account database on this origin, each with its
+ * install marker. Enumerated rather than derived from the session, because
+ * after a verified account switch the previous account's database is still
+ * on disk (verifySessionAccount keeps it — the switch is not that account's
+ * sign-out) and a user signing out to leave a shared machine expects no
+ * mailbox to stay readable. Markers go first: a marker that outlives its
+ * database turns the next sign-in into a fake eviction (forgetInstallMarker),
+ * while a database that outlives its marker re-stamps it from the accounts
+ * row (restoreBackfillWindowIfEvicted).
+ */
+async function wipeAllAccountData(accountEmail: string | null): Promise<void> {
+  // The signing-out account's own database is never left to enumeration:
+  // listAccountDBNames tolerates a refused Dexie.getDatabaseNames, and the
+  // open database may already be closed by then, so name it directly too.
+  const names = await listAccountDBNames()
+  if (accountEmail !== null) {
+    const own = dbNameForAccount(accountEmail)
+    if (!names.includes(own)) names.push(own)
+  }
+  for (const name of names) durableRemove(INSTALL_MARKER_PREFIX + name)
+  await deleteAccountDBs(names)
 }
 
 // ---------------------------------------------------------------------------
@@ -759,7 +792,7 @@ export async function signIn(loginHint?: string): Promise<void> {
   await b.interactiveSignIn(hint)
 }
 
-/** Sign out; the broker's wipe hooks delete the account DB. */
+/** Sign out; the broker's wipe hook deletes every account DB on this origin. */
 export async function signOut(): Promise<void> {
   const b = broker
   // Forget the account BEFORE the DB goes away: otherwise the next boot's
@@ -768,6 +801,8 @@ export async function signOut(): Promise<void> {
   forgetLastAccountEmail()
   forgetSessionEvidence()
   // A sign-out is a clean slate, not an eviction (see forgetInstallMarker).
+  // The sweep drops every marker it finds a database for; this one goes
+  // synchronously so it is gone even if the enumeration fails.
   if (remembered !== null) forgetInstallMarker(remembered)
   if (b !== null) {
     await b.signOut()
@@ -776,7 +811,7 @@ export async function signOut(): Promise<void> {
   // Offline fallback (no broker was ever created): honour the intent locally —
   // there is no grant to revoke, but the mailbox must still go.
   teardownSession()
-  if (remembered !== null) await deleteDBForAccount(remembered)
+  await wipeAllAccountData(remembered)
   publish('signed_out')
 }
 

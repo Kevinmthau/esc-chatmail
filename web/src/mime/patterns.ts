@@ -50,9 +50,27 @@ export const BARE_HOST_LINE_PATTERN = new RegExp(
 /** Phone-number candidate: 7+ digits with common separators. */
 export const PHONE_PATTERN = /\b\+?\d[\d\s().-]{6,}\b/
 
+/**
+ * ICU's `\b`, which NSRegularExpression evaluates on iOS, is Unicode-aware: its
+ * `\w` is `[\p{Alphabetic}\p{M}\p{Nd}\p{Pc}\u200C\u200D]`, so `\bno\b` does not
+ * match inside "Noël" and `\bst\b` does not match inside "Stéphane". JavaScript's
+ * `\b` is ASCII-only even under the `u` flag, which read "Noël Dupont | Sales
+ * Director" as prose and "Stéphane Dubois" as a street address, so the keyword
+ * classifiers spell ICU's boundary out with these lookarounds. Patterns that only
+ * match ASCII tokens (URLs, digit runs) keep `\b`.
+ */
+const ICU_WORD_CHARACTER = String.raw`[\p{Alphabetic}\p{M}\p{Nd}\p{Pc}\u200C\u200D]`
+export const WORD_START = `(?<!${ICU_WORD_CHARACTER})`
+export const WORD_END = `(?!${ICU_WORD_CHARACTER})`
+
 /** Street/suite/floor keywords, matched on word boundaries. */
-export const ADDRESS_KEYWORD_PATTERN =
-  /\b(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|suite|ste|floor|fl)\b\.?/i
+export const ADDRESS_KEYWORD_PATTERN = new RegExp(
+  WORD_START +
+    String.raw`(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|suite|ste|floor|fl)` +
+    WORD_END +
+    String.raw`\.?`,
+  'iu',
+)
 
 /** Standalone one-letter contact labels ("m:", "t.", "p"). */
 export const STANDALONE_CONTACT_LABEL_PATTERN = /^(m|c|o|f|d|t|p)[:.]?$/i
@@ -200,14 +218,34 @@ export const DESCRIPTIVE_PHONE_LINE_PATTERN = new RegExp(
   'i',
 )
 
-export const SIGNATURE_NAME_CONTACT_WORD_PATTERN = /\b(?:fax|mobile|office|cell|phone)\b/i
-const SIGNATURE_SUPPORT_KEYWORD_PATTERN =
-  /\b(?:director|manager|vp|vice president|president|founder|ceo|cfo|cto|coo|realtor|broker|associate|sales|agent|partner|principal|owner|specialist)\b|\s(?:inc|llc|ltd|corp|corporation|company|partners|group|llp|lp)\b|\sco\./i
+export const SIGNATURE_NAME_CONTACT_WORD_PATTERN = new RegExp(
+  WORD_START + String.raw`(?:fax|mobile|office|cell|phone)` + WORD_END,
+  'iu',
+)
+const SIGNATURE_SUPPORT_KEYWORD_PATTERN = new RegExp(
+  WORD_START +
+    String.raw`(?:director|manager|vp|vice president|president|founder|ceo|cfo|cto|coo|realtor|broker|associate|sales|agent|partner|principal|owner|specialist)` +
+    WORD_END +
+    String.raw`|\s(?:inc|llc|ltd|corp|corporation|company|partners|group|llp|lp)` +
+    WORD_END +
+    String.raw`|\sco\.`,
+  'iu',
+)
 // Added roles require a complete title phrase, not a keyword anywhere in a sentence.
 const SIGNATURE_ADDITIONAL_SUPPORT_TITLE_PATTERN =
   /^(?:(?:(?:chief|executive|senior|junior|lead|staff|loan|financial|investment|legal|technical|software|systems|project|account|marketing|operations|general|assistant)\s+){0,2}(?:officer|chief|advisor|consultant|engineer|attorney|counsel|analyst|coordinator)|[a-z][a-z'’.-]+\s+(?:insurance|travel|real estate|staffing|marketing|advertising|creative)\s+agency)$/i
-const SIGNATURE_SUPPORT_PROSE_PATTERN =
-  /\b(?:please|not|never|no|without|must|shall|should|will|would|could|cannot|is|are|was|were|be|been|being|pending|awaiting|required|approval|pay|payment|fees|due|my|our|your|their)\b|^(?:i|we|you|he|she|it|they|do|check|ask|ensure|remember|confirm|send|wait|get|need|call|contact|use)\b/i
+export const SIGNATURE_SUPPORT_PROSE_PATTERN = new RegExp(
+  WORD_START +
+    String.raw`(?:please|not|never|no|without|must|shall|should|will|would|could|cannot|is|are|was|were|be|been|being|pending|awaiting|required|approval|pay|payment|fees|due|my|our|your|their)` +
+    WORD_END +
+    String.raw`|^(?:i|we|you|he|she|it|they|do|check|ask|ensure|remember|confirm|send|wait|get|need|call|contact|use)` +
+    WORD_END,
+  'iu',
+)
+const SIGNATURE_SUPPORT_SENTENCE_END_COMPANY_PATTERN = new RegExp(
+  WORD_START + String.raw`(?:inc|co|corp)\.$`,
+  'iu',
+)
 const SIGNATURE_TITLE_JOINERS = new Set([
   'and',
   'of',
@@ -231,7 +269,8 @@ export function isStrongSignatureSupportLine(line: string): boolean {
   if (words.length >= 8) return false
   // Capitalization does not make an instruction a title (e.g. "DO NOT PAY THE CONSULTANT").
   if (SIGNATURE_SUPPORT_PROSE_PATTERN.test(trimmed)) return false
-  if (/[.?!]$/.test(trimmed) && !/\b(?:inc|co|corp)\.$/i.test(trimmed)) return false
+  if (/[.?!]$/.test(trimmed) && !SIGNATURE_SUPPORT_SENTENCE_END_COMPANY_PATTERN.test(trimmed))
+    return false
   if (SIGNATURE_ADDITIONAL_SUPPORT_TITLE_PATTERN.test(trimmed)) return true
   if (!SIGNATURE_SUPPORT_KEYWORD_PATTERN.test(trimmed)) return false
 

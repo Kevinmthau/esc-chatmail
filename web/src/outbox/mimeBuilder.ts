@@ -68,6 +68,14 @@ export interface BuildNewInput {
   from: MimeFrom
   to: readonly string[]
   subject?: string
+  /**
+   * RFC Message-ID to emit (angle brackets included); a random one is generated
+   * when absent. The send pipeline passes messageIdForOptimisticSend so the
+   * value stored on the optimistic row is the one the header carries — that is
+   * how a later reply threads onto an own message sync has not echoed yet, and
+   * how the echo of a delivery-unknown send is recognized.
+   */
+  messageId?: string
   textBody: string
   /** When present the message is multipart/alternative (text + html). */
   htmlBody?: string
@@ -328,6 +336,129 @@ function generateMessageId(): string {
   return `<${newId()}@${MESSAGE_ID_DOMAIN}>`
 }
 
+const OPTIMISTIC_MESSAGE_ID_PREFIX = '<esc-'
+
+/**
+ * Stable RFC Message-ID for an optimistic send, derived from the optimistic
+ * row id (MimeBuilder.messageId(forOptimisticMessageID:)). Hex encoding is
+ * injection-safe and preserves the id exactly, so optimisticSendIdFromMessageId
+ * recovers it from a synced echo's header: that round trip is how sync matches
+ * the server copy of a send whose response never arrived, and how every reader
+ * tells an own row that is still local from one Gmail has echoed.
+ */
+export function messageIdForOptimisticSend(optimisticId: string): string {
+  const localPart = Array.from(new TextEncoder().encode(optimisticId), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')
+  return `${OPTIMISTIC_MESSAGE_ID_PREFIX}${localPart}@${MESSAGE_ID_DOMAIN}>`
+}
+
+/**
+ * The optimistic row id a Message-ID was derived from, or null when it is not
+ * one of ours (MimeBuilder.optimisticMessageID(from:)). Strict: the decoded id
+ * must re-encode to exactly the given header, so a foreign `<esc-…>` cannot
+ * impersonate a local row.
+ */
+export function optimisticSendIdFromMessageId(rfcMessageId: string): string | null {
+  if (!rfcMessageId.startsWith(OPTIMISTIC_MESSAGE_ID_PREFIX)) return null
+  const at = rfcMessageId.indexOf('@')
+  if (at === -1) return null
+  const hex = rfcMessageId.slice(OPTIMISTIC_MESSAGE_ID_PREFIX.length, at)
+  if (hex === '' || hex.length > 256 || hex.length % 2 !== 0 || !/^[0-9a-f]+$/u.test(hex)) {
+    return null
+  }
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  }
+  let optimisticId: string
+  try {
+    optimisticId = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return null
+  }
+  return messageIdForOptimisticSend(optimisticId) === rfcMessageId ? optimisticId : null
+}
+
+/**
+ * RFC 5322 §2.1.1 line limits, excluding the CRLF: a line MUST NOT exceed 998
+ * characters and SHOULD NOT exceed 78.
+ */
+export const HEADER_LINE_HARD_LIMIT = 998
+export const HEADER_LINE_SOFT_LIMIT = 78
+
+/**
+ * How many of the most recent References IDs a reply keeps, in addition to the
+ * thread's first ID (trimmedReferences).
+ */
+export const REFERENCES_RECENT_ID_LIMIT = 20
+
+const REFERENCES_FIELD_PREFIX = 'References: '
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).length
+}
+
+/**
+ * The References IDs a reply emits: the thread's first ID plus the most recent
+ * REFERENCES_RECENT_ID_LIMIT, in their original order (RFC 5322 §3.6.4 permits
+ * trimming the chain; the root and the latest ancestors are what threading
+ * clients use, and the last ID — the parent's Message-ID — is always kept
+ * last). Port of MimeBuilder.trimmedReferences.
+ *
+ * Entries are re-tokenized on whitespace after CRLF sanitization: the stored
+ * chain is split on spaces only, so one entry can still carry several IDs or
+ * folding whitespace, and the cap and the fold must both count real IDs. Only
+ * well-formed <message-id> tokens survive (a crafted stored value must not
+ * restructure the header), and an ID too long to fit on any header line even
+ * alone is dropped rather than emitted past the hard limit — it can only come
+ * from a malformed or hostile inbound header, and In-Reply-To (unchanged)
+ * still names the parent.
+ */
+export function trimmedReferences(references: readonly string[]): string[] {
+  const maxIdLength = HEADER_LINE_HARD_LIMIT - REFERENCES_FIELD_PREFIX.length
+  const ids = references
+    .flatMap((entry) => sanitizeHeaderValue(entry).split(/\s+/u))
+    .filter((id) => isMessageIdToken(id) && utf8Length(id) <= maxIdLength)
+  const [root] = ids
+  if (root === undefined || ids.length <= REFERENCES_RECENT_ID_LIMIT + 1) return ids
+  return [root, ...ids.slice(-REFERENCES_RECENT_ID_LIMIT)]
+}
+
+/**
+ * The folded `References:` value (without the field name or the final CRLF),
+ * or null when no usable ID remains. Port of MimeBuilder.formatReferencesHeader.
+ *
+ * Every reply copies its parent's References and appends the parent's
+ * Message-ID, so a long chat grows the chain by one ID per message. Typical
+ * Gmail Message-IDs are ~75 characters and this app's own ~95, so one
+ * space-joined line passed the 998-character hard limit after about a dozen
+ * replies; receiving MTAs and clients may then truncate or rewrap it and break
+ * threading outside Gmail. The chain is trimmed (trimmedReferences) and folded
+ * with the same CRLF + SP the encoded-word path uses, packing IDs greedily so a
+ * line stays at or under 78 characters unless a single ID is longer by itself —
+ * a msg-id cannot be folded internally, so such an ID gets a line of its own.
+ */
+export function formatReferencesHeader(references: readonly string[]): string | null {
+  const ids = trimmedReferences(references)
+  const firstId = ids[0]
+  if (firstId === undefined) return null
+
+  let value = firstId
+  let lineLength = REFERENCES_FIELD_PREFIX.length + utf8Length(firstId)
+  for (const id of ids.slice(1)) {
+    const idLength = utf8Length(id)
+    if (lineLength + 1 + idLength <= HEADER_LINE_SOFT_LIMIT) {
+      value += ` ${id}`
+      lineLength += 1 + idLength
+    } else {
+      value += `${RFC2047_FOLD}${id}`
+      lineLength = 1 + idLength
+    }
+  }
+  return value
+}
+
 function generateBoundary(): string {
   return `----Boundary${newId().replaceAll('-', '')}`
 }
@@ -541,7 +672,9 @@ function buildMime(
   }\r\n`
 
   mime += `Date: ${formatRfc2822Date(options?.now ?? new Date())}\r\n`
-  mime += `Message-ID: ${generateMessageId()}\r\n`
+  const messageId =
+    input.messageId === undefined ? generateMessageId() : sanitizeHeaderValue(input.messageId)
+  mime += `Message-ID: ${messageId}\r\n`
 
   if (reply !== null) {
     // Threading values originate from inbound headers; only emit well-formed
@@ -549,10 +682,8 @@ function buildMime(
     // header (CRLF is stripped by sanitizeHeaderValue first).
     const inReplyTo = sanitizeHeaderValue(reply.inReplyTo)
     if (inReplyTo !== '' && isMessageIdToken(inReplyTo)) mime += `In-Reply-To: ${inReplyTo}\r\n`
-    const references = reply.references
-      .map((ref) => sanitizeHeaderValue(ref))
-      .filter((ref) => isMessageIdToken(ref))
-    if (references.length > 0) mime += `References: ${references.join(' ')}\r\n`
+    const references = formatReferencesHeader(reply.references)
+    if (references !== null) mime += `${REFERENCES_FIELD_PREFIX}${references}\r\n`
   }
 
   mime += 'MIME-Version: 1.0\r\n'

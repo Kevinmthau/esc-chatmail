@@ -15,6 +15,15 @@ export function shouldStick(pinned: boolean, hasOwnAppend: boolean): boolean {
 /** Distance from the bottom still treated as pinned (mirrors the 48px sentinel rootMargin). */
 export const PINNED_BOTTOM_EPSILON_PX = 48
 
+/** Whether a scroll offset sits within the epsilon of the content end. */
+export function isWithinBottomEpsilon(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+): boolean {
+  return scrollTop + clientHeight >= scrollHeight - PINNED_BOTTOM_EPSILON_PX
+}
+
 /**
  * Initial pinned state after the mount-time scroll restore. With no saved
  * offset we jump to the bottom (pinned); a saved offset counts as pinned only
@@ -29,7 +38,60 @@ export function initialPinned(
   clientHeight: number,
 ): boolean {
   if (saved === undefined) return true
-  return saved + clientHeight >= scrollHeight - PINNED_BOTTOM_EPSILON_PX
+  return isWithinBottomEpsilon(saved, scrollHeight, clientHeight)
+}
+
+/**
+ * What the hook remembers about a conversation on leaving it. A pixel offset
+ * only means something against the rows it was measured over, so it travels
+ * with the window's first and last row ids: MessageList remounts with the
+ * window reset to its first page, and new mail evicts the oldest rows of a
+ * full page, so the same offset can land on unrelated rows on return.
+ */
+export type SavedScrollPosition =
+  { kind: 'bottom' } | { kind: 'offset'; top: number; firstId: string; lastId: string | null }
+
+/**
+ * The position to save when leaving. Within the epsilon of the bottom the
+ * user was reading the newest mail, so the restore reopens at the content
+ * end (where anything that arrived meanwhile is), as iOS always opens a
+ * transcript; a raw offset would reopen above the new rows with nothing
+ * pointing at them, because the restore cannot tell "left here" from "left
+ * at the bottom, then mail arrived".
+ */
+export function savedScrollPosition(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+  messages: readonly AppendMessageLike[],
+): SavedScrollPosition {
+  const firstId = messages[0]?.id
+  if (firstId === undefined || isWithinBottomEpsilon(scrollTop, scrollHeight, clientHeight)) {
+    return { kind: 'bottom' }
+  }
+  return { kind: 'offset', top: scrollTop, firstId, lastId: messages.at(-1)?.id ?? null }
+}
+
+export type RestoreResolution =
+  { kind: 'bottom' } | { kind: 'offset'; top: number; unseenIncomingCount: number }
+
+/**
+ * Where to open the transcript on return. A saved offset is honored only
+ * when the window still starts at the row it was measured from, so the rows
+ * above the offset are the ones it was measured over; otherwise (fresh open,
+ * left at the bottom, deeper window reset to the first page, oldest rows
+ * evicted by new mail) the transcript opens at the content end. Rows that
+ * appeared after the last row seen at leave time are the pill's seed count,
+ * so a restored mid-history position still announces what arrived meanwhile.
+ */
+export function resolveRestore(
+  saved: SavedScrollPosition | undefined,
+  messages: readonly AppendMessageLike[],
+): RestoreResolution {
+  if (saved === undefined || saved.kind === 'bottom') return { kind: 'bottom' }
+  if (messages[0]?.id !== saved.firstId) return { kind: 'bottom' }
+  const diff = diffAppended(saved.lastId, messages)
+  return { kind: 'offset', top: saved.top, unseenIncomingCount: diff.incomingCount }
 }
 
 /**

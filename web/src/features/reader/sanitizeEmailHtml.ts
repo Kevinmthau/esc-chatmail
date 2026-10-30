@@ -5,6 +5,8 @@
 // self-contained HTML document string carrying its own meta CSP and base
 // styles, plus the list of cid: image ids the caller must resolve to Blobs.
 
+import { isPrivateOrReservedUrl } from './privateNetworkAddress'
+
 export type EmailRenderMode = 'preview' | 'full'
 
 export interface SanitizedEmailHtml {
@@ -71,6 +73,41 @@ function loadPurify(): Promise<typeof import('dompurify').default> {
 /** Strips angle brackets/whitespace from a Content-ID. */
 function normalizeCid(rawCid: string): string {
   return rawCid.replace(/[<>]/g, '').trim()
+}
+
+/**
+ * Stand-in for the email frame's own https origin when resolving an href. A
+ * result still on this host is a same-document or same-origin link, which no
+ * email can aim at a private host, so only a result elsewhere is classified.
+ */
+const RELATIVE_HREF_BASE = new URL('https://relative-href.email-frame.invalid/')
+
+/**
+ * iOS parity (FullInteractiveEmailWebView.navigationDecision →
+ * .blockedPrivateNetwork): an http(s) link whose host is private, loopback,
+ * link-local or otherwise reserved is refused rather than opened — a phishing
+ * mail's "View invoice" must not land on the user's router admin page or a
+ * cloud metadata endpoint. Links only: iOS applies no such check to in-page
+ * image loads, and neither does the frame CSP. An http(s) href the URL parser
+ * rejects is refused too, as a nil URL(string:) is on iOS.
+ */
+function isBlockedPrivateNetworkLink(href: string): boolean {
+  // Classify what the browser will navigate to, not the attribute's spelling.
+  // The frame resolves every href against its own https origin, and the URL
+  // parser strips ASCII tab/LF/CR anywhere in the input and reads a backslash
+  // as a slash in an http(s) URL, so "\\10.0.0.1/" and "/\\10.0.0.1/" open
+  // https://10.0.0.1/ exactly as "//10.0.0.1/" does. A literal prefix test on
+  // the raw href missed the backslash spellings; resolving against a stand-in
+  // base applies the parser's own rules instead.
+  let url: URL
+  try {
+    url = new URL(href, RELATIVE_HREF_BASE)
+  } catch {
+    return true
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  if (url.hostname === RELATIVE_HREF_BASE.hostname) return false
+  return isPrivateOrReservedUrl(url)
 }
 
 /**
@@ -150,10 +187,18 @@ export async function sanitizeEmailHtml(
     }
   }
 
-  // Every link opens outside the frame and never leaks referrer/opener.
-  for (const anchor of Array.from(root.querySelectorAll('a'))) {
-    anchor.setAttribute('target', '_blank')
-    anchor.setAttribute('rel', 'noopener noreferrer')
+  // Every link opens outside the frame and never leaks referrer/opener. An
+  // image-map <area> is a link too: DOMPurify keeps map/area/usemap and strips
+  // target, and a frame may always navigate ITSELF under sandbox — so an
+  // untreated area click loaded the email-authored page inside the reader
+  // chrome, with scripts and sandbox-escaping popups. iOS cancels every link
+  // activation (FullInteractiveEmailWebView.navigationDecision), so nothing
+  // email-authored may navigate the frame.
+  for (const link of Array.from(root.querySelectorAll('a, area'))) {
+    const href = link.getAttribute('href')
+    if (href !== null && isBlockedPrivateNetworkLink(href)) link.removeAttribute('href')
+    link.setAttribute('target', '_blank')
+    link.setAttribute('rel', 'noopener noreferrer')
   }
 
   let head = root.querySelector('head')

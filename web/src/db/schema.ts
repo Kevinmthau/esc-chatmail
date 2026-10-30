@@ -75,9 +75,16 @@ export class ChatmailDB extends Dexie {
   }
 }
 
+/**
+ * Every account database on this origin starts with this; `listAccountDBNames`
+ * enumerates by it, so the sign-out sweep finds databases of accounts this
+ * boot never opened (a previous account left behind by a verified switch).
+ */
+export const ACCOUNT_DB_NAME_PREFIX = 'escmail_'
+
 /** One database per account so sign-out is a clean `db.delete()`. */
 export function dbNameForAccount(email: string): string {
-  return `escmail_${sha256Hex(email.trim().toLowerCase()).slice(0, 16)}`
+  return `${ACCOUNT_DB_NAME_PREFIX}${sha256Hex(email.trim().toLowerCase()).slice(0, 16)}`
 }
 
 let current: ChatmailDB | null = null
@@ -107,9 +114,50 @@ export function setDBForTests(db: ChatmailDB | null): void {
 }
 
 export async function deleteDBForAccount(email: string): Promise<void> {
-  if (current?.name === dbNameForAccount(email)) {
+  await deleteAccountDB(dbNameForAccount(email))
+}
+
+async function deleteAccountDB(name: string): Promise<void> {
+  if (current?.name === name) {
     current.close()
     current = null
   }
-  await Dexie.delete(dbNameForAccount(email))
+  await Dexie.delete(name)
+}
+
+/**
+ * Names of every account database on this origin. Dexie.getDatabaseNames()
+ * reads `indexedDB.databases()` where it exists and otherwise the registry
+ * Dexie keeps for its own databases, so this also lists databases opened in
+ * a previous boot or by another tab. The open database is included even when
+ * the enumeration lacks it: Dexie creates a database on its first query, so
+ * one opened and never queried is not on disk yet but is still the one
+ * getDB() hands out.
+ */
+export async function listAccountDBNames(): Promise<string[]> {
+  let names: string[] = []
+  try {
+    names = (await Dexie.getDatabaseNames()).filter((name) =>
+      name.startsWith(ACCOUNT_DB_NAME_PREFIX),
+    )
+  } catch {
+    // Enumeration unsupported or refused: the open database is still known.
+  }
+  const open = current?.name
+  if (open !== undefined && open.startsWith(ACCOUNT_DB_NAME_PREFIX) && !names.includes(open)) {
+    names.push(open)
+  }
+  return names
+}
+
+/**
+ * Deletes the named account databases, the open one included. The sign-out
+ * sweep passes `listAccountDBNames()`: an account switch keeps the previous
+ * account's database (it belongs to that account, and the switch is not its
+ * sign-out), so by sign-out more than the current account can be on disk,
+ * and deleting only the current one left the other mailbox readable to the
+ * next person on the machine.
+ */
+export async function deleteAccountDBs(names: readonly string[]): Promise<void> {
+  for (const name of names) await deleteAccountDB(name)
 }

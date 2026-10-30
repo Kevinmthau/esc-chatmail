@@ -18,9 +18,11 @@ export function Lightbox({ images, initialIndex, onClose }: LightboxProps) {
     Math.min(Math.max(initialIndex, 0), Math.max(images.length - 1, 0)),
   )
   const current = images[index] ?? null
-  const url = useAttachmentUrl(
-    current !== null && current.state === 'downloaded' ? current.id : null,
-  )
+  // Bytes, not state, decide (AttachmentContent's rule): the tile that opened
+  // this viewer rendered the blob, and an own-sent image is 'queued' /
+  // 'uploaded' / 'failed' until the Gmail echo adopts it — gating on
+  // 'downloaded' showed "Image not downloaded" over the user's own photo.
+  const url = useAttachmentUrl(current?.id ?? null)
 
   const showPrev = useCallback(() => {
     setIndex((i) => (i > 0 ? i - 1 : i))

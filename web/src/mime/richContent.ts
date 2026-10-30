@@ -79,6 +79,14 @@ export interface HtmlProcessingCleanupResult {
   applyPlainTextQuoteRemoval: boolean
   /** Rescue modes must retain content that signature cleanup removed. */
   applyTrailingContactSignatureRemoval: boolean
+  /**
+   * True only for the containers-only rescue: that mode skips marker
+   * truncation, so a leftover attribution line must be dropped at the
+   * text level (`removeStandaloneQuoteAttributionLines` in htmlText.ts). The
+   * fuller modes already truncate attributions in the DOM, and running the
+   * line filter on their output risks deleting legitimate prose.
+   */
+  stripStandaloneQuoteAttributionLines: boolean
 }
 
 export function cleanedHtmlForCleanupModes(
@@ -97,14 +105,24 @@ export function cleanedHtmlForCleanupModes(
 
 /**
  * ChatBubbleTextProcessor.cleanedHTMLForProcessing: try quote+signature removal,
- * then quote-only, falling back to the original HTML.
+ * then quote-only, then the containers-only rescue, falling back to the
+ * original HTML.
  */
 export function cleanedHtmlForProcessing(html: string): HtmlProcessingCleanupResult {
-  const fallback = cleanedHtmlForCleanupModes(html, ['quotedAndSignatures', 'quotedOnly'])
+  // quotedContainersOnly is the quote-first-reply rescue: when marker
+  // truncation wipes the whole body (attribution + blockquote first,
+  // content after), removing just the quoted containers keeps the
+  // content that follows them.
+  const fallback = cleanedHtmlForCleanupModes(html, [
+    'quotedAndSignatures',
+    'quotedOnly',
+    'quotedContainersOnly',
+  ])
   return {
     html: fallback.html,
     applyPlainTextQuoteRemoval: fallback.appliedMode === null,
     applyTrailingContactSignatureRemoval: fallback.appliedMode === 'quotedAndSignatures',
+    stripStandaloneQuoteAttributionLines: fallback.appliedMode === 'quotedContainersOnly',
   }
 }
 
