@@ -2371,6 +2371,101 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(retried?.referencedInlineContentIDs, ["hero"])
     }
 
+    func testCachedHTMLAnalysis_seedReusesExactSourceAndAttachmentVariant() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveHTML("<p>Current body</p><div class=\"gmail_signature\"><img src=\"cid:hidden\"></div>")
+        func request(width: Int16 = 300) -> MessageBubbleContentRequest {
+            fixture.request(attachmentSnapshots: [MessageBubbleAttachmentSnapshot(
+                contentId: "hidden", filename: "image.png", mimeType: "image/png",
+                stateRaw: Attachment.State.downloaded.rawValue, localURL: nil,
+                byteSize: 50_000, pageCount: 0, width: width, height: 300
+            )])
+        }
+        XCTAssertNil(fixture.loader.cachedHTMLAnalysis(for: request()))
+        let loaded = await fixture.loader.loadContent(from: request())
+        XCTAssertTrue(loaded.isComplete)
+        XCTAssertTrue(loaded.htmlAnalysis.nonDisplayableInlineContentIDs.contains("hidden"))
+        XCTAssertEqual(fixture.loader.cachedHTMLAnalysis(for: request()), loaded.htmlAnalysis)
+        XCTAssertNil(fixture.loader.cachedHTMLAnalysis(for: request(width: 1200)), "Changed attachment metadata needs its own analysis")
+
+        try fixture.saveHTML("<p>A changed body with a real inline photo</p><img src=\"cid:hidden\">")
+        XCTAssertNil(fixture.loader.cachedHTMLAnalysis(for: request()), "An older source's filtering must not seed the new source")
+        let refreshed = await fixture.loader.loadContent(from: request())
+        XCTAssertFalse(refreshed.htmlAnalysis.nonDisplayableInlineContentIDs.contains("hidden"))
+        XCTAssertEqual(fixture.loader.cachedHTMLAnalysis(for: request()), refreshed.htmlAnalysis)
+    }
+
+    func testCachedHTMLAnalysis_coldPeekDoesNotPopulateFileSignatures() throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        try fixture.writeMessageFile(Data("<p>Uncached source</p>".utf8))
+        let generation = try XCTUnwrap(fixture.handler.captureAccountGeneration())
+        XCTAssertNil(fixture.handler.cachedHTMLSourceSignature(
+            messageId: fixture.messageID, bodyStorageURI: nil, expectedGeneration: generation
+        ))
+        XCTAssertNil(fixture.loader.cachedHTMLAnalysis(for: fixture.request()))
+        XCTAssertNil(fixture.handler.cachedHTMLSourceSignature(
+            messageId: fixture.messageID, bodyStorageURI: nil, expectedGeneration: generation
+        ), "The mount-time lookup must not stat the source or populate the signature cache")
+
+        let signature = fixture.handler.htmlSourceSignature(messageId: fixture.messageID, bodyStorageURI: nil)
+        XCTAssertNotEqual(signature, "missing")
+        XCTAssertEqual(fixture.handler.cachedHTMLSourceSignature(
+            messageId: fixture.messageID, bodyStorageURI: nil, expectedGeneration: generation
+        ), signature)
+    }
+
+    func testCachedHTMLSourceSignature_usesCachedFallbackAndPrefersPrimary() throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+        let fallback = fixture.directory.appendingPathComponent("fallback.html")
+        try Data("<p>Fallback source</p>".utf8).write(to: fallback)
+        let generation = try XCTUnwrap(fixture.handler.captureAccountGeneration())
+        let signature = fixture.handler.htmlSourceSignature(
+            messageId: fixture.messageID, bodyStorageURI: fallback.absoluteString
+        )
+        XCTAssertNotEqual(signature, "missing")
+        XCTAssertEqual(fixture.handler.cachedHTMLSourceSignature(
+            messageId: fixture.messageID, bodyStorageURI: fallback.absoluteString, expectedGeneration: generation
+        ), signature)
+
+        try fixture.saveHTML("<p>A different primary source takes precedence</p>")
+        let primarySignature = fixture.handler.htmlSourceSignature(messageId: fixture.messageID, bodyStorageURI: nil)
+        XCTAssertNotEqual(primarySignature, signature)
+        XCTAssertEqual(fixture.handler.cachedHTMLSourceSignature(
+            messageId: fixture.messageID, bodyStorageURI: fallback.absoluteString, expectedGeneration: generation
+        ), primarySignature)
+    }
+
+    func testCachedHTMLAnalysis_accountClosureAndReopenRejectOldSeeds() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer {
+            try? fixture.handler.reopenAccountWork()
+            fixture.removeFiles()
+        }
+        try fixture.saveHTML("<p>Existing account</p>")
+        let request = fixture.request()
+        _ = await fixture.loader.loadContent(from: request)
+        XCTAssertNotNil(fixture.loader.cachedHTMLAnalysis(for: request))
+
+        fixture.loader.htmlAnalysisCache.closeAccountWorkAndClear()
+        XCTAssertNil(fixture.loader.cachedHTMLAnalysis(for: request))
+        fixture.loader.htmlAnalysisCache.reopenAccountWork()
+        XCTAssertNil(fixture.loader.cachedHTMLAnalysis(for: request))
+
+        _ = await fixture.loader.loadContent(from: request)
+        XCTAssertNotNil(fixture.loader.cachedHTMLAnalysis(for: request))
+        let oldGeneration = try XCTUnwrap(fixture.handler.captureAccountGeneration())
+        fixture.handler.closeAccountWork()
+        XCTAssertNil(fixture.loader.cachedHTMLAnalysis(for: request))
+        try fixture.handler.reopenAccountWork()
+        XCTAssertNil(fixture.handler.cachedHTMLSourceSignature(
+            messageId: fixture.messageID, bodyStorageURI: nil, expectedGeneration: oldGeneration
+        ))
+        XCTAssertNil(fixture.loader.cachedHTMLAnalysis(for: request), "Reopening must not restore a seed before the new source is resolved")
+    }
+
     func testLoadContent_accountTransitionWhileAnalysisIsSuspendedDoesNotRecoverOrRepopulateCaches() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MessageBubbleLoaderAccountBoundary-\(UUID().uuidString)", isDirectory: true)
@@ -3137,6 +3232,7 @@ private struct RichVerdictLoaderFixture {
         hasHTMLSource: Bool = true,
         isFromMe: Bool = false,
         isForwardedEmail: Bool = false,
+        attachmentSnapshots: [MessageBubbleAttachmentSnapshot] = [],
         storedRichContentVerdict: RichContentVerdict = .unknown
     ) -> MessageBubbleContentRequest {
         MessageBubbleContentRequest(
@@ -3149,12 +3245,12 @@ private struct RichVerdictLoaderFixture {
             subject: "Stored verdict",
             senderName: "Alice Example",
             hasHTMLSource: hasHTMLSource,
-            hasAttachments: false,
+            hasAttachments: !attachmentSnapshots.isEmpty,
             isFromMe: isFromMe,
             isForwardedEmail: isForwardedEmail,
             isLikelyCalendarInvite: false,
             effectiveSenderEmail: "alice@example.com",
-            attachmentSnapshots: [],
+            attachmentSnapshots: attachmentSnapshots,
             storedRichContentVerdict: storedRichContentVerdict
         )
     }

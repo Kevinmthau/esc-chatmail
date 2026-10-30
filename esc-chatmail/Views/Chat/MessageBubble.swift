@@ -176,13 +176,12 @@ struct MessageBubble: View {
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
         self.onSendRecoveryAction = onSendRecoveryAction
-        // Seeded with the row's hint so the body passes before the load starts route as the
-        // mid-load state does (see the view model's initializer). `StateObject` evaluates this
-        // once per mount: when Gmail's echo replaces an optimistic reply the view model is kept,
-        // and the echo's hint reaches it through `loadIfNeeded` instead.
+        // StateObject evaluates the request and memory-only analysis lookup once per mount.
+        // A warm row starts with its resolved attachment layout; a cold row keeps its source
+        // hint. Gmail's echo retains this view model and refreshes through loadIfNeeded.
         self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(
             loader: messageBubbleLoader,
-            initialHasHTMLSource: message.hasHTMLSource
+            initialContentRequest: message.makeContentRequest()
         ))
     }
 
@@ -489,7 +488,7 @@ struct MessageBubble: View {
                             isFromMe: message.isFromMe,
                             isHTMLPreview: showHTMLPreview,
                             bodyContentIDs: viewModel.htmlAnalysis.bodyInlineContentIDs,
-                            hasLoadedAnalysis: viewModel.hasLoadedContent
+                            hasLoadedAnalysis: viewModel.hasResolvedHTMLAnalysis
                         ))
                     })
                 )

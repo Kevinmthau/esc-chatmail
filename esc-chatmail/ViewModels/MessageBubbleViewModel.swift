@@ -11,6 +11,7 @@ final class MessageBubbleViewModel: ObservableObject {
     @Published private(set) var sharedDocumentLinks: [SharedDocumentLink] = []
     @Published private(set) var forwardedDisplayContent: ForwardedMessageDisplayContent?
     @Published private(set) var htmlAnalysis: MessageBubbleHTMLAnalysis
+    @Published private(set) var hasResolvedHTMLAnalysis = false
 
     private let loader: any MessageBubbleLoading
     private var loadingMessageID: String?
@@ -24,18 +25,20 @@ final class MessageBubbleViewModel: ObservableObject {
     /// signature, and the next `loadIfNeeded` must retry rather than short-circuit on stale content.
     private var appliedContentSignature: String?
 
-    /// - Parameter initialHasHTMLSource: the row's HTML-source hint
-    ///   (`ChatMessageRowModel.hasHTMLSource`), the same value `loadIfNeeded` publishes in its
-    ///   synchronous prologue. The bubble's body runs before its `.task` has started that load,
-    ///   and routes on `htmlAnalysis` (`MessageBubble.displayInput`): unseeded, every HTML row
-    ///   was laid out as a row with no HTML source until then (its text), and swapped to the
-    ///   "Loading..." pill or the preview card once the prologue ran; on a chat open, inside the
-    ///   hidden initial-anchor pass (`ChatMessagesCoordinator`). Seeded, a fresh mount starts in
-    ///   the mid-load state. Only a fresh view model takes the seed: an in-place refresh (Gmail's
-    ///   echo replacing an optimistic reply) keeps this instance and what it has published.
-    init(loader: any MessageBubbleLoading, initialHasHTMLSource: Bool = false) {
+    /// A fresh mount reuses resolved attachment filtering and sizing before its first body
+    /// pass. A cache miss still seeds the HTML-source hint, without doing file or parser work.
+    /// Analysis alone is not completed content: rich routing and text still await the load.
+    init(
+        loader: any MessageBubbleLoading,
+        initialHasHTMLSource: Bool = false,
+        initialContentRequest: MessageBubbleContentRequest? = nil
+    ) {
         self.loader = loader
-        self.htmlAnalysis = .placeholder(hasHTMLSource: initialHasHTMLSource)
+        let cachedAnalysis = initialContentRequest.flatMap { loader.cachedHTMLAnalysis(for: $0) }
+        self.htmlAnalysis = cachedAnalysis ?? .placeholder(
+            hasHTMLSource: initialContentRequest?.hasHTMLSource ?? initialHasHTMLSource
+        )
+        self.hasResolvedHTMLAnalysis = cachedAnalysis != nil
     }
 
     convenience init(deps: Dependencies) {
@@ -77,7 +80,11 @@ final class MessageBubbleViewModel: ObservableObject {
             hasRichHTMLContent = false
             sharedDocumentLinks = []
             forwardedDisplayContent = nil
-            htmlAnalysis = .placeholder(hasHTMLSource: context.contentRequest.hasHTMLSource)
+            // Revalidate the exact source and attachment variant. A warm remount keeps the
+            // same filtering/compact-image decisions before and during its async load.
+            let cachedAnalysis = loader.cachedHTMLAnalysis(for: context.contentRequest)
+            htmlAnalysis = cachedAnalysis ?? .placeholder(hasHTMLSource: context.contentRequest.hasHTMLSource)
+            hasResolvedHTMLAnalysis = cachedAnalysis != nil
             senderName = context.prefetchedSenderName
             senderAvatarURL = nil
             senderImageData = nil
@@ -132,6 +139,7 @@ final class MessageBubbleViewModel: ObservableObject {
         sharedDocumentLinks = contentResult.sharedDocumentLinks
         forwardedDisplayContent = contentResult.forwardedDisplayContent
         htmlAnalysis = contentResult.htmlAnalysis
+        hasResolvedHTMLAnalysis = true
         hasLoadedContent = true
         appliedContentSignature = context.contentSignature
     }

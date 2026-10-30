@@ -233,6 +233,14 @@ struct MessageBubbleLoadContext: Sendable {
 }
 
 protocol MessageBubbleLoading: Sendable {
+    /// A synchronous, memory-only seed for a fresh row. A miss must not start work.
+    func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) -> MessageBubbleHTMLAnalysis?
     func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult
+}
+
+extension MessageBubbleLoading {
+    func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) -> MessageBubbleHTMLAnalysis? {
+        nil
+    }
 }

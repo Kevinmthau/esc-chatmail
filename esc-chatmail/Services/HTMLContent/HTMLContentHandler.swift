@@ -365,6 +365,27 @@ final class HTMLContentHandler: @unchecked Sendable {
         )
     }
 
+    /// Reads only signatures already cached by normal source access. A missing entry is
+    /// unknown, not a missing file: mounting a chat row must not stat or read its HTML.
+    func cachedHTMLSourceSignature(
+        messageId: String,
+        bodyStorageURI: String?,
+        expectedGeneration: HTMLContentAccountGeneration
+    ) -> String? {
+        accountBoundary.perform(directoryKey: directoryKey, expectedGeneration: expectedGeneration) {
+            let primaryFileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
+            guard let primarySignature = Self.fileSignatureCache.object(
+                forKey: cacheKey(for: primaryFileURL)
+            ) as String? else { return nil }
+            guard primarySignature == "missing", let bodyStorageURI,
+                  let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+                  resolvedURL.path != primaryFileURL.path else {
+                return primarySignature
+            }
+            return Self.fileSignatureCache.object(forKey: cacheKey(for: resolvedURL)) as String?
+        } ?? nil
+    }
+
     func htmlSourceSignature(
         messageId: String,
         bodyStorageURI: String?,
