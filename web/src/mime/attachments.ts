@@ -27,13 +27,35 @@ function normalizedContentId(part: GmailPart): string | null {
   return rawContentId !== null ? rawContentId.replace(/^[<>]+|[<>]+$/g, '') : null
 }
 
+function isMultipartPart(part: GmailPart): boolean {
+  return part.mimeType?.toLowerCase().startsWith('multipart/') ?? false
+}
+
+function hasContentId(contentId: string | null): contentId is string {
+  return contentId !== null && contentId.length > 0
+}
+
+/** `text/*`: the media types Gmail hands back behind an attachmentId as oversized bodies. */
+function isTextualMimeType(mimeType: string | undefined): boolean {
+  return mimeType?.toLowerCase().startsWith('text/') ?? false
+}
+
+/** The two body slots the content walk (parse.ts) fills. */
+function isBodySlotMimeType(mimeType: string | undefined): boolean {
+  const normalized = mimeType?.toLowerCase() ?? ''
+  return normalized.startsWith('text/html') || normalized.startsWith('text/plain')
+}
+
 /**
- * Gmail also uses body.attachmentId as indirection for oversized message
- * bodies. Attachment evidence therefore comes from MIME semantics, never the
- * presence of attachmentId alone.
+ * Attachment evidence from MIME semantics alone — a filename, an `attachment`
+ * disposition, or a Content-ID image (MessageProcessor.isAttachmentContentPart
+ * plus the CID-image case of its inline-data rule). This is also the body-slot
+ * exclusion the content walk (parse.ts) applies, so it must stay free of the
+ * attachmentId signal: Gmail uses body.attachmentId as indirection for
+ * oversized message bodies too, and a part admitted here is never a body.
  */
 export function isAttachmentPart(part: GmailPart): boolean {
-  if (part.mimeType?.toLowerCase().startsWith('multipart/') ?? false) return false
+  if (isMultipartPart(part)) return false
 
   const trimmedFilename = part.filename?.trim() ?? ''
   const contentId = normalizedContentId(part)
@@ -41,9 +63,7 @@ export function isAttachmentPart(part: GmailPart): boolean {
 
   const hasAttachmentDisposition = contentDisposition.includes('attachment')
   const isInlineCIDImage =
-    (part.mimeType?.toLowerCase().startsWith('image/') ?? false) &&
-    contentId !== null &&
-    contentId.length > 0
+    (part.mimeType?.toLowerCase().startsWith('image/') ?? false) && hasContentId(contentId)
 
   if (hasAttachmentDisposition) {
     return true
@@ -54,6 +74,44 @@ export function isAttachmentPart(part: GmailPart): boolean {
   }
 
   return isInlineCIDImage
+}
+
+/**
+ * MessageProcessor.extractAttachments's server-part rule. iOS takes every
+ * non-multipart part carrying an attachmentId; here an oversized `text/*`
+ * body arrives the same way (parse.ts follows it through fetchLargeBody), so
+ * text parts still need the MIME evidence above. Anything else behind an
+ * attachmentId can only be a file: a nameless `application/pdf` with no
+ * Content-Disposition (Gmail lists it as "noname") is the attachment iOS
+ * shows as `attachment.pdf`, and dropping it leaves the message with no
+ * download affordance at all.
+ */
+export function isServerAttachmentPart(part: GmailPart): boolean {
+  if (part.body?.attachmentId === undefined || isMultipartPart(part)) return false
+  if (isAttachmentPart(part)) return true
+  return !isTextualMimeType(part.mimeType)
+}
+
+/**
+ * MessageProcessor.shouldTreatInlineDataPartAsAttachment: the MIME evidence
+ * above, or an `inline` disposition paired with a Content-ID (a calendar or
+ * PDF part a client embeds by reference without naming it). That last branch
+ * stops at the body slots: a multipart/related root commonly carries
+ * `Content-Disposition: inline` plus a Content-ID, and here the same part
+ * feeds the content walk, so it stays the body rather than gaining an
+ * `attachment.html` tile beside itself (parse.test pins it).
+ */
+export function isInlineDataAttachmentPart(part: GmailPart): boolean {
+  if (isMultipartPart(part)) return false
+  if (isAttachmentPart(part)) return true
+
+  const contentDisposition = (headerValue(part, 'content-disposition') ?? '').toLowerCase()
+  const hasInlineDisposition = contentDisposition.includes('inline')
+  return (
+    hasInlineDisposition &&
+    hasContentId(normalizedContentId(part)) &&
+    !isBodySlotMimeType(part.mimeType)
+  )
 }
 
 export function fileExtensionForMimeType(mimeType: string): string {
@@ -172,12 +230,16 @@ function resolvedAttachmentFilename(trimmedFilename: string, mimeType: string): 
   return trimmedFilename
 }
 
-/** True when any part in the tree has both content and attachment semantics. */
+/**
+ * True when any part in the tree has both content and attachment semantics —
+ * the same two admissions extractAttachments applies, minus the decode.
+ */
 export function checkForAttachments(part: GmailPart): boolean {
-  if (
-    isAttachmentPart(part) &&
-    (part.body?.attachmentId !== undefined || part.body?.data !== undefined)
-  ) {
+  if (isServerAttachmentPart(part)) {
+    return true
+  }
+
+  if (part.body?.data !== undefined && isInlineDataAttachmentPart(part)) {
     return true
   }
 
@@ -201,15 +263,17 @@ export function extractAttachments(part: GmailPart): ParsedAttachment[] {
   const traverse = (current: GmailPart): void => {
     const trimmedFilename = current.filename?.trim() ?? ''
     const mimeType = current.mimeType ?? 'application/octet-stream'
-    const isMultipart = current.mimeType?.startsWith('multipart/') ?? false
 
     // Content-ID format is typically <unique-id@domain.com>; strip the angle
     // brackets for matching against cid: URLs.
     const contentId = normalizedContentId(current)
-    const isAttachment = isAttachmentPart(current)
 
     const attachmentId = current.body?.attachmentId
-    if (attachmentId !== undefined && !isMultipart && isAttachment && !seenIds.has(attachmentId)) {
+    if (
+      attachmentId !== undefined &&
+      isServerAttachmentPart(current) &&
+      !seenIds.has(attachmentId)
+    ) {
       seenIds.add(attachmentId)
       attachments.push({
         id: attachmentId,
@@ -219,7 +283,7 @@ export function extractAttachments(part: GmailPart): ParsedAttachment[] {
         contentId,
         inlineData: null,
       })
-    } else if (!isMultipart && current.body?.data !== undefined && isAttachment) {
+    } else if (current.body?.data !== undefined && isInlineDataAttachmentPart(current)) {
       const decodedData = base64UrlDecodeToBytes(current.body.data)
       if (decodedData !== null) {
         const size = current.body.size ?? decodedData.length

@@ -3,6 +3,7 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { ChatmailDB } from '@/db/schema'
 import type { AttachmentState, OutboundSendRow } from '@/db/types'
+import { GmailApiError } from '@/gmail/errors'
 import type { TokenBroker } from '@/gmail/gmailFetch'
 import { makeRecipientParticipantSetIdentity } from '@/identity/participantSet'
 import { MAX_SEND_RAW_BYTES } from './mimeBuilder'
@@ -144,7 +145,7 @@ describe('sendMessage', () => {
       },
     )
 
-    expect(result).toEqual({ messageId: 'g_new', conversationId: 'c1' })
+    expect(result).toEqual({ messageId: 'g_new', conversationId: 'c1', delivery: 'committed' })
 
     // Request: threadId passed, MIME carries the reply chain and recipients.
     expect(captured).toHaveLength(1)
@@ -321,7 +322,7 @@ describe('sendMessage', () => {
           snippet: 'inbound wins',
           inboxUnreadCount: 1,
         })
-        throw new Error('boom')
+        throw new GmailApiError(400, 'invalidArgument', 'boom')
       },
     }
 
@@ -849,7 +850,7 @@ describe('sendMessage', () => {
           captured.push(params)
           if (firstAttempt) {
             firstAttempt = false
-            return Promise.reject(new Error('offline'))
+            return Promise.reject(new GmailApiError(400, 'invalidArgument', 'rejected'))
           }
           return Promise.resolve({ id: 'g_retry_fwd', threadId: 't_fwd', labelIds: ['SENT'] })
         },

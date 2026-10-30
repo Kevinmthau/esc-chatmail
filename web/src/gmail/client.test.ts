@@ -422,9 +422,12 @@ describe('listHistory', () => {
   })
 
   it('keeps other 4xx as GmailApiError', async () => {
+    // A policy/scope 403 (not a throttle or quota reason) stays terminal.
     server.use(
       http.get(`${GMAIL_API_BASE}/users/me/history`, () =>
-        HttpResponse.json(gmailError(403, 'Quota exceeded', 'quotaExceeded'), { status: 403 }),
+        HttpResponse.json(gmailError(403, 'Insufficient Permission', 'insufficientPermissions'), {
+          status: 403,
+        }),
       ),
     )
 
@@ -433,7 +436,7 @@ describe('listHistory', () => {
     )
 
     expect(failure).toBeInstanceOf(GmailApiError)
-    expect(failure).toMatchObject({ status: 403, reason: 'quotaExceeded' })
+    expect(failure).toMatchObject({ status: 403, reason: 'insufficientPermissions' })
   })
 
   it('passes startHistoryId and pageToken as query params', async () => {

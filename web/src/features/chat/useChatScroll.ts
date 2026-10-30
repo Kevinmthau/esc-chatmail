@@ -1,7 +1,9 @@
 // The chat scroll engine (plan §Chat scroll decision): no virtualizer. The
 // scroller is a normal-flow overflow-y column with [overflow-anchor:none];
 // this hook does all anchoring manually:
-//   - initial position: restore the saved scrollTop for the conversation, else
+//   - initial position: restore the saved mid-history offset for the
+//     conversation when the window still starts at the row it was measured
+//     from (seeding the new-messages pill with what arrived meanwhile), else
 //     jump to the bottom, in useLayoutEffect (before first paint); pinned is
 //     seeded from that restored position so observer initial deliveries cannot
 //     clobber it
@@ -22,15 +24,18 @@ import {
   pillCount,
   prependCorrection,
   resolveAppend,
+  resolveRestore,
+  savedScrollPosition,
   windowGrewAtTop,
   type AppendMessageLike,
+  type SavedScrollPosition,
 } from './useChatScroll.helpers'
 
-/** Saved scroll offsets per conversation (module-level; survives remounts). */
-const savedScrollTops = new Map<string, number>()
+/** Saved scroll positions per conversation (module-level; survives remounts). */
+const savedScrollPositions = new Map<string, SavedScrollPosition>()
 
 export function clearSavedScrollTopsForTests(): void {
-  savedScrollTops.clear()
+  savedScrollPositions.clear()
 }
 
 function prefersReducedMotion(): boolean {
@@ -86,9 +91,9 @@ export function useChatScroll({
     null,
   )
   const prevLastIdRef = useRef<string | null>(null)
-  // Observer callbacks read the latest props through this ref.
-  const latestRef = useRef({ hasOlder, onLoadOlder, firstId: messages[0]?.id ?? null })
-  latestRef.current = { hasOlder, onLoadOlder, firstId: messages[0]?.id ?? null }
+  // Observer callbacks and the unmount save read the latest props through this ref.
+  const latestRef = useRef({ hasOlder, onLoadOlder, messages, firstId: messages[0]?.id ?? null })
+  latestRef.current = { hasOlder, onLoadOlder, messages, firstId: messages[0]?.id ?? null }
 
   const [newCount, setNewCount] = useState(0)
 
@@ -110,12 +115,16 @@ export function useChatScroll({
 
     if (!didInitRef.current) {
       didInitRef.current = true
-      const saved = savedScrollTops.get(conversationId)
+      const restore = resolveRestore(savedScrollPositions.get(conversationId), messages)
+      const saved = restore.kind === 'offset' ? restore.top : undefined
       setScrollTop(scroller, saved ?? scroller.scrollHeight, false)
       // A restored mid-history position must not count as pinned, or the
       // ResizeObserver's initial delivery would immediately re-stick to the
       // bottom and clobber the restore.
       pinnedRef.current = initialPinned(saved, scroller.scrollHeight, scroller.clientHeight)
+      if (restore.kind === 'offset' && restore.unseenIncomingCount > 0) {
+        setNewCount(restore.unseenIncomingCount)
+      }
       prevLastIdRef.current = messages.at(-1)?.id ?? null
       return
     }
@@ -225,7 +234,16 @@ export function useChatScroll({
     // The scroller node is stable for the lifetime of this effect.
     const scroller = scrollerRef.current
     return () => {
-      if (scroller !== null) savedScrollTops.set(conversationId, scroller.scrollTop)
+      if (scroller === null) return
+      savedScrollPositions.set(
+        conversationId,
+        savedScrollPosition(
+          scroller.scrollTop,
+          scroller.scrollHeight,
+          scroller.clientHeight,
+          latestRef.current.messages,
+        ),
+      )
     }
   }, [conversationId])
 

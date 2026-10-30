@@ -4,7 +4,10 @@
 // GmailAPIClient.swift) + Services/Retry/* onto the web transport. The
 // engine owns 429 pacing and 5xx/network exponential backoff; gmailFetch
 // already owns the once-only 401 refresh+replay, so AuthRequiredError is
-// always terminal here.
+// always terminal here. gmailFetch also classifies 403 by Gmail reason: a
+// throttle 403 arrives here as RateLimitError (paced like a 429 — a definite
+// rejection, so even a non-retransmittable send is safe to resend), a quota
+// 403 as the terminal, account-scoped QuotaExhaustedError.
 //
 // Simplifications vs iOS (per plan): the 120s total-retry circuit breaker
 // and RateLimitTracker sliding window are replaced by a per-request
@@ -53,6 +56,14 @@ export interface RetryBehavior {
   random?: () => number
   /** Injectable fetch, threaded through to gmailFetch. */
   fetchImpl?: typeof fetch
+  /** Per-attempt timeout override, threaded through to gmailFetch. */
+  timeoutMs?: number
+  /**
+   * Caller cancellation (session teardown), threaded through to gmailFetch.
+   * An aborted signal surfaces as RequestAbortedError, which is terminal
+   * here: a request the caller gave up on is never resent.
+   */
+  signal?: AbortSignal
 }
 
 /**
@@ -77,9 +88,12 @@ function defaultSleep(ms: number): Promise<void> {
  *   carried no Retry-After; retry, counting against maxAttempts.
  * - GmailApiError 5xx: exponential backoff (1s base, ×2, cap 30s, ±10%
  *   jitter), retry — only when retransmission is safe (allowed or GET).
- * - NetworkError: same backoff retry when retransmission is safe; terminal
- *   otherwise (see the pre-transmission deviation note above).
+ * - NetworkError (transport failure or per-request timeout): same backoff
+ *   retry when retransmission is safe; terminal otherwise (see the
+ *   pre-transmission deviation note above).
  * - AuthRequiredError: terminal (gmailFetch already refreshed+replayed once).
+ * - QuotaExhaustedError, RequestAbortedError: terminal — the account's quota
+ *   is spent, or the caller cancelled; neither improves with a resend.
  * - Other GmailApiError (4xx…): terminal; mapStatus is consulted first.
  */
 export async function performRetryingRequest(
@@ -93,9 +107,11 @@ export async function performRetryingRequest(
   const random = behavior.random ?? Math.random
   const method = (init?.method ?? 'GET').toUpperCase()
   const retransmissionSafe = behavior.allowsRetransmission || method === 'GET'
-  const fetchOptions: GmailFetchOptions | undefined = behavior.fetchImpl
-    ? { fetchImpl: behavior.fetchImpl }
-    : undefined
+  const fetchOptions: GmailFetchOptions = {
+    ...(behavior.fetchImpl !== undefined ? { fetchImpl: behavior.fetchImpl } : {}),
+    ...(behavior.timeoutMs !== undefined ? { timeoutMs: behavior.timeoutMs } : {}),
+    ...(behavior.signal !== undefined ? { signal: behavior.signal } : {}),
+  }
 
   // 0-indexed count of backoff sleeps taken so far; drives the exponential
   // progression for 5xx/network retries (429 uses server pacing instead).

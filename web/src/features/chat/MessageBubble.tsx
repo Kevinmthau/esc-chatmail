@@ -5,7 +5,7 @@
 // mail — and the timestamp/unread/send-state meta line.
 
 import { Link, useNavigate } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Avatar } from '@/components/ui/Avatar'
 import { ContextMenu, ContextMenuItem } from '@/components/ui/ContextMenu'
 import { UnreadDot } from '@/components/ui/UnreadDot'
@@ -20,6 +20,7 @@ import { messageDisplayMode } from '@/lib/displayPolicy'
 import { formatTimestamp } from '@/lib/formatTimestamp'
 import { isForwardedSubject } from '@/mime/preview'
 import { sendFailureMessage } from '@/outbox/send'
+import { resolveBubbleText } from './resolveBubbleText'
 import { useRichHtmlContent } from './useRichHtmlContent'
 
 // --- Row ---------------------------------------------------------------------
@@ -60,9 +61,11 @@ export function MessageBubble({ message, decoration, isOneToOne, onReply }: Mess
 
   const senderLabel =
     message.senderName.trim().length > 0 ? message.senderName : message.senderEmail
-  const text = (
-    message.chatPreviewText.trim().length > 0 ? message.chatPreviewText : message.bodyText
-  ).trim()
+  // Never the raw bodyText (resolveBubbleText); memoized because it runs per row.
+  const text = useMemo(
+    () => resolveBubbleText(message.chatPreviewText, message.bodyText),
+    [message.chatPreviewText, message.bodyText],
+  )
   const subject = message.subject.trim()
   const showSubjectLine =
     mode !== 'previewCard' && subject.length > 0 && subject.toLowerCase() !== text.toLowerCase()

@@ -2,15 +2,17 @@
 // Services/Compose/ReplyMetadataBuilder.swift (+ OutboundReplyContextBuilder
 // and the ReplyAddressHint ladder from ReplySnapshots.swift): recipients come
 // from the conversation's PARTICIPANT rows (not the last message's headers),
-// threading targets the newest message, and the reply-from alias is selected
-// via the shared sync/replyFrom ladder.
+// threading targets the newest message whose delivery is settled
+// (latestNonListReplyMessage), and the reply-from alias is selected via the
+// shared sync/replyFrom ladder.
 
 import Dexie from 'dexie'
 import type { ChatmailDB } from '@/db/schema'
-import type { MessageRow, MsgParticipantRow, SendAsAlias } from '@/db/types'
+import type { MessageRow, MsgParticipantRow, OutboundSendRow, SendAsAlias } from '@/db/types'
 import { normalizeEmail } from '@/identity/normalizeEmail'
 import { deduplicated, normalizedAliasAddress } from '@/sync/aliases'
 import { selectReplyFromAlias } from '@/sync/replyFrom'
+import { optimisticSendIdFromMessageId } from './mimeBuilder'
 
 export interface ReplyMetadata {
   /** Conversation participants minus the user's own aliases (normalized compare). */
@@ -33,6 +35,58 @@ export function prefixSubjectForReply(subject: string): string {
   if (trimmed === '') return ''
   if (trimmed.toLowerCase().startsWith('re:')) return trimmed
   return `Re: ${trimmed}`
+}
+
+/**
+ * True for a row this device's send created that sync has not yet replaced
+ * with Gmail's echo: its Message-ID still derives from its own (local) id
+ * (OutboundSendDeliveryState.localOptimisticMessageID), or it still carries a
+ * local sendState from before the deterministic Message-ID was stamped.
+ */
+export function isLocalOptimisticRow(message: MessageRow): boolean {
+  if (message.sendState === 'pending' || message.sendState === 'failed') return true
+  return (
+    message.isFromMe === 1 && optimisticSendIdFromMessageId(message.rfcMessageId) === message.id
+  )
+}
+
+/**
+ * True while the row's remote send has no settled result
+ * (OutboundSendDeliveryState.resolve != .none): still sending, definitely not
+ * sent, or delivery unknown (retained under its local id with an 'ambiguous'
+ * journal). A committed send — PK already swapped to the Gmail id, or its
+ * journal committed/finalized — is settled and carries the Message-ID the
+ * header went out with, so it is a valid reply target.
+ */
+async function isUnresolvedLocalSend(db: ChatmailDB, message: MessageRow): Promise<boolean> {
+  if (message.sendState === 'pending' || message.sendState === 'failed') return true
+  if (!isLocalOptimisticRow(message)) return false
+  const journal: OutboundSendRow | undefined = await db.outboundSends.get(message.id)
+  if (journal === undefined) return false
+  const status: string = journal.status
+  return status !== 'committed' && status !== 'finalized'
+}
+
+/**
+ * The message a reply threads onto (ReplySnapshots.latestNonListReplyMessage):
+ * the newest row whose remote send is settled. A local row with no thread id
+ * yet (a new compose or forward still in flight, or retained unsent) is
+ * selected on purpose and yields NO threading: an unresolved new send must
+ * not let the reply fall back onto an older thread before its own thread id
+ * is known.
+ */
+async function latestReplyTarget(
+  db: ChatmailDB,
+  messagesNewestFirst: readonly MessageRow[],
+): Promise<MessageRow | undefined> {
+  for (const message of messagesNewestFirst) {
+    if (message.gmThreadId.trim() === '') {
+      if (isLocalOptimisticRow(message)) return message
+      continue
+    }
+    if (!(await isUnresolvedLocalSend(db, message))) return message
+  }
+  return undefined
 }
 
 function buildReferences(referencesHeader: string, rfcMessageId: string): string[] {
@@ -161,7 +215,10 @@ export async function buildReplyMetadata(
     .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey])
     .toArray()
   const newestFirst = [...messages].reverse()
-  const target = newestFirst[0]
+  const latest = await latestReplyTarget(db, newestFirst)
+  // A thread-less local row blocks older thread metadata but is no reply
+  // target itself (ReplyConversationSnapshot.latestReplyTarget is nil for it).
+  const target = latest !== undefined && latest.gmThreadId.trim() !== '' ? latest : undefined
 
   // Reply-from resolution ladder (ReplyMetadataBuilder: `replyingTo ??
   // conversation` per field): the target's stored addresses, then an alias

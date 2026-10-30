@@ -24,7 +24,8 @@ export const AUTOCOMPLETE_LIMIT = 8
  * chip. Each committed segment is expanded by splitRecipientSegment, so an
  * Outlook-style paste ('a@b.com; c@d.com' or space-joined) becomes several
  * valid chips instead of one chip the MIME builder would reject. Invalid
- * chips are kept, tinted danger, and excluded from send by the model layer.
+ * chips are kept and tinted danger; ComposeDialog's send gate holds the send
+ * while one exists (iOS ComposeViewModel.canSend), it never drops them.
  */
 export function RecipientField({
   chips,

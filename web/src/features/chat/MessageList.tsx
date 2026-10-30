@@ -1,7 +1,8 @@
 // The message scroller: windowed rendering (useChatWindow, +50 per load-older)
 // driven by the useChatScroll engine. Mount this keyed by conversationId so all
-// scroll state resets on chat switches while the saved-offset Map restores the
-// previous position.
+// scroll state resets on chat switches while the saved-position Map restores
+// the previous mid-history position (only against the same first page; the
+// window limit resets here, so a deeper window's offset reopens at the bottom).
 
 import { useMemo, useState, type RefObject } from 'react'
 import { Skeleton } from '@/components/ui/Skeleton'

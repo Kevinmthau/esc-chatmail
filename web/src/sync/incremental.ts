@@ -3,22 +3,28 @@
 // +MessageDeletions) + HistoryCollectionPhase.
 //
 // Phase order (invariant-critical):
-//   1  history collection (≤50 pages; truncation keeps the ORIGINAL cursor)
+//   1  history collection (≤50 pages per slice, resuming from a stored
+//      continuation token; truncation keeps the ORIGINAL cursor and stages
+//      the next page token instead)
 //   2  fetch + persist new messages
 //   2b abandoned drain (failures never block cursor advancement)
 //   3  label ops — AFTER fetch so the rows exist — deletions, then adds, then
 //      removals, respecting the 30-min localModifiedAt guard
 //   4  reconciliation (missed-message check every sync; label repair on TTL)
-//   ∎  finalize: historyId + rollups in ONE rw transaction.
+//   ∎  finalize: historyId or continuation + rollups in ONE rw transaction.
 
 import {
+  clearHistoryContinuation,
+  getHistoryContinuation,
   getLastSuccessfulSyncAt,
+  setHistoryContinuation,
   setLabelReconciledAt,
   setLastSuccessfulSyncAt,
   setSyncProgress,
 } from '@/db/kv'
 import type { ChatmailDB } from '@/db/schema'
 import type { AccountRow, Flag } from '@/db/types'
+import { GmailApiError } from '@/gmail/errors'
 import { HistoryIdExpiredError } from '@/gmail/historyError'
 import type { HistoryRecord } from '@/gmail/types'
 import { rollupConversation, EXCLUDED_MAILBOX_LABEL_IDS } from '@/rollup/rollup'
@@ -59,8 +65,17 @@ export const SEND_AS_REFRESH_TTL_MS = 24 * 60 * 60 * 1000
 export interface IncrementalSyncResult {
   mode: 'incremental' | 'recovery'
   newMessageCount: number
+  /** The Account cursor moved. False for a truncated slice even when its continuation was staged. */
   historyIdAdvanced: boolean
   wasTruncated: boolean
+  /** The truncated slice staged its continuation token (it had no blocking failures). */
+  continuationStaged: boolean
+  /**
+   * More history is already known to be waiting (a continuation was staged)
+   * or this slice must be retried: the caller should run again without
+   * waiting for the next scheduler tick (IncrementalSyncResult.needsFollowUp).
+   */
+  needsFollowUp: boolean
 }
 
 export type SyncRunResult = IncrementalSyncResult | InitialSyncResult
@@ -70,19 +85,27 @@ interface HistoryCollection {
   newMessageIds: string[]
   latestHistoryId: string
   wasTruncated: boolean
+  /** The token for page 51+ when truncated; null on a terminal slice. */
+  nextPageToken: string | null
 }
 
 /**
- * Pages listHistory up to MAX_HISTORY_PAGES. New-message ids come from
- * messagesAdded, excluding anything already labeled SPAM/DRAFT/TRASH, deduped
- * across records. On truncation the ORIGINAL startHistoryId is kept so pages
- * 51+ are never lost.
+ * Pages listHistory up to MAX_HISTORY_PAGES, starting at `resumeToken` when a
+ * compatible continuation is stored. New-message ids come from messagesAdded,
+ * excluding anything already labeled SPAM/DRAFT/TRASH, deduped across
+ * records. On truncation the ORIGINAL startHistoryId is kept and the next
+ * page token is returned so pages 51+ are never lost: the orchestrator stages
+ * it with this slice's effects (HistoryCollectionPhase).
  */
-async function collectHistory(deps: SyncDeps, startHistoryId: string): Promise<HistoryCollection> {
+async function collectHistory(
+  deps: SyncDeps,
+  startHistoryId: string,
+  resumeToken: string | null,
+): Promise<HistoryCollection> {
   const records: HistoryRecord[] = []
   const newMessageIds = new Set<string>()
   let latestHistoryId = startHistoryId
-  let pageToken: string | undefined
+  let pageToken: string | undefined = resumeToken ?? undefined
   let pageCount = 0
 
   for (;;) {
@@ -109,11 +132,62 @@ async function collectHistory(deps: SyncDeps, startHistoryId: string): Promise<H
         newMessageIds: [...newMessageIds],
         latestHistoryId: startHistoryId,
         wasTruncated: true,
+        nextPageToken: pageToken,
       }
     }
   }
 
-  return { records, newMessageIds: [...newMessageIds], latestHistoryId, wasTruncated: false }
+  return {
+    records,
+    newMessageIds: [...newMessageIds],
+    latestHistoryId,
+    wasTruncated: false,
+    nextPageToken: null,
+  }
+}
+
+/**
+ * Gmail has no dedicated status for an invalid History API page token:
+ * observed responses are a 4xx whose message/reason names `pageToken`. Only
+ * that narrow shape is matched, and only for a request that carried a stored
+ * token, so an unrelated malformed request cannot trigger a checkpoint
+ * replay. A message naming the frozen cursor is NOT a token rejection: that
+ * is history expiry. (Port of GmailAPIClient.isInvalidHistoryPageTokenResponse;
+ * the web listHistory already maps every 404 to HistoryIdExpiredError, whose
+ * recovery discards the continuation too.)
+ */
+export function isInvalidHistoryPageTokenError(error: unknown): boolean {
+  if (!(error instanceof GmailApiError)) return false
+  if (error.status < 400 || error.status > 499) return false
+  const normalize = (text: string): string => text.toLowerCase().replace(/[_\- ]/g, '')
+  const message = normalize(error.message)
+  if (message.includes('starthistoryid')) return false
+  const diagnostic = normalize(`${error.message} ${error.reason ?? ''}`)
+  return (
+    diagnostic.includes('pagetoken') &&
+    (diagnostic.includes('invalid') ||
+      diagnostic.includes('expired') ||
+      diagnostic.includes('notfound'))
+  )
+}
+
+/**
+ * Loads the stored continuation for this cursor. A row for another cursor is
+ * garbage from a cursor that has since moved (ForegroundHistoryCheckpointStore
+ * .loadCompatible deletes such rows): it is dropped and the slice replays
+ * from the frozen Account cursor.
+ */
+async function loadCompatibleContinuation(
+  db: ChatmailDB,
+  startHistoryId: string,
+): Promise<string | null> {
+  const stored = await getHistoryContinuation(db)
+  if (stored === null) return null
+  if (stored.startHistoryId !== startHistoryId) {
+    await clearHistoryContinuation(db)
+    return null
+  }
+  return stored.pageToken
 }
 
 // ---------------------------------------------------------------------------
@@ -222,28 +296,54 @@ export async function applyHistoryLabelOps(
 // ---------------------------------------------------------------------------
 
 /**
- * Advances the history cursor and recomputes rollups for every touched
+ * How the durable history position moves at the end of a slice
+ * (IncrementalSyncOrchestrator's advance block):
+ * - advance: terminal slice, failure policy allows — the Account cursor moves
+ *   and any continuation is cleared;
+ * - stage: truncated slice, failure policy allows — the cursor stays frozen
+ *   and the next page token is stored for the next run;
+ * - hold: failures below the escape hatch — nothing moves, so the same slice
+ *   (an existing continuation, or the frozen cursor) is retried.
+ */
+type HistoryPositionMove =
+  | { kind: 'advance'; historyId: string }
+  | { kind: 'stage'; startHistoryId: string; pageToken: string }
+  | { kind: 'hold' }
+
+/**
+ * Moves the history position and recomputes rollups for every touched
  * conversation in ONE rw transaction: later syncs can never observe message
- * changes without the derived conversation state, and vice versa.
+ * changes without the derived conversation state, nor a continuation without
+ * the slice's effects it skips past, and vice versa.
  */
 async function finalizeSync(
   db: ChatmailDB,
   accountEmail: string,
-  historyIdToSave: string | null,
+  move: HistoryPositionMove,
   touchedConversationIds: ReadonlySet<string>,
   now: number,
 ): Promise<void> {
-  await db.transaction('rw', db.messages, db.conversations, db.accounts, async () => {
-    for (const conversationId of touchedConversationIds) {
-      await rollupConversation(db, conversationId, now)
-    }
-    if (historyIdToSave !== null) {
-      const account = await db.accounts.get(accountEmail)
-      if (account !== undefined) {
-        await db.accounts.put({ ...account, historyId: historyIdToSave })
+  await db.transaction(
+    'rw',
+    [db.messages, db.conversations, db.convoParticipants, db.people, db.accounts, db.syncState],
+    async () => {
+      for (const conversationId of touchedConversationIds) {
+        await rollupConversation(db, conversationId, now)
       }
-    }
-  })
+      if (move.kind === 'advance') {
+        await clearHistoryContinuation(db)
+        const account = await db.accounts.get(accountEmail)
+        if (account !== undefined) {
+          await db.accounts.put({ ...account, historyId: move.historyId })
+        }
+      } else if (move.kind === 'stage') {
+        await setHistoryContinuation(db, {
+          startHistoryId: move.startHistoryId,
+          pageToken: move.pageToken,
+        })
+      }
+    },
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +371,9 @@ async function runHistoryRecovery(
 ): Promise<IncrementalSyncResult> {
   const { db, api } = deps
   await setSyncProgress(db, { phase: 'recovery' })
+  // The cursor the continuation extended is dead at Gmail; whatever recovery
+  // decides about the cursor, the token can never be resumed.
+  await clearHistoryContinuation(db)
 
   const lastSyncAt = await getLastSuccessfulSyncAt(db)
   const startSec = Math.floor(
@@ -306,6 +409,8 @@ async function runHistoryRecovery(
     newMessageCount: result.processedCount,
     historyIdAdvanced: advance,
     wasTruncated: false,
+    continuationStaged: false,
+    needsFollowUp: !advance,
   }
 }
 
@@ -340,10 +445,24 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
   account = await refreshSendAsAliasesIfStale(deps, account)
   const ctx = await buildPersistContext(deps, account)
 
-  // Phase 1: history collection (HistoryIdExpiredError → recovery).
+  // Phase 1: collect one bounded history slice, resuming at a compatible
+  // stored continuation while the Account cursor stays frozen
+  // (HistoryIdExpiredError → recovery).
   let history: HistoryCollection
   try {
-    history = await collectHistory(deps, account.historyId)
+    const resumeToken = await loadCompatibleContinuation(db, account.historyId)
+    try {
+      history = await collectHistory(deps, account.historyId, resumeToken)
+    } catch (error) {
+      // Gmail page tokens are opaque and may expire independently of the
+      // still-valid history cursor. A rejected stored token is recovered by
+      // durably discarding it and replaying from the frozen cursor once; the
+      // same error on the first page propagates, because it indicates a
+      // different request defect.
+      if (resumeToken === null || !isInvalidHistoryPageTokenError(error)) throw error
+      await clearHistoryContinuation(db)
+      history = await collectHistory(deps, account.historyId, null)
+    }
   } catch (error) {
     if (error instanceof HistoryIdExpiredError) {
       return runHistoryRecovery(deps, account, ctx)
@@ -414,21 +533,31 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
   }
   await deps.hooks?.onPhase?.('incremental:afterReconcile')
 
-  // Advance decision: truncation keeps the original cursor unconditionally.
+  // Resolve this slice's ledger before moving either continuation or cursor.
+  // Below the failure threshold nothing moves, so the same slice is retried.
+  // Once every outcome is clean or durably abandoned, a truncated slice
+  // advances only its continuation; the Account cursor advances only at
+  // Gmail's end (IncrementalSyncOrchestrator's advance block).
   const hadFailures = failedIds.length > 0
   if (hadFailures) await recordSyncFailure(db, failedIds)
   const now = depsNow(deps)
-  let advance = false
-  if (!history.wasTruncated) {
-    advance = await shouldAdvanceHistoryId(db, hadFailures, now)
+  const sliceResolved = await shouldAdvanceHistoryId(db, hadFailures, now)
+  let move: HistoryPositionMove = { kind: 'hold' }
+  if (sliceResolved) {
+    move =
+      history.nextPageToken !== null
+        ? { kind: 'stage', startHistoryId: account.historyId, pageToken: history.nextPageToken }
+        : { kind: 'advance', historyId: history.latestHistoryId }
   }
+  const advance = move.kind === 'advance'
 
-  // Finalize: historyId + rollups in ONE durable transaction.
-  const historyIdToSave =
-    advance && history.latestHistoryId !== account.historyId ? history.latestHistoryId : null
-  await finalizeSync(db, deps.accountEmail, historyIdToSave, touched, now)
+  // Finalize: cursor/continuation + rollups in ONE durable transaction.
+  await finalizeSync(db, deps.accountEmail, move, touched, now)
 
-  // Post-save bookkeeping (only after the durable save, mirroring iOS).
+  // Post-save bookkeeping (only after the durable save, mirroring iOS). A
+  // staged continuation resets failure tracking but is not a terminal
+  // success for the reconcile window (failureTracker.commit with
+  // recordsSuccessfulSync: false).
   await recordAbandonedRetryOutcome(db, drainOutcome, now)
   if (!hadFailures && !history.wasTruncated) {
     await recordSyncSuccess(db)
@@ -444,5 +573,7 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
     newMessageCount: applied.persistedMessageIds.size,
     historyIdAdvanced: advance,
     wasTruncated: history.wasTruncated,
+    continuationStaged: move.kind === 'stage',
+    needsFollowUp: history.wasTruncated || !sliceResolved,
   }
 }

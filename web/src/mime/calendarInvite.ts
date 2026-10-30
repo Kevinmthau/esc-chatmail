@@ -371,10 +371,486 @@ function wallClockToEpochMs(
   return secondOffset === firstOffset ? firstPass : guess - secondOffset
 }
 
+// MARK: - Non-IANA TZIDs (Exchange / Outlook)
+
+/**
+ * Windows time-zone names → IANA, the CLDR windowsZones "001" rows for every
+ * zone Exchange emits in the Americas, Europe/Africa and Asia-Pacific. Outlook
+ * writes `TZID=Eastern Standard Time` (the Windows registry key, DST and all)
+ * rather than an IANA name, and Intl refuses it. Keys are lowercased.
+ */
+const WINDOWS_TIME_ZONE_ALIASES: ReadonlyMap<string, string> = new Map(
+  Object.entries({
+    // Americas
+    'Dateline Standard Time': 'Etc/GMT+12',
+    'UTC-11': 'Etc/GMT+11',
+    'Aleutian Standard Time': 'America/Adak',
+    'Hawaiian Standard Time': 'Pacific/Honolulu',
+    'Marquesas Standard Time': 'Pacific/Marquesas',
+    'Alaskan Standard Time': 'America/Anchorage',
+    'UTC-09': 'Etc/GMT+9',
+    'Pacific Standard Time (Mexico)': 'America/Tijuana',
+    'UTC-08': 'Etc/GMT+8',
+    'Pacific Standard Time': 'America/Los_Angeles',
+    'US Mountain Standard Time': 'America/Phoenix',
+    'Mountain Standard Time (Mexico)': 'America/Mazatlan',
+    'Mountain Standard Time': 'America/Denver',
+    'Yukon Standard Time': 'America/Whitehorse',
+    'Central America Standard Time': 'America/Guatemala',
+    'Central Standard Time': 'America/Chicago',
+    'Easter Island Standard Time': 'Pacific/Easter',
+    'Central Standard Time (Mexico)': 'America/Mexico_City',
+    'Canada Central Standard Time': 'America/Regina',
+    'SA Pacific Standard Time': 'America/Bogota',
+    'Eastern Standard Time (Mexico)': 'America/Cancun',
+    'Eastern Standard Time': 'America/New_York',
+    'Haiti Standard Time': 'America/Port-au-Prince',
+    'Cuba Standard Time': 'America/Havana',
+    'US Eastern Standard Time': 'America/Indiana/Indianapolis',
+    'Turks And Caicos Standard Time': 'America/Grand_Turk',
+    'Paraguay Standard Time': 'America/Asuncion',
+    'Atlantic Standard Time': 'America/Halifax',
+    'Venezuela Standard Time': 'America/Caracas',
+    'Central Brazilian Standard Time': 'America/Cuiaba',
+    'SA Western Standard Time': 'America/La_Paz',
+    'Pacific SA Standard Time': 'America/Santiago',
+    'Newfoundland Standard Time': 'America/St_Johns',
+    'Tocantins Standard Time': 'America/Araguaina',
+    'E. South America Standard Time': 'America/Sao_Paulo',
+    'SA Eastern Standard Time': 'America/Cayenne',
+    'Argentina Standard Time': 'America/Argentina/Buenos_Aires',
+    'Montevideo Standard Time': 'America/Montevideo',
+    'Magallanes Standard Time': 'America/Punta_Arenas',
+    'Saint Pierre Standard Time': 'America/Miquelon',
+    'Bahia Standard Time': 'America/Bahia',
+    'UTC-02': 'Etc/GMT+2',
+    'Greenland Standard Time': 'America/Godthab',
+    'Azores Standard Time': 'Atlantic/Azores',
+    'Cape Verde Standard Time': 'Atlantic/Cape_Verde',
+    UTC: 'Etc/UTC',
+    // Europe / Africa / Middle East
+    'GMT Standard Time': 'Europe/London',
+    'Greenwich Standard Time': 'Atlantic/Reykjavik',
+    'Sao Tome Standard Time': 'Africa/Sao_Tome',
+    'Morocco Standard Time': 'Africa/Casablanca',
+    'W. Europe Standard Time': 'Europe/Berlin',
+    'Central Europe Standard Time': 'Europe/Budapest',
+    'Romance Standard Time': 'Europe/Paris',
+    'Central European Standard Time': 'Europe/Warsaw',
+    'W. Central Africa Standard Time': 'Africa/Lagos',
+    'GTB Standard Time': 'Europe/Bucharest',
+    'Middle East Standard Time': 'Asia/Beirut',
+    'Egypt Standard Time': 'Africa/Cairo',
+    'E. Europe Standard Time': 'Europe/Chisinau',
+    'West Bank Standard Time': 'Asia/Hebron',
+    'South Africa Standard Time': 'Africa/Johannesburg',
+    'FLE Standard Time': 'Europe/Kiev',
+    'Israel Standard Time': 'Asia/Jerusalem',
+    'South Sudan Standard Time': 'Africa/Juba',
+    'Kaliningrad Standard Time': 'Europe/Kaliningrad',
+    'Sudan Standard Time': 'Africa/Khartoum',
+    'Libya Standard Time': 'Africa/Tripoli',
+    'Namibia Standard Time': 'Africa/Windhoek',
+    'Jordan Standard Time': 'Asia/Amman',
+    'Arabic Standard Time': 'Asia/Baghdad',
+    'Syria Standard Time': 'Asia/Damascus',
+    'Turkey Standard Time': 'Europe/Istanbul',
+    'Arab Standard Time': 'Asia/Riyadh',
+    'Belarus Standard Time': 'Europe/Minsk',
+    'Russian Standard Time': 'Europe/Moscow',
+    'E. Africa Standard Time': 'Africa/Nairobi',
+    'Volgograd Standard Time': 'Europe/Volgograd',
+    'Iran Standard Time': 'Asia/Tehran',
+    'Arabian Standard Time': 'Asia/Dubai',
+    'Astrakhan Standard Time': 'Europe/Astrakhan',
+    'Azerbaijan Standard Time': 'Asia/Baku',
+    'Russia Time Zone 3': 'Europe/Samara',
+    'Mauritius Standard Time': 'Indian/Mauritius',
+    'Saratov Standard Time': 'Europe/Saratov',
+    'Georgian Standard Time': 'Asia/Tbilisi',
+    'Caucasus Standard Time': 'Asia/Yerevan',
+    'Afghanistan Standard Time': 'Asia/Kabul',
+    // Asia-Pacific
+    'West Asia Standard Time': 'Asia/Tashkent',
+    'Ekaterinburg Standard Time': 'Asia/Yekaterinburg',
+    'Pakistan Standard Time': 'Asia/Karachi',
+    'Qyzylorda Standard Time': 'Asia/Qyzylorda',
+    'Astana Standard Time': 'Asia/Almaty',
+    'India Standard Time': 'Asia/Kolkata',
+    'Sri Lanka Standard Time': 'Asia/Colombo',
+    'Nepal Standard Time': 'Asia/Kathmandu',
+    'Central Asia Standard Time': 'Asia/Bishkek',
+    'Bangladesh Standard Time': 'Asia/Dhaka',
+    'Omsk Standard Time': 'Asia/Omsk',
+    'Myanmar Standard Time': 'Asia/Yangon',
+    'SE Asia Standard Time': 'Asia/Bangkok',
+    'Altai Standard Time': 'Asia/Barnaul',
+    'W. Mongolia Standard Time': 'Asia/Hovd',
+    'North Asia Standard Time': 'Asia/Krasnoyarsk',
+    'N. Central Asia Standard Time': 'Asia/Novosibirsk',
+    'Tomsk Standard Time': 'Asia/Tomsk',
+    'China Standard Time': 'Asia/Shanghai',
+    'North Asia East Standard Time': 'Asia/Irkutsk',
+    'Singapore Standard Time': 'Asia/Singapore',
+    'W. Australia Standard Time': 'Australia/Perth',
+    'Taipei Standard Time': 'Asia/Taipei',
+    'Ulaanbaatar Standard Time': 'Asia/Ulaanbaatar',
+    'Aus Central W. Standard Time': 'Australia/Eucla',
+    'Transbaikal Standard Time': 'Asia/Chita',
+    'Tokyo Standard Time': 'Asia/Tokyo',
+    'North Korea Standard Time': 'Asia/Pyongyang',
+    'Korea Standard Time': 'Asia/Seoul',
+    'Yakutsk Standard Time': 'Asia/Yakutsk',
+    'Cen. Australia Standard Time': 'Australia/Adelaide',
+    'AUS Central Standard Time': 'Australia/Darwin',
+    'E. Australia Standard Time': 'Australia/Brisbane',
+    'AUS Eastern Standard Time': 'Australia/Sydney',
+    'West Pacific Standard Time': 'Pacific/Port_Moresby',
+    'Tasmania Standard Time': 'Australia/Hobart',
+    'Vladivostok Standard Time': 'Asia/Vladivostok',
+    'Lord Howe Standard Time': 'Australia/Lord_Howe',
+    'Bougainville Standard Time': 'Pacific/Bougainville',
+    'Russia Time Zone 10': 'Asia/Srednekolymsk',
+    'Magadan Standard Time': 'Asia/Magadan',
+    'Norfolk Standard Time': 'Pacific/Norfolk',
+    'Sakhalin Standard Time': 'Asia/Sakhalin',
+    'Central Pacific Standard Time': 'Pacific/Guadalcanal',
+    'Russia Time Zone 11': 'Asia/Kamchatka',
+    'New Zealand Standard Time': 'Pacific/Auckland',
+    'UTC+12': 'Etc/GMT-12',
+    'Fiji Standard Time': 'Pacific/Fiji',
+    'Chatham Islands Standard Time': 'Pacific/Chatham',
+    'UTC+13': 'Etc/GMT-13',
+    'Tonga Standard Time': 'Pacific/Tongatapu',
+    'Samoa Standard Time': 'Pacific/Apia',
+    'Line Islands Standard Time': 'Pacific/Kiritimati',
+  }).map(([windowsName, iana]) => [windowsName.toLowerCase(), iana]),
+)
+
+/** IANA name for a Windows TZID this runtime can format in; null otherwise. */
+export function ianaAliasForTimeZone(tzid: string): string | null {
+  const alias = WINDOWS_TIME_ZONE_ALIASES.get(tzid.trim().toLowerCase())
+  return alias !== undefined && isSupportedTimeZone(alias) ? alias : null
+}
+
+interface WallClock {
+  year: number
+  month: number
+  day: number
+  hour: number
+  minute: number
+  second: number
+}
+
+/** FREQ=YEARLY RRULE as VTIMEZONE observances use it: one onset per year. */
+interface YearlyOnsetRule {
+  month: number
+  /** 0 (Sunday) – 6; null when the rule names a month day instead. */
+  weekday: number | null
+  /** 1-based from the month start, negative from its end; null with monthDays. */
+  ordinal: number | null
+  /** BYMONTHDAY candidates (ascending); the first on `weekday` wins. */
+  monthDays: number[]
+  /** UNTIL as an instant; null when the rule is open-ended. */
+  untilMs: number | null
+}
+
+/** One STANDARD or DAYLIGHT observance of a VTIMEZONE. */
+interface TimeZoneObservance {
+  /** DTSTART: local wall clock of the first onset, read in `offsetFromMs`. */
+  start: WallClock
+  offsetFromMs: number
+  offsetToMs: number
+  /** Null when the observance happens once, at `start`. */
+  rule: YearlyOnsetRule | null
+}
+
+interface TimeZoneComponent {
+  observances: TimeZoneObservance[]
+}
+
+/** `+0530` / `-05` / `-050030` → ms east of UTC; null when malformed. */
+function parseUtcOffsetMs(value: string): number | null {
+  const match = /^([+-])(\d{2})(\d{2})?(\d{2})?$/.exec(value.trim())
+  if (match === null) return null
+  const [, sign, hours, minutes, seconds] = match
+  const magnitude =
+    Number(hours) * 3_600_000 + Number(minutes ?? '0') * 60_000 + Number(seconds ?? '0') * 1_000
+  return sign === '-' ? -magnitude : magnitude
+}
+
+function parseWallClock(value: string): WallClock | null {
+  const match = ICAL_DATE_TIME.exec(value.trim())
+  if (match === null) return null
+  const [, year, month, day, hour, minute, second] = match
+  return {
+    year: Number(year),
+    month: Number(month),
+    day: Number(day),
+    hour: Number(hour ?? '0'),
+    minute: Number(minute ?? '0'),
+    second: Number(second ?? '0'),
+  }
+}
+
+function wallClockAsUtcMs(wall: WallClock): number {
+  return Date.UTC(wall.year, wall.month - 1, wall.day, wall.hour, wall.minute, wall.second)
+}
+
+const WEEKDAY_CODES = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']
+
+/**
+ * The yearly transition rule Outlook writes (`FREQ=YEARLY;BYDAY=2SU;BYMONTH=3`)
+ * plus the BYMONTHDAY spelling Apple uses (`BYDAY=SU;BYMONTHDAY=8,9,…,14`).
+ * Anything else yields null and the observance is read as a single onset.
+ */
+function parseYearlyOnsetRule(value: string, offsetFromMs: number): YearlyOnsetRule | null {
+  const fields = new Map<string, string>()
+  for (const segment of value.split(';')) {
+    const equalsIndex = segment.indexOf('=')
+    if (equalsIndex === -1) continue
+    fields.set(segment.slice(0, equalsIndex).trim().toUpperCase(), segment.slice(equalsIndex + 1))
+  }
+  if (fields.get('FREQ')?.trim().toUpperCase() !== 'YEARLY') return null
+
+  const month = Number(fields.get('BYMONTH'))
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null
+
+  const monthDays = (fields.get('BYMONTHDAY') ?? '')
+    .split(',')
+    .map((day) => Number(day))
+    .filter((day) => Number.isInteger(day) && day >= 1 && day <= 31)
+    .sort((a, b) => a - b)
+
+  let weekday: number | null = null
+  let ordinal: number | null = null
+  const byDay = fields.get('BYDAY')?.trim().toUpperCase() ?? ''
+  if (byDay.length > 0) {
+    const dayMatch = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/.exec(byDay)
+    if (dayMatch === null) return null
+    weekday = WEEKDAY_CODES.indexOf(dayMatch[2] ?? '')
+    ordinal = dayMatch[1] === undefined ? null : Number(dayMatch[1])
+    if (ordinal === 0) return null
+  }
+  if (weekday === null && monthDays.length === 0) return null
+  if (weekday !== null && ordinal === null && monthDays.length === 0) return null
+
+  let untilMs: number | null = null
+  const until = fields.get('UNTIL')?.trim() ?? ''
+  if (until.length > 0) {
+    const untilWall = parseWallClock(until)
+    if (untilWall === null) return null
+    untilMs = wallClockAsUtcMs(untilWall) - (until.endsWith('Z') ? 0 : offsetFromMs)
+  }
+
+  return { month, weekday, ordinal, monthDays, untilMs }
+}
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+}
+
+function weekdayOf(year: number, month: number, day: number): number {
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDay()
+}
+
+/** Day of month the rule lands on in `year`; null when the month has none. */
+function ruleDayOfMonth(rule: YearlyOnsetRule, year: number): number | null {
+  const lastDay = daysInMonth(year, rule.month)
+  if (rule.weekday === null) {
+    const [first] = rule.monthDays
+    return first !== undefined && first <= lastDay ? first : null
+  }
+  if (rule.ordinal === null) {
+    return (
+      rule.monthDays.find(
+        (day) => day <= lastDay && weekdayOf(year, rule.month, day) === rule.weekday,
+      ) ?? null
+    )
+  }
+  let day: number
+  if (rule.ordinal > 0) {
+    const firstWeekday = weekdayOf(year, rule.month, 1)
+    day = 1 + ((rule.weekday - firstWeekday + 7) % 7) + (rule.ordinal - 1) * 7
+  } else {
+    const lastWeekday = weekdayOf(year, rule.month, lastDay)
+    day = lastDay - ((lastWeekday - rule.weekday + 7) % 7) + (rule.ordinal + 1) * 7
+  }
+  return day >= 1 && day <= lastDay ? day : null
+}
+
+/**
+ * Instants (UTC ms) at which `observance` takes effect: its DTSTART (the
+ * first onset by definition, even when a rule follows) plus the rule's onset
+ * in each of the years asked.
+ */
+function observanceOnsetsMs(observance: TimeZoneObservance, years: readonly number[]): number[] {
+  const { start, rule, offsetFromMs } = observance
+  const onsets = [wallClockAsUtcMs(start) - offsetFromMs]
+  if (rule === null) return onsets
+  for (const year of years) {
+    if (year < start.year) continue
+    const day = ruleDayOfMonth(rule, year)
+    if (day === null) continue
+    const onsetMs =
+      Date.UTC(year, rule.month - 1, day, start.hour, start.minute, start.second) - offsetFromMs
+    if (rule.untilMs !== null && onsetMs > rule.untilMs) continue
+    onsets.push(onsetMs)
+  }
+  return onsets
+}
+
+interface ZoneTransition {
+  onsetMs: number
+  offsetFromMs: number
+  offsetToMs: number
+}
+
+/**
+ * Offset in effect at `instantMs`: TZOFFSETTO of the latest transition at or
+ * before it. Before every transition (an event older than the zone's first
+ * rule) the earliest transition's TZOFFSETFROM is the only offset the
+ * document declares for that era.
+ */
+function offsetInEffectMs(transitions: readonly ZoneTransition[], instantMs: number): number {
+  let offset = transitions[0]?.offsetFromMs ?? 0
+  for (const transition of transitions) {
+    if (transition.onsetMs > instantMs) break
+    offset = transition.offsetToMs
+  }
+  return offset
+}
+
+/**
+ * Wall clock in a VTIMEZONE → epoch ms. Each TZOFFSETTO the zone declares is
+ * a candidate reading of the wall clock, and a reading holds when that
+ * offset is the one in effect at the instant it yields. The fall-back hour
+ * yields two holding readings; the first occurrence wins, as ICU and
+ * Foundation read it (and as wallClockToEpochMs lands for the US zones
+ * Exchange emits most). The spring-forward hour yields none; it is carried
+ * forward by the gap's length, as ZonedDateTime does, rather than refused.
+ */
+function epochMsFromTimeZoneComponent(zone: TimeZoneComponent, wall: WallClock): number | null {
+  if (zone.observances.length === 0) return null
+
+  const wallUtcMs = wallClockAsUtcMs(wall)
+  // Both neighbouring years: the previous year's last transition is the one
+  // in effect in January, and applying an offset can carry a New Year's Eve
+  // wall clock across a January onset.
+  const years = [wall.year - 1, wall.year, wall.year + 1]
+  const transitions: ZoneTransition[] = []
+  for (const observance of zone.observances) {
+    for (const onsetMs of observanceOnsetsMs(observance, years)) {
+      transitions.push({
+        onsetMs,
+        offsetFromMs: observance.offsetFromMs,
+        offsetToMs: observance.offsetToMs,
+      })
+    }
+  }
+  transitions.sort((a, b) => a.onsetMs - b.onsetMs)
+
+  const candidateOffsets = [...new Set(zone.observances.map((observance) => observance.offsetToMs))]
+  const instants = candidateOffsets.map((offset) => wallUtcMs - offset)
+  const holding = instants.filter(
+    (instant) => offsetInEffectMs(transitions, instant) === wallUtcMs - instant,
+  )
+  return holding.length > 0 ? Math.min(...holding) : Math.max(...instants)
+}
+
+/**
+ * The document's VTIMEZONE components keyed by TZID. Only the observances
+ * are modelled (DTSTART, TZOFFSETFROM/TO, RRULE); RDATE lists, which Outlook
+ * does not write, are ignored.
+ */
+function collectTimeZoneComponents(lines: readonly string[]): Map<string, TimeZoneComponent> {
+  const zones = new Map<string, TimeZoneComponent>()
+  const componentStack: string[] = []
+  let tzid = ''
+  let observances: TimeZoneObservance[] = []
+  let start: WallClock | null = null
+  let offsetFromMs: number | null = null
+  let offsetToMs: number | null = null
+  let rrule = ''
+
+  for (const line of lines) {
+    const property = parseProperty(line)
+    if (property === null) continue
+
+    if (property.name === 'BEGIN') {
+      const component = property.value.trim().toUpperCase()
+      componentStack.push(component)
+      if (component === 'VTIMEZONE') {
+        tzid = ''
+        observances = []
+      } else if (component === 'STANDARD' || component === 'DAYLIGHT') {
+        start = null
+        offsetFromMs = null
+        offsetToMs = null
+        rrule = ''
+      }
+      continue
+    }
+
+    if (property.name === 'END') {
+      const component = componentStack.pop()
+      if (component === 'STANDARD' || component === 'DAYLIGHT') {
+        if (start !== null && offsetFromMs !== null && offsetToMs !== null) {
+          observances.push({
+            start,
+            offsetFromMs,
+            offsetToMs,
+            rule: rrule.length > 0 ? parseYearlyOnsetRule(rrule, offsetFromMs) : null,
+          })
+        }
+      } else if (component === 'VTIMEZONE' && tzid.length > 0 && observances.length > 0) {
+        zones.set(tzid, { observances })
+      }
+      continue
+    }
+
+    const innermost = componentStack.at(-1)
+    if (innermost === 'VTIMEZONE') {
+      if (property.name === 'TZID') tzid = property.value.trim()
+      continue
+    }
+    if (innermost !== 'STANDARD' && innermost !== 'DAYLIGHT') continue
+    if (componentStack.at(-2) !== 'VTIMEZONE') continue
+
+    switch (property.name) {
+      case 'DTSTART':
+        start = parseWallClock(property.value)
+        break
+      case 'TZOFFSETFROM':
+        offsetFromMs = parseUtcOffsetMs(property.value)
+        break
+      case 'TZOFFSETTO':
+        offsetToMs = parseUtcOffsetMs(property.value)
+        break
+      case 'RRULE':
+        rrule = property.value.trim()
+        break
+      default:
+        break
+    }
+  }
+
+  return zones
+}
+
+const NO_TIME_ZONES: ReadonlyMap<string, TimeZoneComponent> = new Map()
+
 interface ParsedDateTime {
   ms: number
   isAllDay: boolean
-  /** IANA identifier the value was expressed in; '' for UTC/floating. */
+  /**
+   * Zone the value was expressed in; '' for UTC/floating. An IANA identifier
+   * when the TZID is one or aliases to one; a TZID resolved only through the
+   * document's VTIMEZONE keeps its own name. The card never formats in this
+   * zone (formatCalendarEvent guards every Intl use with isSupportedTimeZone);
+   * it compares it to the reader's zone to decide whether to name the zone,
+   * and a foreign name is exactly the cue a converted time needs.
+   */
   timeZone: string
 }
 
@@ -386,8 +862,18 @@ const ICAL_DATE_TIME = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?$/
  * All-day values are anchored to UTC midnight and flagged; the card formats
  * them in UTC so "Mar 15" never slides a day for a reader west of Greenwich.
  * Floating values (no Z, no TZID) are local time by RFC 5545.
+ *
+ * A TZID Intl does not know is resolved from the document's own VTIMEZONE
+ * first (Exchange ships one with every Windows-named TZID, and it is the
+ * sender's authoritative offset table), then through the Windows→IANA alias
+ * table, and only then read as floating: before this an Outlook invite's
+ * wall clock was silently reinterpreted in the reader's zone, hours off for
+ * anyone outside the sender's, with no zone label to flag it.
  */
-function parseICalDateTime(property: ICalProperty): ParsedDateTime | null {
+function parseICalDateTime(
+  property: ICalProperty,
+  timeZones: ReadonlyMap<string, TimeZoneComponent> = NO_TIME_ZONES,
+): ParsedDateTime | null {
   const raw = property.value.trim()
   const match = ICAL_DATE_TIME.exec(raw)
   if (match === null) return null
@@ -417,15 +903,41 @@ function parseICalDateTime(property: ICalProperty): ParsedDateTime | null {
   }
 
   const tzid = property.params.get('TZID') ?? ''
-  if (tzid.length > 0 && isSupportedTimeZone(tzid)) {
-    return {
-      ms: wallClockToEpochMs(year, month, day, hour, minute, second, tzid),
-      isAllDay: false,
-      timeZone: tzid,
+  if (tzid.length > 0) {
+    if (isSupportedTimeZone(tzid)) {
+      return {
+        ms: wallClockToEpochMs(year, month, day, hour, minute, second, tzid),
+        isAllDay: false,
+        timeZone: tzid,
+      }
+    }
+
+    const alias = ianaAliasForTimeZone(tzid)
+    const component = timeZones.get(tzid)
+    if (component !== undefined) {
+      const ms = epochMsFromTimeZoneComponent(component, {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+      })
+      if (ms !== null) {
+        return { ms, isAllDay: false, timeZone: alias ?? tzid }
+      }
+    }
+
+    if (alias !== null) {
+      return {
+        ms: wallClockToEpochMs(year, month, day, hour, minute, second, alias),
+        isAllDay: false,
+        timeZone: alias,
+      }
     }
   }
 
-  // Floating (or an unknown TZID): local time on this device.
+  // Floating (or a TZID nothing above could resolve): local time on this device.
   return {
     ms: new Date(year, month - 1, day, hour, minute, second).getTime(),
     isAllDay: false,
@@ -473,7 +985,12 @@ export function parseICalendarEvent(document: string): CalendarEventData | null 
   const componentStack: string[] = []
   let sawEvent = false
 
-  for (const line of unfold(document)) {
+  const lines = unfold(document)
+  // Pre-scanned: RFC 5545 orders components freely, and the VTIMEZONE a
+  // DTSTART's TZID refers to may follow the VEVENT.
+  const timeZones = collectTimeZoneComponents(lines)
+
+  for (const line of lines) {
     const property = parseProperty(line)
     if (property === null) continue
 
@@ -511,10 +1028,10 @@ export function parseICalendarEvent(document: string): CalendarEventData | null 
         status = property.value.trim().toUpperCase()
         break
       case 'DTSTART':
-        start = parseICalDateTime(property)
+        start = parseICalDateTime(property, timeZones)
         break
       case 'DTEND':
-        end = parseICalDateTime(property)
+        end = parseICalDateTime(property, timeZones)
         break
       case 'DURATION':
         durationMs = parseICalDuration(property.value)

@@ -504,21 +504,25 @@ describe('rollupConversation', () => {
     await expect(rollupConversation(db, 'missing', 1000)).resolves.toBeUndefined()
   })
 
-  it('nests inside an existing rw transaction spanning messages+conversations', async () => {
+  it('nests inside an existing rw transaction covering the rollup tables', async () => {
     await db.conversations.add(conversationRow({ id: 'c1' }))
 
-    await db.transaction('rw', db.messages, db.conversations, async () => {
-      await db.messages.add(
-        messageRow({
-          conversationId: 'c1',
-          internalDate: 100,
-          labelIds: ['INBOX'],
-          isUnread: 1,
-          cleanedSnippet: 'inside tx',
-        }),
-      )
-      await rollupConversation(db, 'c1', 1000)
-    })
+    await db.transaction(
+      'rw',
+      [db.messages, db.conversations, db.convoParticipants, db.people],
+      async () => {
+        await db.messages.add(
+          messageRow({
+            conversationId: 'c1',
+            internalDate: 100,
+            labelIds: ['INBOX'],
+            isUnread: 1,
+            cleanedSnippet: 'inside tx',
+          }),
+        )
+        await rollupConversation(db, 'c1', 1000)
+      },
+    )
 
     const row = await db.conversations.get('c1')
     expect(row).toMatchObject({ snippet: 'inside tx', hasInbox: 1, inboxUnreadCount: 1 })

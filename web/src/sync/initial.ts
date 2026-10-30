@@ -43,11 +43,15 @@ export async function rollupConversations(
   now: number,
 ): Promise<void> {
   if (conversationIds.size === 0) return
-  await db.transaction('rw', db.messages, db.conversations, async () => {
-    for (const id of conversationIds) {
-      await rollupConversation(db, id, now)
-    }
-  })
+  await db.transaction(
+    'rw',
+    [db.messages, db.conversations, db.convoParticipants, db.people],
+    async () => {
+      for (const id of conversationIds) {
+        await rollupConversation(db, id, now)
+      }
+    },
+  )
 }
 
 export interface ListSyncPagesResult {

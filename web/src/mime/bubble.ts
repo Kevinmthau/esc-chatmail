@@ -4,8 +4,13 @@
 // header quote blocks).
 
 import { decodeHtmlEntities } from './decode'
+import { removeRepeatedSignature } from './repeatedSignature'
 import { removeTrailingContactSignature } from './signature'
-import { extractPlainTextFromHtml } from './htmlText'
+import {
+  extractPlainTextFromHtml,
+  isHtmlTextQuoteAttributionLine,
+  removeStandaloneQuoteAttributionLines,
+} from './htmlText'
 import {
   EMAIL_ADDRESS_PATTERN,
   FROM_HEADER_PREFIXES,
@@ -134,10 +139,22 @@ function processHtml(
     formatSignOffs,
     cleanup.applyPlainTextQuoteRemoval,
     cleanup.applyTrailingContactSignatureRemoval,
+    cleanup.stripStandaloneQuoteAttributionLines,
   )
 
   if (plainText === null) {
     plainText = extractPlainTextFromHtmlForBubble(html, decodeEntities, formatSignOffs, true)
+  }
+
+  if (cleanup.applyTrailingContactSignatureRemoval && plainText !== null) {
+    plainText = removeRepeatedSignature(plainText, () => {
+      // Only project the source for a surviving, corroborated contact block.
+      // History is evidence for preview cleanup; canonical HTML remains untouched.
+      const sourceText = extractPlainTextFromHtml(html)
+      return extractQuotes(sourceText, false)
+        .quotedParts.map((part) => part.text)
+        .join('\n')
+    })
   }
 
   const hasRichContent = classifyRichContent ? hasGenuineRichContent(cleanup.html) : false
@@ -190,6 +207,7 @@ function extractPlainTextFromHtmlForBubble(
   formatSignOffs: boolean,
   applyPlainTextQuoteRemoval: boolean,
   applyTrailingContactSignatureRemoval = false,
+  stripStandaloneQuoteAttributionLines = false,
 ): string | null {
   const extracted = extractPlainTextFromHtml(html)
   if (extracted.length === 0) return null
@@ -208,7 +226,12 @@ function extractPlainTextFromHtmlForBubble(
     quoteRemoved = extractQuotes(unwrapped).mainContent
   } else {
     const headerRemoved = removePlainTextHeaderQuoteBlocks(unwrapped)
-    quoteRemoved = removeResidualHtmlTextQuoteMarkers(headerRemoved)
+    // The containers-only rescue leaves the attribution line of the removed
+    // blockquote behind; dropping just that line keeps the bottom-posted reply.
+    const attributionRemoved = stripStandaloneQuoteAttributionLines
+      ? removeStandaloneQuoteAttributionLines(headerRemoved)
+      : headerRemoved
+    quoteRemoved = removeResidualHtmlTextQuoteMarkers(attributionRemoved)
   }
   const formatted = formatSignOffs ? formatSignOffLineBreaks(quoteRemoved) : quoteRemoved
   const trimmed = formatted.trim()
@@ -240,21 +263,6 @@ function removeConsecutivePlainTextQuoteLines(text: string): string {
   }
 
   return text
-}
-
-function isHtmlTextQuoteAttributionLine(text: string): boolean {
-  const lowercased = text.toLowerCase()
-  const attributionSuffixes = [
-    'wrote:',
-    'schrieb:',
-    'a écrit :',
-    'a écrit:',
-    'escribió:',
-    'ha scritto:',
-    'escreveu:',
-    'schreef:',
-  ]
-  return attributionSuffixes.some((suffix) => lowercased.endsWith(suffix))
 }
 
 const RESIDUAL_HTML_TEXT_QUOTE_MARKER_PATTERNS: RegExp[] = [
