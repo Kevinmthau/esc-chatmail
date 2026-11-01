@@ -269,4 +269,42 @@ final class MessageExtensionsTests: XCTestCase {
         XCTAssertEqual(first, second)
         XCTAssertTrue(first)
     }
+
+    // MARK: - isLikelyCalendarInvite: booking-system reservations
+
+    /// The River Club court reminder: an .ics plus a numeric date ("Sunday, 11/01/2026"),
+    /// which `CalendarInviteSignals.containsDateTimeSignal` never matches, so the row stayed
+    /// a long text bubble instead of routing to a card.
+    ///
+    /// Revert-check: the `ReservationSummaryParser.parse` branch in
+    /// `Message.computeIsLikelyCalendarInvite`.
+    func testIsLikelyCalendarInvite_reservationWithCalendarAttachment_isTrue() throws {
+        let message = MessageBuilder()
+            .withId("reservation-ics-\(UUID().uuidString)")
+            .withSubject(ReservationEmailFixture.subject)
+            .withBody(ReservationEmailFixture.bodyText)
+            .withAttachments()
+            .build(in: context)
+        AttachmentBuilder()
+            .withFilename(ReservationEmailFixture.calendarAttachmentFilename)
+            .withMimeType(ReservationEmailFixture.calendarAttachmentMimeType)
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        XCTAssertTrue(message.isLikelyCalendarInvite)
+    }
+
+    /// Without the .ics the same mail keeps whatever card or bubble it had: the reservation
+    /// parse alone never routes a row.
+    func testIsLikelyCalendarInvite_reservationWithoutCalendarAttachment_isFalse() throws {
+        let message = MessageBuilder()
+            .withId("reservation-no-ics-\(UUID().uuidString)")
+            .withSubject(ReservationEmailFixture.subject)
+            .withBody(ReservationEmailFixture.bodyText)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        XCTAssertFalse(message.isLikelyCalendarInvite)
+    }
 }

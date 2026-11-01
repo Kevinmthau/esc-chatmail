@@ -168,6 +168,26 @@ struct CalendarInvitePreviewModel: Equatable, Sendable {
     let sourceLabel: String?
 }
 
+/// A booking-system reservation (court, tee time, lane, class) as its summary card shows
+/// it. Built by `ReservationSummaryPreviewBuilder` from `ReservationSummaryParser`.
+struct ReservationSummaryPreviewModel: Equatable, Sendable {
+    let title: String
+    let monthSymbol: String
+    let dayNumber: String
+    let weekdaySymbol: String
+    /// "1:00 – 2:00 PM": the card's clock row, beside a date tile that already shows the day.
+    let timeLine: String
+    /// "Sunday, Nov 1 • 1:00 – 2:00 PM": the spoken form, for VoiceOver.
+    let dateTimeLine: String
+    let locationLine: String?
+    let peopleLine: String?
+    /// "Cancel by Sat, Oct 31, 1:00 PM", from the notice the email requires.
+    let cancellationLine: String?
+    let status: ReservationSummaryParser.Summary.Status?
+    /// The venue the email names above its greeting, else the sender's display name.
+    let sourceLabel: String?
+}
+
 enum NetlifyDeployStatus: String, Equatable, Sendable {
     case processing
     case ready
