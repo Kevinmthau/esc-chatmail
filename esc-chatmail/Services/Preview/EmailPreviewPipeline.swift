@@ -162,11 +162,15 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             isNewsletter: request.isNewsletter,
             isForwardedEmail: request.isForwardedEmail,
             classificationKind: classification.kind,
-            isDeveloperProgramNotice: Self.routesDeveloperProgramNoticeToTransactionalCard(
+            isDeterministicTransactionalNotice: Self.routesDeveloperProgramNoticeToTransactionalCard(
                 senderName: request.senderName,
                 senderEmail: request.senderEmail,
                 subject: request.subject,
                 classification: classification
+            ) || Self.routesNintendoPurchaseNoticeToTransactionalCard(
+                senderEmail: request.senderEmail,
+                subject: request.subject,
+                previewSource: previewSource
             )
         ) {
             switch route {
@@ -292,19 +296,43 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             !classification.signals.contains(.conversationalGreeting)
     }
 
-    /// `isDeveloperProgramNotice` routes the transactional card ahead of the
-    /// classifier's verdict (see `routesDeveloperProgramNoticeToTransactionalCard`);
-    /// the builder still has to produce a model, and the newsletter route stays
-    /// behind it as the fallback the verdict would have chosen.
+    /// Nintendo purchase receipts and Switch Online renewal notices rendered as
+    /// the HTML snapshot: two screens of plain label/value text per message.
+    /// Like the Apple notice they are decided here rather than by forcing the
+    /// classifier's kind, so `MessageProcessor`'s newsletter flag and the
+    /// render-quality evaluator keep the classifier's own verdict. The gate is
+    /// `NintendoPurchasePreviewExtractor.isPurchaseNotice` over the same text
+    /// the builder reads, so a routed message always gets its card.
+    static func routesNintendoPurchaseNoticeToTransactionalCard(
+        senderEmail: String?,
+        subject: String?,
+        previewSource: EmailPreviewSource
+    ) -> Bool {
+        NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: senderEmail,
+            subject: subject,
+            noticeText: NintendoPurchasePreviewExtractor.noticeText(
+                plainText: previewSource.plainText,
+                extractedText: previewSource.extractedText,
+                canonicalHTML: previewSource.canonicalHTML
+            )
+        )
+    }
+
+    /// `isDeterministicTransactionalNotice` routes the transactional card ahead
+    /// of the classifier's verdict (see `routesDeveloperProgramNoticeToTransactionalCard`
+    /// and `routesNintendoPurchaseNoticeToTransactionalCard`); the builder still
+    /// has to produce a model, and the newsletter route stays behind it as the
+    /// fallback the verdict would have chosen.
     static func nativePreviewCardRoutes(
         isNewsletter: Bool,
         isForwardedEmail: Bool,
         classificationKind: EmailPreviewKind,
-        isDeveloperProgramNotice: Bool = false
+        isDeterministicTransactionalNotice: Bool = false
     ) -> [NativePreviewCardRoute] {
         var routes: [NativePreviewCardRoute] = []
 
-        if classificationKind == .transactional || isDeveloperProgramNotice,
+        if classificationKind == .transactional || isDeterministicTransactionalNotice,
            shouldUseTransactionalPreviewCard(isForwardedEmail: isForwardedEmail) {
             routes.append(.transactional)
         }
