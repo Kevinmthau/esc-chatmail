@@ -2,11 +2,20 @@ import CoreData
 import XCTest
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationRollupMutationSerializerTests: XCTestCase {
     func testSyncMutationRestoresNewerReadStateForStaleRegisteredMessage() async throws {
         let stack = TestCoreDataStack()
-        let viewContext = stack.viewContext
+        let viewContext = stack.makeMainQueueViewContext()
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(1)
@@ -18,7 +27,7 @@ final class ConversationRollupMutationSerializerTests: XCTestCase {
             .inConversation(conversation)
             .build(in: viewContext)
         message.addToLabels(inboxLabel)
-        try stack.saveViewContext()
+        try viewContext.save()
 
         let conversationObjectID = conversation.objectID
         let messageObjectID = message.objectID
@@ -31,7 +40,7 @@ final class ConversationRollupMutationSerializerTests: XCTestCase {
         message.isUnread = false
         message.localModifiedAt = Date()
         conversation.inboxUnreadCount = 0
-        try stack.saveViewContext()
+        try viewContext.save()
 
         let serializer = ConversationRollupMutationSerializer()
         let unreadSeenByRollup = try await serializer.performThrowingSyncMutation(
