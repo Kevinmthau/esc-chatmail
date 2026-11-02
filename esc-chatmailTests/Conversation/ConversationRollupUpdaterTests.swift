@@ -2,6 +2,21 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// The updater's async entry points enter the handed context through that
+/// context's own `perform`. Its synchronous ones (`updateRollups`,
+/// `updateDisplayNameOnly`) run on the caller's thread, here on-queue for the
+/// same reason as the test bodies.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class ConversationRollupUpdaterTests: XCTestCase {
     private var testStack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
@@ -10,7 +25,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
         updater = ConversationRollupUpdater()
     }
 
@@ -19,6 +34,11 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         context = nil
         testStack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     func testUpdateRollups_clearsLatestInboxDateWhenNoInboxMessages() throws {
@@ -171,7 +191,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
             .inConversation(conversation)
             .build(in: context)
         inboxMessage.addToLabels(inboxLabel)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         updater.updateRollups(for: conversation, myEmail: "me@example.com")
         XCTAssertTrue(conversation.hasInbox)
@@ -181,7 +201,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.snippet, "Inbox preview")
         XCTAssertNil(conversation.archivedAt)
         XCTAssertFalse(conversation.hidden)
-        try testStack.saveViewContext()
+        try saveViewContext()
         XCTAssertFalse(context.hasChanges)
 
         updater.updateRollups(for: conversation, myEmail: "me@example.com")
@@ -209,7 +229,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
             .withSnippet("Archived preview")
             .inConversation(conversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         updater.updateRollups(for: conversation, myEmail: "me@example.com")
         XCTAssertFalse(conversation.hasInbox)
@@ -217,7 +237,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertTrue(conversation.hidden)
         XCTAssertEqual(conversation.lastMessageDate, receivedDate)
         XCTAssertEqual(conversation.snippet, "Archived preview")
-        try testStack.saveViewContext()
+        try saveViewContext()
         XCTAssertFalse(context.hasChanges)
 
         updater.updateRollups(for: conversation, myEmail: "me@example.com")
@@ -412,7 +432,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
 
     func testRepairMissingConversationPreviewsRestoresWhitespaceOnlyConversationPreviewInSQLiteStore() async throws {
         let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
-        let sqliteContext = sqliteStack.viewContext
+        let sqliteContext = sqliteStack.makeMainQueueViewContext()
         let messageDate = Date(timeIntervalSince1970: 200)
         let conversation = ConversationBuilder()
             .withSnippet(" \n\t ")
@@ -428,7 +448,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
             .build(in: sqliteContext)
         message.cleanedSnippet = "Clean repair preview"
 
-        try sqliteStack.saveViewContext()
+        try sqliteContext.save()
 
         let result = await updater.repairMissingConversationPreviews(in: sqliteContext)
 
