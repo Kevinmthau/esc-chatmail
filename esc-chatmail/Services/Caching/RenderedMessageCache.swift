@@ -908,7 +908,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
 
     private static func previewRenderModelSize(_ model: EmailPreviewRenderModel) -> Int {
         switch model {
-        case .calendarInvite:
+        case .calendarInvite, .reservationSummary:
             return 512
         case .newsletter(let model):
             return stringSize(model.title) +

@@ -1016,10 +1016,17 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return false
         }
 
+        // The reservation summary card stands in for the subject and the .ics exactly as
+        // the invite card does; the pipeline tries it right after the invite builder, under
+        // the same gate.
         return CalendarInvitePreviewBuilder().canBuildPreview(
             canonicalHTML: canonicalHTML,
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
+            subject: subject
+        ) || ReservationSummaryPreviewBuilder().canBuildPreview(
+            canonicalHTML: canonicalHTML,
+            bodyText: bodyText,
             subject: subject
         )
     }
