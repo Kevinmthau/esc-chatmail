@@ -20,7 +20,12 @@ struct ReservationSummaryPreviewCard: View {
             header
 
             HStack(alignment: .top, spacing: 14) {
-                dateTile
+                PreviewCardDateTile(
+                    monthSymbol: model.monthSymbol,
+                    dayNumber: model.dayNumber,
+                    weekdaySymbol: model.weekdaySymbol,
+                    color: accentColor
+                )
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.title)
@@ -94,31 +99,6 @@ struct ReservationSummaryPreviewCard: View {
                     .lineLimit(1)
             }
         }
-    }
-
-    private var dateTile: some View {
-        VStack(spacing: 4) {
-            Text(model.monthSymbol)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.92))
-                .lineLimit(1)
-
-            Text(model.dayNumber)
-                .font(.system(size: 30, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-
-            Text(model.weekdaySymbol)
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.88))
-                .lineLimit(1)
-        }
-        .frame(width: 70, height: 92)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(accentColor.gradient)
-        )
     }
 
     private func detailRow(

@@ -18,9 +18,9 @@ import Foundation
 /// has no labelled field and stays a text bubble.
 ///
 /// Pure and sender-independent: `Message.isLikelyCalendarInvite` (the row gate, over the
-/// stored body text and snippet) and `ReservationSummaryPreviewBuilder` (the card, over
-/// the same lines plus the HTML's text appended after them) both call `parse`, so the gate
-/// cannot route a row the builder then fails to card.
+/// stored body text) and `ReservationSummaryPreviewBuilder` (the card, over the same lines
+/// plus the HTML's text appended after them) both call `parse`, so the gate cannot route a
+/// row the builder then fails to card.
 enum ReservationSummaryParser {
     struct Summary: Equatable, Sendable {
         enum Status: Equatable, Sendable {
@@ -66,8 +66,8 @@ enum ReservationSummaryParser {
             return nil
         }
 
-        guard let dated = firstDate(in: lines),
-              let times = timeRange(in: lines, dateLineIndex: dated.lineIndex) else {
+        guard let dated = reservationDate(in: lines),
+              let times = timeRange(in: lines, dated: dated) else {
             return nil
         }
 
@@ -91,36 +91,27 @@ enum ReservationSummaryParser {
         )
     }
 
-    /// Display lines from free text: normalized, blank lines dropped, repeats (compared
-    /// case-insensitively) kept only once, in order.
+    /// Display lines from free text: normalized, blank lines dropped, in order. Repeats stay:
+    /// a field's value can legitimately repeat an earlier line ("Location:" then the venue
+    /// heading the mail opens with), and dropping it would hand the label the line after.
     static func lines(from text: String?) -> [String] {
         let normalized = CalendarInviteSignals.normalizedSignalText(text)
         guard !normalized.isEmpty else {
             return []
         }
 
-        var seen = Set<String>()
-        var lines: [String] = []
-        for rawLine in normalized.components(separatedBy: .newlines) {
-            let line = CalendarInviteSignals.normalizedSignalText(rawLine)
-            guard !line.isEmpty, seen.insert(line.lowercased()).inserted else {
-                continue
-            }
-            lines.append(line)
-        }
-        return lines
+        return normalized
+            .components(separatedBy: .newlines)
+            .map { CalendarInviteSignals.normalizedSignalText($0) }
+            .filter { !$0.isEmpty }
     }
 
-    /// `primary` then the lines of `others` not already present, compared case-insensitively.
-    /// Appending keeps every match `parse` finds in `primary` ahead of anything later
-    /// sources add, which is what lets the row gate and the card builder agree.
-    static func mergedLines(_ primary: [String], _ others: [String]...) -> [String] {
-        var seen = Set(primary.map { $0.lowercased() })
-        var merged = primary
-        for line in others.joined() where seen.insert(line.lowercased()).inserted {
-            merged.append(line)
-        }
-        return merged
+    /// `primary` then the lines of `other` not in it, compared case-insensitively. Only ever
+    /// adding lines means a parse that succeeds on `primary` also succeeds on the result,
+    /// which is what lets the row gate and the card builder agree.
+    static func mergedLines(_ primary: [String], _ other: [String]) -> [String] {
+        let seen = Set(primary.map { $0.lowercased() })
+        return primary + other.filter { !seen.contains($0.lowercased()) }
     }
 
     // MARK: - Date
@@ -128,22 +119,73 @@ enum ReservationSummaryParser {
     private struct DatedLine {
         let day: Summary.Day
         let lineIndex: Int
+        /// The rest of the line past the date, where its time usually sits.
+        let textAfterDate: String
     }
 
-    private static func firstDate(in lines: [String]) -> DatedLine? {
+    private struct DateMatch {
+        let day: Summary.Day
+        let range: Range<String.Index>
+    }
+
+    /// The reservation's own date: the first that shares a line with a time, else the first.
+    /// A mail can state others ahead of it, so a date worded as when the booking was made or
+    /// as a deadline ("Booked on: 10/25/2026", "cancel by 10/30/2026") never counts. A mail
+    /// stating only those has no reservation date to show, and declines.
+    private static func reservationDate(in lines: [String]) -> DatedLine? {
+        var firstDated: DatedLine?
         for (index, line) in lines.enumerated() {
-            if let day = numericDate(in: line) ?? textualDate(in: line) {
-                return DatedLine(day: day, lineIndex: index)
+            for match in dateMatches(in: line) where !isNonEventDate(match, in: line) {
+                let dated = DatedLine(
+                    day: match.day,
+                    lineIndex: index,
+                    textAfterDate: String(line[match.range.upperBound...])
+                )
+                if timeRange(inLine: line) != nil {
+                    return dated
+                }
+                if firstDated == nil {
+                    firstDated = dated
+                }
             }
         }
-        return nil
+        return firstDated
+    }
+
+    /// Every date the line states, in order.
+    private static func dateMatches(in line: String) -> [DateMatch] {
+        func matches(
+            _ regex: NSRegularExpression,
+            reading: (NSTextCheckingResult) -> Summary.Day?
+        ) -> [DateMatch] {
+            regex.matches(in: line, options: [], range: NSRange(line.startIndex..., in: line)).compactMap { match in
+                guard let range = Range(match.range, in: line), let day = reading(match) else {
+                    return nil
+                }
+                return DateMatch(day: day, range: range)
+            }
+        }
+
+        let found = matches(numericDateRegex) { numericDate($0, in: line) } +
+            matches(monthFirstTextualDateRegex) { monthFirstTextualDate($0, in: line) } +
+            matches(dayFirstTextualDateRegex) { dayFirstTextualDate($0, in: line) }
+        return found.sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    private static func isNonEventDate(_ match: DateMatch, in line: String) -> Bool {
+        firstMatch(nonEventDatePrefixRegex, in: String(line[..<match.range.lowerBound])) != nil
+    }
+
+    /// A stamp or deadline line: nothing on it describes the reservation, including its time.
+    private static func holdsOnlyNonEventDates(_ line: String) -> Bool {
+        let matches = dateMatches(in: line)
+        return !matches.isEmpty && matches.allSatisfy { isNonEventDate($0, in: line) }
     }
 
     /// "Sunday, 11/01/2026", "11/1/26". Read month-first (the US booking systems this
     /// targets), unless a stated weekday only fits the day-first reading.
-    private static func numericDate(in line: String) -> Summary.Day? {
-        guard let match = firstMatch(numericDateRegex, in: line),
-              let first = intGroup(match, 2, in: line),
+    private static func numericDate(_ match: NSTextCheckingResult, in line: String) -> Summary.Day? {
+        guard let first = intGroup(match, 2, in: line),
               let second = intGroup(match, 3, in: line),
               let rawYear = intGroup(match, 4, in: line) else {
             return nil
@@ -165,25 +207,26 @@ enum ReservationSummaryParser {
         return monthFirst ?? dayFirst
     }
 
-    /// "Saturday, November 7, 2026", "Nov 7th 2026", "7 November 2026".
-    private static func textualDate(in line: String) -> Summary.Day? {
-        if let match = firstMatch(monthFirstTextualDateRegex, in: line),
-           let monthName = stringGroup(match, 1, in: line),
-           let month = monthNumber(monthName),
-           let day = intGroup(match, 2, in: line),
-           let year = intGroup(match, 3, in: line) {
-            return validDay(year: year, month: month, day: day)
+    /// "Saturday, November 7, 2026", "Nov 7th 2026".
+    private static func monthFirstTextualDate(_ match: NSTextCheckingResult, in line: String) -> Summary.Day? {
+        guard let monthName = stringGroup(match, 1, in: line),
+              let month = monthNumber(monthName),
+              let day = intGroup(match, 2, in: line),
+              let year = intGroup(match, 3, in: line) else {
+            return nil
         }
+        return validDay(year: year, month: month, day: day)
+    }
 
-        if let match = firstMatch(dayFirstTextualDateRegex, in: line),
-           let day = intGroup(match, 1, in: line),
-           let monthName = stringGroup(match, 2, in: line),
-           let month = monthNumber(monthName),
-           let year = intGroup(match, 3, in: line) {
-            return validDay(year: year, month: month, day: day)
+    /// "7 November 2026".
+    private static func dayFirstTextualDate(_ match: NSTextCheckingResult, in line: String) -> Summary.Day? {
+        guard let day = intGroup(match, 1, in: line),
+              let monthName = stringGroup(match, 2, in: line),
+              let month = monthNumber(monthName),
+              let year = intGroup(match, 3, in: line) else {
+            return nil
         }
-
-        return nil
+        return validDay(year: year, month: month, day: day)
     }
 
     private static func validDay(year: Int, month: Int, day: Int) -> Summary.Day? {
@@ -229,24 +272,49 @@ enum ReservationSummaryParser {
         let end: Summary.Time?
     }
 
-    /// The date's own line first ("confirmed for 01:00 PM - 02:00 PM" usually shares the
-    /// sentence), then the two lines after it, then anywhere. Ranges beat lone times on
-    /// each line, so "1:00 PM - 2:00 PM" is never read as just its start.
-    private static func timeRange(in lines: [String], dateLineIndex: Int) -> TimeRange? {
-        let nearby = (dateLineIndex..<min(lines.count, dateLineIndex + 3)).map { lines[$0] }
-        for line in nearby + lines {
-            if let range = explicitRange(in: line) ?? singleTime(in: line).map({ TimeRange(start: $0, end: nil) }) {
+    /// The text past the date first ("confirmed for 01:00 PM - 02:00 PM" usually shares the
+    /// sentence), then the date's own line and the two after it, then anywhere. Ranges beat
+    /// lone times on each line, so "1:00 PM - 2:00 PM" is never read as just its start.
+    private static func timeRange(in lines: [String], dated: DatedLine) -> TimeRange? {
+        let nearby = Array(lines[dated.lineIndex..<min(lines.count, dated.lineIndex + 3)])
+        for line in [dated.textAfterDate] + nearby + lines where !holdsOnlyNonEventDates(line) {
+            if let range = timeRange(inLine: line) {
                 return range
             }
         }
         return nil
     }
 
+    private static func timeRange(inLine line: String) -> TimeRange? {
+        explicitRange(in: line) ?? singleTime(in: line).map { TimeRange(start: $0, end: nil) }
+    }
+
+    /// A match that cannot be a range (a court number or day as its start) only consumes up
+    /// to that start, so "Lane 4 - 6:00 PM - 7:00 PM" still finds "6:00 PM - 7:00 PM".
     private static func explicitRange(in line: String) -> TimeRange? {
-        guard let match = firstMatch(timeRangeRegex, in: line),
-              let startHour = intGroup(match, 1, in: line),
+        var searchStart = line.startIndex
+        while searchStart < line.endIndex,
+              let match = timeRangeRegex.firstMatch(
+                in: line,
+                options: [],
+                range: NSRange(searchStart..., in: line)
+              ) {
+            if let range = timeRange(from: match, in: line) {
+                return range
+            }
+            guard let start = Range(match.range(at: 1), in: line) else {
+                return nil
+            }
+            searchStart = start.upperBound
+        }
+        return nil
+    }
+
+    private static func timeRange(from match: NSTextCheckingResult, in line: String) -> TimeRange? {
+        guard let startHour = intGroup(match, 1, in: line),
               let endHour = intGroup(match, 4, in: line),
-              let endMeridiem = stringGroup(match, 6, in: line).flatMap(meridiem) else {
+              let endMeridiem = stringGroup(match, 6, in: line).flatMap(meridiem),
+              !hasImplausibleBareStart(match, in: line) else {
             return nil
         }
 
@@ -274,6 +342,18 @@ enum ReservationSummaryParser {
             return nil
         }
         return TimeRange(start: start, end: end)
+    }
+
+    /// A start with neither minutes nor AM/PM is only a number, so it has to read as a time
+    /// from what comes before it ("for 11 - 12:30 pm"). After a word that names something
+    /// else ("Court 3 - 7:00 PM", "Nov 1 - 7:00 PM") it is that thing's number.
+    private static func hasImplausibleBareStart(_ match: NSTextCheckingResult, in line: String) -> Bool {
+        guard match.range(at: 2).location == NSNotFound,
+              match.range(at: 3).location == NSNotFound,
+              let start = Range(match.range(at: 1), in: line) else {
+            return false
+        }
+        return firstMatch(bareRangeStartContextRegex, in: String(line[..<start.lowerBound])) == nil
     }
 
     private static func singleTime(in line: String) -> Summary.Time? {
@@ -346,7 +426,7 @@ enum ReservationSummaryParser {
                 var nextIndex = index + 1
                 while nextIndex < lines.count, values.count < maximumPeople {
                     let candidate = lines[nextIndex]
-                    guard isFieldValueLine(candidate) else {
+                    guard isFieldValueLine(candidate), kind == .location || isPeopleValueLine(candidate) else {
                         break
                     }
                     values.append(candidate)
@@ -356,6 +436,8 @@ enum ReservationSummaryParser {
                     nextIndex += 1
                 }
             }
+            // "Guests: None" states no value, so a later label can still supply the field.
+            values.removeAll { firstMatch(placeholderValueRegex, in: $0) != nil }
 
             switch kind {
             case .location:
@@ -402,12 +484,28 @@ enum ReservationSummaryParser {
         return true
     }
 
+    /// Whether a line after a people label is more of that list: a bare count or names. The
+    /// mail's next sentence often has no period and passes `isFieldValueLine`
+    /// ("Thank you for your reservation", "DO NOT REPLY TO THIS EMAIL").
+    private static func isPeopleValueLine(_ line: String) -> Bool {
+        if Int(line) != nil {
+            return true
+        }
+        guard firstMatch(peopleListEndRegex, in: line) == nil else {
+            return false
+        }
+        return line.components(separatedBy: CharacterSet(charactersIn: ",;")).allSatisfy { name in
+            isNameLike(name) && name.split(separator: " ").count <= 4
+        }
+    }
+
     /// "Thau, Kevin" reads "Kevin Thau"; "Thau, Kevin; Doe, Jane" is two people; a bare
     /// count ("4") reads "4 players" under its label.
     private static func peopleNames(in value: String, label: String) -> [String] {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if let count = Int(trimmed) {
-            return ["\(count) \(label)"]
+            let singular = label.hasSuffix("s") ? String(label.dropLast()) : label
+            return ["\(count) \(count == 1 ? singular : singular + "s")"]
         }
 
         return trimmed
@@ -424,8 +522,11 @@ enum ReservationSummaryParser {
             .filter { !$0.isEmpty }
 
         let wordCounts = parts.map { $0.split(separator: " ").count }
+        // Two words on both sides ("John Smith, Jane Doe") is two people far more often than
+        // one person with a two-word surname and two given names.
         if parts.count == 2,
            wordCounts.allSatisfy({ (1...2).contains($0) }),
+           wordCounts != [2, 2],
            parts.allSatisfy(isNameLike),
            !nameSuffixes.contains(parts[1].lowercased().replacingOccurrences(of: ".", with: "")) {
             return ["\(parts[1]) \(parts[0])"]
@@ -500,15 +601,16 @@ enum ReservationSummaryParser {
 
     /// Cancelled outranks confirmed outranks reminder: a cancellation notice often quotes
     /// the booking it cancels, and a reminder usually restates that the booking stands.
-    /// "To CANCEL your reservation, please email…" is an instruction, not a cancellation,
-    /// so the text check needs a phrase stating one happened.
+    /// "To CANCEL your reservation, please email…" is an instruction, not a cancellation, and
+    /// "If your reservation is cancelled less than 24 hours before…" is policy, so both
+    /// statuses need a phrase stating it happened (`statesFact`).
     private static func resolvedStatus(lowercasedSubject: String, lowercasedText: String) -> Summary.Status? {
-        if lowercasedSubject.range(of: #"\bcancel(?:l?ed|lation)\b"#, options: .regularExpression) != nil ||
-            lowercasedText.range(of: cancelledStatementPattern, options: .regularExpression) != nil {
+        if statesFact(cancelledSubjectRegex, in: lowercasedSubject, unlessClauseHas: conditionalClauseRegex) ||
+            statesFact(cancelledStatementRegex, in: lowercasedText, unlessClauseHas: conditionalClauseRegex) {
             return .cancelled
         }
-        if lowercasedSubject.contains("confirm") ||
-            lowercasedText.range(of: #"\b(?:is|has been|was|now) confirmed\b|\bconfirmation\b"#, options: .regularExpression) != nil {
+        if statesFact(confirmedSubjectRegex, in: lowercasedSubject, unlessClauseHas: unconfirmedClauseRegex) ||
+            statesFact(confirmedStatementRegex, in: lowercasedText, unlessClauseHas: unconfirmedClauseRegex) {
             return .confirmed
         }
         if lowercasedSubject.contains("reminder") {
@@ -517,19 +619,51 @@ enum ReservationSummaryParser {
         return nil
     }
 
-    /// "provide us with 24 hours notice of cancellation", "48-hour notice". Only read when
-    /// the mail talks about cancelling at all.
-    private static func cancellationNoticeHours(in lowercasedText: String) -> Int? {
-        guard lowercasedText.contains("cancel"),
-              let match = firstMatch(noticeHoursRegex, in: lowercasedText),
-              let hours = intGroup(match, 1, in: lowercasedText),
-              (1...336).contains(hours) else {
-            return nil
+    /// Whether `regex` matches somewhere as a statement: not hedged earlier in its sentence
+    /// ("if", "once", "pending"), and not followed by a policy's terms ("is cancelled less
+    /// than 24 hours before").
+    private static func statesFact(
+        _ regex: NSRegularExpression,
+        in text: String,
+        unlessClauseHas hedge: NSRegularExpression
+    ) -> Bool {
+        regex.matches(in: text, options: [], range: NSRange(text.startIndex..., in: text)).contains { match in
+            guard let range = Range(match.range, in: text) else {
+                return false
+            }
+            return firstMatch(hedge, in: String(text[sentenceStart(before: range.lowerBound, in: text)..<range.lowerBound])) == nil &&
+                firstMatch(policyTermsRegex, in: String(text[range.upperBound...])) == nil
         }
-        return hours
+    }
+
+    /// "provide us with 24 hours notice of cancellation", "48-hour notice". Only a notice its
+    /// own sentence ties to cancelling counts: "48 hours notice" for a pro request is not a
+    /// cancellation deadline just because the mail also says how to cancel.
+    private static func cancellationNoticeHours(in lowercasedText: String) -> Int? {
+        let range = NSRange(lowercasedText.startIndex..., in: lowercasedText)
+        for match in noticeHoursRegex.matches(in: lowercasedText, options: [], range: range) {
+            guard let matched = Range(match.range, in: lowercasedText),
+                  let hours = intGroup(match, 1, in: lowercasedText),
+                  (1...336).contains(hours) else {
+                continue
+            }
+            let sentenceEnd = lowercasedText[matched.upperBound...].firstIndex(where: isSentenceEnd) ?? lowercasedText.endIndex
+            if lowercasedText[sentenceStart(before: matched.lowerBound, in: lowercasedText)..<sentenceEnd].contains("cancel") {
+                return hours
+            }
+        }
+        return nil
     }
 
     // MARK: - Helpers
+
+    private static func isSentenceEnd(_ character: Character) -> Bool {
+        ".!?;\n".contains(character)
+    }
+
+    private static func sentenceStart(before index: String.Index, in text: String) -> String.Index {
+        text[..<index].lastIndex(where: isSentenceEnd).map { text.index(after: $0) } ?? text.startIndex
+    }
 
     private static func truncate(_ text: String, limit: Int) -> String {
         guard text.count > limit else {
@@ -632,10 +766,26 @@ enum ReservationSummaryParser {
         #"\b(\d{1,2})(?:st|nd|rd|th)?\s+("# + monthPattern + #")\.?,?\s+(\d{4})\b"#
     )
 
-    /// "01:00 PM - 02:00 PM", "1-2pm", "11 to 12:30 p.m.". The end's AM/PM is required.
+    /// A date worded as something other than the reservation, ending right where the date
+    /// starts: "Booked on: ", "Sent: Monday, ", "cancel by ". "Your court is booked on …" and
+    /// "has been booked on …" do state the reservation, so they stay out.
+    private static let nonEventDatePrefixRegex = regex(
+        #"(?:(?<!is )(?<!been )\b(?:booked|made|created|placed|sent|received|purchased|issued|modified|updated|printed|generated)(?:\s+(?:on|at))?|\b(?:by|before|until|deadline))\s*:?\s*(?:\b(?:"# +
+            weekdayPattern + #")\b\.?,?\s+)?$"#
+    )
+
+    /// "01:00 PM - 02:00 PM", "1-2pm", "11 to 12:30 p.m.". The end's AM/PM is required. The
+    /// lookbehind keeps a date's trailing part ("11/01 - 2 PM") from being read as the start.
     private static let timeRangeRegex = regex(
-        #"\b(\d{1,2})(?::(\d{2}))?\s*("# + meridiemPattern + #")?\s*(?:-|–|—|to|until)\s*(\d{1,2})(?::(\d{2}))?\s*("# +
+        #"(?<![/\d])\b(\d{1,2})(?::(\d{2}))?\s*("# + meridiemPattern + #")?\s*(?:-|–|—|to|until)\s*(\d{1,2})(?::(\d{2}))?\s*("# +
             meridiemPattern + #")(?![a-z])"#
+    )
+
+    /// What may precede a bare-number range start: nothing, punctuation or a number (but not
+    /// "#"), or a word that introduces a time.
+    private static let bareRangeStartContextRegex = regex(
+        #"(?:^\s*|[^a-zA-Z\s#]\s*|\b(?:for|from|at|time|times|between|is|on|today|tomorrow|"# +
+            weekdayPattern + #")\b\.?,?\s*)$"#
     )
 
     private static let singleTimeRegex = regex(
@@ -655,9 +805,44 @@ enum ReservationSummaryParser {
         #"\b(\d{1,3})\s*-?\s*(?:hours?|hrs?)(?:'|’)?s?\s+(?:advance\s+|advanced\s+|prior\s+)?notice\b"#
     )
 
+    /// A dash only separates when spaced after the prefix: "Re-booking confirmed" and
+    /// "Update-required reservation" start with hyphenated words, not with prefixes.
     private static let subjectPrefixPattern =
-        #"^\s*(?:re|fwd?|fw|reminder|friendly reminder|confirmation|confirmed|update|updated|important)\s*[:\-–]\s*"#
+        #"^\s*(?:re|fwd?|reminder|friendly reminder|confirmation|confirmed|update|updated|important)\s*(?::\s*|[\-–]\s+)"#
 
-    private static let cancelledStatementPattern =
+    /// A line that ends a people list even though it reads like a short name.
+    private static let peopleListEndRegex = regex(
+        #"^(?:thank|thanks|regards|sincerely|cheers|best|please|questions?|note|see you|enjoy|do not|don['’]t)\b"#
+    )
+
+    private static let placeholderValueRegex = regex(#"^(?:|none|n/?a|tbd|-+|0)$"#)
+
+    private static let cancelledSubjectRegex = regex(#"\bcancel(?:l?ed|l?ation)\b"#)
+
+    private static let cancelledStatementRegex = regex(
         #"\b(?:reservation|booking)\s+(?:has been|was|is|have been)\s+cancel(?:l)?ed\b|\b(?:we have|we've|you have|you've)\s+cancel(?:l)?ed\b"#
+    )
+
+    private static let confirmedSubjectRegex = regex(#"\bconfirm(?:ed|ation)\b"#)
+
+    /// "Confirmation" names a confirmed booking ("Confirmation #123"), but a follow-up one
+    /// ("a confirmation email will follow") says nothing yet.
+    private static let confirmedStatementRegex = regex(
+        #"\b(?:is|has been|was|now) confirmed\b|\bconfirmation\b(?!\s+(?:e-?mail|message|link|required|needed|pending))"#
+    )
+
+    private static let conditionalClausePattern =
+        "if|when|whenever|unless|should|once|until|after|before|any|each|every|in case|in the event"
+
+    /// Hedges a cancellation or confirmation earlier in its sentence, making it a condition
+    /// rather than a statement.
+    private static let conditionalClauseRegex = regex(#"\b(?:"# + conditionalClausePattern + #")\b"#)
+
+    /// The conditional hedges, plus the wording of a booking still waiting on a confirmation.
+    private static let unconfirmedClauseRegex = regex(
+        #"\b(?:"# + conditionalClausePattern + #"|pending|awaiting|await|waiting|requires?|required|needs?|upon|not)\b"#
+    )
+
+    /// What follows "is cancelled" in a policy rather than in a report of one.
+    private static let policyTermsRegex = regex(#"^\s+(?:less|fewer|more|within|without|late|before|prior)\b"#)
 }
