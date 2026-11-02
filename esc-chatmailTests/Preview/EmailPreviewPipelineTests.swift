@@ -464,31 +464,11 @@ final class EmailPreviewPipelineTests: XCTestCase {
     }
 
     func testNativePreviewCardRoutes_nintendoPurchaseNoticeRoutesTransactionalForPersonToPersonVerdict() {
-        // Revert-check: dropping `routesNintendoPurchaseNoticeToTransactionalCard`
-        // from `buildPreview`'s `isDeterministicTransactionalNotice` leaves a
-        // person-to-person verdict with no native route, so the chat shows
-        // the rendered-HTML snapshot of the receipt text.
-        let source = EmailPreviewSource(
-            messageId: "nintendo-route-\(UUID().uuidString)",
-            sourceSignature: "sig",
-            canonicalHTML: NintendoNoticeFixtures.html(from: NintendoNoticeFixtures.renewalBodyText),
-            plainText: NintendoNoticeFixtures.renewalBodyText,
-            extractedText: nil,
-            extractedImages: [],
-            htmlSummary: EmailPreviewHTMLSummary(
-                h1Text: nil,
-                h2Text: nil,
-                titleText: nil,
-                preheaderText: nil,
-                actionLinkTexts: []
-            ),
-            classification: EmailPreviewClassification(
-                kind: .personToPerson,
-                newsletterScore: 0,
-                transactionalScore: 26,
-                signals: [.transactionalKeywords, .replyChainMarkers]
-            )
-        )
+        // Pins the gate and the route list; that `buildPreview` wires them
+        // together is `testLoadPreview_nintendoNoticeWithPersonToPersonVerdict_buildsTransactionalCard`.
+        // Revert-check: dropping the sender check from
+        // `NintendoPurchasePreviewExtractor.isPurchaseNotice` lets the lookalike through.
+        let source = personToPersonNintendoSource(bodyText: NintendoNoticeFixtures.renewalBodyText)
 
         let routesNotice = EmailPreviewPipeline.routesNintendoPurchaseNoticeToTransactionalCard(
             senderEmail: NintendoNoticeFixtures.senderEmail,
@@ -512,12 +492,54 @@ final class EmailPreviewPipelineTests: XCTestCase {
         ))
     }
 
+    func testLoadPreview_nintendoNoticeWithPersonToPersonVerdict_buildsTransactionalCard() async throws {
+        // Revert-check: dropping `routesNintendoPurchaseNoticeToTransactionalCard`
+        // from `buildPreview`'s `isDeterministicTransactionalNotice` leaves a
+        // person-to-person verdict with no native route, so the chat shows
+        // the rendered-HTML snapshot of the notice text.
+        let preview = try await loadPreviewForPersonToPersonNintendoSource(
+            bodyText: NintendoNoticeFixtures.renewalBodyText,
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: NintendoNoticeFixtures.renewalSubject
+        )
+
+        guard case .transactional(let model) = preview else {
+            XCTFail("Expected transactional preview, got \(preview)")
+            return
+        }
+
+        XCTAssertEqual(model.status, "Auto-Renewal")
+        XCTAssertEqual(model.sourceLabel, "Nintendo")
+    }
+
+    func testLoadPreview_nintendoRefundWithPersonToPersonVerdict_keepsHTMLSnapshot() async throws {
+        // Revert-check: removing `reportsOtherOutcome` from
+        // `NintendoPurchasePreviewExtractor.isPurchaseNotice` routes this refund
+        // to the card, which shows it as "Purchased".
+        let preview = try await loadPreviewForPersonToPersonNintendoSource(
+            bodyText: """
+            We have refunded your recent digital purchase from Nintendo.
+
+            Transaction ID: 52724694283
+            Price: $49.99
+            """,
+            senderEmail: "support@nintendo.com",
+            subject: "Your transaction with Nintendo"
+        )
+
+        guard case .html = preview else {
+            XCTFail("Expected HTML preview, got \(preview)")
+            return
+        }
+    }
+
     func testLoadPreview_buildsTransactionalCardForNintendoAutomaticRenewalEmail() async throws {
         // End-to-end from stored HTML: the chat showed this notice as the
         // rendered-HTML snapshot (two screens of serif body text).
         // HONEST SCOPE: whether the classifier calls this fixture transactional
         // depends on scoring this test does not pin, so on its own it cannot
-        // prove the route; the route test above does. What it pins is that the
+        // prove the route; `testLoadPreview_nintendoNoticeWithPersonToPersonVerdict_buildsTransactionalCard`
+        // does. What it pins is that the
         // stored message reaches the Nintendo card's fields through the real
         // source loader. Revert-check: removing the `NintendoPurchasePreviewExtractor`
         // branch from `TransactionalPreviewBuilder.buildPreview` fails the
@@ -807,6 +829,66 @@ final class EmailPreviewPipelineTests: XCTestCase {
         )
     }
 
+    private func personToPersonNintendoSource(bodyText: String) -> EmailPreviewSource {
+        EmailPreviewSource(
+            messageId: "nintendo-route-\(UUID().uuidString)",
+            sourceSignature: "sig",
+            canonicalHTML: NintendoNoticeFixtures.html(from: bodyText),
+            plainText: bodyText,
+            extractedText: nil,
+            extractedImages: [],
+            htmlSummary: EmailPreviewHTMLSummary(
+                h1Text: nil,
+                h2Text: nil,
+                titleText: nil,
+                preheaderText: nil,
+                actionLinkTexts: []
+            ),
+            classification: EmailPreviewClassification(
+                kind: .personToPerson,
+                newsletterScore: 0,
+                transactionalScore: 26,
+                signals: [.transactionalKeywords, .replyChainMarkers]
+            )
+        )
+    }
+
+    /// Runs the real `buildPreview` over a source whose classifier verdict is
+    /// fixed, so the only way to a native card is the deterministic route.
+    private func loadPreviewForPersonToPersonNintendoSource(
+        bodyText: String,
+        senderEmail: String,
+        subject: String
+    ) async throws -> EmailPreviewRenderModel {
+        let source = personToPersonNintendoSource(bodyText: bodyText)
+        let htmlLoader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            recoveryService: NoopHTMLContentRecoverer()
+        )
+        let pipeline = EmailPreviewPipeline(
+            previewSourceLoader: FixedEmailPreviewSourceLoader(source: source),
+            htmlContentLoader: htmlLoader,
+            renderedMessageCache: renderedMessageCache
+        )
+        let loadedPreview = await pipeline.loadPreview(
+            request: EmailPreviewPipelineRequest(
+                messageId: source.messageId,
+                bodyStorageURI: nil,
+                bodyText: bodyText,
+                cleanedSnippet: nil,
+                senderName: NintendoNoticeFixtures.senderName,
+                senderEmail: senderEmail,
+                subject: subject,
+                isNewsletter: false,
+                isForwardedEmail: false,
+                cleanupMode: .none,
+                isDarkMode: false
+            )
+        )
+        return try XCTUnwrap(loadedPreview)
+    }
+
     func testLoadPreviewRejectsSourceThatCompletesAfterAccountReopen() async throws {
         let htmlLoader = HTMLContentLoader(
             contentHandler: contentHandler,
@@ -881,6 +963,21 @@ final class EmailPreviewPipelineTests: XCTestCase {
 private struct NoopHTMLContentRecoverer: HTMLContentRecovering {
     func recoverHTMLContent(messageId: String) async -> String? {
         nil
+    }
+}
+
+private struct FixedEmailPreviewSourceLoader: EmailPreviewSourceLoading {
+    let source: EmailPreviewSource
+
+    func loadPreviewSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        allowRecovery: Bool
+    ) async -> EmailPreviewSource? {
+        source
     }
 }
 

@@ -97,7 +97,7 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
         ))
         XCTAssertFalse(NintendoPurchasePreviewExtractor.isPurchaseNotice(
             senderEmail: "support@nintendo.com",
-            subject: "Your refund request",
+            subject: "Your request",
             noticeText: "We have reviewed your request.\n\nOn Nov 1, 2026, Player wrote:\n> \(receipt)"
         ))
         // Nintendo marketing mail that mentions renewal but carries no receipt fields.
@@ -107,4 +107,77 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
             noticeText: "Make sure your membership is set for automatic renewal so you never miss a release. Unsubscribe"
         ))
     }
+
+    func testIsPurchaseNotice_otherOutcomeInSubjectOrLeadIn_returnsFalse() {
+        // Revert-check: removing `reportsOtherOutcome` from `isPurchaseNotice`
+        // accepts all three, and the card then reads "Purchased" on a refund.
+        XCTAssertFalse(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: "support@nintendo.com",
+            subject: "Your transaction with Nintendo",
+            noticeText: Self.refundBodyText
+        ))
+        XCTAssertFalse(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: "Your refund has been processed",
+            noticeText: NintendoNoticeFixtures.purchaseBodyText
+        ))
+        XCTAssertFalse(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: "Your membership update",
+            noticeText: """
+            Automatic renewal for your membership has been turned off.
+
+            Automatic renewal term: 365 d
+            Price: $49.99
+            """
+        ))
+    }
+
+    func testIsPurchaseNotice_outcomeWordsBelowTheFields_returnsTrue() {
+        // Revert-check: scanning the whole body in `reportsOtherOutcome` rather
+        // than the lead-in refuses this genuine receipt over its legal section.
+        XCTAssertTrue(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: NintendoNoticeFixtures.purchaseSubject,
+            noticeText: NintendoNoticeFixtures.purchaseBodyText
+                + "\n\nDigital purchases are not eligible for a refund. Contact Nintendo Support for help."
+        ))
+    }
+
+    func testIsPurchaseNotice_transactionIDWithOnlyHowToEShopMention_returnsFalse() {
+        // Revert-check: restoring "nintendo eshop" to `purchaseMarkers` accepts
+        // this order note, which never says a purchase was made.
+        XCTAssertFalse(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: "Your order",
+            noticeText: """
+            Here is the information about your order.
+
+            Transaction ID: 52724694283
+
+            To check it, open Nintendo eShop.
+            """
+        ))
+    }
+
+    func testBuildPreview_nintendoRefundCarryingReceiptFields_doesNotClaimPurchased() {
+        // Revert-check: removing `reportsOtherOutcome` from `isPurchaseNotice`
+        // gives this refund the Nintendo card with its fixed "Purchased" status.
+        let result = builder.buildPreview(
+            canonicalHTML: NintendoNoticeFixtures.html(from: Self.refundBodyText),
+            bodyText: Self.refundBodyText,
+            senderName: NintendoNoticeFixtures.senderName,
+            senderEmail: "support@nintendo.com",
+            subject: "Your transaction with Nintendo"
+        )
+
+        XCTAssertNotEqual(result?.status, "Purchased")
+    }
+
+    private static let refundBodyText = """
+    We have refunded your recent digital purchase from Nintendo.
+
+    Transaction ID: 52724694283
+    Price: $49.99
+    """
 }

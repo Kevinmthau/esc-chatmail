@@ -85,7 +85,26 @@ struct NintendoPurchasePreviewExtractor {
             return false
         }
 
-        return noticeKind(in: lowercasedText) != nil
+        guard noticeKind(in: lowercasedText) != nil else {
+            return false
+        }
+
+        return !reportsOtherOutcome(lowercasedSubject: lowercasedSubject, lowercasedText: lowercasedText)
+    }
+
+    /// A refund, cancelled order, declined payment, lapsed renewal or support
+    /// reply can carry these same labeled fields, and the card's fixed status
+    /// ("Purchased", "Auto-Renewal") would then state the opposite of the mail.
+    /// Only the subject and the lead-in above the first field are read: the
+    /// how-to and legal sections below the fields can use these words on a
+    /// genuine notice. A mail this refuses takes the classifier's route, as any
+    /// other Nintendo mail does.
+    private static func reportsOtherOutcome(lowercasedSubject: String, lowercasedText: String) -> Bool {
+        let firstField = lowercasedText.range(of: noticeFieldPattern, options: .regularExpression)
+        let leadIn = firstField.map { String(lowercasedText[..<$0.lowerBound]) } ?? ""
+        return [lowercasedSubject, leadIn].contains { text in
+            text.range(of: otherOutcomePattern, options: .regularExpression) != nil
+        }
     }
 
     /// The card for a purchase notice, or nil when `isPurchaseNotice` refuses
@@ -117,7 +136,7 @@ struct NintendoPurchasePreviewExtractor {
     /// A purchase receipt also mentions automatic renewal (where to find the
     /// turn-off deadline), so a transaction ID decides the receipt first.
     private static func noticeKind(in lowercasedText: String) -> NoticeKind? {
-        if lowercasedText.range(of: #"\btransaction id\s*:"#, options: .regularExpression) != nil,
+        if lowercasedText.range(of: transactionIDFieldPattern, options: .regularExpression) != nil,
            purchaseMarkers.contains(where: lowercasedText.contains) {
             return .purchase
         }
@@ -334,12 +353,18 @@ private let quotedConversationMarkers = [
     "---------- forwarded message"
 ]
 
+private let transactionIDFieldPattern = #"\btransaction id\s*:"#
+
+/// The receipt's own sentence and item labels (with their colons). A bare
+/// "nintendo eshop" or "purchase from nintendo" is not enough: how-to sections
+/// and support mail say those about a transaction that was no purchase. A real
+/// receipt worded differently falls back to the classifier's route, which only
+/// costs it the summary card.
 private let purchaseMarkers = [
     "digital purchase from nintendo",
-    "purchase from nintendo",
-    "nintendo eshop",
-    "purchased membership",
-    "purchased item"
+    "purchased membership:",
+    "purchased item:",
+    "purchased items:"
 ]
 
 /// Field labels, with their colons, that only the renewal notice carries: the
@@ -349,6 +374,14 @@ private let automaticRenewalMarkers = [
     "automatic renewal term:",
     "deadline to turn off automatic renewal:"
 ]
+
+/// Where a notice's labeled fields begin; `reportsOtherOutcome` reads above it.
+private let noticeFieldPattern = ([transactionIDFieldPattern] + automaticRenewalMarkers)
+    .joined(separator: "|")
+
+/// Word stems that say the transaction did not end as a purchase or a live renewal.
+private let otherOutcomePattern =
+    #"\b(?:refund|cancel|declin|fail|unsuccessful|unable|could not|couldn['’]t|turned off|expired|support)"#
 
 private let purchasedItemLabels = [
     "purchased membership",
