@@ -3,6 +3,15 @@ import CoreData
 import Contacts
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ParticipantLoaderTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -11,13 +20,18 @@ final class ParticipantLoaderTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        context = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
         context = nil
         stack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     func testLoadParticipants_resolvesNamesWithContactsUnavailable() async throws {
@@ -1011,7 +1025,7 @@ final class ParticipantLoaderTests: XCTestCase {
             .withSender(email: email, name: "Jacob Laycock")
             .inConversation(conversation)
             .build(in: context)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         let loader = ParticipantLoader(
             contactsResolver: MockContactsResolving(contactMap: [:]),
@@ -1063,7 +1077,7 @@ final class ParticipantLoaderTests: XCTestCase {
             .build(in: context)
         addConversationParticipant(person: friend, to: conversation)
         addConversationParticipant(person: myAlias, to: conversation)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         let loader = ParticipantLoader(
             contactsResolver: MockContactsResolving(contactMap: [:]),
@@ -1111,7 +1125,7 @@ final class ParticipantLoaderTests: XCTestCase {
             .withSender(email: email, name: "Jacob Laycock")
             .inConversation(conversation)
             .build(in: context)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         let loader = ParticipantLoader(
             contactsResolver: MockContactsResolving(contactMap: [:]),
@@ -1156,7 +1170,7 @@ final class ParticipantLoaderTests: XCTestCase {
             .withDisplayName("Jacob Laycock")
             .build(in: context)
         addConversationParticipant(person: jacob, to: conversation)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         let loader = ParticipantLoader(
             contactsResolver: MockContactsResolving(contactMap: [:]),

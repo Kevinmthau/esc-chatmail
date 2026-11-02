@@ -2,11 +2,20 @@ import CoreData
 import XCTest
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ComposeAttachmentManagerTests: XCTestCase {
     func testRecoveryCopiesRegularAndInlineFilesAndDiscardPreservesFailedMessage() throws {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context = stack.makeMainQueueViewContext()
         let source = MessageBuilder().withId("failed-forward-\(UUID().uuidString)").build(in: context)
         AttachmentPaths.setupDirectories()
         let regularPath = AttachmentPaths.originalPath(idOrUUID: "local_\(UUID().uuidString)", ext: "pdf")
@@ -34,7 +43,7 @@ final class ComposeAttachmentManagerTests: XCTestCase {
             .withLocalURL(inlinePath)
             .forMessage(source)
             .build(in: context)
-        try stack.saveViewContext()
+        try context.save()
         let leases = ComposeAttachmentLeaseRegistry()
         let manager = ComposeAttachmentManager(viewContext: context, leaseRegistry: leases)
         defer { manager.clear() }
@@ -66,8 +75,9 @@ final class ComposeAttachmentManagerTests: XCTestCase {
 
     func testFailedInlineCopyCanBeDiscardedWithoutLeakingEarlierCopies() throws {
         let stack = TestCoreDataStack()
+        let context = stack.makeMainQueueViewContext()
         let leases = ComposeAttachmentLeaseRegistry()
-        let manager = ComposeAttachmentManager(viewContext: stack.viewContext, leaseRegistry: leases)
+        let manager = ComposeAttachmentManager(viewContext: context, leaseRegistry: leases)
         AttachmentPaths.setupDirectories()
         let sourcePath = AttachmentPaths.originalPath(idOrUUID: "local_\(UUID().uuidString)", ext: "png")
         XCTAssertTrue(AttachmentPaths.saveData(Data([1, 2, 3]), to: sourcePath))
@@ -88,8 +98,9 @@ final class ComposeAttachmentManagerTests: XCTestCase {
 
     func testDiscardAfterSendFailurePreservesAttachmentsOwnedByRetainedMessage() throws {
         let stack = TestCoreDataStack()
+        let context = stack.makeMainQueueViewContext()
         let leases = ComposeAttachmentLeaseRegistry()
-        let manager = ComposeAttachmentManager(viewContext: stack.viewContext, leaseRegistry: leases)
+        let manager = ComposeAttachmentManager(viewContext: context, leaseRegistry: leases)
         AttachmentPaths.setupDirectories()
         let sourcePath = AttachmentPaths.originalPath(idOrUUID: "local_\(UUID().uuidString)", ext: "png")
         let imageData = Data([1, 2, 3])
@@ -101,9 +112,9 @@ final class ComposeAttachmentManagerTests: XCTestCase {
         let attachment = try XCTUnwrap(manager.inlineAttachments.first)
         let copiedPath = try XCTUnwrap(attachment.localURL)
         defer { AttachmentPaths.deleteFile(at: copiedPath) }
-        let retainedMessage = MessageBuilder().withId("retained-forward-\(UUID().uuidString)").build(in: stack.viewContext)
+        let retainedMessage = MessageBuilder().withId("retained-forward-\(UUID().uuidString)").build(in: context)
         attachment.message = retainedMessage
-        try stack.saveViewContext()
+        try context.save()
 
         manager.clear()
 

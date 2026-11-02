@@ -9,6 +9,16 @@ import CoreData
 /// `visibleItems` stays sorted by `ConversationListStore.sortsBefore(_:_:)`
 /// after any mutation sequence (`replaceAll` excepted — it trusts the
 /// caller's order).
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationListStoreTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -17,13 +27,18 @@ final class ConversationListStoreTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        context = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
         context = nil
         stack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     // Revert-check: ConversationListStore.replaceAll — it must keep the
@@ -34,7 +49,7 @@ final class ConversationListStoreTests: XCTestCase {
         let alice = makeConversation(name: "Alice", date: 300)
         let bob = makeConversation(name: "Bob", date: 200)
         let carol = makeConversation(name: "Carol", date: 100)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var store = ConversationListStore()
         // Deliberately not sort order: the store must trust the caller's order.
@@ -50,7 +65,7 @@ final class ConversationListStoreTests: XCTestCase {
         let alice = makeConversation(name: "Alice", date: 300)
         let bob = makeConversation(name: "Bob", date: 200)
         let carol = makeConversation(name: "Carol", date: 100)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var store = ConversationListStore()
         store.replaceAll(with: [alice, bob, carol])
@@ -74,7 +89,7 @@ final class ConversationListStoreTests: XCTestCase {
         let alice = makeConversation(name: "Alice", date: 300)
         let bob = makeConversation(name: "Bob", date: 200)
         let carol = makeConversation(name: "Carol", date: 100)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var store = ConversationListStore()
         store.replaceAll(with: [alice, bob, carol])
@@ -100,7 +115,7 @@ final class ConversationListStoreTests: XCTestCase {
     func testApplyChanges_archivedRow_isRemovedAndReported() throws {
         let alice = makeConversation(name: "Alice", date: 300)
         let bob = makeConversation(name: "Bob", date: 200)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var store = ConversationListStore()
         store.replaceAll(with: [alice, bob])
@@ -119,7 +134,7 @@ final class ConversationListStoreTests: XCTestCase {
         let alice = makeConversation(name: "Alice", date: 300)
         let bob = makeConversation(name: "Bob", date: 200)
         let carol = makeConversation(name: "Carol", date: 100)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var store = ConversationListStore()
         store.replaceAll(with: [alice, bob, carol])
@@ -142,7 +157,7 @@ final class ConversationListStoreTests: XCTestCase {
     func testApplyChanges_rowStopsMatchingVisibility_isRemovedWithoutBeingReported() throws {
         let alice = makeConversation(name: "Alice", date: 300, unread: 1)
         let bob = makeConversation(name: "Bob", date: 200, unread: 1)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         let matchesUnread: (Conversation) -> Bool = { $0.inboxUnreadCount > 0 }
 
@@ -165,7 +180,7 @@ final class ConversationListStoreTests: XCTestCase {
         let bob = makeConversation(name: "Bob", date: 300)
         let carol = makeConversation(name: "Carol", date: 200)
         let dave = makeConversation(name: "Dave", date: 100)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var store = ConversationListStore()
         store.replaceAll(with: [alice, bob, carol, dave])
@@ -202,7 +217,7 @@ final class ConversationListStoreTests: XCTestCase {
             date: sharedDate,
             id: try XCTUnwrap(UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"))
         )
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var store = ConversationListStore()
         // Upsert in shuffled order into an empty store: sorted insertion must
@@ -263,7 +278,7 @@ final class ConversationListStoreTests: XCTestCase {
             .withSnippet("snippet")
             .visible()
             .build(in: context)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         // Fixed scrambled input order; both sorts must agree on the result.
         let conversations = [tieMid, nilDateHigh, newest, pinnedOld, tieHigh, nilDateLow, tieLow]
@@ -302,7 +317,7 @@ final class ConversationListStoreTests: XCTestCase {
         let carol = makeConversation(name: "Carol", date: 300, unread: 1)
         let dave = makeConversation(name: "Dave", date: 200, unread: 1)
         let erin = makeConversation(name: "Erin", date: 100, unread: 1)
-        try stack.saveViewContext()
+        try saveViewContext()
 
         var store = ConversationListStore()
         store.replaceAll(with: [alice, bob, carol, dave, erin])

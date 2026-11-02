@@ -1,5 +1,6 @@
 import CoreGraphics
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
 final class NewsletterPreviewBuilderTests: XCTestCase {
@@ -864,22 +865,33 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
     }
 }
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class EmailContentSectionTests: XCTestCase {
     private var testStack: TestCoreDataStack!
+    private var context: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
+        context = testStack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
+        context = nil
         testStack = nil
         super.tearDown()
     }
 
     func testMakeLoadKeyIncludesCleanedSnippet() {
-        let context = testStack.viewContext
         let message = MessageBuilder()
             .withId("message-id")
             .withSubject("Subject")
@@ -904,7 +916,6 @@ final class EmailContentSectionTests: XCTestCase {
     }
 
     func testMakeLoadKeyIncludesSenderName() {
-        let context = testStack.viewContext
         let message = MessageBuilder()
             .withId("message-id")
             .withSubject("Subject")
@@ -928,7 +939,6 @@ final class EmailContentSectionTests: XCTestCase {
     }
 
     func testMakeLoadKeyIncludesDarkMode() {
-        let context = testStack.viewContext
         let message = MessageBuilder()
             .withId("message-id")
             .withSubject("Subject")
@@ -1035,7 +1045,7 @@ final class EmailContentSectionTests: XCTestCase {
             .withSubject("Warm subject")
             .withSender(email: "warm@example.com", name: "Warm Sender")
             .withBody("Warm body")
-            .build(in: testStack.viewContext)
+            .build(in: context)
 
         message.bodyStorageURI = "file:///tmp/\(id).html"
         message.cleanedSnippet = "Warm cleaned snippet"

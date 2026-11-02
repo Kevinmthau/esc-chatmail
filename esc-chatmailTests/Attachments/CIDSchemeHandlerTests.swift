@@ -3,6 +3,19 @@ import WebKit
 import CoreData
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// The scheme handler works on the background contexts it gets from
+/// `makeBackgroundContext`, so this moves only the fixtures and direct
+/// assertions.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class CIDSchemeHandlerTests: XCTestCase {
     private var testStack: TestCoreDataStack!
@@ -11,13 +24,18 @@ final class CIDSchemeHandlerTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
         context = nil
         testStack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     func testNormalizedContentIDMatchesEmailDocumentBehavior() throws {
@@ -62,7 +80,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withId("message-cid-later-local")
             .withAttachments()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let stack = testStack!
         let apiClient = MockGmailAPIClient()
@@ -108,7 +126,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withLocalURL(localPath)
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let localFinished = expectation(description: "persisted local cid scheme task finished")
         let localTask = MockURLSchemeTask(url: cidURL) {
@@ -137,7 +155,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .queued()
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let imageData = Data([0x89, 0x50, 0x4E, 0x47])
         let apiClient = MockGmailAPIClient()
@@ -200,7 +218,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withLastDownloadFailedAt(staleFailureDate)
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let apiClient = MockGmailAPIClient()
         let didFinish = expectation(description: "cid scheme task finished with fallback pixel")
@@ -244,7 +262,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .queued()
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let imageData = Data([0x89, 0x50, 0x4E, 0x47])
         let apiClient = MockGmailAPIClient()
@@ -301,7 +319,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .queued()
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let imageData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D])
         let apiClient = MockGmailAPIClient()
@@ -369,7 +387,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withLocalURL(localPath)
             .forMessage(try XCTUnwrap(message))
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let stack = testStack!
         let handler = CIDSchemeHandler(
@@ -415,7 +433,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withLocalURL(localPath)
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let apiClient = MockGmailAPIClient()
         let didFinish = expectation(description: "local cid scheme task finished")
@@ -462,7 +480,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withLocalURL(legacyPath)
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let apiClient = MockGmailAPIClient()
         let didFinish = expectation(description: "legacy inline cid uses safe fallback")
@@ -541,7 +559,7 @@ final class CIDSchemeHandlerTests: XCTestCase {
             .withLocalURL(legacyPath)
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let apiClient = MockGmailAPIClient()
         apiClient.getMessageResponses[messageID] = recoveredMessage.message
