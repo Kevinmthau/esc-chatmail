@@ -2,6 +2,19 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// The prefetcher works on its own background contexts, so this moves only the
+/// fixtures.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
     private var testStack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
@@ -9,13 +22,18 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
         context = nil
         testStack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     func testPrefetch_downloadsReferencedInlineAttachment() async throws {
@@ -31,7 +49,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .queued()
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let recorder = InlineCIDDownloadRecorder()
         let prefetcher = makePrefetcher(recorder: recorder)
@@ -62,7 +80,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .queued()
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let registry = AttachmentAccountWorkRegistry(admissionOpen: true)
         let recorder = InlineCIDDownloadRecorder()
@@ -98,7 +116,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
         let newAdmission = try XCTUnwrap(registry.captureAdmissionToken())
         XCTAssertNotEqual(oldAdmission, newAdmission)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         XCTAssertTrue(InlineCIDAttachmentPrefetchScheduler.pendingRequests(in: context).isEmpty)
         XCTAssertNil(InlineCIDAttachmentPrefetchScheduler.pendingAdmissionToken(in: context))
@@ -120,7 +138,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .queued()
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let registry = AttachmentAccountWorkRegistry(admissionOpen: true)
         let recorder = InlineCIDDownloadRecorder()
@@ -149,7 +167,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             1
         )
 
-        try testStack.saveViewContext()
+        try saveViewContext()
         XCTAssertEqual(registry.activeOperationCount, 1)
         await downloadGate.waitUntilStarted()
 
@@ -196,7 +214,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .withLocalURL(cachedPath)
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let recorder = InlineCIDDownloadRecorder()
         let prefetcher = makePrefetcher(recorder: recorder)
@@ -237,7 +255,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .withLocalURL(legacyPath)
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let recorder = InlineCIDDownloadRecorder()
         let prefetcher = makePrefetcher(recorder: recorder)
@@ -262,7 +280,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
         let message = MessageBuilder()
             .withId("message-inline-prefetch-missing-metadata")
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let recorder = InlineCIDDownloadRecorder()
         let prefetcher = makePrefetcher(recorder: recorder)
@@ -291,7 +309,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .queued()
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let recorder = InlineCIDDownloadRecorder()
         let prefetcher = makePrefetcher(recorder: recorder)
@@ -324,7 +342,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .withLastDownloadFailedAt(now.addingTimeInterval(-3_600))
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let recorder = InlineCIDDownloadRecorder()
         let prefetcher = makePrefetcher(
@@ -361,7 +379,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .withLastDownloadFailedAt(now.addingTimeInterval(-60))
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let recorder = InlineCIDDownloadRecorder()
         let prefetcher = makePrefetcher(
@@ -396,7 +414,7 @@ final class InlineCIDAttachmentPrefetcherTests: XCTestCase {
             .withLastDownloadFailedAt(now.addingTimeInterval(-3_600))
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let attachmentObjectID = attachment.objectID
         let recorder = InlineCIDDownloadRecorder()

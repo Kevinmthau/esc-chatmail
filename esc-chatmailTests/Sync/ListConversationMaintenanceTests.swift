@@ -5,12 +5,23 @@ import CoreData
 /// Pins how the recurring maintenance passes treat mailing-list conversations,
 /// whose participantHash is the "l|" List-Id hash rather than a participant-set
 /// derivation.
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class ListConversationMaintenanceTests: XCTestCase {
     private var stack: TestCoreDataStack!
     private var coreDataStack: CoreDataStack!
     private var context: NSManagedObjectContext!
 
-    private static let me = "me@example.com"
+    private nonisolated static let me = "me@example.com"
     private static let alice = "alice@example.com"
     private static let listAddress = "announce@list.example.com"
     private static let listHash = calculateListConversationHash(fromNormalizedListId: "announce.list.example.com")
@@ -20,7 +31,7 @@ final class ListConversationMaintenanceTests: XCTestCase {
         super.setUp()
         stack = TestCoreDataStack()
         coreDataStack = CoreDataStack(persistentContainerForTesting: stack.persistentContainer)
-        context = stack.viewContext
+        context = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {

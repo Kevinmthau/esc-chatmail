@@ -2,6 +2,16 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class MessageExtensionsTests: XCTestCase {
     private var testStack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
@@ -9,13 +19,18 @@ final class MessageExtensionsTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
         context = nil
         testStack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     func testConversationPreviewText_forwardedMessage_usesQuotedOriginalSubject() {
@@ -237,7 +252,7 @@ final class MessageExtensionsTests: XCTestCase {
             .withSubject("Lunch?")
             .withBody("Want to grab food later?")
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Prime the memo with the non-invite result.
         XCTAssertFalse(message.isLikelyCalendarInvite)
@@ -262,7 +277,7 @@ final class MessageExtensionsTests: XCTestCase {
             .withSubject("Invitation: Standup @ Tue May 6, 2026 10:00am - 10:15am (EDT)")
             .withBody("Invitation from Google Calendar\nStandup\nWhen\nTuesday May 6, 2026 10:00am")
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let first = message.isLikelyCalendarInvite
         let second = message.isLikelyCalendarInvite
@@ -290,7 +305,7 @@ final class MessageExtensionsTests: XCTestCase {
             .withMimeType(ReservationEmailFixture.calendarAttachmentMimeType)
             .forMessage(message)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         XCTAssertTrue(message.isLikelyCalendarInvite)
     }
@@ -303,7 +318,7 @@ final class MessageExtensionsTests: XCTestCase {
             .withSubject(ReservationEmailFixture.subject)
             .withBody(ReservationEmailFixture.bodyText)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         XCTAssertFalse(message.isLikelyCalendarInvite)
     }
