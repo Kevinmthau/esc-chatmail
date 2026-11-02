@@ -72,6 +72,39 @@ struct TransactionalPreviewBuilder {
         subject: String?
     ) -> TransactionalPreviewModel? {
         let sourceDomain = PreviewTextUtilities.normalizedSourceDomain(from: senderEmail)
+        if let nintendoNotice = NintendoPurchasePreviewExtractor(
+            lineProcessor: lineProcessor,
+            firstAmount: self.firstAmount
+        ).notice(
+            senderEmail: senderEmail,
+            subject: subject,
+            noticeText: NintendoPurchasePreviewExtractor.noticeText(
+                plainText: plainText,
+                extractedText: extractedText,
+                canonicalHTML: canonicalHTML
+            )
+        ) {
+            // The notice's labeled fields are the whole card: the generic line
+            // resolvers read Nintendo's how-to sections ("Open Nintendo
+            // eShop") as subtitles and detail lines.
+            return TransactionalPreviewModel(
+                title: nintendoNotice.title,
+                subtitle: nintendoNotice.subtitle,
+                amount: nintendoNotice.amount ?? resolvedAmount(
+                    subject: subject,
+                    cleanedSnippet: cleanedSnippet,
+                    lines: [],
+                    extractedText: extractedText
+                ),
+                status: nintendoNotice.status,
+                actionLabel: nil,
+                detailLine: nintendoNotice.detailLine,
+                imageURL: nil,
+                imageStyle: .avatar,
+                sourceLabel: "Nintendo",
+                sourceDomain: sourceDomain
+            )
+        }
         let inferredSourceLabel = sourceLabel(
             senderName: senderName,
             senderEmail: senderEmail,
