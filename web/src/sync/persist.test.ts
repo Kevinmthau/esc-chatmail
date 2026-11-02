@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatmailDB } from '@/db/schema'
 import type { AttachmentRow } from '@/db/types'
+import { AuthRequiredError, QuotaExhaustedError, RequestAbortedError } from '@/gmail/errors'
 import type { GmailMessage } from '@/gmail/types'
 import { calculateParticipantHash } from '@/identity/participantSet'
 import { strictParticipantSetIdentity } from '@/identity/strictIdentity'
@@ -306,6 +307,24 @@ describe('preparePersist fan-out', () => {
     expect(plan).toEqual({ kind: 'retryableFailure', id: 'm1' })
   })
 
+  // Revert-check: the isAccountScopedSyncAbort rethrow in fetchLargeBodyContent
+  // (mime/parse.ts) — wrapping these in LargeBodyFetchError makes the outage a
+  // retryable plan, which feeds the message into the failure ledger and, after
+  // three syncs, abandons it and advances the cursor past it.
+  it.each([
+    ['auth', () => new AuthRequiredError('expired', 'renewal_failed')],
+    ['quota', () => new QuotaExhaustedError('daily limit')],
+    ['caller abort', () => new RequestAbortedError()],
+  ])('lets a %s failure of a large-body fetch abort the run', async (_label, makeError) => {
+    const error = makeError()
+    await expect(
+      preparePersistPlan(largeBodyMessage('m1'), {
+        ...ctx,
+        fetchLargeBody: () => Promise.reject(error),
+      }),
+    ).rejects.toBe(error)
+  })
+
   it('bounds concurrent large-body fetches instead of fanning out over the whole page', async () => {
     // The message-GET tier is bounded at FETCH_CONCURRENCY, but parsing opens a
     // SECOND network tier (attachments.get for oversized bodies). An unbounded
@@ -472,6 +491,32 @@ describe('applyPersist — creation and routing', () => {
     expect(message!.subject).toBe('Fwd: Trip plans')
     const conversation = await db.conversations.get(message!.conversationId)
     expect(conversation!.snippet).toBe('Fwd: "Trip plans"')
+  })
+
+  // Revert-check: the rollupConversation in applyPersist's excluded branch — left
+  // to finalize, a run that dies first loses it for good, because the rerun finds
+  // the row gone and touches nothing.
+  it('rolls the conversation up in the same step that deletes an excluded message', async () => {
+    await applyPersist(
+      db,
+      await preparePersist(
+        [
+          textMessage({ id: 'm1', labelIds: ['INBOX'], internalDate: NOW - 5000 }),
+          textMessage({ id: 'm2', labelIds: ['INBOX'], internalDate: NOW - 4000 }),
+        ],
+        ctx,
+      ),
+      NOW,
+    )
+
+    const plans = await preparePersist(
+      [textMessage({ id: 'm2', labelIds: ['TRASH'], internalDate: NOW - 4000 })],
+      ctx,
+    )
+    await applyPersist(db, plans, NOW)
+
+    const [conversation] = await db.conversations.toArray()
+    expect(conversation?.lastMessageDate).toBe(NOW - 5000)
   })
 
   it('deletes the local copy when a message moved to an excluded mailbox, and never inserts it', async () => {

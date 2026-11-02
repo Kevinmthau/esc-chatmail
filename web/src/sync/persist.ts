@@ -32,7 +32,9 @@ import {
   type ResolveSeed,
 } from '@/identity/routing'
 import { calculateNewsletterScore } from '@/mime/newsletter'
+import { optimisticSendIdFromMessageId } from '@/outbox/mimeBuilder'
 import { isLocalAttachmentId, matchLocalAttachment } from '@/outbox/outboundAttachments'
+import { reconcileSyncedSendEcho } from '@/outbox/send'
 import {
   LargeBodyFetchError,
   parseEmailAddresses,
@@ -42,7 +44,11 @@ import {
   type ParseGmailMessageOptions,
 } from '@/mime/parse'
 import { createChatPreviewText, createCleanedSnippet, isForwardedSubject } from '@/mime/preview'
-import { conversationPreview, EXCLUDED_MAILBOX_LABEL_IDS } from '@/rollup/rollup'
+import {
+  conversationPreview,
+  EXCLUDED_MAILBOX_LABEL_IDS,
+  rollupConversation,
+} from '@/rollup/rollup'
 import { mapWithConcurrency } from './concurrency'
 import { resolveReplyFrom, type ReplyFromHeaders } from './replyFrom'
 
@@ -832,6 +838,26 @@ async function applyMessagePlan(
         if (plan.bodyHtml !== null) {
           await db.bodies.put({ messageId: updated.id, html: plan.bodyHtml })
         }
+        // A row that already exists under its Gmail id normally has its
+        // participant rows from its own creation, and those are left alone
+        // (displayNameRepair owns their upkeep). The exception is the SENT
+        // echo of an optimistic send: reconcileCommittedSend swaps the
+        // optimistic row's key to the Gmail id without writing any
+        // participants (iOS persists the echo as a creation, so every synced
+        // sent message carries MessageParticipant rows there), and this update
+        // is the last chance to give it the rows that forwardSource and
+        // strictParticipantSetIdentity read.
+        if (plan.participants.length > 0) {
+          const participantCount = await db.msgParticipants
+            .where('messageId')
+            .equals(updated.id)
+            .count()
+          if (participantCount === 0) {
+            await db.msgParticipants.bulkAdd(
+              plan.participants.map((p) => ({ ...p, messageId: updated.id })),
+            )
+          }
+        }
         await upsertPeople(db, plan.people)
         const attachmentRetryable = await putAttachments(db, updated.id, plan.attachments, now)
         await applyFastUpdateForExistingMessage(
@@ -915,12 +941,34 @@ export async function applyPersist(
         async () => {
           const conversationId = await deleteMessageCascade(db, plan.id)
           if (conversationId !== null) {
+            // With the delete, as in applyHistoryLabelOps: a rerun after an
+            // aborted run finds the row gone and touches nothing.
+            await rollupConversation(db, conversationId, now)
             result.touchedConversationIds.add(conversationId)
             result.deletedMessageIds.add(plan.id)
           }
         },
       )
       continue
+    }
+    // The echo of a send this device made carries the deterministic Message-ID
+    // its optimistic row was stamped with. Adopting it first swaps that row's
+    // key to the Gmail id (or drops the retained row of a delivery-unknown
+    // send), so the apply below merges into one row instead of inserting a
+    // second copy beside it.
+    if (
+      plan.message.isFromMe === 1 &&
+      optimisticSendIdFromMessageId(plan.message.rfcMessageId) !== null
+    ) {
+      await reconcileSyncedSendEcho(
+        db,
+        {
+          rfcMessageId: plan.message.rfcMessageId,
+          remoteMessageId: plan.message.id,
+          remoteThreadId: plan.message.gmThreadId,
+        },
+        now,
+      )
     }
     await applyMessagePlan(db, plan, now, result, hooks)
   }

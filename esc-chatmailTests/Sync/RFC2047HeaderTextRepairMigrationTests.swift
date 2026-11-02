@@ -5,6 +5,20 @@ import CoreData
 /// Covers `DataCleanupService.decodeRFC2047HeaderTextIfNeeded`, the one-shot
 /// repair that decodes raw RFC 2047 encoded-words persisted into display
 /// fields by builds that predate ingestion-time decoding (issue #149).
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// The repair under test works on the background context each run hands it, so
+/// this moves only the fixtures and the direct assertions.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class RFC2047HeaderTextRepairMigrationTests: XCTestCase {
     private var stack: TestCoreDataStack!
     private var coreDataStack: CoreDataStack!
@@ -15,7 +29,7 @@ final class RFC2047HeaderTextRepairMigrationTests: XCTestCase {
         super.setUp()
         stack = TestCoreDataStack()
         coreDataStack = CoreDataStack(persistentContainerForTesting: stack.persistentContainer)
-        context = stack.viewContext
+        context = stack.makeMainQueueViewContext()
         migrationFlags = InMemoryMigrationFlagStore()
     }
 
@@ -128,14 +142,11 @@ final class RFC2047HeaderTextRepairMigrationTests: XCTestCase {
         // process-global, so another suite must never post under this email.
         let email = "jose.\(UUID().uuidString.prefix(8).lowercased())@example.com"
         let encodedName = "=?utf-8?B?Sm9zw6k=?="
-        let seedContext = stack.viewContext
-        await seedContext.perform {
-            _ = PersonBuilder()
-                .withEmail(email)
-                .withDisplayName(encodedName)
-                .build(in: seedContext)
-        }
-        try stack.saveViewContext()
+        PersonBuilder()
+            .withEmail(email)
+            .withDisplayName(encodedName)
+            .build(in: context)
+        try context.save()
 
         let failingContext = FirstSaveFailingContext()
         failingContext.persistentStoreCoordinator = stack.persistentContainer.persistentStoreCoordinator

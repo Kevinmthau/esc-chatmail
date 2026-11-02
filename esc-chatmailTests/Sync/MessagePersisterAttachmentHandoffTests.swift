@@ -4,11 +4,13 @@ import XCTest
 
 /// The fixtures and the persister call go through a main-queue context from
 /// `TestCoreDataStack.makeMainQueueViewContext()`, never `testStack.viewContext`,
-/// which is private-queue. `MessagePersister` is not actor-isolated and
-/// operates on whatever context it is handed, on the caller's thread — here
-/// this `@MainActor` test body, which reads and mutates the same objects
-/// around the call. A private-queue context makes every one of those accesses
-/// off-queue; see that helper for what it races.
+/// which is private-queue. `MessagePersister` is an `actor`, but the helpers
+/// called here (`consumeRemoteCommittedSendMutation` and
+/// `handoffOptimisticAttachmentStorage`) are `nonisolated` and operate on
+/// whatever context they are handed, on the caller's thread — here this
+/// `@MainActor` test body, which reads and mutates the same objects around the
+/// call. A private-queue context makes every one of those accesses off-queue;
+/// see that helper for what it races.
 ///
 /// Production runs this handoff on a sync background context inside
 /// `perform`, which this test does not model: the file-handoff logic under

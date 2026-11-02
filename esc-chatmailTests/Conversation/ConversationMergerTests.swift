@@ -3,6 +3,22 @@ import CoreData
 @testable import esc_chatmail
 
 /// Tests for ConversationMerger duplicate detection and merging logic.
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// `removeDuplicateConversations` and `mergeActiveConversationDuplicates` enter
+/// the handed context through its own `perform`. The synchronous `selectWinner`
+/// and `merge` run on the caller's thread, here on-queue for the same reason as
+/// the test bodies.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class ConversationMergerTests: XCTestCase {
 
     var testStack: TestCoreDataStack!
@@ -12,7 +28,7 @@ final class ConversationMergerTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
         // Back the merger with the test container: the merger saves through
         // its stack and merges results into its stack's viewContext, so
         // handing it CoreDataStack.shared would route every merge through the
@@ -27,6 +43,11 @@ final class ConversationMergerTests: XCTestCase {
         testStack = nil
         merger = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     // MARK: - Winner Selection Tests
@@ -53,7 +74,7 @@ final class ConversationMergerTests: XCTestCase {
         let _ = MessageBuilder().withId("msg3").inConversation(conv2).build(in: context)
         let _ = MessageBuilder().withId("msg4").inConversation(conv2).build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Test winner selection
         let winner = merger.selectWinner(from: [conv1, conv2])
@@ -80,7 +101,7 @@ final class ConversationMergerTests: XCTestCase {
             .withLastMessageDate(newDate)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Both have 0 messages, should prefer newer
         let winner = merger.selectWinner(from: [oldConv, newConv])
@@ -120,7 +141,7 @@ final class ConversationMergerTests: XCTestCase {
             .inConversation(archivedConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let winner = merger.selectWinner(from: [visibleConversation, archivedConversation])
 
@@ -144,7 +165,7 @@ final class ConversationMergerTests: XCTestCase {
         let msg1 = MessageBuilder().withId("msg1").inConversation(loser).build(in: context)
         let msg2 = MessageBuilder().withId("msg2").inConversation(loser).build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         XCTAssertEqual(loser.messages?.count, 2)
         XCTAssertEqual(winner.messages?.count ?? 0, 0)
@@ -180,7 +201,7 @@ final class ConversationMergerTests: XCTestCase {
             .inConversation(loser)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         merger.merge(from: loser, into: winner)
 
@@ -216,7 +237,7 @@ final class ConversationMergerTests: XCTestCase {
             .inConversation(loser)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         merger.merge(from: loser, into: winner)
 
@@ -234,7 +255,7 @@ final class ConversationMergerTests: XCTestCase {
             .setPinned()
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         XCTAssertFalse(winner.pinned)
         XCTAssertFalse(winner.muted)
@@ -263,7 +284,7 @@ final class ConversationMergerTests: XCTestCase {
             .setMuted()
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         merger.merge(from: plainLoser, into: mutedWinner)
         merger.merge(from: mutedLoser, into: plainWinner)
@@ -302,7 +323,7 @@ final class ConversationMergerTests: XCTestCase {
             message.addToLabels(inboxLabel)
         }
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         merger.merge(from: loser, into: winner)
 
@@ -326,7 +347,7 @@ final class ConversationMergerTests: XCTestCase {
             .build(in: context)
         inboxMessage.addToLabels(inboxLabel)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         XCTAssertFalse(winner.hasInbox)
 
@@ -353,7 +374,7 @@ final class ConversationMergerTests: XCTestCase {
             .build(in: context)
         inboxMessage.addToLabels(inboxLabel)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         merger.merge(from: loser, into: winner)
 
@@ -389,7 +410,7 @@ final class ConversationMergerTests: XCTestCase {
         record.id = UUID().uuidString
         record.createdAt = Date()
         record.conversationId = pendingID
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await merger.mergeActiveConversationDuplicates(in: context)
 
@@ -441,7 +462,7 @@ final class ConversationMergerTests: XCTestCase {
         record.id = UUID().uuidString
         record.createdAt = Date()
         record.conversationId = pendingID
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await merger.mergeActiveConversationDuplicates(in: context)
 
@@ -496,7 +517,7 @@ final class ConversationMergerTests: XCTestCase {
             .withPayload(payload)
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await merger.mergeActiveConversationDuplicates(in: context)
 
@@ -565,7 +586,7 @@ final class ConversationMergerTests: XCTestCase {
         record.id = UUID().uuidString
         record.createdAt = Date()
         record.conversationId = pendingLoserID
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await merger.removeDuplicateConversations(in: context)
 
@@ -620,7 +641,7 @@ final class ConversationMergerTests: XCTestCase {
             .withDisplayName("Unique Conv")
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Verify we have 4 conversations before merge
         let beforeRequest = Conversation.fetchRequest()

@@ -13,6 +13,9 @@ struct EmailPreviewPipelineRequest: Sendable {
     let isForwardedEmail: Bool
     let cleanupMode: HTMLContentCleanupMode
     let isDarkMode: Bool
+    /// The row's `Message.isLikelyCalendarInvite`. Gates the reservation summary card, so
+    /// only a reservation that carries a calendar attachment leaves the card it had.
+    var isLikelyCalendarInvite: Bool = false
 }
 
 enum NativePreviewCardRoute: Equatable, Sendable {
@@ -27,6 +30,7 @@ struct HTMLPreviewPayload: Equatable, Sendable {
 
 enum EmailPreviewRenderModel: Equatable, Sendable {
     case calendarInvite(CalendarInvitePreviewModel)
+    case reservationSummary(ReservationSummaryPreviewModel)
     case newsletter(NewsletterPreviewModel)
     case transactional(TransactionalPreviewModel)
     case netlifyDeploy(NetlifyDeployPreviewModel)
@@ -39,6 +43,7 @@ final class EmailPreviewPipeline: @unchecked Sendable {
     private let previewSourceLoader: any EmailPreviewSourceLoading
     private let htmlContentLoader: HTMLContentLoader
     private let calendarInvitePreviewBuilder: CalendarInvitePreviewBuilder
+    private let reservationSummaryPreviewBuilder: ReservationSummaryPreviewBuilder
     private let newsletterPreviewBuilder: NewsletterPreviewBuilder
     private let transactionalPreviewBuilder: TransactionalPreviewBuilder
     private let netlifyDeployPreviewBuilder: NetlifyDeployPreviewBuilder
@@ -53,6 +58,7 @@ final class EmailPreviewPipeline: @unchecked Sendable {
         previewSourceLoader: any EmailPreviewSourceLoading = EmailPreviewSourceLoader.shared,
         htmlContentLoader: HTMLContentLoader = .shared,
         calendarInvitePreviewBuilder: CalendarInvitePreviewBuilder = CalendarInvitePreviewBuilder(),
+        reservationSummaryPreviewBuilder: ReservationSummaryPreviewBuilder = ReservationSummaryPreviewBuilder(),
         newsletterPreviewBuilder: NewsletterPreviewBuilder = NewsletterPreviewBuilder(),
         transactionalPreviewBuilder: TransactionalPreviewBuilder = TransactionalPreviewBuilder(),
         netlifyDeployPreviewBuilder: NetlifyDeployPreviewBuilder = NetlifyDeployPreviewBuilder(),
@@ -61,6 +67,7 @@ final class EmailPreviewPipeline: @unchecked Sendable {
         self.previewSourceLoader = previewSourceLoader
         self.htmlContentLoader = htmlContentLoader
         self.calendarInvitePreviewBuilder = calendarInvitePreviewBuilder
+        self.reservationSummaryPreviewBuilder = reservationSummaryPreviewBuilder
         self.newsletterPreviewBuilder = newsletterPreviewBuilder
         self.transactionalPreviewBuilder = transactionalPreviewBuilder
         self.netlifyDeployPreviewBuilder = netlifyDeployPreviewBuilder
@@ -147,6 +154,20 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             subject: request.subject
            ) {
             return .calendarInvite(model)
+        }
+
+        // The row's stored body text, not `previewSource.plainText`: the row gate parsed
+        // that same text, so the two agree (`ReservationSummaryPreviewBuilder`).
+        if !request.isForwardedEmail,
+           request.isLikelyCalendarInvite,
+           let model = reservationSummaryPreviewBuilder.buildPreview(
+            canonicalHTML: canonicalHTML,
+            bodyText: request.bodyText,
+            senderName: request.senderName,
+            senderEmail: request.senderEmail,
+            subject: request.subject
+           ) {
+            return .reservationSummary(model)
         }
 
         if !request.isForwardedEmail,
@@ -414,6 +435,7 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             "subject:\(Self.fingerprint(for: request.subject))",
             "newsletter:\(request.isNewsletter)",
             "forwarded:\(request.isForwardedEmail)",
+            "calendar:\(request.isLikelyCalendarInvite)",
             "cleanup:\(request.cleanupMode.rawValue)",
             "dark:\(request.isDarkMode)"
         ].joined(separator: "|"))

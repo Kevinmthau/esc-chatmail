@@ -5,19 +5,33 @@ import CoreData
 /// Covers `DataCleanupService.splitConversationsByParticipantSetIfNeeded`, the
 /// one-shot migration that re-homes every message into the conversation keyed
 /// by its strict participant set (From+To+Cc minus the user's aliases).
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// The migration under test works on its own background contexts, so this
+/// moves only the fixtures and the direct assertions.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class ParticipantSetSplitMigrationTests: XCTestCase {
     private var stack: TestCoreDataStack!
     private var coreDataStack: CoreDataStack!
     private var context: NSManagedObjectContext!
     private var migrationFlags: InMemoryMigrationFlagStore!
 
-    private static let me = "me@example.com"
-    private static let alice = "alice@example.com"
+    private nonisolated static let me = "me@example.com"
+    private nonisolated static let alice = "alice@example.com"
     private static let bob = "bob@example.com"
     private static let carol = "carol@example.com"
     private static let relay = "legacy-relay@icloud.com"
 
-    private static let hashAlice = calculateParticipantHash(from: [alice])
+    private nonisolated static let hashAlice = calculateParticipantHash(from: [alice])
     private static let hashAliceBob = calculateParticipantHash(from: [alice, bob])
     private static let hashAliceBobCarol = calculateParticipantHash(from: [alice, bob, carol])
     private static let hashBob = calculateParticipantHash(from: [bob])
@@ -26,7 +40,7 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         super.setUp()
         stack = TestCoreDataStack()
         coreDataStack = CoreDataStack(persistentContainerForTesting: stack.persistentContainer)
-        context = stack.viewContext
+        context = stack.makeMainQueueViewContext()
         migrationFlags = InMemoryMigrationFlagStore()
     }
 
@@ -721,7 +735,7 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         let sqliteCoreDataStack = CoreDataStack(
             persistentContainerForTesting: sqliteStack.persistentContainer
         )
-        let fixtureContext = sqliteStack.viewContext
+        let fixtureContext = sqliteStack.makeMainQueueViewContext()
 
         let pinnedShell = ConversationBuilder()
             .withParticipantHash("batch-pinned-empty-hash")
@@ -744,7 +758,7 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         pendingRecord.id = UUID().uuidString
         pendingRecord.createdAt = Date()
         pendingRecord.conversationId = pendingEmptyID
-        try sqliteStack.saveViewContext()
+        try fixtureContext.save()
 
         let service = DataCleanupService(
             coreDataStack: sqliteCoreDataStack,
@@ -757,35 +771,36 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         )
 
         let assertionContext = sqliteStack.newBackgroundContext()
-        let durableState = try await assertionContext.perform {
+        // Assertions stay inside `perform`: reading these rows after it returns
+        // is off-queue on assertionContext, which traps under
+        // -com.apple.CoreData.ConcurrencyDebug 1.
+        try await assertionContext.perform {
             let conversations = try assertionContext.fetch(Conversation.fetchRequest())
             let pendingConversationIDs = try assertionContext
                 .fetch(OutboundSendMutationRecord.fetchRequest())
                 .compactMap(\.conversationId)
-            return (conversations, pendingConversationIDs)
-        }
-        let conversations = durableState.0
-        let preserved = try XCTUnwrap(
-            conversations.first { $0.id == pinnedShellID }
-        )
-        XCTAssertTrue(preserved.pinned)
-        XCTAssertNotNil(preserved.archivedAt)
-        XCTAssertTrue(preserved.hidden)
-        XCTAssertNil(preserved.lastMessageDate)
-        XCTAssertNil(conversations.first { $0.id == disposableEmptyID })
+            let preserved = try XCTUnwrap(
+                conversations.first { $0.id == pinnedShellID }
+            )
+            XCTAssertTrue(preserved.pinned)
+            XCTAssertNotNil(preserved.archivedAt)
+            XCTAssertTrue(preserved.hidden)
+            XCTAssertNil(preserved.lastMessageDate)
+            XCTAssertNil(conversations.first { $0.id == disposableEmptyID })
 
-        let pending = try XCTUnwrap(
-            conversations.first { $0.id == pendingEmptyID }
-        )
-        XCTAssertNil(pending.archivedAt)
-        XCTAssertFalse(pending.hidden)
-        XCTAssertEqual(durableState.1, [pendingEmptyID])
+            let pending = try XCTUnwrap(
+                conversations.first { $0.id == pendingEmptyID }
+            )
+            XCTAssertNil(pending.archivedAt)
+            XCTAssertFalse(pending.hidden)
+            XCTAssertEqual(pendingConversationIDs, [pendingEmptyID])
+        }
     }
 
     func testSavedDraftProtectsEmptyConversationDuringBatchCleanup() async throws {
         let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
         let sqliteCoreDataStack = CoreDataStack(persistentContainerForTesting: sqliteStack.persistentContainer)
-        let fixtureContext = sqliteStack.viewContext
+        let fixtureContext = sqliteStack.makeMainQueueViewContext()
         let conversation = ConversationBuilder().visible().build(in: fixtureContext)
         let conversationID = conversation.id
         let disposable = ConversationBuilder().visible().build(in: fixtureContext)
@@ -793,7 +808,7 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         let draft = ChatReplyDraft(context: fixtureContext)
         draft.conversationId = conversationID
         draft.data = Data("saved reply".utf8)
-        try sqliteStack.saveViewContext()
+        try fixtureContext.save()
         let service = DataCleanupService(
             coreDataStack: sqliteCoreDataStack,
             conversationManager: ConversationManager(currentUserEmail: { Self.me }),

@@ -2,11 +2,20 @@ import XCTest
 import UIKit
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class QuickLookPreviewControllerTests: XCTestCase {
     func testPresentationKeepsSelectionIndexAlignedAfterRejectingLegacyPath() throws {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context = stack.makeMainQueueViewContext()
         let message = MessageBuilder()
             .withId("quick-look-message")
             .withAttachments()
@@ -59,7 +68,7 @@ final class QuickLookPreviewControllerTests: XCTestCase {
 
     func testPresentationKeepsSnapshotStableWhenFileDisappearsAfterCreation() throws {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context = stack.makeMainQueueViewContext()
         let message = MessageBuilder()
             .withId("quick-look-disappearing-message")
             .withAttachments()
@@ -126,7 +135,7 @@ final class QuickLookPreviewControllerTests: XCTestCase {
 
     func testPresentationFailsWhenSelectedFileDisappearedBeforeSnapshot() {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context = stack.makeMainQueueViewContext()
         let message = MessageBuilder()
             .withId("quick-look-missing-selection-message")
             .withAttachments()
@@ -162,7 +171,7 @@ final class QuickLookPreviewControllerTests: XCTestCase {
     /// would not block the next tap: each tap stores a presentation with a new id.)
     func testController_dismissedByQuickLook_invokesOnDismissAndServesSnapshot() throws {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context = stack.makeMainQueueViewContext()
         let message = MessageBuilder()
             .withId("quick-look-dismiss-message")
             .withAttachments()
@@ -216,7 +225,7 @@ final class QuickLookPreviewControllerTests: XCTestCase {
     /// not exercised here.
     func testDismissAll_presentedQuickLook_isDismissed() async throws {
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context = stack.makeMainQueueViewContext()
         let message = MessageBuilder()
             .withId("quick-look-dismiss-all-message")
             .withAttachments()

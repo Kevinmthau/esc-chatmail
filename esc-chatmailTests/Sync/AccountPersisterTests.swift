@@ -2,6 +2,19 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// `AccountPersister` works on the background context each test hands it, so
+/// this moves only the seed fixture.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class AccountPersisterTests: XCTestCase {
     private var stack: TestCoreDataStack!
     private var sut: MessagePersister!
@@ -45,12 +58,12 @@ final class AccountPersisterTests: XCTestCase {
     }
 
     func testSaveAccount_withoutHistoryIdOnUpdate_preservesExistingCursor() async throws {
-        let seedContext = stack.viewContext
+        let seedContext = stack.makeMainQueueViewContext()
         _ = AccountBuilder()
             .withEmail("test@example.com")
             .withHistoryId("history-old")
             .build(in: seedContext)
-        try stack.saveViewContext()
+        try seedContext.save()
 
         let context = stack.newBackgroundContext()
         let profile = GmailProfile(

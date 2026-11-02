@@ -94,7 +94,12 @@ export async function retrySend(messageId: string): Promise<SendResult> {
 export async function replayOutboundSends(): Promise<void> {
   const db = openDb()
   if (db === null) return
-  await replayAbandonedSends(db)
+  try {
+    await replayAbandonedSends(db)
+  } catch {
+    // Opportunistic like the drain: the journals persist for the next boot, and
+    // a sign-out can close the database under this fire-and-forget scan.
+  }
 }
 
 // ---------------------------------------------------------------------------

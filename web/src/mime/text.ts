@@ -10,6 +10,7 @@ import {
   SIGN_OFF_PHRASES,
   isUppercaseChar,
 } from './patterns'
+import { removeRepeatedSignature } from './repeatedSignature'
 import { removeSignature } from './signature'
 
 export interface QuotedPart {
@@ -410,7 +411,19 @@ export function extractQuotes(text: string, removingSignature = true): QuoteExtr
   }
 
   if (earliestQuoteIndex < cleanText.length) {
-    const quotedText = cleanText.slice(earliestQuoteIndex).trim()
+    let quotedText = cleanText.slice(earliestQuoteIndex).trim()
+
+    cleanText = cleanText.slice(0, earliestQuoteIndex)
+
+    // Bottom-posted reply rescue: when the message STARTS with the
+    // quote (nothing before it), the author's text sits after the
+    // ">"-prefixed block. Truncation alone would return an empty
+    // bubble for a message that has real content. The rescue must
+    // run before the quoted part is captured so recovered lines
+    // move out of the quoted region instead of appearing in both.
+    if (cleanText.trim().length === 0) {
+      ;({ content: cleanText, remainingQuotedRegion: quotedText } = bottomPostedRescue(quotedText))
+    }
 
     const { cleanedText, maxNestingLevel } = cleanQuotedText(quotedText)
     if (cleanedText.length > 0) {
@@ -420,15 +433,76 @@ export function extractQuotes(text: string, removingSignature = true): QuoteExtr
         nestingLevel: maxNestingLevel,
       })
     }
-
-    cleanText = cleanText.slice(0, earliestQuoteIndex)
   }
 
   if (removingSignature) {
+    cleanText = removeRepeatedSignature(cleanText, () =>
+      quotedParts.map((part) => part.text).join('\n'),
+    )
     cleanText = removeSignature(cleanText)
   }
 
   return { mainContent: cleanText.trim(), quotedParts }
+}
+
+/**
+ * Recovers a bottom-posted reply's own text from a quote-first region:
+ * the non-">"-prefixed lines that FOLLOW the last ">"-prefixed line.
+ * Returns the recovered content plus the quoted region with those lines
+ * removed, so recovered text renders once (as the bubble), never twice.
+ * Requires an actual ">" block — without markers there is no reliable
+ * boundary between quoted history and new text, so nothing is recovered.
+ * Attribution/header/forward-marker lines never count as content.
+ * Known limitation: for interleaved inline replies ("> question" /
+ * "answer" pairs) only the segment after the LAST ">" line is recovered;
+ * earlier answers stay inside the quoted region, next to the lines they
+ * answer. A bare mid-quote line is more often a soft-wrapped
+ * continuation of the quoted text than new writing, so hoisting every
+ * interleaved segment would risk putting the quoted author's words in
+ * the reply bubble.
+ */
+function bottomPostedRescue(quotedRegion: string): {
+  content: string
+  remainingQuotedRegion: string
+} {
+  const lines = quotedRegion.split('\n')
+  let lastQuoteMarkerLineIndex = -1
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (lines[index]!.trim().startsWith('>')) {
+      lastQuoteMarkerLineIndex = index
+      break
+    }
+  }
+  if (lastQuoteMarkerLineIndex < 0) {
+    return { content: '', remainingQuotedRegion: quotedRegion }
+  }
+
+  const trailingLines = lines.slice(lastQuoteMarkerLineIndex + 1).filter((line) => {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) return true
+
+    const lowercased = trimmed.toLowerCase()
+    if (isQuoteAttributionLine(lowercased)) {
+      return false
+    }
+    if (HEADER_PREFIXES_LOWERCASED.some((prefix) => lowercased.startsWith(prefix))) {
+      return false
+    }
+    if (FORWARD_MARKERS_LOWERCASED.some((marker) => lowercased.includes(marker))) {
+      return false
+    }
+    return true
+  })
+
+  const content = trailingLines.join('\n').trim()
+  if (content.length === 0) {
+    return { content: '', remainingQuotedRegion: quotedRegion }
+  }
+
+  return {
+    content,
+    remainingQuotedRegion: lines.slice(0, lastQuoteMarkerLineIndex + 1).join('\n'),
+  }
 }
 
 function findEarliestPatternMatchWithAttribution(text: string): [number, string | null] {

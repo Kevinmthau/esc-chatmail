@@ -11,8 +11,9 @@ import Dexie from 'dexie'
 import type { ChatmailDB } from '@/db/schema'
 import type { ConversationRow, MessageRow } from '@/db/types'
 import { enqueue } from './pendingActions'
+import { isLocalOptimisticRow } from './replyMetadata'
 
-const ACTION_TABLES = ['messages', 'conversations', 'pendingActions'] as const
+const ACTION_TABLES = ['messages', 'conversations', 'pendingActions', 'outboundSends'] as const
 
 function actionTables(db: ChatmailDB) {
   return ACTION_TABLES.map((t) => db[t])
@@ -46,9 +47,34 @@ async function writeRecountedUnread(db: ChatmailDB, conversation: ConversationRo
   await db.conversations.put({ ...conversation, inboxUnreadCount })
 }
 
-/** Optimistic sends have no server-side message yet; never enqueue their ids. */
-function remoteActionableIds(messages: readonly MessageRow[]): string[] {
-  return messages.filter((m) => m.sendState !== 'pending').map((m) => m.id)
+/**
+ * The ids a conversation-wide Gmail action may name: only rows with a Gmail
+ * id of their own (MessageActions.gmailMessageIDForConversationAction).
+ *
+ * The user's own send keeps its local UUID until sync replaces it with
+ * Gmail's echo: while it sends, and for good once retained as not sent
+ * (sendState 'failed') or delivery unknown (shown as sent, with an
+ * 'ambiguous' outbound journal under its id). That is not a Gmail message
+ * id. One such id in the single batchModify this action becomes made Gmail
+ * reject the whole request, and the processor abandons a non-retriable
+ * failure at once, so the archive or spam report never reached Gmail for any
+ * message in the conversation — while the local change stood until sync
+ * reverted it. The row still takes the local change; its echo arrives as an
+ * outgoing message, which is never inbox presence.
+ */
+async function remoteActionableIds(
+  db: ChatmailDB,
+  messages: readonly MessageRow[],
+): Promise<string[]> {
+  const candidates = messages.filter((m) => !isLocalOptimisticRow(m))
+  if (candidates.length === 0) return []
+  const journaled = new Set(
+    await db.outboundSends
+      .where('id')
+      .anyOf(candidates.map((m) => m.id))
+      .primaryKeys(),
+  )
+  return candidates.filter((m) => !journaled.has(m.id)).map((m) => m.id)
 }
 
 /**
@@ -71,7 +97,7 @@ export async function markConversationRead(
     }
     await writeRecountedUnread(db, conversation)
 
-    const messageIds = remoteActionableIds(unread)
+    const messageIds = await remoteActionableIds(db, unread)
     if (messageIds.length > 0) {
       await enqueue(db, { actionType: 'markRead', conversationId, messageIds }, now)
     }
@@ -105,7 +131,7 @@ export async function toggleConversationRead(
     await db.messages.put({ ...newestInbox, isUnread: 1, localModifiedAt: now })
     await writeRecountedUnread(db, conversation)
 
-    const messageIds = remoteActionableIds([newestInbox])
+    const messageIds = await remoteActionableIds(db, [newestInbox])
     if (messageIds.length > 0) {
       await enqueue(db, { actionType: 'markUnread', conversationId, messageIds }, now)
     }
@@ -146,7 +172,7 @@ export async function archiveConversation(
       latestInboxDate: 0,
     })
 
-    const messageIds = remoteActionableIds(affected)
+    const messageIds = await remoteActionableIds(db, affected)
     if (messageIds.length > 0) {
       await enqueue(db, { actionType: 'archiveConversation', conversationId, messageIds }, now)
     }
@@ -182,7 +208,7 @@ export async function reportSpam(
       latestInboxDate: 0,
     })
 
-    const messageIds = remoteActionableIds(messages)
+    const messageIds = await remoteActionableIds(db, messages)
     if (messageIds.length > 0) {
       await enqueue(db, { actionType: 'reportSpam', conversationId, messageIds }, now)
     }

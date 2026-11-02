@@ -55,13 +55,22 @@ export async function hasFreshLocalUnread(
 
 export function useAutoMarkRead(conversationId: string): void {
   const conversation = useConversation(conversationId)
-  const unreadCount = conversation?.inboxUnreadCount ?? 0
+  // The live query resolves a turn after the id changes: undefined on mount,
+  // and on a desktop chat switch (ChatPane is not remounted) the PREVIOUS
+  // chat's row until the new query emits. Entry is decided only once the row
+  // for this id is in hand, or it would be consumed against a 0 / stale unread
+  // count and the real count's run would pass as an in-place change, which a
+  // fresh "Mark unread" stamp suppresses — the user re-opened the chat and it
+  // stayed unread.
+  const resolved = conversation !== undefined && conversation.id === conversationId
+  const unreadCount = resolved ? conversation.inboxUnreadCount : 0
   // Which conversation this hook has already "entered" — lets re-runs of the
   // effect distinguish chat entry (mark unconditionally) from in-place unread
   // changes (respect a fresh local mark-unread).
   const enteredRef = useRef<string | null>(null)
 
   useEffect(() => {
+    if (!resolved) return
     const isEntry = enteredRef.current !== conversationId
     enteredRef.current = conversationId
     if (unreadCount === 0) return
@@ -100,5 +109,5 @@ export function useAutoMarkRead(conversationId: string): void {
       if (timer !== undefined) clearTimeout(timer)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [conversationId, unreadCount])
+  }, [conversationId, resolved, unreadCount])
 }

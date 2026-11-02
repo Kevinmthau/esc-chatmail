@@ -4,7 +4,12 @@
 // concurrency 15 → 5, and the retry ladder lives here (the injected
 // api.getMessage makes exactly one attempt per call).
 
-import { AuthRequiredError, GmailApiError, NetworkError, RateLimitError } from '@/gmail/errors'
+import {
+  GmailApiError,
+  isAccountScopedSyncAbort,
+  NetworkError,
+  RateLimitError,
+} from '@/gmail/errors'
 import type { GmailMessage } from '@/gmail/types'
 import { mapWithConcurrency } from './concurrency'
 import type { GmailSyncApi } from './deps'
@@ -22,8 +27,9 @@ export const FETCH_BASE_DELAY_MS = 500
 export interface FetchFailure {
   id: string
   /**
-   * true: auth/4xx/decode — retrying the same request cannot succeed.
+   * true: message-scoped 4xx/decode — retrying the same request cannot succeed.
    * false: 5xx/network/rate-limit exhaustion — may succeed on a later sync.
+   * Account-scoped errors (auth, quota) never produce a failure: they abort.
    */
   permanent: boolean
 }
@@ -44,7 +50,13 @@ export interface FetchMessagesOptions {
   random?: () => number
 }
 
-type Classification = 'gone' | 'permanent' | 'retriable'
+/**
+ * 'abort' is run-level, not a per-id verdict: an auth, quota or cancellation
+ * condition proves nothing about the message being fetched, so the batch
+ * stops issuing requests and rethrows (MessageFetcher's accountScopedAbortError
+ * path; `APIError.isAccountScopedSyncAbort`).
+ */
+type Classification = 'gone' | 'permanent' | 'retriable' | 'abort'
 
 interface ClassifiedError {
   classification: Classification
@@ -52,6 +64,9 @@ interface ClassifiedError {
 }
 
 export function classifyFetchError(error: unknown): ClassifiedError {
+  if (isAccountScopedSyncAbort(error)) {
+    return { classification: 'abort', retryAfterSeconds: null }
+  }
   if (error instanceof RateLimitError) {
     return { classification: 'retriable', retryAfterSeconds: error.retryAfterSeconds }
   }
@@ -63,11 +78,8 @@ export function classifyFetchError(error: unknown): ClassifiedError {
     if (error.status >= 500) return { classification: 'retriable', retryAfterSeconds: null }
     return { classification: 'permanent', retryAfterSeconds: null }
   }
-  // AuthRequiredError, decode failures, unknown errors: permanent — retrying
-  // the identical request cannot succeed (mirrors MessageFetcher's default).
-  if (error instanceof AuthRequiredError) {
-    return { classification: 'permanent', retryAfterSeconds: null }
-  }
+  // Decode failures, unknown errors: permanent — retrying the identical
+  // request cannot succeed (mirrors MessageFetcher's default).
   return { classification: 'permanent', retryAfterSeconds: null }
 }
 
@@ -96,6 +108,13 @@ function chronological(messages: GmailMessage[]): GmailMessage[] {
  * Fetches `ids` with bounded concurrency. Each id gets up to `maxAttempts`
  * attempts with backoff; failures are classified so the caller can gate
  * historyId advancement (permanent vs may-recover).
+ *
+ * @throws the first account-scoped error (AuthRequiredError,
+ *         QuotaExhaustedError, RequestAbortedError): every further request
+ *         this pass is doomed, so no more ids are claimed, the ids already
+ *         attempted get NO verdict (an auth or quota outage must never be
+ *         recorded as a per-message failure), and nothing of the batch is
+ *         returned — the caller's run aborts so no cursor can commit.
  */
 export async function fetchMessagesBounded(
   api: Pick<GmailSyncApi, 'getMessage'>,
@@ -115,15 +134,26 @@ export async function fetchMessagesBounded(
   // for the remainder of it. Continuing at full width against a throttled
   // account only converts more messages into retry-ladder sleeps.
   let effectiveConcurrency = concurrency
+  let runAbortError: unknown = null
 
   const fetchOne = async (id: string): Promise<void> => {
     for (let attempt = 1; ; attempt += 1) {
+      // A worker claiming its next id after the abort must not issue the
+      // request; one retrying mid-ladder must not resume either.
+      if (runAbortError !== null) return
       try {
         const message = await api.getMessage(id, 'full')
         fetched.push(message)
         return
       } catch (error) {
         const { classification, retryAfterSeconds } = classifyFetchError(error)
+        if (classification === 'abort') {
+          runAbortError ??= error
+          return
+        }
+        // Failures landing after the abort are in-flight requests of a doomed
+        // pass; those ids get no verdict either.
+        if (runAbortError !== null) return
         if (error instanceof RateLimitError) {
           effectiveConcurrency = Math.max(1, Math.floor(effectiveConcurrency / 2))
         }
@@ -148,5 +178,6 @@ export async function fetchMessagesBounded(
     limit: () => effectiveConcurrency,
   })
 
+  if (runAbortError !== null) throw runAbortError
   return { fetched: chronological(fetched), goneIds, failed }
 }

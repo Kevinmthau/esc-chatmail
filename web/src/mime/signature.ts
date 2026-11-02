@@ -14,6 +14,8 @@ import {
   SIGNATURE_DELIMITER_PATTERN,
   STANDALONE_CONTACT_LABEL_PATTERN,
   WEB_URL_PATTERN,
+  WORD_END,
+  WORD_START,
 } from './patterns'
 import {
   isContactSignatureLine,
@@ -521,10 +523,19 @@ function isTaglineBetweenAffiliationAndContacts(
   return isStrongSignatureSupportLine(previous) || MULTI_WORD_NAME_PATTERN.test(previous)
 }
 
+// Unicode-bounded (see WORD_END): ASCII `\b` read "Iñaki" as "I" and "Letícia" as "let".
+const AUTHORED_PROSE_PREFIX_PATTERN = new RegExp(
+  String.raw`^(?:please|kindly|can|could|would|i|we|you|our|the|this|that|here|there|let|remember|also|attached|send|call|reply|note|use|check|review|confirm)` +
+    WORD_END,
+  'iu',
+)
+const BODY_PROSE_COMPANY_SUFFIX_PATTERN = new RegExp(
+  WORD_START + String.raw`(?:n\.a|ltd|llp)\.$`,
+  'iu',
+)
+
 function hasAuthoredProsePrefix(line: string): boolean {
-  return /^(?:please|kindly|can|could|would|i|we|you|our|the|this|that|here|there|let|remember|also|attached|send|call|reply|note|use|check|review|confirm)\b/i.test(
-    line.trim(),
-  )
+  return AUTHORED_PROSE_PREFIX_PATTERN.test(line.trim())
 }
 
 function isBodyProseLine(line: string): boolean {
@@ -534,7 +545,7 @@ function isBodyProseLine(line: string): boolean {
     line.split(/\s+/).length > 1 &&
     /[.!?]$/.test(line) &&
     !isStrongSignatureSupportLine(line) &&
-    !/\b(?:n\.a|ltd|llp)\.$/i.test(line)
+    !BODY_PROSE_COMPANY_SUFFIX_PATTERN.test(line)
   )
 }
 
@@ -966,7 +977,7 @@ function previousNonEmptyLineIndex(index: number, lines: string[]): number | nul
   return null
 }
 
-function isPostscriptLine(lowercased: string): boolean {
+export function isPostscriptLine(lowercased: string): boolean {
   const trimmed = lowercased.trim()
   return (
     trimmed.startsWith('p.s.') ||

@@ -60,7 +60,7 @@ describe('RecipientField', () => {
     expect(screen.getByRole('status').textContent).toContain('Added bob@example.com')
   })
 
-  it('keeps invalid chips in the danger tint and excludes them from send', async () => {
+  it('keeps invalid chips in the danger tint and out of the valid-address list', async () => {
     const user = userEvent.setup()
     render(<Host />)
 

@@ -7,12 +7,40 @@
 import { containsEncodedWord, decodeRfc2047 } from '@/mime/rfc2047Decoder'
 
 /**
+ * Swift `CharacterSet.whitespacesAndNewlines`: Unicode category Z (Zs, Zl,
+ * Zp) plus U+0009–U+000D and U+0085. JS `String.prototype.trim` strips a
+ * different set — it includes U+FEFF (which Swift keeps) and lacks U+0085
+ * (which Swift strips) — and the trimmed bytes feed the participant hash.
+ */
+const SWIFT_WHITESPACE_AND_NEWLINES_EDGES = /^[\t\n\v\f\r\u0085\p{Z}]+|[\t\n\v\f\r\u0085\p{Z}]+$/gu
+
+function trimSwiftWhitespaceAndNewlines(value: string): string {
+  return value.replace(SWIFT_WHITESPACE_AND_NEWLINES_EDGES, '')
+}
+
+/**
+ * Swift `lowercased()` maps each scalar on its own. JS `toLowerCase` applies
+ * the context-sensitive Final_Sigma rule ('ΣΑΣ' → 'σας'), so the two differ
+ * on a Greek word-final sigma; lowercasing per code point disables it.
+ */
+function lowercasePerCodePoint(value: string): string {
+  return [...value].map((codePoint) => codePoint.toLowerCase()).join('')
+}
+
+/**
  * Canonical email normalization for identity hashing: trim + lowercase; for
  * gmail.com/googlemail.com additionally strip '.' from the local part,
  * truncate the local part at '+', and canonicalize the domain to gmail.com.
+ *
+ * The scalars themselves are preserved, never NFC-normalized: Swift hashes
+ * the scalars it was given, and the golden corpus pins a decomposed address
+ * hashing in its decomposed form (unicode_combining_scalar_sort). Swift
+ * `String` equality is canonical equivalence all the same, so a `Set` there
+ * holds one member for "é" and "e"+U+0301 while a JS `Set` holds two; that
+ * belongs to the set construction in participantSet.ts, not to this function.
  */
 export function normalizeEmail(raw: string): string {
-  const trimmed = raw.trim().toLowerCase()
+  const trimmed = lowercasePerCodePoint(trimSwiftWhitespaceAndNewlines(raw))
 
   const atIndex = trimmed.indexOf('@')
   if (atIndex === -1) return trimmed

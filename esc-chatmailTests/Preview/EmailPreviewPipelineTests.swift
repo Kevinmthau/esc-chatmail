@@ -758,6 +758,55 @@ final class EmailPreviewPipelineTests: XCTestCase {
         XCTAssertFalse(secondPayload.previewCacheKey.contains("plainText:"))
     }
 
+    /// Revert-check: the `.reservationSummary` step in `EmailPreviewPipeline.buildPreview`.
+    func testLoadPreview_reservationRoutedAsCalendarEvent_buildsReservationSummaryCard() async throws {
+        let preview = try await loadReservationFixturePreview(isLikelyCalendarInvite: true)
+
+        guard case .reservationSummary(let model) = preview else {
+            XCTFail("Expected reservation summary preview, got \(String(describing: preview))")
+            return
+        }
+
+        XCTAssertEqual(model.title, "Tennis Reservation – with Pro")
+        XCTAssertEqual(model.dateTimeLine, "Sunday, Nov 1 • 1:00 – 2:00 PM")
+        XCTAssertEqual(model.locationLine, "East Court")
+    }
+
+    /// A reservation-shaped mail the row gate did not route as a calendar event (no .ics)
+    /// keeps the card the pipeline gave it before.
+    ///
+    /// Revert-check: the `request.isLikelyCalendarInvite` condition on that step.
+    func testLoadPreview_reservationNotRoutedAsCalendarEvent_doesNotBuildReservationCard() async throws {
+        let preview = try await loadReservationFixturePreview(isLikelyCalendarInvite: false)
+
+        if case .reservationSummary = preview {
+            XCTFail("A row without the calendar-event gate must not get the reservation card")
+        }
+    }
+
+    private func loadReservationFixturePreview(isLikelyCalendarInvite: Bool) async throws -> EmailPreviewRenderModel? {
+        let messageId = "preview-pipeline-reservation-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+        _ = contentHandler.saveHTML(ReservationEmailFixture.html, for: messageId)
+
+        return await pipeline.loadPreview(
+            request: EmailPreviewPipelineRequest(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: ReservationEmailFixture.bodyText,
+                cleanedSnippet: nil,
+                senderName: ReservationEmailFixture.senderName,
+                senderEmail: ReservationEmailFixture.senderEmail,
+                subject: ReservationEmailFixture.subject,
+                isNewsletter: false,
+                isForwardedEmail: false,
+                cleanupMode: .none,
+                isDarkMode: false,
+                isLikelyCalendarInvite: isLikelyCalendarInvite
+            )
+        )
+    }
+
     func testLoadPreviewRejectsSourceThatCompletesAfterAccountReopen() async throws {
         let htmlLoader = HTMLContentLoader(
             contentHandler: contentHandler,

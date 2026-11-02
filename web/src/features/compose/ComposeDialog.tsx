@@ -19,7 +19,7 @@ import { AttachmentStrip } from './AttachmentStrip'
 import { buildForwardDraft, skippedAttachmentWarning, type ForwardDraft } from './forwardSource'
 import { GrowingTextarea } from './GrowingTextarea'
 import { RecipientField } from './RecipientField'
-import { validRecipientEmails, type RecipientChipData } from './recipients'
+import { invalidRecipientMessage, validRecipientEmails, type RecipientChipData } from './recipients'
 import { useAttachmentPicker } from './useAttachmentPicker'
 import { useRecipientDedup } from './useRecipientDedup'
 
@@ -91,6 +91,13 @@ export function ComposeDialog({
   }, [forwardMessageId])
 
   const recipients = validRecipientEmails(chips)
+  // iOS ComposeViewModel.canSend: `!recipients.isEmpty && recipients.allSatisfy
+  // { $0.isValid }`. A red chip holds the send instead of being dropped from
+  // it: the MIME builder refuses to narrow a recipient set silently
+  // (InvalidRecipientsError names the address), and the gate must not do at
+  // the chip what the builder refuses at the address — the chip's tint is the
+  // only other signal, and it leaves with the dialog.
+  const invalidRecipientNotice = invalidRecipientMessage(chips)
   const attachments = picker.attachments
   // Forward mode mirrors iOS canSend: the forwarded content IS the message, so
   // an empty note does not block the send — but only once the forwarded draft
@@ -101,7 +108,12 @@ export function ComposeDialog({
   const hasContent = isForward
     ? !preparing && (forward !== null || body.trim() !== '' || attachments.length > 0)
     : body.trim() !== '' || attachments.length > 0
-  const canSend = !sending && !picker.busy && recipients.length > 0 && hasContent
+  const canSend =
+    !sending &&
+    !picker.busy &&
+    recipients.length > 0 &&
+    invalidRecipientNotice === null &&
+    hasContent
 
   const forwardPayload = (): ForwardSendPayload | undefined => {
     if (!isForward || forward === null) return undefined
@@ -203,6 +215,12 @@ export function ComposeDialog({
 
         <AliasPicker value={fromAlias} onChange={setFromAlias} />
         <RecipientField chips={chips} onChipsChange={setChips} disabled={sending} />
+        {invalidRecipientNotice !== null && (
+          // Not a live region: RecipientField already announces the chip as
+          // invalid when it is committed; this is the visible reason Send is
+          // disabled.
+          <p className="px-4 pt-2 text-xs text-danger">{invalidRecipientNotice}</p>
+        )}
 
         {isForward && (
           <div className="flex items-center gap-2 border-b border-border px-4 py-2">

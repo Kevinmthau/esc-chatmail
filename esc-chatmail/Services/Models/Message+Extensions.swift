@@ -284,6 +284,19 @@ extension Message {
             return true
         }
 
+        // A booking system's reservation mail with its .ics ("Sunday, 11/01/2026 ...
+        // 01:00 PM - 02:00 PM", "Court:" / "Players:"): its numeric date never matches
+        // `hasDateSignal`, and without this the row stayed a long text bubble. Parsed from
+        // the stored body alone, the prefix of what `ReservationSummaryPreviewBuilder`
+        // parses, so a row routed here is one the pipeline cards.
+        if hasCalendarAttachment,
+           ReservationSummaryParser.parse(
+            subject: subject,
+            lines: ReservationSummaryPreviewBuilder.lines(bodyText: bodyText)
+           ) != nil {
+            return true
+        }
+
         return hasInviteSubjectPrefix && hasCalendarStructure && hasDateSignal
     }
 

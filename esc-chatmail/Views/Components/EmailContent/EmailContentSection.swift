@@ -76,7 +76,9 @@ struct EmailContentSection: View {
         let subjectFingerprint = contentFingerprint(for: message.subject)
         let senderEmailFingerprint = contentFingerprint(for: message.senderEmail)
         let senderNameFingerprint = contentFingerprint(for: message.senderName)
-        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextFingerprint)|\(cleanedSnippetFingerprint)|\(subjectFingerprint)|\(senderEmailFingerprint)|\(senderNameFingerprint)|\(isDarkMode)|\(message.htmlDisplayCleanupMode.rawValue)|source:\(htmlSourceSignature ?? "unknown")"
+        // `isLikelyCalendarInvite` gates the reservation card in the pipeline request, so a
+        // row whose .ics metadata lands after mount must reload into it.
+        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextFingerprint)|\(cleanedSnippetFingerprint)|\(subjectFingerprint)|\(senderEmailFingerprint)|\(senderNameFingerprint)|\(isDarkMode)|\(message.htmlDisplayCleanupMode.rawValue)|calendar:\(message.isLikelyCalendarInvite)|source:\(htmlSourceSignature ?? "unknown")"
     }
 
     var body: some View {
@@ -171,7 +173,8 @@ struct EmailContentSection: View {
                 isNewsletter: message.isNewsletter,
                 isForwardedEmail: message.isForwardedEmail,
                 cleanupMode: message.htmlDisplayCleanupMode,
-                isDarkMode: colorScheme == .dark
+                isDarkMode: colorScheme == .dark,
+                isLikelyCalendarInvite: message.isLikelyCalendarInvite
             )
         )
 
@@ -230,6 +233,15 @@ struct EmailContentSection: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Calendar invite: \(model.title)")
             .accessibilityHint("Opens the full original email")
+        case .reservationSummary(let model):
+            Button {
+                openPreviewCard(renderedPreview)
+            } label: {
+                ReservationSummaryPreviewCard(model: model)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(ReservationSummaryPreviewCard.accessibilityLabel(for: model))
+            .accessibilityHint("Opens the full original email")
         case .newsletter(let model):
             Button {
                 openPreviewCard(renderedPreview)
@@ -274,7 +286,7 @@ struct EmailContentSection: View {
         switch renderedPreview {
         case .newsletter:
             return true
-        case .calendarInvite, .transactional, .netlifyDeploy, .html:
+        case .calendarInvite, .reservationSummary, .transactional, .netlifyDeploy, .html:
             return false
         }
     }

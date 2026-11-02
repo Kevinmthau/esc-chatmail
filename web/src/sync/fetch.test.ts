@@ -32,9 +32,10 @@ describe('classifyFetchError', () => {
       'retriable',
     )
     expect(classifyFetchError(new NetworkError('offline')).classification).toBe('retriable')
+    // Account-scoped: a run-level abort, never a per-id verdict.
     expect(
       classifyFetchError(new AuthRequiredError('sign in', 'needs_interaction')).classification,
-    ).toBe('permanent')
+    ).toBe('abort')
     expect(classifyFetchError(new Error('decode failed')).classification).toBe('permanent')
     const rateLimited = classifyFetchError(new RateLimitError(7))
     expect(rateLimited.classification).toBe('retriable')

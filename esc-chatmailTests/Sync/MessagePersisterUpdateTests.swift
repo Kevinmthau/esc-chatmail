@@ -2,6 +2,28 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Every fixture, save, and assertion goes through the suite's `context`, a
+/// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
+/// never `testStack.viewContext`, which is private-queue. The test bodies use
+/// it directly (builders, managed-object reads, fetch, count, save), so
+/// `@MainActor` on the class is what puts those accesses on-queue. Wrapping
+/// them in `perform` instead would mean moving nearly every line of every test
+/// into a closure. See that helper for what the private-queue shape races:
+/// here it crashed the test host in CI run 41482980173 with "Collection
+/// <__NSCFSet> was mutated while being enumerated" under
+/// `-[NSManagedObjectContext _countForFetchRequest_:error:]`.
+///
+/// Production runs `MessagePersister` on a sync background context, which the
+/// two `onBackgroundContext` tests still model. The actor's entry points under
+/// test enter whichever context they are handed through that context's own
+/// `perform`, so the other tests exercise the same logic. The nonisolated
+/// `applyFastConversationListUpdateForExistingMessage` runs on the caller's
+/// thread, here on-queue for the same reason as the test bodies.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class MessagePersisterUpdateTests: XCTestCase {
     private var testStack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
@@ -10,7 +32,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
         persister = MessagePersister(photoPrefetcher: { _ in })
     }
 
@@ -81,7 +103,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .withSnippet("Newest preview")
             .inConversation(conversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // No INBOX membership or unread change on either side, so only the
         // newest-message block runs, as for a star on a non-INBOX row.
@@ -95,7 +117,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
         XCTAssertEqual(conversation.lastMessageDate, messageDate)
         XCTAssertEqual(conversation.snippet, "Newest preview")
-        try testStack.saveViewContext()
+        try saveViewContext()
         XCTAssertFalse(context.hasChanges)
 
         persister.applyFastConversationListUpdateForExistingMessage(
@@ -870,7 +892,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .withId("background-update-message")
             .inConversation(conversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let backgroundContext = testStack.newBackgroundContext()
         var headers = ProcessedHeaders()
@@ -940,7 +962,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .fromMe()
             .inConversation(conversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Finish options"
@@ -973,8 +995,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(didUpdate)
         XCTAssertEqual(existingMessage.bodyText, replyBody)
 
-        try testStack.saveViewContext()
-        testStack.resetViewContext()
+        try saveViewContext()
+        context.reset()
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", processedMessage.id)
@@ -986,13 +1008,13 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(saved.cleanedSnippet, "Can we please see alts for:")
     }
 
-    // @MainActor: these two tests call ConversationRollupUpdater's
-    // synchronous updateDisplayNameOnly, which writes managed-object
-    // properties directly and so must run on the viewContext's queue. As a
-    // nonisolated async test it ran on the cooperative pool and raced the
-    // display-info notification handlers from neighboring tests — an
-    // intermittent SIGSEGV in CI (_setLastSnapshot__ under setvfk).
-    @MainActor
+    // These two tests call ConversationRollupUpdater's synchronous
+    // updateDisplayNameOnly, which writes managed-object properties directly
+    // and so must run on the context's queue, which the class's @MainActor
+    // and main-queue context now guarantee. As a nonisolated async test it
+    // ran on the cooperative pool and raced the display-info notification
+    // handlers from neighboring tests — an intermittent SIGSEGV in CI
+    // (_setLastSnapshot__ under setvfk).
     func testUpdateExistingMessage_enrichesParticipantDisplayNameFromRefreshedFromHeader() async throws {
         let senderEmail = "info@bonbonwhims.com"
         let conversation = ConversationBuilder()
@@ -1048,7 +1070,6 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "BONBONWHIMS")
     }
 
-    @MainActor
     func testUpdateExistingMessage_replacesAddressDerivedParticipantDisplayName() async throws {
         let senderEmail = "bonbonwhims@example.com"
         let conversation = ConversationBuilder()
@@ -1130,7 +1151,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(firstConversation)
             .build(in: context)
         addMessageParticipant(person: sender, kind: .from, to: existingMessage)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Our Totally Spies! Collab is here"
@@ -1203,7 +1224,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(conversation)
             .build(in: context)
         addMessageParticipant(person: sender, kind: .from, to: existingMessage)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Our Totally Spies! Collab is here"
@@ -1282,7 +1303,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(conversation)
             .build(in: context)
         addMessageParticipant(person: sender, kind: .from, to: existingMessage)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Header name regressed"
@@ -1366,7 +1387,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .fromMe()
             .inConversation(conversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Plans"
@@ -1443,7 +1464,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(existingConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: private lesson"
@@ -1527,7 +1548,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(forwardedConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Team dinner"
@@ -1584,7 +1605,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(existingConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Fwd: Mario Spina"
@@ -1650,7 +1671,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(existingConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Deposit Notification (Deposit Declined)"
@@ -1720,7 +1741,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(archivedConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Archived thread"
@@ -1776,7 +1797,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(existingConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Existing thread"
@@ -1838,7 +1859,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .setHidden()
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "New outbound"
@@ -1895,7 +1916,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(archivedConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Archived thread"
@@ -1974,7 +1995,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(existingConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Fast list update"
@@ -2035,7 +2056,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .inConversation(existingConversation)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.from = "Sender <sender@example.com>"
@@ -2101,7 +2122,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         conversation.lastMessageDate = messageDate
         conversation.latestInboxDate = messageDate
         conversation.snippet = previewText
-        try testStack.saveViewContext()
+        try saveViewContext()
         XCTAssertFalse(context.hasChanges)
 
         persister.applyFastConversationListUpdateForExistingMessage(
@@ -2844,6 +2865,14 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(attachment.previewURL, expectedPreviewPath)
         XCTAssertEqual(AttachmentPaths.loadData(from: attachment.localURL), inlineImageData)
         XCTAssertFalse(attachment.needsRedownload)
+    }
+
+    /// Saves the suite's main-queue context directly; the test body is
+    /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
+    /// the stack's private-queue context instead.
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     private func addConversationParticipant(person: Person, to conversation: Conversation) {

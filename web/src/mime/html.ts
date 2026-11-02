@@ -2,7 +2,7 @@
 // Port of esc-chatmail/Services/EmailDOM/EmailDOMQuoteRemover*.swift
 // (SwiftSoup → DOMParser).
 
-import { collapsedElementText, paragraphAwareText, parseHtmlDocument } from './htmlText'
+import { collapsedElementText, paragraphAwareText, parseHtmlFragmentDocument } from './htmlText'
 import {
   BARE_HOST_LINE_PATTERN,
   EMAIL_ADDRESS_PATTERN,
@@ -21,7 +21,15 @@ import {
 } from './patterns'
 import { looksLikeNameLine } from './text'
 
-export type QuoteRemovalMode = 'quotedOnly' | 'quotedAndSignatures'
+/**
+ * HTMLQuoteRemover.RemovalMode. `quotedContainersOnly` is selector-based
+ * container removal only (quote containers, signature wrappers, footers) —
+ * no structural or text-marker truncation. Used as the last cleanup fallback
+ * for quote-first replies whose actual content sits AFTER the quoted block:
+ * marker truncation removes everything from the attribution line onward, so
+ * this mode keeps the content and drops just the quoted subtrees.
+ */
+export type QuoteRemovalMode = 'quotedOnly' | 'quotedAndSignatures' | 'quotedContainersOnly'
 
 const NODE_ELEMENT = 1
 const NODE_TEXT = 3
@@ -73,7 +81,7 @@ export function removeQuotesFromHtml(
   const inputIsFragment = !hasDocumentWrapper(html)
   let document: Document
   try {
-    document = parseHtmlDocument(html)
+    document = parseHtmlFragmentDocument(html, inputIsFragment)
   } catch {
     return html
   }
@@ -81,14 +89,28 @@ export function removeQuotesFromHtml(
   if (!body) return html
 
   try {
-    removeQuotedContainers(document)
-    const didTruncateAtStructuralBoundary = truncateAtStructuralBoundaries(document)
-    if (!didTruncateAtStructuralBoundary) {
-      truncateAtTextMarkers(document)
+    const removedQuotedContainerCount = removeQuotedContainers(document)
+    // The containers-only rescue exists for quote-in-container shapes
+    // (attribution + blockquote first, content after). When no quote
+    // container was removed there is no boundary between quoted history
+    // and content, so this mode must not claim the document: an empty
+    // result fails the caller's meaningful-content check and the cleanup
+    // chain falls back to the original HTML with full plain-text quote
+    // removal.
+    if (mode === 'quotedContainersOnly' && removedQuotedContainerCount === 0) {
+      return ''
     }
-    if (mode === 'quotedAndSignatures') {
+    if (mode !== 'quotedContainersOnly') {
+      const didTruncateAtStructuralBoundary = truncateAtStructuralBoundaries(document)
+      if (!didTruncateAtStructuralBoundary) {
+        truncateAtTextMarkers(document)
+      }
+    }
+    if (mode === 'quotedAndSignatures' || mode === 'quotedContainersOnly') {
       removeSignatureWrappers(document)
       removeFooterContainers(document)
+    }
+    if (mode === 'quotedAndSignatures') {
       truncateAtSignatureMarkers(document)
       truncateTrailingContactSignature(document)
     }
@@ -494,13 +516,14 @@ function walkAllComments(node: Node, visit: (comment: Comment) => void): void {
   }
 }
 
+/** Returns true when an open/close pair was found and its region removed. */
 function removeCommentDelimitedRegions(
   document: Document,
   openHint: string,
   closeHint: string,
-): void {
+): boolean {
   const body = document.body
-  if (!body) return
+  if (!body) return false
   const comments: Comment[] = []
   walkAllComments(body, (comment) => {
     comments.push(comment)
@@ -518,7 +541,7 @@ function removeCommentDelimitedRegions(
       close = comment
     }
   }
-  if (open === undefined || close === undefined) return
+  if (open === undefined || close === undefined) return false
 
   const openParent = open.parentNode
   const closeParent = close.parentNode
@@ -539,10 +562,11 @@ function removeCommentDelimitedRegions(
       openParent.removeChild(child)
     }
     open.remove()
-    return
+    return true
   }
   open.remove()
   close.remove()
+  return true
 }
 
 // MARK: - Containers (provider-specific)
@@ -562,19 +586,28 @@ const QUOTED_CONTAINER_SELECTORS: string[] = [
   'blockquote',
 ]
 
-function removeQuotedContainers(document: Document): void {
+/** Returns how many quote containers were removed (the containers-only mode declines on 0). */
+function removeQuotedContainers(document: Document): number {
+  let removedCount = 0
+
   // border-left styled divs are commonly used as quote blocks.
   for (const element of Array.from(document.querySelectorAll('div[style*="border-left"]'))) {
     element.remove()
+    removedCount += 1
   }
 
   for (const selector of QUOTED_CONTAINER_SELECTORS) {
     for (const element of Array.from(document.querySelectorAll(selector))) {
       element.remove()
+      removedCount += 1
     }
   }
 
-  removeCommentDelimitedRegions(document, 'originalmessage', '/originalmessage')
+  if (removeCommentDelimitedRegions(document, 'originalmessage', '/originalmessage')) {
+    removedCount += 1
+  }
+
+  return removedCount
 }
 
 // MARK: - Structural boundaries

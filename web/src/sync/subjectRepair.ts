@@ -66,57 +66,61 @@ export async function decodeEncodedSubjectsIfNeeded(
   db: ChatmailDB,
   now: number,
 ): Promise<EncodedSubjectRepairResult> {
-  return db.transaction('rw', [db.syncState, db.messages, db.conversations], async () => {
-    const flag = await db.syncState.get(ENCODED_SUBJECT_REPAIR_KEY)
-    if (flag?.value === true) {
+  return db.transaction(
+    'rw',
+    [db.syncState, db.messages, db.conversations, db.convoParticipants, db.people],
+    async () => {
+      const flag = await db.syncState.get(ENCODED_SUBJECT_REPAIR_KEY)
+      if (flag?.value === true) {
+        return {
+          performed: false,
+          decodedSubjectCount: 0,
+          retitledCalendarEventCount: 0,
+          recomputedConversationCount: 0,
+        }
+      }
+
+      const candidates = await db.messages
+        .filter((message) => containsEncodedWord(message.subject))
+        .toArray()
+
+      const repaired: MessageRow[] = []
+      const conversationIds = new Set<string>()
+      let retitledCalendarEventCount = 0
+      for (const message of candidates) {
+        const decoded = decodeRfc2047(message.subject)
+        if (decoded === message.subject) continue
+
+        // analyzeCalendarInvite titles an event with no SUMMARY from the same
+        // subject this row stored, so a title equal to that fallback came from
+        // the encoded subject. A SUMMARY title stays as the invite spelled it.
+        const event = message.calendarEvent
+        if (event !== undefined && event.title === invitedSubjectTitle(message.subject)) {
+          message.calendarEvent = { ...event, title: invitedSubjectTitle(decoded) }
+          retitledCalendarEventCount += 1
+        }
+        message.subject = decoded
+        repaired.push(message)
+        conversationIds.add(message.conversationId)
+      }
+
+      if (repaired.length > 0) {
+        await db.messages.bulkPut(repaired)
+        // Nested into this transaction, so each rollup reads the decoded rows.
+        for (const conversationId of conversationIds) {
+          await rollupConversation(db, conversationId, now)
+        }
+      }
+
+      // Last write by design: it commits with the repaired rows or not at all.
+      await db.syncState.put({ key: ENCODED_SUBJECT_REPAIR_KEY, value: true })
+
       return {
-        performed: false,
-        decodedSubjectCount: 0,
-        retitledCalendarEventCount: 0,
-        recomputedConversationCount: 0,
+        performed: true,
+        decodedSubjectCount: repaired.length,
+        retitledCalendarEventCount,
+        recomputedConversationCount: conversationIds.size,
       }
-    }
-
-    const candidates = await db.messages
-      .filter((message) => containsEncodedWord(message.subject))
-      .toArray()
-
-    const repaired: MessageRow[] = []
-    const conversationIds = new Set<string>()
-    let retitledCalendarEventCount = 0
-    for (const message of candidates) {
-      const decoded = decodeRfc2047(message.subject)
-      if (decoded === message.subject) continue
-
-      // analyzeCalendarInvite titles an event with no SUMMARY from the same
-      // subject this row stored, so a title equal to that fallback came from
-      // the encoded subject. A SUMMARY title stays as the invite spelled it.
-      const event = message.calendarEvent
-      if (event !== undefined && event.title === invitedSubjectTitle(message.subject)) {
-        message.calendarEvent = { ...event, title: invitedSubjectTitle(decoded) }
-        retitledCalendarEventCount += 1
-      }
-      message.subject = decoded
-      repaired.push(message)
-      conversationIds.add(message.conversationId)
-    }
-
-    if (repaired.length > 0) {
-      await db.messages.bulkPut(repaired)
-      // Nested into this transaction, so each rollup reads the decoded rows.
-      for (const conversationId of conversationIds) {
-        await rollupConversation(db, conversationId, now)
-      }
-    }
-
-    // Last write by design: it commits with the repaired rows or not at all.
-    await db.syncState.put({ key: ENCODED_SUBJECT_REPAIR_KEY, value: true })
-
-    return {
-      performed: true,
-      decodedSubjectCount: repaired.length,
-      retitledCalendarEventCount,
-      recomputedConversationCount: conversationIds.size,
-    }
-  })
+    },
+  )
 }
