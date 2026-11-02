@@ -44,7 +44,11 @@ import {
   type ParseGmailMessageOptions,
 } from '@/mime/parse'
 import { createChatPreviewText, createCleanedSnippet, isForwardedSubject } from '@/mime/preview'
-import { conversationPreview, EXCLUDED_MAILBOX_LABEL_IDS } from '@/rollup/rollup'
+import {
+  conversationPreview,
+  EXCLUDED_MAILBOX_LABEL_IDS,
+  rollupConversation,
+} from '@/rollup/rollup'
 import { mapWithConcurrency } from './concurrency'
 import { resolveReplyFrom, type ReplyFromHeaders } from './replyFrom'
 
@@ -937,6 +941,9 @@ export async function applyPersist(
         async () => {
           const conversationId = await deleteMessageCascade(db, plan.id)
           if (conversationId !== null) {
+            // With the delete, as in applyHistoryLabelOps: a rerun after an
+            // aborted run finds the row gone and touches nothing.
+            await rollupConversation(db, conversationId, now)
             result.touchedConversationIds.add(conversationId)
             result.deletedMessageIds.add(plan.id)
           }

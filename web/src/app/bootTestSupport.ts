@@ -9,6 +9,7 @@ import {
   AuthBroker,
 } from '@/auth/authBroker'
 import type {
+  AuthChannel,
   GisSurface,
   GisTokenClientConfig,
   GisTokenResponse,
@@ -84,10 +85,14 @@ export function seedStoredSession(
 }
 
 /** Boots real mode with a broker restored from `gis`'s stored session. */
-export function bootWithBroker(gis: FakeGis, getProfile: () => Promise<unknown>): AuthBroker {
+export function bootWithBroker(
+  gis: FakeGis,
+  getProfile: () => Promise<unknown>,
+  channel: AuthChannel | null = null,
+): AuthBroker {
   const broker = new AuthBroker(gis.surface(), {
     clientId: 'test-client-id',
-    createChannel: () => null,
+    createChannel: () => channel,
     verifyAccessToken: async () => {
       const profile = (await getProfile()) as { emailAddress: string }
       return profile.emailAddress

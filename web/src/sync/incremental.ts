@@ -214,10 +214,20 @@ export async function applyHistoryLabelOps(
   now: number,
 ): Promise<Set<string>> {
   const touched = new Set<string>()
+  const deletedFrom = new Set<string>()
 
   await db.transaction(
     'rw',
-    [db.messages, db.bodies, db.msgParticipants, db.attachments, db.blobs, db.conversations],
+    [
+      db.messages,
+      db.bodies,
+      db.msgParticipants,
+      db.attachments,
+      db.blobs,
+      db.conversations,
+      db.convoParticipants,
+      db.people,
+    ],
     async () => {
       const guardActive = (localModifiedAt: number): boolean =>
         localModifiedAt !== 0 && now - localModifiedAt < LOCAL_MODIFICATION_MAX_AGE_MS
@@ -225,7 +235,10 @@ export async function applyHistoryLabelOps(
       for (const record of records) {
         for (const deleted of record.messagesDeleted ?? []) {
           const conversationId = await deleteMessageInTx(db, deleted.message.id)
-          if (conversationId !== null) touched.add(conversationId)
+          if (conversationId !== null) {
+            touched.add(conversationId)
+            deletedFrom.add(conversationId)
+          }
         }
 
         for (const change of record.labelsAdded ?? []) {
@@ -236,7 +249,10 @@ export async function applyHistoryLabelOps(
 
           if (addedLabels.some((id) => EXCLUDED_MAILBOX_LABEL_IDS.has(id))) {
             const conversationId = await deleteMessageInTx(db, message.id)
-            if (conversationId !== null) touched.add(conversationId)
+            if (conversationId !== null) {
+              touched.add(conversationId)
+              deletedFrom.add(conversationId)
+            }
             continue
           }
 
@@ -278,6 +294,13 @@ export async function applyHistoryLabelOps(
           )
           touched.add(updated.conversationId)
         }
+      }
+
+      // Rolled up with the delete, not left to finalize: a rerun of this record
+      // after an aborted run finds the row gone and touches nothing, so the
+      // deleted message's snippet, date and unread count would outlive the cursor.
+      for (const conversationId of deletedFrom) {
+        await rollupConversation(db, conversationId, now)
       }
     },
   )

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { GmailApiError, NetworkError } from '../gmail/errors'
+import { GmailApiError, NetworkError, QuotaExhaustedError } from '../gmail/errors'
 import type { GmailMessage, GmailPart } from '../gmail/types'
 import { encodeHeaderIfNeeded } from '../outbox/mimeBuilder'
 import { extractAttachments } from './attachments'
@@ -271,6 +271,43 @@ describe('parseGmailMessage content extraction', () => {
 
     expect(parsed!.html).toBeNull()
     expect(parsed!.attachments).toEqual([])
+  })
+
+  describe('embedded-HTML probe failures', () => {
+    const payload = {
+      partId: '',
+      mimeType: 'multipart/mixed',
+      headers: baseHeaders,
+      parts: [
+        {
+          partId: '0',
+          mimeType: 'text/plain',
+          body: { data: b64url('The real body'), size: 13 },
+        },
+        { partId: '1', mimeType: 'text/csv', body: { attachmentId: 'csv-att', size: 90_000 } },
+      ],
+    }
+
+    // Revert-check: the try around decodedTextualBody in
+    // extractEmbeddedHtmlFromTextualBodies — the fully read message would become
+    // a retryable failure, freezing the cursor over a probe it did not need.
+    it('does not fail a fully read message when the probe fetch fails', async () => {
+      const parsed = await parseGmailMessage(message(payload), {
+        fetchLargeBody: () => Promise.reject(new NetworkError('offline')),
+      })
+
+      expect(parsed?.plainText).toBe('The real body')
+      expect(parsed?.html).toBeNull()
+    })
+
+    // Revert-check: the isAccountScopedSyncAbort rethrow in that same catch.
+    it('still lets an account-scoped failure of the probe abort the run', async () => {
+      const error = new QuotaExhaustedError('daily limit')
+
+      await expect(
+        parseGmailMessage(message(payload), { fetchLargeBody: () => Promise.reject(error) }),
+      ).rejects.toBe(error)
+    })
   })
 
   it('never downloads binary attachments for the embedded-HTML rescue', async () => {

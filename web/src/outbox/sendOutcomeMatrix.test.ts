@@ -139,6 +139,69 @@ describe('sendMessage outcome matrix', () => {
     expect((await db.conversations.get('c1'))?.snippet).not.toBe('hello')
   })
 
+  // Revert-check: the try around step (e) in sendMessage — a rejection here read
+  // as a failed send, so the composer restored the draft and a second tap
+  // delivered the message twice. Replay then settles what the failure left.
+  it('reports a committed send as committed when the store write after it fails', async () => {
+    const send = vi.fn<SendApi['send']>(() => Promise.resolve({ id: 'g_new', threadId: 't_new' }))
+    vi.spyOn(db.outboundSends, 'update').mockRejectedValueOnce(new Error('IDB connection lost'))
+
+    const result = await sendMessage(
+      db,
+      broker,
+      { conversationId: 'c1', body: 'hello' },
+      { api: { send }, now: () => NOW },
+    )
+
+    expect(result).toMatchObject({ messageId: 'g_new', delivery: 'committed' })
+    expect(send).toHaveBeenCalledTimes(1)
+
+    await replayAbandonedSends(db, { now: () => NOW + STALE_PENDING_SEND_MS + 1 })
+    const [row] = await ownRows()
+    expect(row?.sendState).toBe('sent')
+    expect(await journalStatus(db, row?.id ?? '')).toBe(AMBIGUOUS_SEND_STATUS)
+  })
+
+  // Revert-check: the .catch on recordAmbiguousSend in sendMessage — a store
+  // failure on an ambiguous outcome must not offer the message for a resend.
+  it('reports an ambiguous send as unknown when recording it fails', async () => {
+    const send = vi.fn<SendApi['send']>(() => Promise.reject(new NetworkError('reset')))
+    vi.spyOn(db.messages, 'put').mockRejectedValueOnce(new Error('IDB connection lost'))
+
+    const result = await sendMessage(
+      db,
+      broker,
+      { conversationId: 'c1', body: 'hello' },
+      { api: { send }, now: () => NOW },
+    )
+
+    expect(result.delivery).toBe('unknown')
+    expect(send).toHaveBeenCalledTimes(1)
+
+    await replayAbandonedSends(db, { now: () => NOW + STALE_PENDING_SEND_MS + 1 })
+    expect((await db.messages.get(result.messageId))?.sendState).toBe('sent')
+    expect(await journalStatus(db, result.messageId)).toBe(AMBIGUOUS_SEND_STATUS)
+  })
+
+  // Revert-check: the .catch on the definite-rejection failSend in sendMessage —
+  // the composer needs the typed error, not the store's.
+  it('still throws SendFailedError for a definite rejection when the rollback fails', async () => {
+    const send = vi.fn<SendApi['send']>(() =>
+      Promise.reject(new GmailApiError(400, 'invalidArgument', 'bad')),
+    )
+    vi.spyOn(db.messages, 'delete').mockRejectedValueOnce(new Error('IDB connection lost'))
+
+    const failure: unknown = await sendMessage(
+      db,
+      broker,
+      { conversationId: 'c1', body: 'hello' },
+      { api: { send }, now: () => NOW },
+    ).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(SendFailedError)
+    expect(failure).toMatchObject({ keptFailedMessage: false })
+  })
+
   async function expectAmbiguousRetention(
     result: Awaited<ReturnType<typeof sendMessage>>,
     body: string,

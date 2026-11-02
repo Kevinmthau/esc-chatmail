@@ -372,7 +372,15 @@ async function extractEmbeddedHtmlFromTextualBodies(
   // (HTMLContentRecoveryService.collectHTMLCandidates returns [] here too).
   if (isAttachmentPart(part)) return null
 
-  const decodedText = await decodedTextualBody(part, messageId, fetchLargeBody)
+  // The main walk already decided the message's body, so a probe fetch that
+  // fails must not fail the message (iOS extractEmbeddedHTMLFromTextualBodies):
+  // it yields nothing, and only an account-scoped abort propagates.
+  let decodedText: string | null = null
+  try {
+    decodedText = await decodedTextualBody(part, messageId, fetchLargeBody)
+  } catch (error) {
+    if (isAccountScopedSyncAbort(error)) throw error
+  }
   if (decodedText !== null) {
     const extractedHtml = extractHtmlFromRawSource(decodedText)
     if (extractedHtml !== null) {

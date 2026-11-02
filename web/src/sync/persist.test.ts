@@ -493,6 +493,32 @@ describe('applyPersist — creation and routing', () => {
     expect(conversation!.snippet).toBe('Fwd: "Trip plans"')
   })
 
+  // Revert-check: the rollupConversation in applyPersist's excluded branch — left
+  // to finalize, a run that dies first loses it for good, because the rerun finds
+  // the row gone and touches nothing.
+  it('rolls the conversation up in the same step that deletes an excluded message', async () => {
+    await applyPersist(
+      db,
+      await preparePersist(
+        [
+          textMessage({ id: 'm1', labelIds: ['INBOX'], internalDate: NOW - 5000 }),
+          textMessage({ id: 'm2', labelIds: ['INBOX'], internalDate: NOW - 4000 }),
+        ],
+        ctx,
+      ),
+      NOW,
+    )
+
+    const plans = await preparePersist(
+      [textMessage({ id: 'm2', labelIds: ['TRASH'], internalDate: NOW - 4000 })],
+      ctx,
+    )
+    await applyPersist(db, plans, NOW)
+
+    const [conversation] = await db.conversations.toArray()
+    expect(conversation?.lastMessageDate).toBe(NOW - 5000)
+  })
+
   it('deletes the local copy when a message moved to an excluded mailbox, and never inserts it', async () => {
     await persistMessages([textMessage({ id: 'm1', from: 'alice@example.com' })])
     expect(await db.messages.get('m1')).toBeDefined()

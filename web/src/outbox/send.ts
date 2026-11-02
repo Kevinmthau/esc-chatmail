@@ -553,7 +553,7 @@ export async function sendMessage(
   // verdict leaves a 'pending' journal that replayAbandonedSends must treat as
   // ambiguous, not as never sent.
   if (!(await waitForUsablePath(opts.connectivity ?? browserConnectivity()))) {
-    const kept = await failSend(db, optimisticId, now())
+    const kept = await failSend(db, optimisticId, now()).catch(() => false)
     throw new SendFailedError('No internet connection', {
       cause: new NetworkError('The browser reports no network path'),
       userMessage: 'You appear to be offline. Check your connection and try again.',
@@ -584,12 +584,15 @@ export async function sendMessage(
     })
   } catch (error) {
     if (!isDefiniteSendRejection(error)) {
-      await recordAmbiguousSend(db, optimisticId, now())
+      // Gmail may have the message, so a store failure here must still report
+      // success (see step (e)). The pending journal's admittedAt keeps it
+      // delivery-unknown for replay, and sync's echo adopts it either way.
+      await recordAmbiguousSend(db, optimisticId, now()).catch(() => undefined)
       return { messageId: optimisticId, conversationId, delivery: 'unknown' }
     }
     // (f) Definite rejection: roll the optimistic graph back, or keep it as a
     // retryable failed bubble when it carries attachments.
-    const kept = await failSend(db, optimisticId, now())
+    const kept = await failSend(db, optimisticId, now()).catch(() => false)
     throw new SendFailedError('Send failed', {
       cause: error,
       ...(error instanceof QuotaExhaustedError
@@ -604,13 +607,21 @@ export async function sendMessage(
   }
 
   // (e) Success: journal 'committed' + remote ids FIRST (crash-safe), then
-  // reconcile the local store and refresh the rollup.
-  await db.outboundSends.update(optimisticId, {
-    status: 'committed',
-    remoteCommittedMessageId: response.id,
-    remoteCommittedThreadId: response.threadId,
-  })
-  await reconcileCommittedSend(db, optimisticId, now())
+  // reconcile the local store and refresh the rollup. Gmail has the message, so
+  // a store failure from here on must not read as a failed send: the composer
+  // would restore the draft and a second tap would deliver it twice. A journal
+  // left 'committed' re-reconciles on replay, one left 'pending' has admittedAt
+  // so replay retains it as delivery-unknown, and sync's echo settles either.
+  try {
+    await db.outboundSends.update(optimisticId, {
+      status: 'committed',
+      remoteCommittedMessageId: response.id,
+      remoteCommittedThreadId: response.threadId,
+    })
+    await reconcileCommittedSend(db, optimisticId, now())
+  } catch {
+    // See above: the send itself succeeded.
+  }
 
   return { messageId: response.id, conversationId, delivery: 'committed' }
 }

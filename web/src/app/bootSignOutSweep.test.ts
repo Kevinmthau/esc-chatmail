@@ -1,6 +1,13 @@
 import Dexie from 'dexie'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ChatmailDB, dbNameForAccount, deleteDBForAccount, getDB } from '@/db/schema'
+import type { AuthChannel } from '@/auth/authBroker'
+import {
+  ChatmailDB,
+  dbNameForAccount,
+  deleteDBForAccount,
+  getDB,
+  getDBIfAvailable,
+} from '@/db/schema'
 import { getAccountEmail, getAuthState, resetBootForTests, signOut, startBoot } from './boot'
 import {
   FakeGis,
@@ -71,6 +78,30 @@ describe('boot sign-out sweeps every account database', () => {
     localStorage.clear()
     await deleteDBForAccount(A)
     await deleteDBForAccount(B)
+  })
+
+  // Revert-check: closeCurrentDB in onBrokerState — Dexie's versionchange close
+  // leaves auto-open on, so the write below re-creates the deleted database and
+  // the mail a sync run still held stays on disk after the sign-out.
+  it('after a sign-out in another tab, this tab cannot re-create the deleted database', async () => {
+    const channel: AuthChannel = { postMessage: () => {}, onmessage: null, close: () => {} }
+    const gis = new FakeGis()
+    seedStoredSession(gis, { email: A, accessToken: 'tok-a' })
+    bootWithBroker(gis, getProfileMock, channel)
+    await startBoot()
+    await vi.waitFor(() => {
+      expect(getAuthState()).toBe('ready')
+    })
+    const inFlightHandle = getDB()
+    await inFlightHandle.syncState.put({ key: 'wipe-canary', value: '1' })
+
+    channel.onmessage?.({ data: { type: 'signed_out', epoch: 99 } })
+    await Dexie.delete(dbNameForAccount(A)) // the originating tab's sweep
+    const lateWrite = inFlightHandle.syncState.put({ key: 'late-write', value: '1' })
+
+    await expect(lateWrite).rejects.toThrow()
+    expect(getDBIfAvailable()).toBeNull()
+    expect(await Dexie.exists(dbNameForAccount(A))).toBe(false)
   })
 
   it('after a verified A→B switch, sign-out deletes both databases and both install markers', async () => {

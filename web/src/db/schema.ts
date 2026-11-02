@@ -113,6 +113,17 @@ export function setDBForTests(db: ChatmailDB | null): void {
   current = db
 }
 
+/**
+ * Closes the current account database for good. Dexie's default close refuses
+ * further work on the handle, unlike the close its versionchange handler does
+ * when another tab deletes the database, which leaves auto-open on so that the
+ * handle's next query silently creates the database again.
+ */
+export function closeCurrentDB(): void {
+  current?.close()
+  current = null
+}
+
 export async function deleteDBForAccount(email: string): Promise<void> {
   await deleteAccountDB(dbNameForAccount(email))
 }

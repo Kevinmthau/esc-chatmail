@@ -24,6 +24,7 @@ import {
   type AuthState,
 } from '@/auth/authBroker'
 import {
+  closeCurrentDB,
   dbNameForAccount,
   deleteAccountDBs,
   getDB,
@@ -227,7 +228,13 @@ function onBrokerState(state: AuthState): void {
     }
     return
   }
-  if (state === 'signed_out') teardownSession()
+  if (state === 'signed_out') {
+    teardownSession()
+    // Teardown only aborts requests. A sync run in this tab can still hold
+    // fetched mail to apply, and after a sign-out in another tab (which deletes
+    // the database) its next write would re-create the mailbox on disk.
+    closeCurrentDB()
+  }
   if ((state === 'needs_interaction' || state === 'authorizing') && !hasOpenDB()) {
     // Without an open account DB the main app cannot render (every querier
     // calls getDB(), which throws), so these states must gate to the sign-in
