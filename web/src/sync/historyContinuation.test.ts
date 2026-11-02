@@ -84,7 +84,7 @@ describe('history continuation', () => {
     const first = await sync()
     expect(first.wasTruncated).toBe(true)
     expect(first.historyIdAdvanced).toBe(false)
-    expect(first.needsFollowUp).toBe(true)
+    expect(first.continuationStaged).toBe(true)
     expect(api.historyCalls).toHaveLength(MAX_HISTORY_PAGES)
     expect((await db.accounts.get(ME))?.historyId).toBe('h1')
     expect(await getHistoryContinuation(db)).toEqual({
@@ -104,7 +104,7 @@ describe('history continuation', () => {
     expect(await db.messages.get('m51')).toBeDefined()
     expect(second.wasTruncated).toBe(false)
     expect(second.historyIdAdvanced).toBe(true)
-    expect(second.needsFollowUp).toBe(false)
+    expect(second.continuationStaged).toBe(false)
     expect((await db.accounts.get(ME))?.historyId).toBe('h2')
     expect(await getHistoryContinuation(db)).toBeNull()
     expect(await getLastSuccessfulSyncAt(db)).toBe(NOW)
@@ -135,7 +135,7 @@ describe('history continuation', () => {
     const result = await sync()
 
     expect(result.wasTruncated).toBe(true)
-    expect(result.needsFollowUp).toBe(true)
+    expect(result.continuationStaged).toBe(false)
     expect(await getHistoryContinuation(db)).toBeNull()
     expect((await db.accounts.get(ME))?.historyId).toBe('h1')
     expect(await consecutiveFailureCount(db)).toBe(1)

@@ -7,11 +7,11 @@ import {
 import type { PreloadErrorRecoveryHost } from './preloadErrorRecovery'
 import { memoryStorage } from './bootTestSupport'
 
-// A tab still controlled by the old service worker after another tab accepted
-// an update can no longer load its not-yet-fetched split chunks (the new
-// worker purged them from the shared precache and the host serves only the
-// current deploy). Vite raises `vite:preloadError`; the recovery is one
-// reload, bounded so a broken deploy cannot reload forever.
+// A page still running an old index.html after a new deploy's worker took over
+// can no longer load its not-yet-fetched split chunks (the new worker purged
+// them from the shared precache and the host serves only the current deploy).
+// Vite raises `vite:preloadError`; the recovery is one reload, bounded so a
+// broken deploy cannot reload forever.
 //
 // Revert-check: installPreloadErrorRecovery (and main.tsx's call to it).
 // Without the handler no reload happens; without the window guard the
@@ -74,33 +74,47 @@ describe('preload error recovery', () => {
     expect(preventDefault).not.toHaveBeenCalled()
   })
 
-  it('without session storage reloads once per page lifetime', () => {
+  // Revert-check: the `storage === undefined` decline in claimReload — an
+  // in-memory budget resets with the module on every reload, so a chunk that
+  // stays broken reloads the page forever.
+  it('without session storage never reloads, because nothing could bound the loop', () => {
     const { host, reload, fire } = fakeHost()
     installPreloadErrorRecovery(host, { now: () => 0 })
 
-    fire()
-    fire()
-    expect(reload).toHaveBeenCalledTimes(1)
+    const preventDefault = fire()
+    expect(reload).not.toHaveBeenCalled()
+    expect(preventDefault).not.toHaveBeenCalled()
   })
 
   // Revert-check: the try/catch around `host.sessionStorage` in
   // installPreloadErrorRecovery — a throwing getter (storage access denied for
-  // the document) must take the in-memory one-reload path, not abort the handler.
-  // A fresh module instance: the in-memory budget is per page lifetime and the
-  // test above already spent this module's.
-  it('reloads once when the sessionStorage getter itself throws', async () => {
-    vi.resetModules()
-    const fresh = await import('./preloadErrorRecovery')
+  // the document) must decline the reload, not abort the handler.
+  it('does not reload or throw when the sessionStorage getter itself throws', () => {
     const { host, reload, fire } = fakeHost()
     Object.defineProperty(host, 'sessionStorage', {
       get() {
         throw new DOMException('Access is denied for this document.', 'SecurityError')
       },
     })
-    fresh.installPreloadErrorRecovery(host, { now: () => 1_000_000 })
+    installPreloadErrorRecovery(host, { now: () => 1_000_000 })
 
     const preventDefault = fire()
-    expect(reload).toHaveBeenCalledTimes(1)
-    expect(preventDefault).toHaveBeenCalled()
+    expect(reload).not.toHaveBeenCalled()
+    expect(preventDefault).not.toHaveBeenCalled()
+  })
+
+  // Revert-check: the try/catch in claimReload — a stamp that cannot be written
+  // would not survive the reload either.
+  it('does not reload when the stamp cannot be written', () => {
+    const storage = memoryStorage()
+    storage.setItem = () => {
+      throw new DOMException('The quota has been exceeded.', 'QuotaExceededError')
+    }
+    const { host, reload, fire } = fakeHost(storage)
+    installPreloadErrorRecovery(host, { now: () => 1_000_000 })
+
+    const preventDefault = fire()
+    expect(reload).not.toHaveBeenCalled()
+    expect(preventDefault).not.toHaveBeenCalled()
   })
 })

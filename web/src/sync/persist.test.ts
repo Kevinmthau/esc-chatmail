@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatmailDB } from '@/db/schema'
 import type { AttachmentRow } from '@/db/types'
+import { AuthRequiredError, QuotaExhaustedError, RequestAbortedError } from '@/gmail/errors'
 import type { GmailMessage } from '@/gmail/types'
 import { calculateParticipantHash } from '@/identity/participantSet'
 import { strictParticipantSetIdentity } from '@/identity/strictIdentity'
@@ -304,6 +305,24 @@ describe('preparePersist fan-out', () => {
     })
 
     expect(plan).toEqual({ kind: 'retryableFailure', id: 'm1' })
+  })
+
+  // Revert-check: the isAccountScopedSyncAbort rethrow in fetchLargeBodyContent
+  // (mime/parse.ts) — wrapping these in LargeBodyFetchError makes the outage a
+  // retryable plan, which feeds the message into the failure ledger and, after
+  // three syncs, abandons it and advances the cursor past it.
+  it.each([
+    ['auth', () => new AuthRequiredError('expired', 'renewal_failed')],
+    ['quota', () => new QuotaExhaustedError('daily limit')],
+    ['caller abort', () => new RequestAbortedError()],
+  ])('lets a %s failure of a large-body fetch abort the run', async (_label, makeError) => {
+    const error = makeError()
+    await expect(
+      preparePersistPlan(largeBodyMessage('m1'), {
+        ...ctx,
+        fetchLargeBody: () => Promise.reject(error),
+      }),
+    ).rejects.toBe(error)
   })
 
   it('bounds concurrent large-body fetches instead of fanning out over the whole page', async () => {

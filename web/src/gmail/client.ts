@@ -56,8 +56,6 @@ export interface RetryBehavior {
   random?: () => number
   /** Injectable fetch, threaded through to gmailFetch. */
   fetchImpl?: typeof fetch
-  /** Per-attempt timeout override, threaded through to gmailFetch. */
-  timeoutMs?: number
   /**
    * Caller cancellation (session teardown), threaded through to gmailFetch.
    * An aborted signal surfaces as RequestAbortedError, which is terminal
@@ -109,7 +107,6 @@ export async function performRetryingRequest(
   const retransmissionSafe = behavior.allowsRetransmission || method === 'GET'
   const fetchOptions: GmailFetchOptions = {
     ...(behavior.fetchImpl !== undefined ? { fetchImpl: behavior.fetchImpl } : {}),
-    ...(behavior.timeoutMs !== undefined ? { timeoutMs: behavior.timeoutMs } : {}),
     ...(behavior.signal !== undefined ? { signal: behavior.signal } : {}),
   }
 

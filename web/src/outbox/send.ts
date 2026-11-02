@@ -255,39 +255,14 @@ export interface PreservedForwardEnvelope {
  * Journal status for a send Gmail may have accepted: the request was admitted
  * and no verdict came back (OutboundSendRemoteState.ambiguousMessageID). The
  * row is retained as sent under its local id until sync echoes the server copy
- * (reconcileSyncedSendEcho) and is never resent. This module reads and writes
- * the journal through journalTable, whose row type also carries the unindexed
- * forward-retry envelope.
+ * (reconcileSyncedSendEcho) and is never resent.
  */
 export const AMBIGUOUS_SEND_STATUS = 'ambiguous'
 
-type OutboundSendJournalStatus = OutboundSendRow['status'] | typeof AMBIGUOUS_SEND_STATUS
+/** The journal plus the unindexed forward-retry envelope (no Dexie migration). */
+type OutboundSendJournal = OutboundSendRow & { forwardEnvelope?: PreservedForwardEnvelope }
 
-/**
- * Unindexed additions to the journal row (no Dexie migration): the forward
- * retry envelope, and the transmission-admission marker.
- */
-interface OutboundSendJournalExtras {
-  forwardEnvelope?: PreservedForwardEnvelope
-  /**
-   * Epoch ms the request was handed to the transport. Written immediately
-   * before api.send (iOS recordRemoteSendAdmission): a journal still 'pending'
-   * with this set may have been processed by Gmail, one without it never
-   * reached the network.
-   */
-  admittedAt?: number
-}
-
-/** The journal as this module reads it; OutboundSendRow is assignable to it. */
-type OutboundSendJournal = Omit<OutboundSendRow, 'status'> & {
-  status: OutboundSendJournalStatus
-} & OutboundSendJournalExtras
-
-/**
- * The outbound journal with this module's wider row type. The stored shape is
- * the same table; only the status union and the unindexed extras differ, so
- * the one cast lives here.
- */
+/** The outbound journal with this module's wider row type. */
 function journalTable(db: ChatmailDB): Table<OutboundSendJournal, string> {
   return db.outboundSends
 }
@@ -586,8 +561,20 @@ export async function sendMessage(
       conversationId,
     })
   }
-  if (attachments.length > 0) await markAttachmentState(db, optimisticId, 'uploading')
-  await recordSendAdmission(db, optimisticId, now())
+  try {
+    if (attachments.length > 0) await markAttachmentState(db, optimisticId, 'uploading')
+    await recordSendAdmission(db, optimisticId, now())
+  } catch (error) {
+    // A store failure before the request: nothing reached Gmail, so this is a
+    // definite "not sent", not a bubble left on "Sending…" until a later boot's
+    // replay. The rollback may fail for the same reason; the send still failed.
+    const kept = await failSend(db, optimisticId, now()).catch(() => false)
+    throw new SendFailedError('Send failed', {
+      cause: error,
+      keptFailedMessage: kept,
+      conversationId,
+    })
+  }
 
   let response: SendMessageResponse
   try {
@@ -765,8 +752,8 @@ export interface SyncedSendEcho {
  * verdict is still in flight — the later verdict finds the journal finalized
  * and leaves it so. Returns false when the Message-ID names no live journal.
  *
- * Intended caller: sync/persist, before its apply transaction (this runs its
- * own transactions and a rollup), for a from-me message whose
+ * Called by sync/persist's applyPersist, before its apply transaction (this
+ * runs its own transactions and a rollup), for a from-me message whose
  * optimisticSendIdFromMessageId is non-null.
  */
 export async function reconcileSyncedSendEcho(
@@ -797,9 +784,9 @@ export async function reconcileSyncedSendEcho(
  * its Gmail id: the server copy carries the deterministic Message-ID the row
  * was stamped with (the messages table indexes rfcMessageId), so it is found
  * without the sync pipeline's help and adopted through reconcileSyncedSendEcho,
- * which drops the retained local row. Until sync/persist reconciles echoes
- * itself this runs at startup only, so the chat shows the echo beside the
- * retained row until the next launch. False when no echo has arrived.
+ * which drops the retained local row. sync/persist adopts an echo as it arrives
+ * (applyPersist), so this startup pass only recovers one stored without that
+ * adoption, such as by a build before it. False when no echo has arrived.
  */
 async function adoptStoredEchoOfAmbiguousSend(
   db: ChatmailDB,

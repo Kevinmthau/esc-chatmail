@@ -4,7 +4,7 @@
 // extractContent.
 
 import type { CalendarEventData } from '../db/types'
-import { GmailApiError } from '../gmail/errors'
+import { GmailApiError, isAccountScopedSyncAbort } from '../gmail/errors'
 import type { GmailHeader, GmailMessage, GmailPart } from '../gmail/types'
 import { addressTokens, extractDisplayName, extractEmail, normalizeEmail } from './address'
 import { extractAttachments, isAttachmentPart, type ParsedAttachment } from './attachments'
@@ -244,6 +244,10 @@ async function fetchLargeBodyContent(
     if (text === null) return null
     return decodeTransferEncoding(text, headers)
   } catch (error) {
+    // An auth, quota or cancellation condition proves nothing about this
+    // message: it stays itself so the run aborts with no per-message verdict,
+    // rather than spending the message's way toward the escape hatch.
+    if (isAccountScopedSyncAbort(error)) throw error
     // A missing attachment is deterministic; malformed returned bytes are
     // handled by the decoder above. Everything else may recover later and
     // must prevent an incomplete message from being persisted.

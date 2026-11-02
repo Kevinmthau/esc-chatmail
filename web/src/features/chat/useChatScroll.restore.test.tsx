@@ -20,20 +20,24 @@ interface FakeMetrics {
   clientHeight: number
 }
 
-/** Backs scrollHeight/clientHeight/scrollTop/scrollTo with controllable fakes. */
+/**
+ * Backs scrollHeight/clientHeight/scrollTop/scrollTo with controllable fakes.
+ * Every metric reads 0 once the node is detached, as an element with no box
+ * does in a browser (the leave-time save must read them before removal).
+ */
 function installFakeMetrics(node: HTMLElement, metrics: FakeMetrics): void {
   let top = 0
   Object.defineProperty(node, 'scrollHeight', {
     configurable: true,
-    get: () => metrics.scrollHeight,
+    get: () => (node.isConnected ? metrics.scrollHeight : 0),
   })
   Object.defineProperty(node, 'clientHeight', {
     configurable: true,
-    get: () => metrics.clientHeight,
+    get: () => (node.isConnected ? metrics.clientHeight : 0),
   })
   Object.defineProperty(node, 'scrollTop', {
     configurable: true,
-    get: () => top,
+    get: () => (node.isConnected ? top : 0),
     set: (value: number) => {
       top = value
     },
@@ -220,6 +224,9 @@ describe('useChatScroll: restore on return', () => {
 
   // Revert-check: resolveRestore (useChatScroll.helpers.ts) — a restore that
   // seeds prevLastId with the current last row raises no pill for 'd' and 'e'.
+  // Revert-check: the useLayoutEffect around the leave-time save in
+  // useChatScroll — a passive cleanup reads the detached node's zeroed metrics,
+  // saves 'bottom', and this reopens at 1400.
   it('restores a mid-history position and announces the rows that arrived since', () => {
     const metrics: FakeMetrics = { scrollHeight: 1000, clientHeight: 400 }
     const rows = [msg('a'), msg('b'), msg('c')]

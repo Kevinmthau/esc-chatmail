@@ -1,15 +1,14 @@
 // Recovery for a stale lazily-loaded chunk.
 //
 // Routes are code-split (autoCodeSplitting) and ComposeDialog is lazy(), so
-// each is a separately hashed chunk fetched on first use. The service worker
-// updates on prompt (vite.config.ts registerType) with no clientsClaim, so
-// when one tab accepts an update the new worker purges the old-hash chunks
-// from the shared precache while every other open tab stays controlled by the
-// old worker and its old index.html. That tab's next first-time import — open
-// Compose, first open of a chat route — misses the cache and 404s at the
-// host, which serves only the current deploy's assets. Vite reports that as
-// `vite:preloadError`; its documented recovery is a reload, which fetches the
-// current index.html and matching chunks.
+// each is a separately hashed chunk fetched on first use. A new deploy's worker
+// activates as soon as it installs (vite.config.ts registerType 'autoUpdate')
+// and purges the old-hash chunks from the shared precache, and the host serves
+// only the current deploy's assets. A page still running the old index.html
+// (the reload onto the new build has not landed, or no worker controls it)
+// fails its next first-time import — open Compose, first open of a chat route.
+// Vite reports that as `vite:preloadError`; its documented recovery is a
+// reload, which fetches the current index.html and matching chunks.
 
 /** Where the last recovery reload was stamped; per tab, so tabs do not share one budget. */
 export const PRELOAD_ERROR_RELOAD_KEY = 'esc.preloadError.reloadedAt.v1'
@@ -43,7 +42,7 @@ export function installPreloadErrorRecovery(
   host.addEventListener('vite:preloadError', (event) => {
     const at = now()
     // The sessionStorage GETTER itself throws when storage access is denied
-    // for the document; a throw here would skip the reload entirely.
+    // for the document; that must decline the reload, not escape the listener.
     let storage: Storage | undefined
     try {
       storage = host.sessionStorage
@@ -59,34 +58,20 @@ export function installPreloadErrorRecovery(
   })
 }
 
-/** True when no recovery reload is on record within the window; stamps this one. */
-function claimReload(storage: Storage | undefined, at: number): boolean {
-  let last = Number.NaN
-  try {
-    last = Number.parseInt(storage?.getItem(PRELOAD_ERROR_RELOAD_KEY) ?? '', 10)
-  } catch {
-    // Storage unavailable (private mode): fall through and reload once per
-    // page lifetime below.
-  }
-  if (Number.isFinite(last) && at - last < PRELOAD_ERROR_RELOAD_WINDOW_MS) return false
-  if (storage === undefined) return claimInMemory()
-  try {
-    storage.setItem(PRELOAD_ERROR_RELOAD_KEY, String(at))
-  } catch {
-    return claimInMemory()
-  }
-  return true
-}
-
-let reloadedWithoutStorage = false
-
 /**
- * Without usable storage the stamp cannot survive the reload, so the budget is
- * one reload per page lifetime: a reload that reproduces the error has a
- * fresh page and reloads once more, and a reload that fixes it is done.
+ * True when no recovery reload is on record within the window; stamps this one.
+ * The stamp has to survive the reload, because it is the only thing that bounds
+ * the loop: a page with no usable storage would reload forever on a chunk that
+ * stays broken, so it declines and lets the error surface instead.
  */
-function claimInMemory(): boolean {
-  if (reloadedWithoutStorage) return false
-  reloadedWithoutStorage = true
-  return true
+function claimReload(storage: Storage | undefined, at: number): boolean {
+  if (storage === undefined) return false
+  try {
+    const last = Number.parseInt(storage.getItem(PRELOAD_ERROR_RELOAD_KEY) ?? '', 10)
+    if (Number.isFinite(last) && at - last < PRELOAD_ERROR_RELOAD_WINDOW_MS) return false
+    storage.setItem(PRELOAD_ERROR_RELOAD_KEY, String(at))
+    return true
+  } catch {
+    return false
+  }
 }

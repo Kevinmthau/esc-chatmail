@@ -314,26 +314,28 @@ async function establishSession(knownEmail?: string): Promise<void> {
     })
 
     // Sync: startup pass now, then the visibility/online/interval scheduler.
-    const [{ startScheduler }, { runSync }, { makeGmailSyncApi }] = await Promise.all([
-      import('@/sync/scheduler'),
-      import('@/sync/engine'),
-      import('@/sync/deps'),
-    ])
+    const [{ startScheduler }, { runSync }, { abortableSleep, makeGmailSyncApi }] =
+      await Promise.all([
+        import('@/sync/scheduler'),
+        import('@/sync/engine'),
+        import('@/sync/deps'),
+      ])
     if (!current()) return bail()
     // Every sync request of this session carries the session's abort signal:
     // teardown ends an in-flight fetch as RequestAbortedError (a run abort
-    // with no failure verdict) instead of letting a stalled request outlive
-    // the account that issued it.
+    // with no failure verdict) and wakes any backoff, instead of letting a
+    // stalled request or a long Retry-After outlive the account that issued it.
     const syncAbort = new AbortController()
     stops.push(() => syncAbort.abort())
-    const api = makeGmailSyncApi(b, { signal: syncAbort.signal })
+    const sleep = abortableSleep(syncAbort.signal)
+    const api = makeGmailSyncApi(b, { signal: syncAbort.signal, sleep })
     // The generation check makes the closure self-invalidating: a scheduler
     // tick (or an in-flight trigger) that fires after this session was torn
     // down must never run this account's sync against a DB/token that has
     // since changed hands.
     const doSync = (reason: Parameters<typeof runSync>[1]) => {
       if (sessionGeneration !== generation) return Promise.resolve({ ran: false })
-      return runSync({ db: getDB(), api, accountEmail: email }, reason)
+      return runSync({ db: getDB(), api, accountEmail: email, sleep }, reason)
     }
     stops.push(startScheduler({ runSync: doSync }))
     void doSync('startup')

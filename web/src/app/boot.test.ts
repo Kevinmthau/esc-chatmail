@@ -349,6 +349,33 @@ describe('boot (real mode)', () => {
     await expect(broker.getToken()).resolves.toBe('tok-a')
   })
 
+  // Revert-check: the `sleep` boot.ts hands runSync — a plain sleep keeps a
+  // torn-down run in its backoff, holding the per-account sync lock, so the next
+  // session's startup sync finds the lock taken and skips.
+  it("wakes the sync run's backoff when the session is torn down", async () => {
+    const gis = new FakeGis()
+    seedStoredSession(gis, { email: 'a@example.com', accessToken: 'tok-a' })
+    const broker = bootWithBroker(gis)
+    runSyncMock.mockClear()
+
+    await startBoot()
+    await vi.waitFor(() => {
+      expect(runSyncMock).toHaveBeenCalled()
+    })
+    const [deps] = runSyncMock.mock.calls[0] as unknown as [
+      { sleep?: (ms: number) => Promise<void> },
+    ]
+    let woke = false
+    void deps.sleep?.(60_000).then(() => {
+      woke = true
+    })
+
+    await broker.signOut()
+    await vi.waitFor(() => {
+      expect(woke).toBe(true)
+    })
+  })
+
   it('does not expose a replacement or stop the old session before verification', async () => {
     const gis = new FakeGis()
     seedStoredSession(gis, { email: 'a@example.com', accessToken: 'tok-a' })

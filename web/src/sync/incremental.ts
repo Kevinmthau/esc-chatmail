@@ -70,12 +70,6 @@ export interface IncrementalSyncResult {
   wasTruncated: boolean
   /** The truncated slice staged its continuation token (it had no blocking failures). */
   continuationStaged: boolean
-  /**
-   * More history is already known to be waiting (a continuation was staged)
-   * or this slice must be retried: the caller should run again without
-   * waiting for the next scheduler tick (IncrementalSyncResult.needsFollowUp).
-   */
-  needsFollowUp: boolean
 }
 
 export type SyncRunResult = IncrementalSyncResult | InitialSyncResult
@@ -410,7 +404,6 @@ async function runHistoryRecovery(
     historyIdAdvanced: advance,
     wasTruncated: false,
     continuationStaged: false,
-    needsFollowUp: !advance,
   }
 }
 
@@ -574,6 +567,5 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
     historyIdAdvanced: advance,
     wasTruncated: history.wasTruncated,
     continuationStaged: move.kind === 'stage',
-    needsFollowUp: history.wasTruncated || !sliceResolved,
   }
 }

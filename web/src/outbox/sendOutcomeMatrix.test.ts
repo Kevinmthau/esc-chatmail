@@ -5,7 +5,7 @@
 
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatmailDB } from '@/db/schema'
 import type { OutboundSendRow } from '@/db/types'
 import { makeSendApi } from './send'
@@ -40,7 +40,6 @@ const broker: TokenBroker = {
 
 const server = setupServer()
 
-/** The journal as stored; status may hold the module-private 'ambiguous'. */
 async function journalStatus(db: ChatmailDB, id: string): Promise<string | undefined> {
   const journal = await db.outboundSends.get(id)
   return journal?.status
@@ -88,13 +87,6 @@ function makeJournal(
   }
 }
 
-/** A journal row carrying fields outside OutboundSendRow (status 'ambiguous', admittedAt). */
-function storedJournal(
-  row: Omit<OutboundSendRow, 'status'> & { admittedAt?: number; status: string },
-) {
-  return row as unknown as OutboundSendRow
-}
-
 describe('sendMessage outcome matrix', () => {
   let db: ChatmailDB
 
@@ -125,6 +117,27 @@ describe('sendMessage outcome matrix', () => {
       (row) => row.isFromMe === 1,
     )
   }
+
+  // Revert-check: the try around recordSendAdmission in sendMessage — without
+  // it a raw store error escapes with the row left on "Sending…" until a later
+  // boot's replay, and the composer gets no SendFailedError to restore from.
+  it('fails definitely, with no request, when the admission marker cannot be written', async () => {
+    const send = vi.fn<SendApi['send']>()
+    vi.spyOn(db.outboundSends, 'put').mockRejectedValueOnce(new Error('disk full'))
+
+    const failure: unknown = await sendMessage(
+      db,
+      broker,
+      { conversationId: 'c1', body: 'hello' },
+      { api: { send }, now: () => NOW },
+    ).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(SendFailedError)
+    expect(failure).toMatchObject({ keptFailedMessage: false, conversationId: 'c1' })
+    expect(send).not.toHaveBeenCalled()
+    expect(await ownRows()).toEqual([])
+    expect((await db.conversations.get('c1'))?.snippet).not.toBe('hello')
+  })
 
   async function expectAmbiguousRetention(
     result: Awaited<ReturnType<typeof sendMessage>>,
@@ -247,9 +260,7 @@ describe('sendMessage outcome matrix', () => {
         internalDate: NOW - 1000,
       }),
     )
-    await db.outboundSends.add(
-      storedJournal({ ...makeJournal({ id: 'u_amb' }), status: AMBIGUOUS_SEND_STATUS }),
-    )
+    await db.outboundSends.add(makeJournal({ id: 'u_amb', status: AMBIGUOUS_SEND_STATUS }))
     let posts = 0
     const api: SendApi = {
       send: () => {
@@ -399,9 +410,7 @@ describe('replayAbandonedSends with ambiguous journals', () => {
       lastDownloadFailedAt: 0,
     })
     const createdAt = NOW - STALE_PENDING_SEND_MS - 60_000
-    await db.outboundSends.add(
-      storedJournal({ ...makeJournal({ id: 'u1', createdAt }), admittedAt: createdAt + 10 }),
-    )
+    await db.outboundSends.add(makeJournal({ id: 'u1', createdAt, admittedAt: createdAt + 10 }))
 
     await replayAbandonedSends(db, { now: () => NOW })
 
@@ -427,8 +436,8 @@ describe('replayAbandonedSends with ambiguous journals', () => {
     await db.messages.add(ownRow('u_kept', { sendState: 'sent' }))
     const createdAt = NOW - STALE_PENDING_SEND_MS - 60_000
     await db.outboundSends.bulkAdd([
-      storedJournal({ ...makeJournal({ id: 'u_kept', createdAt }), status: AMBIGUOUS_SEND_STATUS }),
-      storedJournal({ ...makeJournal({ id: 'u_gone', createdAt }), status: AMBIGUOUS_SEND_STATUS }),
+      makeJournal({ id: 'u_kept', createdAt, status: AMBIGUOUS_SEND_STATUS }),
+      makeJournal({ id: 'u_gone', createdAt, status: AMBIGUOUS_SEND_STATUS }),
     ])
 
     await replayAbandonedSends(db, { now: () => NOW })
@@ -452,9 +461,7 @@ describe('replayAbandonedSends with ambiguous journals', () => {
         internalDate: NOW - 500,
       }),
     )
-    await db.outboundSends.add(
-      storedJournal({ ...makeJournal({ id: 'u_echo' }), status: AMBIGUOUS_SEND_STATUS }),
-    )
+    await db.outboundSends.add(makeJournal({ id: 'u_echo', status: AMBIGUOUS_SEND_STATUS }))
 
     await replayAbandonedSends(db, { now: () => NOW })
 

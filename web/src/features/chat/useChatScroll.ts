@@ -229,8 +229,11 @@ export function useChatScroll({
     return () => observer.disconnect()
   }, [conversationId])
 
-  // Save the scroll position for restore-on-return.
-  useEffect(() => {
+  // Save the scroll position for restore-on-return. A LAYOUT effect: React runs
+  // its cleanup before removing the node, while a passive cleanup runs after,
+  // when a detached scroller reads 0 for every metric and so always looks "at
+  // the bottom", which made the restore dead code in a real browser.
+  useLayoutEffect(() => {
     // The scroller node is stable for the lifetime of this effect.
     const scroller = scrollerRef.current
     return () => {

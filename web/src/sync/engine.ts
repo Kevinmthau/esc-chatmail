@@ -4,7 +4,7 @@
 // syncProgress kv row.
 
 import { setSyncProgress } from '@/db/kv'
-import { AuthRequiredError, QuotaExhaustedError } from '@/gmail/errors'
+import { AuthRequiredError, QuotaExhaustedError, RequestAbortedError } from '@/gmail/errors'
 import {
   repairStoredChatPreviewsIfNeeded,
   seedChatPreviewRepairOnFreshStoreIfNeeded,
@@ -130,7 +130,13 @@ export async function runSync(deps: SyncDeps, reason: SyncReason): Promise<RunSy
               ? error.message
               : String(error)
       try {
-        await setSyncProgress(deps.db, { phase: 'idle', lastError: message })
+        // A caller abort (session teardown) is not a failure to show anyone.
+        await setSyncProgress(
+          deps.db,
+          error instanceof RequestAbortedError
+            ? { phase: 'idle' }
+            : { phase: 'idle', lastError: message },
+        )
       } catch {
         // The progress write is best-effort; the original error wins.
       }

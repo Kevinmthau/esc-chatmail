@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSyncProgress } from '@/db/kv'
 import type { ChatmailDB } from '@/db/schema'
+import { RequestAbortedError } from '@/gmail/errors'
 import { makeParticipantSetIdentity } from '@/identity/participantSet'
 import { convoRow, msgRow } from '@/outbox/testSupport'
 import {
@@ -333,5 +334,17 @@ describe('runSync', () => {
     const progress = await getSyncProgress(db)
     expect(progress.phase).toBe('idle')
     expect(progress.lastError).toBe('network exploded')
+  })
+
+  // Revert-check: the RequestAbortedError branch of runSync's catch — without it
+  // the internal abort message lands in lastError, which the list status renders.
+  it('records a caller abort as idle with no lastError', async () => {
+    await seedAccount(db)
+    api.historyError = new RequestAbortedError()
+    const outcome = await runSync(testDeps(db, api), 'online')
+    expect(outcome.error).toBeInstanceOf(RequestAbortedError)
+    const progress = await getSyncProgress(db)
+    expect(progress.phase).toBe('idle')
+    expect(progress.lastError).toBeUndefined()
   })
 })

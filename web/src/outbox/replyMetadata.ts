@@ -8,7 +8,7 @@
 
 import Dexie from 'dexie'
 import type { ChatmailDB } from '@/db/schema'
-import type { MessageRow, MsgParticipantRow, OutboundSendRow, SendAsAlias } from '@/db/types'
+import type { MessageRow, MsgParticipantRow, SendAsAlias } from '@/db/types'
 import { normalizeEmail } from '@/identity/normalizeEmail'
 import { deduplicated, normalizedAliasAddress } from '@/sync/aliases'
 import { selectReplyFromAlias } from '@/sync/replyFrom'
@@ -61,10 +61,9 @@ export function isLocalOptimisticRow(message: MessageRow): boolean {
 async function isUnresolvedLocalSend(db: ChatmailDB, message: MessageRow): Promise<boolean> {
   if (message.sendState === 'pending' || message.sendState === 'failed') return true
   if (!isLocalOptimisticRow(message)) return false
-  const journal: OutboundSendRow | undefined = await db.outboundSends.get(message.id)
+  const journal = await db.outboundSends.get(message.id)
   if (journal === undefined) return false
-  const status: string = journal.status
-  return status !== 'committed' && status !== 'finalized'
+  return journal.status !== 'committed' && journal.status !== 'finalized'
 }
 
 /**

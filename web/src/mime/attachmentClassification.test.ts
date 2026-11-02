@@ -124,6 +124,24 @@ describe('server attachment admission', () => {
     }
     expect(isServerAttachmentPart(transcript)).toBe(true)
   })
+
+  // Revert-check: the isBodySlotMimeType exclusion in isServerAttachmentPart —
+  // excluding every text/* drops these: the content walk only follows text/html
+  // and text/plain as bodies, so they would be neither a body nor a file.
+  it('admits a nameless non-body text part behind an attachmentId', () => {
+    for (const mimeType of ['text/csv', 'text/calendar; method=REQUEST', 'text/x-vcard']) {
+      const part: GmailPart = {
+        partId: '1',
+        mimeType,
+        body: { attachmentId: `att-${mimeType}`, size: 12_000 },
+      }
+      expect(isServerAttachmentPart(part)).toBe(true)
+      expect(checkForAttachments(part)).toBe(true)
+      expect(extractAttachments(part).map((attachment) => attachment.id)).toEqual([
+        `att-${mimeType}`,
+      ])
+    }
+  })
 })
 
 describe('inline-disposition Content-ID admission', () => {

@@ -35,11 +35,6 @@ function hasContentId(contentId: string | null): contentId is string {
   return contentId !== null && contentId.length > 0
 }
 
-/** `text/*`: the media types Gmail hands back behind an attachmentId as oversized bodies. */
-function isTextualMimeType(mimeType: string | undefined): boolean {
-  return mimeType?.toLowerCase().startsWith('text/') ?? false
-}
-
 /** The two body slots the content walk (parse.ts) fills. */
 function isBodySlotMimeType(mimeType: string | undefined): boolean {
   const normalized = mimeType?.toLowerCase() ?? ''
@@ -78,18 +73,18 @@ export function isAttachmentPart(part: GmailPart): boolean {
 
 /**
  * MessageProcessor.extractAttachments's server-part rule. iOS takes every
- * non-multipart part carrying an attachmentId; here an oversized `text/*`
- * body arrives the same way (parse.ts follows it through fetchLargeBody), so
- * text parts still need the MIME evidence above. Anything else behind an
- * attachmentId can only be a file: a nameless `application/pdf` with no
- * Content-Disposition (Gmail lists it as "noname") is the attachment iOS
- * shows as `attachment.pdf`, and dropping it leaves the message with no
- * download affordance at all.
+ * non-multipart part carrying an attachmentId; here an oversized text/html or
+ * text/plain body arrives the same way (parse.ts follows it through
+ * fetchLargeBody), so those two still need the MIME evidence above. Anything
+ * else behind an attachmentId fills no body slot and can only be a file: a
+ * nameless `application/pdf` or `text/csv` with no Content-Disposition (Gmail
+ * lists it as "noname") is the attachment iOS shows as `attachment.pdf`, and
+ * dropping it leaves the message with no download affordance at all.
  */
 export function isServerAttachmentPart(part: GmailPart): boolean {
   if (part.body?.attachmentId === undefined || isMultipartPart(part)) return false
   if (isAttachmentPart(part)) return true
-  return !isTextualMimeType(part.mimeType)
+  return !isBodySlotMimeType(part.mimeType)
 }
 
 /**
