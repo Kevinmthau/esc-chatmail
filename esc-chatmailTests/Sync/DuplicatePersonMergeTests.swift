@@ -7,19 +7,30 @@ import CoreData
 /// context cannot see a Person still pending in the caller's batch, so
 /// duplicate rows for one address are produced routinely; this pass is what
 /// keeps them from being permanent.
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class DuplicatePersonMergeTests: XCTestCase {
     private var stack: TestCoreDataStack!
     private var coreDataStack: CoreDataStack!
     private var context: NSManagedObjectContext!
 
-    private static let me = "me@example.com"
+    private nonisolated static let me = "me@example.com"
     private static let alice = "alice@example.com"
 
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
         coreDataStack = CoreDataStack(persistentContainerForTesting: stack.persistentContainer)
-        context = stack.viewContext
+        context = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {

@@ -16,6 +16,17 @@ import CoreData
 /// full-email WebView artifacts are not represented in the plan at all). When
 /// that behavior changes on purpose, update the corresponding test deliberately
 /// rather than loosening it.
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
 
     private var stack: TestCoreDataStack!
@@ -24,7 +35,7 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        context = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
@@ -33,21 +44,18 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
         super.tearDown()
     }
 
-    /// Runs the planning function on the context's queue, mirroring how
-    /// `handleContextDidSave` invokes it inside `sourceContext.perform`.
+    /// Runs the planning function on the context's queue, the main queue here,
+    /// mirroring how `handleContextDidSave` invokes it inside
+    /// `sourceContext.perform`.
     private func computePlan(
         updated: [NSManagedObject] = [],
         deleted: [NSManagedObject] = []
     ) -> CacheCoordinator.CacheInvalidationPlan {
-        var plan = CacheCoordinator.CacheInvalidationPlan()
-        context.performAndWait {
-            plan = CacheCoordinator.computeInvalidationPlan(
-                updatedObjectIDs: Set(updated.map(\.objectID)),
-                deletedObjectIDs: Set(deleted.map(\.objectID)),
-                in: context
-            )
-        }
-        return plan
+        CacheCoordinator.computeInvalidationPlan(
+            updatedObjectIDs: Set(updated.map(\.objectID)),
+            deletedObjectIDs: Set(deleted.map(\.objectID)),
+            in: context
+        )
     }
 
     // MARK: - Messages
@@ -187,7 +195,6 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
         XCTAssertFalse(plan.shouldClearPersonCache)
     }
 
-    @MainActor
     func testRetiredAccountContextDoesNotDeleteReopenedAttachmentFile() async throws {
         let coordinator = CacheCoordinator()
         let staleContext = try XCTUnwrap(coordinator.captureInvalidationAccountContext())

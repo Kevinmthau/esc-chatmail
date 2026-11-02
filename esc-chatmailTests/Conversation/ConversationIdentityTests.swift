@@ -2,6 +2,16 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class ConversationIdentityTests: XCTestCase {
 
     func testMakeConversationIdentity_goldenCorpusPinsSharedHashes() throws {
@@ -343,7 +353,7 @@ final class ConversationIdentityTests: XCTestCase {
         ]
 
         let stack = TestCoreDataStack()
-        let context = stack.viewContext
+        let context = stack.makeMainQueueViewContext()
 
         for (index, fixture) in fixtures.enumerated() {
             var headers = [MessageHeader(name: "From", value: fixture.from)]

@@ -2,6 +2,16 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class HistoryProcessorTests: XCTestCase {
 
     private var testStack: TestCoreDataStack!
@@ -137,7 +147,7 @@ final class HistoryProcessorTests: XCTestCase {
     // MARK: - hasPendingLocalModification
 
     func testHasPendingLocalModification_nilLocalModifiedAt_returnsFalse() {
-        let context = testStack.viewContext
+        let context = testStack.makeMainQueueViewContext()
         let message = context.insertTestObject(Message.self)
         message.id = "m1"
         message.localModifiedAt = nil
@@ -146,7 +156,7 @@ final class HistoryProcessorTests: XCTestCase {
     }
 
     func testHasPendingLocalModification_freshLocalModification_returnsTrue() {
-        let context = testStack.viewContext
+        let context = testStack.makeMainQueueViewContext()
         let message = context.insertTestObject(Message.self)
         message.id = "m1"
         message.localModifiedAt = Date().addingTimeInterval(-30) // 30 seconds ago
@@ -155,7 +165,7 @@ final class HistoryProcessorTests: XCTestCase {
     }
 
     func testHasPendingLocalModification_staleLocalModification_returnsFalse() {
-        let context = testStack.viewContext
+        let context = testStack.makeMainQueueViewContext()
         let message = context.insertTestObject(Message.self)
         message.id = "m1"
         // Beyond maxLocalModificationAge (30 minutes)
@@ -167,7 +177,7 @@ final class HistoryProcessorTests: XCTestCase {
     // MARK: - hasConflict (alias semantics)
 
     func testHasConflict_mirrorsHasPendingLocalModification() {
-        let context = testStack.viewContext
+        let context = testStack.makeMainQueueViewContext()
         let message = context.insertTestObject(Message.self)
         message.id = "m1"
         message.localModifiedAt = Date()
