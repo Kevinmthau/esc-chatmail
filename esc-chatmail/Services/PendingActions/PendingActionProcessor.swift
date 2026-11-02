@@ -18,6 +18,29 @@ enum PendingActionRunStopReason {
     case cancelled
 }
 
+/// The fields of a `PendingAction` that processing needs, read on the fetching
+/// context's queue. The processing loop runs on the manager's actor, which is
+/// not that queue, so the managed object itself must not leave `perform`.
+struct PendingActionSnapshot {
+    let objectID: NSManagedObjectID
+    let actionType: PendingAction.ActionType?
+    let messageId: String?
+    let sourceConversationId: UUID?
+    let payloadString: String?
+    let retryCount: Int16
+    let createdAt: Date
+
+    init(_ action: PendingAction) {
+        objectID = action.objectID
+        actionType = action.actionTypeEnum
+        messageId = action.messageIdValue
+        sourceConversationId = action.conversationIdValue
+        payloadString = action.payloadValue
+        retryCount = action.retryCountValue
+        createdAt = action.createdAt
+    }
+}
+
 /// Extension containing action processing logic for PendingActionsManager.
 ///
 /// This handles the execution of pending actions, including retry logic,
@@ -125,7 +148,7 @@ extension PendingActionsManager {
     }
 
     /// Fetches the next pending action to process.
-    func fetchNextPendingAction(context: NSManagedObjectContext) async -> PendingAction? {
+    func fetchNextPendingAction(context: NSManagedObjectContext) async -> PendingActionSnapshot? {
         await context.perform {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
             request.predicate = NSPredicate(
@@ -136,7 +159,7 @@ extension PendingActionsManager {
             request.fetchLimit = 1
 
             do {
-                return try context.fetch(request).first
+                return try context.fetch(request).first.map(PendingActionSnapshot.init)
             } catch {
                 Log.error("Failed to fetch pending actions", category: .sync, error: error)
                 return nil  // Will retry on next cycle
@@ -147,13 +170,13 @@ extension PendingActionsManager {
     /// Processes a single pending action and reports whether the processing
     /// run may continue.
     @discardableResult
-    func processAction(_ action: PendingAction, context: NSManagedObjectContext) async -> PendingActionRunDisposition {
+    func processAction(_ action: PendingActionSnapshot, context: NSManagedObjectContext) async -> PendingActionRunDisposition {
         let objectID = action.objectID
-        let actionType = action.actionTypeEnum
-        let messageId = action.messageIdValue
-        let sourceConversationId = action.conversationIdValue
-        let payloadString = action.payloadValue
-        let retryCount = action.retryCountValue
+        let actionType = action.actionType
+        let messageId = action.messageId
+        let sourceConversationId = action.sourceConversationId
+        let payloadString = action.payloadString
+        let retryCount = action.retryCount
         let actionCreatedAt = action.createdAt
 
         // Mark as processing
