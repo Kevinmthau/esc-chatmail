@@ -1,9 +1,13 @@
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { installPreloadErrorRecovery } from './app/preloadErrorRecovery'
 import { registerServiceWorker } from './app/registerServiceWorker'
 import { routeTree } from './routeTree.gen'
 import './styles/theme.css'
+
+// Before the router mounts: its first route chunk is already a lazy import.
+installPreloadErrorRecovery(window)
 
 const router = createRouter({ routeTree })
 

@@ -6,6 +6,7 @@ import {
   configureDataActions,
   drainOutbox,
   findConversationByParticipants,
+  replayOutboundSends,
   requestSync,
   searchPeople,
 } from './actions'
@@ -24,6 +25,14 @@ describe('data/actions facade', () => {
     setDBForTests(null)
     configureDataActions(null)
     await db.delete()
+  })
+
+  // Revert-check: the try around replayAbandonedSends in replayOutboundSends —
+  // boot fires this and forgets it, so a sign-out closing the database mid-scan
+  // would otherwise be an unhandled rejection.
+  it('does not reject the startup replay when the database closes under it', async () => {
+    db.close()
+    await expect(replayOutboundSends()).resolves.toBeUndefined()
   })
 
   describe('findConversationByParticipants', () => {

@@ -1,6 +1,8 @@
 // HTML → plain-text extraction.
 // Ports TextProcessing.extractPlainText (markup detection + malformed-HTML
-// regex recovery) and EmailDOMTextExtractor (paragraph-aware DOM walk).
+// regex recovery), EmailDOMTextExtractor (paragraph-aware DOM walk),
+// EmailDOMFragmentParser (table-fragment context parsing) and the
+// standalone-attribution line filter of ChatBubbleTextProcessor.
 
 import { decodeHtmlEntities } from './decode'
 
@@ -8,6 +10,99 @@ import { decodeHtmlEntities } from './decode'
 
 export function parseHtmlDocument(html: string): Document {
   return new DOMParser().parseFromString(html, 'text/html')
+}
+
+/**
+ * EmailDOMFragmentParser.parse: a fragment that opens with a table section
+ * is parsed inside its required parent context so the HTML5 "in body"
+ * insertion mode does not drop the rows and cells (leaving bare text under
+ * `<body>`). The context element's children become the body's children, so
+ * fragment-in → fragment-out callers still read `body.innerHTML`.
+ */
+export function parseHtmlFragmentDocument(html: string, inputIsFragment: boolean): Document {
+  if (inputIsFragment) {
+    const contextTagName = tableFragmentContextTagName(html)
+    if (contextTagName !== null) {
+      return parseFragmentInContext(html, contextTagName)
+    }
+  }
+  return parseHtmlDocument(html)
+}
+
+function parseFragmentInContext(html: string, contextTagName: string): Document {
+  const document = parseHtmlDocument('')
+  const body = document.body
+  if (!body) {
+    return parseHtmlDocument(html)
+  }
+
+  // Setting innerHTML on a detached element runs the fragment parsing
+  // algorithm with that element as context (the DOM counterpart of
+  // SwiftSoup's Parser.parseFragment(html, context, baseUri)).
+  const context = document.createElement(contextTagName)
+  context.innerHTML = html
+  for (const node of Array.from(context.childNodes)) {
+    body.appendChild(node)
+  }
+  return document
+}
+
+function tableFragmentContextTagName(html: string): string | null {
+  const tagName = leadingOpeningTagName(html)
+  if (tagName === null) return null
+
+  switch (tagName) {
+    case 'caption':
+    case 'colgroup':
+    case 'tbody':
+    case 'tfoot':
+    case 'thead':
+      return 'table'
+    case 'col':
+      return 'colgroup'
+    case 'tr':
+      return 'tbody'
+    case 'td':
+    case 'th':
+      return 'tr'
+    default:
+      return null
+  }
+}
+
+function leadingOpeningTagName(html: string): string | null {
+  let index = 0
+
+  while (index < html.length) {
+    while (index < html.length && /\s/.test(html[index]!)) {
+      index += 1
+    }
+    if (index >= html.length) return null
+    if (html[index] !== '<') return null
+
+    const afterOpen = index + 1
+    if (afterOpen >= html.length) return null
+
+    if (html.startsWith('!--', afterOpen)) {
+      const commentEnd = html.indexOf('-->', afterOpen)
+      if (commentEnd === -1) return null
+      index = commentEnd + 3
+      continue
+    }
+
+    if (!/\p{L}/u.test(html[afterOpen]!)) {
+      return null
+    }
+
+    let nameEnd = afterOpen
+    while (nameEnd < html.length && isTagNameCharacter(html[nameEnd]!)) {
+      nameEnd += 1
+    }
+
+    return html.slice(afterOpen, nameEnd).toLowerCase()
+  }
+
+  return null
 }
 
 const NODE_ELEMENT = 1
@@ -178,9 +273,24 @@ interface ParagraphTextOptions {
   shouldSkipElement?: (element: Element) => boolean
 }
 
+// SwiftSoup's TextNode.text() (what the iOS walk feeds its buffer) is
+// normaliseWhitespace(wholeText): every run of HTML whitespace (space, tab,
+// newline, form feed, carriage return, NBSP) becomes one space before the
+// buffer sees it, with no <pre> exception. Line structure comes only from
+// the explicit block and <br> boundaries below, so a newline that is merely
+// source wrapping (Outlook/Word hard-wrap paragraphs at ~76 columns) must
+// not survive as a hard line break: downstream unwrapping keeps a wrap after
+// a sentence end or before a capitalised word, which split one paragraph
+// into several on web while iOS rendered one.
+const TEXT_NODE_WHITESPACE_RUN_PATTERN = /[ \t\n\f\r\u00A0]+/g
+
+function normalisedTextNodeText(data: string): string {
+  return data.replace(TEXT_NODE_WHITESPACE_RUN_PATTERN, ' ')
+}
+
 function walk(node: Node, buffer: TextBuffer, options: ParagraphTextOptions): void {
   if (node.nodeType === NODE_TEXT) {
-    buffer.appendText((node as Text).data)
+    buffer.appendText(normalisedTextNodeText((node as Text).data))
     return
   }
   if (node.nodeType !== NODE_ELEMENT) {
@@ -674,4 +784,59 @@ export function extractPlainTextFromHtml(html: string): string {
   }
 
   return recoverPlainTextFromMalformedHtml(html)
+}
+
+// MARK: - Standalone quote attribution lines (ChatBubbleTextProcessor port)
+
+const HTML_TEXT_QUOTE_ATTRIBUTION_SUFFIXES = [
+  'wrote:',
+  'schrieb:',
+  'a écrit :',
+  'a écrit:',
+  'escribió:',
+  'ha scritto:',
+  'escreveu:',
+  'schreef:',
+]
+
+export function isHtmlTextQuoteAttributionLine(text: string): boolean {
+  const lowercased = text.toLowerCase()
+  return HTML_TEXT_QUOTE_ATTRIBUTION_SUFFIXES.some((suffix) => lowercased.endsWith(suffix))
+}
+
+const STANDALONE_QUOTE_ATTRIBUTION_DATE_PREFIXES = ['on ', 'am ', 'le ', 'el ', 'il ', 'em ', 'op ']
+
+/**
+ * A genuine attribution needs more than the "wrote:" suffix — prose like
+ * "Here is what I wrote:" must survive. Real client attributions start
+ * with a date preposition ("On …", "Am …") or embed the quoted sender's
+ * address.
+ */
+export function isStandaloneQuoteAttributionLine(line: string): boolean {
+  if (!isHtmlTextQuoteAttributionLine(line)) return false
+
+  const lowercased = line.toLowerCase()
+  if (STANDALONE_QUOTE_ATTRIBUTION_DATE_PREFIXES.some((prefix) => lowercased.startsWith(prefix))) {
+    return true
+  }
+  return line.includes('@') || line.includes('<')
+}
+
+/**
+ * Drops lines that are ONLY a quote attribution ("On …, Olga wrote:")
+ * without truncating anything after them. The containers-only cleanup
+ * removes the quoted blockquote but leaves its attribution line behind;
+ * truncating at it (the residual-marker behavior) would rediscard the
+ * content that follows. Run only when
+ * `HtmlProcessingCleanupResult.stripStandaloneQuoteAttributionLines` is set:
+ * the fuller modes already truncate attributions in the DOM, and running the
+ * line filter on their output risks deleting legitimate prose.
+ */
+export function removeStandaloneQuoteAttributionLines(text: string): string {
+  const lines = text.split('\n')
+  if (lines.length <= 1) return text
+
+  const kept = lines.filter((line) => !isStandaloneQuoteAttributionLine(line.trim()))
+  if (kept.length === lines.length) return text
+  return kept.join('\n')
 }

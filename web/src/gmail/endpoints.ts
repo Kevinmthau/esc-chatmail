@@ -25,7 +25,10 @@ import type {
 export const BATCH_MODIFY_CHUNK_SIZE = 1_000
 
 /** Retry knobs callers/tests may override; never changes retransmission policy. */
-export type EndpointOptions = Pick<RetryBehavior, 'maxAttempts' | 'sleep' | 'random' | 'fetchImpl'>
+export type EndpointOptions = Pick<
+  RetryBehavior,
+  'maxAttempts' | 'sleep' | 'random' | 'fetchImpl' | 'signal'
+>
 
 export interface ListMessagesParams {
   q?: string

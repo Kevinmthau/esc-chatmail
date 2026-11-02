@@ -19,7 +19,7 @@ export interface RecipientChipData {
   email: string
   /** Canonical form (identity/normalizeEmail) used for dedupe. */
   normalized: string
-  /** Invalid chips render in the danger tint and are excluded from send. */
+  /** Invalid chips render in the danger tint and block the send until fixed or removed. */
   valid: boolean
 }
 
@@ -91,9 +91,32 @@ export function addChip(chips: readonly RecipientChipData[], raw: string): AddCh
   return { next: [...chips, chip], added: chip, duplicate: false }
 }
 
-/** The addresses a send should target: valid chips only, raw form. */
+/**
+ * The valid chips' addresses, raw form: the dedup-to-existing-chat key, and
+ * the send's recipient list once the send gate has proven every chip valid.
+ */
 export function validRecipientEmails(chips: readonly RecipientChipData[]): string[] {
   return chips.filter((chip) => chip.valid).map((chip) => chip.email)
+}
+
+/** The chips the send gate refuses; empty means every committed chip is sendable. */
+export function invalidRecipientChips(chips: readonly RecipientChipData[]): RecipientChipData[] {
+  return chips.filter((chip) => !chip.valid)
+}
+
+/**
+ * Copy naming the chips that hold the send, in the same shape the MIME builder's
+ * rejection takes (outbox/send: InvalidRecipientsError → userMessage), so an
+ * address reads the same whether it is caught here or at the builder. Null
+ * when nothing holds it.
+ */
+export function invalidRecipientMessage(chips: readonly RecipientChipData[]): string | null {
+  const invalid = invalidRecipientChips(chips)
+  if (invalid.length === 0) return null
+  const list = invalid.map((chip) => chip.email).join(', ')
+  return invalid.length === 1
+    ? `${list} is not a valid email address.`
+    : `These are not valid email addresses: ${list}.`
 }
 
 /** Option-element id used for aria-activedescendant on the combobox input. */

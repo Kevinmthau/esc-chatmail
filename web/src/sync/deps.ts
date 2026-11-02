@@ -85,6 +85,30 @@ export function depsRandom(deps: SyncDeps): () => number {
   return deps.random ?? Math.random
 }
 
+/**
+ * A sleep that ends early when `signal` fires. A torn-down session's run must
+ * not wait out a backoff (a Retry-After can be 60s) while it holds the
+ * per-account sync lock, or the next session's startup sync finds the lock taken
+ * and skips. It resolves rather than rejects: the request after it throws
+ * RequestAbortedError, the one error the retry ladders already treat as an abort.
+ */
+export function abortableSleep(signal: AbortSignal): (ms: number) => Promise<void> {
+  return (ms) =>
+    new Promise((resolve) => {
+      if (signal.aborted) {
+        resolve()
+        return
+      }
+      const done = (): void => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', done)
+        resolve()
+      }
+      const timer = setTimeout(done, ms)
+      signal.addEventListener('abort', done)
+    })
+}
+
 /** Large-body fetcher for parseGmailMessage, backed by the attachments endpoint. */
 export function makeFetchLargeBody(
   api: GmailSyncApi,

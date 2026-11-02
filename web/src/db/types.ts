@@ -240,7 +240,18 @@ export interface OutboundSendRow {
   conversationId: string
   newlyInsertedConversation: Flag
   createdAt: number
-  status: 'pending' | 'committed' | 'finalized' | 'failed'
+  /**
+   * 'ambiguous': the request was admitted and no verdict came back; the row
+   * is retained as sent under its local id until sync echoes the server copy
+   * and is never resent (outbox/send.ts recordAmbiguousSend).
+   */
+  status: 'pending' | 'committed' | 'finalized' | 'failed' | 'ambiguous'
+  /**
+   * Epoch ms the request was handed to the transport, written immediately
+   * before messages.send: a 'pending' journal with this set may have been
+   * processed by Gmail; one without it never reached the network. Unindexed.
+   */
+  admittedAt?: number
   /** Snapshot of conversation fields to restore if the send fails. */
   conversationSnapshot: {
     archivedAt: number

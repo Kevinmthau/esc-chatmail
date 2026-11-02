@@ -478,6 +478,15 @@ export class AuthBroker {
     // Gmail profile before promotion. A token swap then notifies listeners so
     // the app can re-establish account-scoped dependencies.
     const hint = this.getLoginHint()
+    // The flight belongs to THIS sign-in generation. signOut and a cross-tab
+    // sign-out null `pending` and bump the epoch, so a flight they retired
+    // settles later with `pending` already pointing elsewhere and the state
+    // possibly 'ready' again: GIS still delivers the first popup's callback
+    // (→ stale_epoch) or its popup_closed error after the user signed back in
+    // through a second popup, and a verification parked across the sign-out
+    // rejects the same way. Demoting on that settle flipped the fresh session
+    // to needs_interaction with a valid grant cached.
+    const epochAtStart = this.epoch
     const flight: Promise<string> = this.acquire(
       hint !== null ? { prompt: '', loginHint: hint } : { prompt: '' },
     ).then(
@@ -488,10 +497,12 @@ export class AuthBroker {
       (err: unknown) => {
         if (this.pending === flight) this.pending = null
         const failure = toAuthRequired(err, 'renewal_failed')
-        // A sign-out mid-flight already moved us to signed_out. An account
-        // change deliberately adopted the verified replacement grant and
-        // published ready; the old-session caller alone must be rejected.
-        if (this.state !== 'signed_out' && failure.reason !== 'account_changed') {
+        // Only a failure of the CURRENT generation means this session needs
+        // the user. A moved epoch is a sign-out mid-flight (already
+        // signed_out), a later re-sign-in (ready again), or an account change
+        // that deliberately adopted the verified replacement grant and
+        // published ready; in each the old-session caller alone is rejected.
+        if (this.epoch === epochAtStart) {
           this.setState('needs_interaction')
         }
         throw failure

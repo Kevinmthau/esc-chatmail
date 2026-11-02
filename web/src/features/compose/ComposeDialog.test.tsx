@@ -98,9 +98,14 @@ describe('ComposeDialog', () => {
     expect(send().disabled).toBe(true)
 
     await user.type(await toInput(), 'notanemail{Enter}')
-    expect(send().disabled).toBe(true) // invalid chip is excluded from send
+    expect(send().disabled).toBe(true) // an invalid chip is not a recipient
 
+    // ...and holds the send even beside a valid one (iOS canSend's allSatisfy):
+    // see ComposeDialog.invalidRecipients.test for the notice it shows.
     await user.type(await toInput(), 'bob@example.com{Enter}')
+    expect(send().disabled).toBe(true)
+
+    await user.click(screen.getByRole('button', { name: 'Remove notanemail' }))
     expect(send().disabled).toBe(false)
   })
 

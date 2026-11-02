@@ -492,6 +492,40 @@ describe('applyHistoryLabelOps ordering', () => {
 // ---------------------------------------------------------------------------
 
 describe('incremental crash matrix', () => {
+  // Revert-check: the deletedFrom rollup in applyHistoryLabelOps — finalize alone
+  // never runs for the crashed pass, and the rerun's delete finds no row, so the
+  // deleted newest message's snippet and date stay on the conversation for good.
+  it('rolls up a history deletion even when the run dies before finalize', async () => {
+    await seedAccount(db)
+    await seedAliceConversation()
+    const before = await aliceConversation()
+    const newest = (await db.messages.orderBy('internalDate').last())!
+    api.historyFactory = () => ({
+      historyId: 'h2',
+      history: [{ id: '900', messagesDeleted: [{ message: { id: newest.id, threadId: 't' } }] }],
+    })
+
+    await expect(
+      runIncrementalSync(
+        testDeps(db, api, {
+          hooks: {
+            onPhase: (phase) => {
+              if (phase === 'incremental:afterLabelOps') throw new Error('crash')
+            },
+          },
+        }),
+      ),
+    ).rejects.toThrow('crash')
+    await runIncrementalSync(testDeps(db, api))
+
+    const conversation = await aliceConversation()
+    expect(conversation.lastMessageDate).toBeLessThan(before.lastMessageDate)
+    const remaining = await db.messages.toArray()
+    expect(conversation.lastMessageDate).toBe(makeRollup(remaining).lastMessageDate)
+    expect(conversation.inboxUnreadCount).toBe(makeRollup(remaining).inboxUnreadCount)
+    expect((await db.accounts.get(ME))?.historyId).toBe('h2')
+  })
+
   const phases = [
     'incremental:afterHistory',
     'incremental:afterFetch',

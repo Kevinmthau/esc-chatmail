@@ -6,12 +6,17 @@
 // - claim order: strict createdAt across pending AND retriable failed rows
 //   (PendingActionProcessor sorts by createdAt over both statuses);
 // - action → Gmail label mapping (ActionExecutor);
-// - retriable failures (429 / 5xx / network) → status 'failed' + retryCount++,
-//   with a 2^retryCount * 2s backoff (cap 30s) measured from lastAttempt: a
-//   failed row whose window has not elapsed is DEFERRED to the end of the drain
-//   (together with anything ordered behind it for the same messages) instead of
-//   blocking the queue head, so fresh user actions are not stuck behind it;
+// - retriable failures (429 or throttle 403 / 5xx / network) → status 'failed'
+//   + retryCount++, with a 2^retryCount * 2s backoff (cap 30s) measured from
+//   lastAttempt: a failed row whose window has not elapsed is DEFERRED to the
+//   end of the drain (together with anything ordered behind it for the same
+//   messages) instead of blocking the queue head, so fresh user actions are not
+//   stuck behind it;
 // - non-retriable failures (other 4xx) → 'abandoned';
+// - account-scoped conditions (auth required, quota exhausted, caller abort)
+//   are not queue failures: the row is restored and the drain stops, so the
+//   user's intent waits for the account rather than being abandoned
+//   (PendingActionProcessor requeues on quota and ends the run);
 // - stale 'processing' rows older than 10 minutes reset to 'failed';
 // - completed rows swept at the start of the next drain;
 // - success clears localModifiedAt on the affected messages only when the
@@ -30,7 +35,12 @@ import {
   type BatchModifyParams,
   type LabelChanges,
 } from '@/gmail/endpoints'
-import { AuthRequiredError, GmailApiError, NetworkError, RateLimitError } from '@/gmail/errors'
+import {
+  GmailApiError,
+  isAccountScopedSyncAbort,
+  NetworkError,
+  RateLimitError,
+} from '@/gmail/errors'
 import type { TokenBroker } from '@/gmail/gmailFetch'
 
 export const MAX_PENDING_ACTION_RETRIES = 5
@@ -190,6 +200,11 @@ export interface DrainResult {
   abandoned: number
 }
 
+/**
+ * RateLimitError covers both a 429 and Gmail's throttle 403 (gmailFetch
+ * classifies the 403 by reason): a throttled modify is a definite rejection
+ * that a later drain can land, never grounds to abandon the user's action.
+ */
 function isRetriableError(error: unknown): boolean {
   if (error instanceof RateLimitError) return true
   if (error instanceof NetworkError) return true
@@ -295,7 +310,7 @@ async function drainLocked(
   const deferred: PendingActionRow[] = []
   const deferredMessageIds = new Set<string>()
   const blockedUntilNextDrain = new Set<string>()
-  let stoppedForAuth = false
+  let stoppedForAccount = false
 
   for (const row of rows) {
     if (row.id === undefined) continue
@@ -314,8 +329,8 @@ async function drainLocked(
       continue
     }
     const outcome = await processRow(db, api, row, result, now, maxRetries)
-    if (outcome === 'authStop') {
-      stoppedForAuth = true
+    if (outcome === 'accountStop') {
+      stoppedForAccount = true
       break
     }
     if (outcome === 'retriableFailure') {
@@ -326,7 +341,7 @@ async function drainLocked(
   // Pass 2: the deferred rows, still in createdAt order. Sleeps are measured
   // against a virtual clock so N rows sharing one backoff window cost ONE wait,
   // not one per row.
-  if (!stoppedForAuth) {
+  if (!stoppedForAccount) {
     let sleptUntil = 0
     for (const row of deferred) {
       if (row.id === undefined) continue
@@ -346,7 +361,7 @@ async function drainLocked(
         sleptUntil = target
       }
       const outcome = await processRow(db, api, row, result, now, maxRetries)
-      if (outcome === 'authStop') break
+      if (outcome === 'accountStop') break
       if (outcome === 'retriableFailure') {
         for (const id of ids) blockedUntilNextDrain.add(id)
       }
@@ -362,7 +377,7 @@ function readyAt(row: PendingActionRow): number {
   return row.lastAttempt + pendingActionBackoffMs(row.retryCount)
 }
 
-type ProcessRowOutcome = 'completed' | 'retriableFailure' | 'terminalFailure' | 'authStop'
+type ProcessRowOutcome = 'completed' | 'retriableFailure' | 'terminalFailure' | 'accountStop'
 
 /** Executes one claimed row and reports how later overlapping rows should proceed. */
 async function processRow(
@@ -400,12 +415,13 @@ async function processRow(
     result.completed += 1
     return 'completed'
   } catch (error) {
-    if (error instanceof AuthRequiredError) {
-      // Not a queue failure: restore the row and stop draining until auth
-      // is available again.
+    if (isAccountScopedSyncAbort(error)) {
+      // Not a queue failure: restore the row and stop draining until the
+      // account is usable again (auth available, quota replenished, session
+      // re-established).
       await db.pendingActions.update(rowId, { status: previousStatus, lastAttempt: claimedAt })
       result.processed -= 1
-      return 'authStop'
+      return 'accountStop'
     }
     if (isRetriableError(error)) {
       const retryCount = row.retryCount + 1

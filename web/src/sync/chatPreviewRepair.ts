@@ -36,7 +36,8 @@ import type { MessageRow } from '@/db/types'
 import { createChatPreviewText, createCleanedSnippet } from '@/mime/preview'
 import { rollupConversation } from '@/rollup/rollup'
 
-export const CHAT_PREVIEW_DERIVATION_VERSION = '2026-10-27-signature-mvpn-unicode-digits-v1'
+export const CHAT_PREVIEW_DERIVATION_VERSION =
+  '2026-10-30-bottom-posted-rescue-repeated-signature-text-node-whitespace-v1'
 export const CHAT_PREVIEW_REPAIR_KEY = 'chatPreviewRepair'
 export const CHAT_PREVIEW_REPAIR_BATCH_SIZE = 100
 export const CHAT_PREVIEW_REPAIR_MESSAGES_PER_RUN = 1000
@@ -187,71 +188,75 @@ async function rederiveBatch(
     })
   })
 
-  return db.transaction('rw', [db.syncState, db.messages, db.conversations], async () => {
-    // Commit only over the state this batch read. Another walker can commit in
-    // between: a second tab when navigator.locks is missing (the fallback lock is
-    // per tab), or a tab on another build. Writing this batch's cursor over its state
-    // moved the cursor back or reopened a finished walk. The rows are dropped with
-    // it: a walker that moved the state past them derived them itself, and one that
-    // reset it makes the next read start over. The next read resumes from that state.
-    const latest = repairState((await db.syncState.get(CHAT_PREVIEW_REPAIR_KEY))?.value)
-    if (!isSameRepairState(latest, state)) {
-      return { scanned: rows.length, rewritten: 0, recomputed: 0, done: false }
-    }
-
-    // Re-read, and write back only the previews: putting the rows back as read would
-    // revert a local change made while the batch derived (a mark-read, an archive).
-    // A row whose previews no longer hold what the derivation compared against keeps
-    // them, because whatever rewrote them read newer inputs, and so does a row that
-    // no longer qualifies. No writer outside the sync lock changes either today; the
-    // check keeps an outgoing row out of this rule if one ever does. The body is not
-    // re-read: only persist replaces a received row's body, and it runs under the
-    // sync lock this walk also holds.
-    const current = await db.messages.bulkGet(rederived.map((entry) => entry.id))
-    const rewritten: MessageRow[] = []
-    const conversationIds = new Set<string>()
-    rederived.forEach((entry, index) => {
-      const message = current[index]
-      if (
-        message === undefined ||
-        !isRederivable(message) ||
-        message.chatPreviewText !== entry.readChatPreviewText ||
-        message.cleanedSnippet !== entry.readCleanedSnippet
-      ) {
-        return
+  return db.transaction(
+    'rw',
+    [db.syncState, db.messages, db.conversations, db.convoParticipants, db.people],
+    async () => {
+      // Commit only over the state this batch read. Another walker can commit in
+      // between: a second tab when navigator.locks is missing (the fallback lock is
+      // per tab), or a tab on another build. Writing this batch's cursor over its state
+      // moved the cursor back or reopened a finished walk. The rows are dropped with
+      // it: a walker that moved the state past them derived them itself, and one that
+      // reset it makes the next read start over. The next read resumes from that state.
+      const latest = repairState((await db.syncState.get(CHAT_PREVIEW_REPAIR_KEY))?.value)
+      if (!isSameRepairState(latest, state)) {
+        return { scanned: rows.length, rewritten: 0, recomputed: 0, done: false }
       }
-      rewritten.push({
-        ...message,
-        chatPreviewText: entry.chatPreviewText,
-        cleanedSnippet: entry.cleanedSnippet,
+
+      // Re-read, and write back only the previews: putting the rows back as read would
+      // revert a local change made while the batch derived (a mark-read, an archive).
+      // A row whose previews no longer hold what the derivation compared against keeps
+      // them, because whatever rewrote them read newer inputs, and so does a row that
+      // no longer qualifies. No writer outside the sync lock changes either today; the
+      // check keeps an outgoing row out of this rule if one ever does. The body is not
+      // re-read: only persist replaces a received row's body, and it runs under the
+      // sync lock this walk also holds.
+      const current = await db.messages.bulkGet(rederived.map((entry) => entry.id))
+      const rewritten: MessageRow[] = []
+      const conversationIds = new Set<string>()
+      rederived.forEach((entry, index) => {
+        const message = current[index]
+        if (
+          message === undefined ||
+          !isRederivable(message) ||
+          message.chatPreviewText !== entry.readChatPreviewText ||
+          message.cleanedSnippet !== entry.readCleanedSnippet
+        ) {
+          return
+        }
+        rewritten.push({
+          ...message,
+          chatPreviewText: entry.chatPreviewText,
+          cleanedSnippet: entry.cleanedSnippet,
+        })
+        conversationIds.add(message.conversationId)
       })
-      conversationIds.add(message.conversationId)
-    })
 
-    if (rewritten.length > 0) {
-      await db.messages.bulkPut(rewritten)
-      // Nested into this transaction, so each rollup reads the rewritten rows.
-      for (const conversationId of conversationIds) {
-        await rollupConversation(db, conversationId, now)
+      if (rewritten.length > 0) {
+        await db.messages.bulkPut(rewritten)
+        // Nested into this transaction, so each rollup reads the rewritten rows.
+        for (const conversationId of conversationIds) {
+          await rollupConversation(db, conversationId, now)
+        }
       }
-    }
 
-    const done = rows.length < limit
-    const next: ChatPreviewRepairState = {
-      version: CHAT_PREVIEW_DERIVATION_VERSION,
-      lastId: rows.at(-1)?.id ?? cursor,
-      done,
-    }
-    // Last write by design: the cursor commits with this batch's rows or not at all.
-    await db.syncState.put({ key: CHAT_PREVIEW_REPAIR_KEY, value: next })
+      const done = rows.length < limit
+      const next: ChatPreviewRepairState = {
+        version: CHAT_PREVIEW_DERIVATION_VERSION,
+        lastId: rows.at(-1)?.id ?? cursor,
+        done,
+      }
+      // Last write by design: the cursor commits with this batch's rows or not at all.
+      await db.syncState.put({ key: CHAT_PREVIEW_REPAIR_KEY, value: next })
 
-    return {
-      scanned: rows.length,
-      rewritten: rewritten.length,
-      recomputed: conversationIds.size,
-      done,
-    }
-  })
+      return {
+        scanned: rows.length,
+        rewritten: rewritten.length,
+        recomputed: conversationIds.size,
+        done,
+      }
+    },
+  )
 }
 
 /** Received rows with a stored HTML body: the only rows this pass re-derives. */

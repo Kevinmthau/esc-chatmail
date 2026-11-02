@@ -231,6 +231,38 @@ test('forward a message to a typed address', async ({ page }) => {
   await expect(page.locator('dialog[open]')).toHaveCount(0)
 })
 
+// Only a real browser can guard this: the position is saved as the chat
+// unmounts, and a detached scroller reads 0 for every metric, so a save that
+// runs after removal always looks "at the bottom" and the restore never fires.
+// Revert-check: the useLayoutEffect around the leave-time save in useChatScroll.
+test('a mid-history scroll position survives switching chats', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'desktop two-pane layout only')
+  await page.setViewportSize({ width: 1000, height: 330 })
+  await openChats(page)
+  await page.getByText('Alice Chen', { exact: true }).first().click()
+
+  const scroller = page.getByTestId('chat-scroller')
+  const input = page.getByRole('textbox', { name: 'Message' })
+  for (let i = 0; i < 8; i += 1) {
+    await input.fill(`scroll filler ${i}`)
+    await page.getByRole('button', { name: /send/i }).click()
+    await expect(scroller.getByText(`scroll filler ${i}`, { exact: true })).toBeVisible()
+  }
+
+  const midpoint = await scroller.evaluate((el) => {
+    el.scrollTop = Math.floor((el.scrollHeight - el.clientHeight) / 2)
+    return el.scrollTop
+  })
+  expect(midpoint).toBeGreaterThan(0)
+
+  await page.getByText('Fatima Khan', { exact: true }).first().click()
+  await expect(scroller.getByText('scroll filler 0', { exact: true })).toHaveCount(0)
+  await page.getByText('Alice Chen', { exact: true }).first().click()
+  await expect(scroller.getByText('scroll filler 0', { exact: true })).toHaveCount(1)
+
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBe(midpoint)
+})
+
 test('mobile: stacked navigation with working back', async ({ page, isMobile }) => {
   test.skip(!isMobile, 'mobile project only')
   await openChats(page)

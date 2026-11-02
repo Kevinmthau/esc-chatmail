@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from 'react'
 import { useAccountLiveQuery } from '@/live/hooks'
+import { objectUrlSourceBlob } from './attachmentObjectUrl'
 
 interface CacheEntry {
   url: string
@@ -19,7 +20,10 @@ function acquireUrl(key: string, blob: Blob): string {
     entry.refs += 1
     return entry.url
   }
-  const url = URL.createObjectURL(blob)
+  // The cache is keyed on the STORED blob's identity; the URL itself is minted
+  // from the re-typed view so a sender-declared text/html or image/svg+xml
+  // never becomes a document on the app origin (attachmentObjectUrl).
+  const url = URL.createObjectURL(objectUrlSourceBlob(blob))
   urlCache.set(key, { url, blob, refs: 1 })
   return url
 }
