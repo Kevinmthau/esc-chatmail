@@ -9,6 +9,22 @@ import CoreData
 /// - Test infrastructure validation
 /// - Core Data entity operations with builders
 /// - Query logic validation
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// `PendingActionsManager` works on contexts from its own `CoreDataStack`, so
+/// this moves only the fixtures and direct assertions.
+/// `testTestCoreDataStack_createsValidContext` keeps `testStack.viewContext`
+/// because it only checks the property.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class PendingActionsManagerTests: XCTestCase {
 
     var testStack: TestCoreDataStack!
@@ -17,13 +33,18 @@ final class PendingActionsManagerTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
         context = nil
         testStack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     // MARK: - Test Infrastructure Tests
@@ -42,7 +63,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .build(in: context)
 
         // Save
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Verify it can be fetched
         let request = PendingAction.fetchRequest()
@@ -60,14 +81,14 @@ final class PendingActionsManagerTests: XCTestCase {
             .markAsRead()
             .forMessage("stack1-message")
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Create second stack
         let stack2 = TestCoreDataStack()
 
         // Verify second stack is empty
         let request = PendingAction.fetchRequest()
-        let results = try stack2.viewContext.fetch(request)
+        let results = try stack2.makeMainQueueViewContext().fetch(request)
 
         XCTAssertEqual(results.count, 0, "Second stack should be isolated and empty")
     }
@@ -214,7 +235,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("msg-3")
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Fetch pending or failed (like PendingActionsManager does)
         let request = PendingAction.fetchRequest()
@@ -251,7 +272,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("msg-over")
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Fetch with retry count filter (like PendingActionsManager with maxRetries = 5)
         let request = PendingAction.fetchRequest()
@@ -283,7 +304,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .createdMinutesAgo(30)
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Fetch sorted by createdAt
         let request = PendingAction.fetchRequest()
@@ -316,7 +337,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .pending()
             .build(in: context)
 
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Fetch specific action by message ID and type
         let request = PendingAction.fetchRequest()
@@ -366,7 +387,7 @@ final class PendingActionsManagerTests: XCTestCase {
         XCTAssertEqual(bgCount, 0, "Unsaved changes should not be visible in background context")
 
         // Now save
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         // Check again
         bgContext.performAndWait {
@@ -375,6 +396,88 @@ final class PendingActionsManagerTests: XCTestCase {
         }
 
         XCTAssertEqual(bgCount, 1, "Saved changes should be visible after save")
+    }
+
+    // MARK: - Row fields read on the context's queue
+
+    // Revert-check: the declared `PendingActionSnapshot?` stops compiling if
+    // fetchNextPendingAction goes back to returning the managed object, and an
+    // assertion fails if PendingActionSnapshot.init maps a field wrongly.
+    //
+    // HONEST SCOPE: without `-com.apple.CoreData.ConcurrencyDebug 1` this cannot
+    // catch an off-queue read, which usually returns the right value. See the
+    // next test for what the flag catches.
+    func testFetchNextPendingAction_failedRow_snapshotsEveryField() async throws {
+        let conversationID = UUID()
+        let createdAt = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let action = PendingActionBuilder()
+            .markAsUnread()
+            .forMessage("snapshot-message")
+            .forConversation(conversationID)
+            .withPayload(#"{"messageIds":["snapshot-message"]}"#)
+            .withStatus("failed")
+            .withRetryCount(2)
+            .createdAt(createdAt)
+            .build(in: context)
+        try saveViewContext()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: RecordingActionExecutor(),
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+
+        let snapshot: PendingActionSnapshot? = await manager.fetchNextPendingAction(
+            context: testStack.persistentContainer.newBackgroundContext()
+        )
+
+        let fetched = try XCTUnwrap(snapshot)
+        XCTAssertEqual(fetched.objectID, action.objectID)
+        XCTAssertEqual(fetched.actionType, .markUnread)
+        XCTAssertEqual(fetched.messageId, "snapshot-message")
+        XCTAssertEqual(fetched.sourceConversationId, conversationID)
+        XCTAssertEqual(fetched.payloadString, #"{"messageIds":["snapshot-message"]}"#)
+        XCTAssertEqual(fetched.retryCount, 2)
+        XCTAssertEqual(fetched.createdAt, createdAt)
+    }
+
+    // Revert-check: under `-com.apple.CoreData.ConcurrencyDebug 1` this traps in
+    // processAction if the PendingActionSnapshot init moves out of
+    // fetchNextPendingAction's `perform`, onto the manager's actor.
+    //
+    // HONEST SCOPE: without that flag the same revert passes here, so this only
+    // pins that the fields still reach the executor.
+    func testProcessAllPendingActions_passesRowFieldsToExecutor() async throws {
+        let conversationID = UUID()
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("executed-message")
+            .forConversation(conversationID)
+            .withPayload(#"{"messageIds":["payload-message"]}"#)
+            .pending()
+            .build(in: context)
+        try saveViewContext()
+        let executor = ExecutionFieldsRecordingActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+
+        await manager.processAllPendingActions()
+
+        XCTAssertEqual(
+            executor.executions,
+            [
+                ExecutionFieldsRecordingActionExecutor.Execution(
+                    type: .markRead,
+                    messageId: "executed-message",
+                    sourceConversationId: conversationID,
+                    payloadMessageIds: ["payload-message"]
+                )
+            ]
+        )
     }
 
     // MARK: - Account transition isolation
@@ -484,7 +587,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("old-account-action")
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let processingTask = Task {
             await manager.processAllPendingActions()
@@ -520,7 +623,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("current-account-action")
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
         await lifecycleProbe.replaceStoreGeneration()
 
         await coordinator.endQuiescence()
@@ -562,7 +665,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("replacement-account-action")
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await coordinator.endQuiescence()
 
@@ -596,7 +699,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .withPayload(["messageIds": ["m-1"]])
             .withStatus("abandoned")
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
         let finished = LockedFlag()
 
         let fetchTask = Task {
@@ -634,7 +737,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("same-message-id")
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let cancelTask = Task {
             await manager.cancelPendingAction(
@@ -657,7 +760,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("same-message-id")
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await coordinator.endQuiescence()
         await cancelTask.value
@@ -693,7 +796,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("replacement-abandoned-action")
             .withStatus("abandoned")
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await coordinator.endQuiescence()
         await dismissTask.value
@@ -1003,7 +1106,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("replacement-generation-action")
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await coordinator.beginQuiescence()
         let processingTask = Task {
@@ -1058,7 +1161,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("replacement-run-during-publication")
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await coordinator.beginQuiescence()
         let processingTask = Task {
@@ -1111,7 +1214,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .pending()
             .createdAt(markerDate.addingTimeInterval(120))
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let executor = SuccessThenAuthenticationFailureActionExecutor()
         let manager = PendingActionsManager(
@@ -1202,7 +1305,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("abandoned-does-not-protect")
             .withStatus("abandoned")
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let manager = PendingActionsManager(
             coreDataStack: CoreDataStack(
@@ -1251,7 +1354,7 @@ final class PendingActionsManagerTests: XCTestCase {
         directMessage.localModifiedAt = markerDate
         let payloadMessage = MessageBuilder().withId("executed-payload-target").build(in: context)
         payloadMessage.localModifiedAt = markerDate
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let manager = PendingActionsManager(
             coreDataStack: CoreDataStack(
@@ -1289,7 +1392,7 @@ final class PendingActionsManagerTests: XCTestCase {
         let newerMarkerDate = completedActionDate.addingTimeInterval(30)
         let message = MessageBuilder().withId("concurrent-newer-marker").build(in: context)
         message.localModifiedAt = markerDate
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let manager = PendingActionsManager(
             coreDataStack: CoreDataStack(
@@ -1316,7 +1419,7 @@ final class PendingActionsManagerTests: XCTestCase {
         await lifecycleProbe.waitUntilLocalModificationClearStagesChanges()
 
         message.localModifiedAt = newerMarkerDate
-        try testStack.saveViewContext()
+        try saveViewContext()
         await lifecycleProbe.resumeLocalModificationClear()
         await clearTask.value
 
@@ -1342,7 +1445,7 @@ final class PendingActionsManagerTests: XCTestCase {
 
         _ = PendingActionBuilder().markAsRead().forMessage("m1").pending().createdMinutesAgo(2).build(in: context)
         _ = PendingActionBuilder().markAsRead().forMessage("m2").pending().createdMinutesAgo(1).build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await manager.processAllPendingActions()
         await retryRecorder.waitUntilScheduled()
@@ -1510,7 +1613,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .forMessage("account-scoped-quota")
             .pending()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await manager.processAllPendingActions()
         await retryRecorder.waitUntilScheduled(count: 1)
@@ -1731,7 +1834,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .withStatus("abandoned")
             .withRetryCount(5)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
         let objectID = abandonedAction.objectID
 
         await manager.retryAbandonedAction(objectID: objectID)
@@ -1823,7 +1926,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .withActionType("markRead").withPayload(oversized)
             .withStatus("abandoned")
             .createdAt(now.addingTimeInterval(-60)).build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await manager.requeueRecentOversizedBatchActionsIfNeeded(now: now)
 
@@ -1858,7 +1961,7 @@ final class PendingActionsManagerTests: XCTestCase {
             .withStatus("abandoned")
             .createdMinutesAgo(1)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         await manager.requeueRecentOversizedBatchActionsIfNeeded()
 
@@ -2080,6 +2183,37 @@ private final class RecordingActionExecutor: ActionExecutorProtocol, @unchecked 
         if let messageId {
             lock.withLock { _executedMessageIds.append(messageId) }
         }
+    }
+}
+
+private final class ExecutionFieldsRecordingActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
+    struct Execution: Equatable {
+        let type: PendingAction.ActionType
+        let messageId: String?
+        let sourceConversationId: UUID?
+        let payloadMessageIds: [String]?
+    }
+
+    private let lock = NSLock()
+    private var _executions: [Execution] = []
+
+    var executions: [Execution] {
+        lock.withLock { _executions }
+    }
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        let execution = Execution(
+            type: type,
+            messageId: messageId,
+            sourceConversationId: sourceConversationId,
+            payloadMessageIds: payload?["messageIds"] as? [String]
+        )
+        lock.withLock { _executions.append(execution) }
     }
 }
 
