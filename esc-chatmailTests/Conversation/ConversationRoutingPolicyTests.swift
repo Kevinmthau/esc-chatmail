@@ -2,6 +2,16 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class ConversationRoutingPolicyTests: XCTestCase {
     private var testStack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
@@ -10,7 +20,7 @@ final class ConversationRoutingPolicyTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
         policy = ConversationRoutingPolicy()
     }
 
@@ -19,6 +29,11 @@ final class ConversationRoutingPolicyTests: XCTestCase {
         context = nil
         testStack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     func testShouldReactivateArchivedConversation_forInboxOrSentMessages() {
@@ -48,7 +63,7 @@ final class ConversationRoutingPolicyTests: XCTestCase {
             .withParticipantHash("archived-not-hidden")
             .archivedOn(Date(timeIntervalSince1970: 100))
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
         XCTAssertFalse(conversation.hasChanges)
         var archivedAtWrites = 0
         var hiddenWrites = 0
@@ -74,7 +89,7 @@ final class ConversationRoutingPolicyTests: XCTestCase {
             .withParticipantHash("hidden-not-archived")
             .setHidden()
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
         XCTAssertFalse(conversation.hasChanges)
         var archivedAtWrites = 0
         var hiddenWrites = 0
@@ -130,6 +145,16 @@ final class ConversationRoutingPolicyTests: XCTestCase {
     }
 }
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class MessageConversationRouterTests: XCTestCase {
     private var testStack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
@@ -138,7 +163,7 @@ final class MessageConversationRouterTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
-        context = testStack.viewContext
+        context = testStack.makeMainQueueViewContext()
         router = MessageConversationRouter()
     }
 
@@ -147,6 +172,11 @@ final class MessageConversationRouterTests: XCTestCase {
         context = nil
         testStack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     func testResolveConversationObjectID_reactivatesArchivedThreadForSentMessage() async throws {
@@ -158,7 +188,7 @@ final class MessageConversationRouterTests: XCTestCase {
             .withSubject("Project")
             .inConversation(conversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let processedMessage = makeProcessedMessage(
             id: "sent-reply",
@@ -187,7 +217,7 @@ final class MessageConversationRouterTests: XCTestCase {
             .withSubject("Project")
             .inConversation(conversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let processedMessage = makeProcessedMessage(
             id: "archived-incoming",
@@ -217,7 +247,7 @@ final class MessageConversationRouterTests: XCTestCase {
             participant: "alice@example.com",
             archivedAt: Date(timeIntervalSince1970: 100)
         )
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let processedMessage = makeProcessedMessage(
             id: "new-non-inbox-message",
@@ -254,7 +284,7 @@ final class MessageConversationRouterTests: XCTestCase {
             .withSubject("Project")
             .inConversation(aliceConversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let processedMessage = makeProcessedMessage(
             id: "alice-adds-bob",
@@ -324,7 +354,7 @@ final class MessageConversationRouterTests: XCTestCase {
             .withSubject("Project")
             .inConversation(aliceConversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let forwardedMessage = makeProcessedMessage(
             id: "forwarded-from-alice",
@@ -393,7 +423,7 @@ final class MessageConversationRouterTests: XCTestCase {
             .withSubject("Project")
             .inConversation(legacyConversation)
             .build(in: context)
-        try testStack.saveViewContext()
+        try saveViewContext()
 
         let processedMessage = makeProcessedMessage(
             id: "incoming-on-legacy-thread",

@@ -1828,6 +1828,19 @@ private func makeMultipartAlternativeMessage(
     )
 }
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never
+/// `testStack.viewContext`, which is private-queue. The test bodies use it
+/// directly, so `@MainActor` on the class is what puts those accesses on-queue;
+/// see that helper for what the private-queue shape races.
+///
+/// Only `testGoldenCorpusReplay`'s conversation-list snippet cases use a
+/// context.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class GoldenCorpusReplayTests: XCTestCase {
     private var processor: MessageProcessor!
 
@@ -1967,7 +1980,7 @@ final class GoldenCorpusReplayTests: XCTestCase {
         for scenario in corpus.conversationListSnippetCases {
             XCTContext.runActivity(named: "conversationListSnippet:\(scenario.id)") { _ in
                 let testStack = TestCoreDataStack()
-                let context = testStack.viewContext
+                let context = testStack.makeMainQueueViewContext()
 
                 let conversationBuilder = ConversationBuilder()
                     .withLastMessageDate(Date())

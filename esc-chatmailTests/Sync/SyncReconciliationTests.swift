@@ -1,6 +1,19 @@
 import XCTest
 @testable import esc_chatmail
 
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// `SyncReconciliation` works on the background context each test hands it, so
+/// this moves only the seed fixtures.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
+@MainActor
 final class SyncReconciliationTests: XCTestCase {
     private var stack: TestCoreDataStack!
 
@@ -33,14 +46,14 @@ final class SyncReconciliationTests: XCTestCase {
             )
         ]
 
-        let seedContext = stack.viewContext
+        let seedContext = stack.makeMainQueueViewContext()
         for index in 1...119 {
             MessageBuilder()
                 .withId("message-\(index)")
                 .withThreadId("thread-\(index)")
                 .build(in: seedContext)
         }
-        try stack.saveViewContext()
+        try seedContext.save()
 
         UserDefaults.standard.set(
             Date().addingTimeInterval(-(3 * 60 * 60)).timeIntervalSince1970,
@@ -329,7 +342,7 @@ final class SyncReconciliationTests: XCTestCase {
                 .build()
         )
 
-        let seedContext = stack.viewContext
+        let seedContext = stack.makeMainQueueViewContext()
         _ = LabelBuilder.inboxLabel(in: seedContext)
         let conversation = ConversationBuilder.simple(in: seedContext)
         MessageBuilder()
@@ -338,7 +351,7 @@ final class SyncReconciliationTests: XCTestCase {
             .read()
             .inConversation(conversation)
             .build(in: seedContext)
-        try stack.saveViewContext()
+        try seedContext.save()
 
         let sut = SyncReconciliation(
             messageFetcher: MessageFetcher(apiClient: mockAPI)
@@ -381,7 +394,7 @@ final class SyncReconciliationTests: XCTestCase {
         )
         mockAPI.getMessageErrors["message-metadata-fails"] = APIError.serverError(500)
 
-        let seedContext = stack.viewContext
+        let seedContext = stack.makeMainQueueViewContext()
         _ = LabelBuilder.inboxLabel(in: seedContext)
         let conversation = ConversationBuilder.simple(in: seedContext)
         MessageBuilder()
@@ -390,7 +403,7 @@ final class SyncReconciliationTests: XCTestCase {
             .read()
             .inConversation(conversation)
             .build(in: seedContext)
-        try stack.saveViewContext()
+        try seedContext.save()
 
         let sut = SyncReconciliation(
             messageFetcher: MessageFetcher(apiClient: mockAPI)
@@ -433,14 +446,14 @@ final class SyncReconciliationTests: XCTestCase {
                 .build()
         )
 
-        let seedContext = stack.viewContext
+        let seedContext = stack.makeMainQueueViewContext()
         let conversation = ConversationBuilder.simple(in: seedContext)
         MessageBuilder()
             .withId("message-needs-inbox")
             .withThreadId("thread-needs-inbox")
             .inConversation(conversation)
             .build(in: seedContext)
-        try stack.saveViewContext()
+        try seedContext.save()
 
         let sut = SyncReconciliation(messageFetcher: MessageFetcher(apiClient: mockAPI))
         let reconcileContext = stack.newBackgroundContext()
@@ -542,14 +555,14 @@ final class SyncReconciliationTests: XCTestCase {
     }
 
     private func seedMessages(_ range: ClosedRange<Int>) throws {
-        let seedContext = stack.viewContext
+        let seedContext = stack.makeMainQueueViewContext()
         for index in range {
             MessageBuilder()
                 .withId("message-\(index)")
                 .withThreadId("thread-\(index)")
                 .build(in: seedContext)
         }
-        try stack.saveViewContext()
+        try seedContext.save()
     }
 
     private func persistedCursor(query: String, pageToken: String) -> [String: Any] {

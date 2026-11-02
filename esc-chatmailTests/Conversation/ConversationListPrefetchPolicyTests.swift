@@ -11,6 +11,16 @@ import CoreData
 /// Note: `ConversationSnapshot.participantEmails` is sorted per conversation,
 /// so "window order" here means item order first, then each item's sorted
 /// email order.
+///
+/// Fixtures, saves, and assertions go through a main-queue context from
+/// `TestCoreDataStack.makeMainQueueViewContext()`, never `stack.viewContext`,
+/// which is private-queue. The test bodies use it directly, so `@MainActor` on
+/// the class is what puts those accesses on-queue; see that helper for what the
+/// private-queue shape races.
+///
+/// HONEST SCOPE: no test here can reproduce that race on demand. With
+/// `-com.apple.CoreData.ConcurrencyDebug 1` the old shape traps and this shape
+/// runs clean.
 @MainActor
 final class ConversationListPrefetchPolicyTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -19,13 +29,18 @@ final class ConversationListPrefetchPolicyTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        context = stack.viewContext
+        context = stack.makeMainQueueViewContext()
     }
 
     override func tearDown() {
         context = nil
         stack = nil
         super.tearDown()
+    }
+
+    private func saveViewContext() throws {
+        guard context.hasChanges else { return }
+        try context.save()
     }
 
     // Revert-check: ConversationListPrefetchPolicy.emailsToPrefetch's
@@ -139,7 +154,7 @@ final class ConversationListPrefetchPolicyTests: XCTestCase {
             participant.conversation = conversation
         }
 
-        try stack.saveViewContext()
+        try saveViewContext()
         return ConversationListItem(conversation: conversation)
     }
 }
