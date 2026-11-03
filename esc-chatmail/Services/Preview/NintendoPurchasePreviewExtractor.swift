@@ -246,9 +246,10 @@ struct NintendoPurchasePreviewExtractor {
     /// `Label: value` lines, keyed by the lowercased label with any
     /// parenthetical dropped ("Price (subject to applicable taxes)" → "price").
     /// A label alone on its line takes the next line as its value, for HTML
-    /// templates that put the two in separate cells, unless that line is itself
-    /// a field or a link. A colon between digits is a clock time ("06:58"), so it
-    /// doesn't count. The first occurrence wins.
+    /// templates that stack the two in separate blocks (table cells extract onto
+    /// one line), unless that line is itself a field or a link. A colon between
+    /// digits is a clock time ("06:58"), so it doesn't count. The first occurrence
+    /// wins.
     private static func labeledFields(in text: String) -> [String: String] {
         let lines = nonEmptyLines(in: text)
         var fields: [String: String] = [:]
