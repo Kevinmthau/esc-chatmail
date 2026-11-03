@@ -48,6 +48,8 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
 
     func testBuildPreview_nintendoNoticeFromHTMLOnly_readsFieldsFromExtractedText() {
         // No plain-text part: the fields come from the HTML-derived text.
+        // Revert-check: dropping `extractedText` from
+        // `NintendoPurchasePreviewExtractor.noticeText` leaves the plain card.
         let result = builder.buildPreview(
             canonicalHTML: NintendoNoticeFixtures.html(from: NintendoNoticeFixtures.renewalBodyText),
             bodyText: nil,
@@ -62,7 +64,44 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
         XCTAssertEqual(result?.detailLine, "Turn off auto-renewal by 10/30/2027 06:58 PDT")
     }
 
-    func testIsPurchaseNotice_requiresNintendoSenderAndReceiptFields() {
+    func testNoticeText_noPlainOrExtractedText_readsCanonicalHTMLLineByLine() {
+        // Revert-check: removing the `canonicalHTML` branch from
+        // `NintendoPurchasePreviewExtractor.noticeText` returns "", so the gate refuses.
+        let noticeText = NintendoPurchasePreviewExtractor.noticeText(
+            plainText: nil,
+            extractedText: nil,
+            canonicalHTML: NintendoNoticeFixtures.html(from: NintendoNoticeFixtures.renewalBodyText)
+        )
+
+        XCTAssertTrue(noticeText.components(separatedBy: .newlines).contains("Automatic renewal term: 365 d"))
+        XCTAssertTrue(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: NintendoNoticeFixtures.renewalSubject,
+            noticeText: noticeText
+        ))
+    }
+
+    func testIsPurchaseNotice_nonNintendoSender_doesNotBuildNoticeText() {
+        // Revert-check: evaluating `noticeText` ahead of `isNintendoSender` in
+        // `isPurchaseNotice` builds the text for every previewed message.
+        var builtText = false
+        func makeNoticeText() -> String {
+            builtText = true
+            return NintendoNoticeFixtures.purchaseBodyText
+        }
+
+        XCTAssertFalse(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: "friend@example.com",
+            subject: NintendoNoticeFixtures.purchaseSubject,
+            noticeText: makeNoticeText()
+        ))
+        XCTAssertFalse(builtText)
+    }
+
+    func testIsPurchaseNotice_senderAndFieldCombinations_acceptsOnlyNintendoNotices() {
+        // Revert-check: dropping `isNintendoSender` from `isPurchaseNotice` accepts
+        // the two foreign senders; dropping `quotedConversationMarkers` or
+        // `isReplyOrForwardSubject` from `acceptedKind` accepts the replies.
         let receipt = NintendoNoticeFixtures.purchaseBodyText
         let renewal = NintendoNoticeFixtures.renewalBodyText
 
@@ -142,6 +181,43 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
             noticeText: NintendoNoticeFixtures.purchaseBodyText
                 + "\n\nDigital purchases are not eligible for a refund. Contact Nintendo Support for help."
         ))
+    }
+
+    func testIsPurchaseNotice_refundStatedBelowTheFields_returnsFalse() {
+        // Revert-check: removing `statedOtherOutcomePattern` from
+        // `reportsOtherOutcome` accepts these, and the card reads "Purchased".
+        for statement in ["This purchase has been refunded.", "We have refunded this purchase.", "Your payment was declined."] {
+            XCTAssertFalse(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+                senderEmail: NintendoNoticeFixtures.senderEmail,
+                subject: "Your transaction with Nintendo",
+                noticeText: """
+                Details of your digital purchase from Nintendo.
+
+                Transaction ID: 52724694283
+                Price: $49.99
+
+                \(statement)
+                """
+            ), statement)
+        }
+    }
+
+    func testBuildPreview_yearFirstTransactionDate_keepsWholeDate() {
+        // Revert-check: dropping the `\b` boundaries and year-first alternative
+        // from `datePart` shows "26/11/01", read from the middle of the year.
+        let bodyText = NintendoNoticeFixtures.purchaseBodyText.replacingOccurrences(
+            of: "11/1/2026 05:58:10",
+            with: "2026/11/01 05:58:10"
+        )
+        let result = builder.buildPreview(
+            canonicalHTML: NintendoNoticeFixtures.html(from: bodyText),
+            bodyText: bodyText,
+            senderName: NintendoNoticeFixtures.senderName,
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: NintendoNoticeFixtures.purchaseSubject
+        )
+
+        XCTAssertEqual(result?.detailLine, "2026/11/01 • Transaction ID 52724694283")
     }
 
     func testIsPurchaseNotice_transactionIDWithOnlyHowToEShopMention_returnsFalse() {

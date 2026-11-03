@@ -111,7 +111,7 @@ struct AppStoreNotificationPreviewExtractor {
 
         let lowercasedSubject = PreviewTextUtilities.normalizedText(subject).lowercased()
         guard !lowercasedSubject.isEmpty,
-              !Self.isReplyOrForwardSubject(lowercasedSubject),
+              !PreviewTextUtilities.isReplyOrForwardSubject(lowercasedSubject),
               !developerDigestSubjectPatterns.contains(where: lowercasedSubject.contains),
               developerAgreementNoticeSubjectPatterns.contains(where: lowercasedSubject.contains) else {
             return false
@@ -133,10 +133,6 @@ struct AppStoreNotificationPreviewExtractor {
             .lowercased()
         return developerProgramTerms.contains(where: lowercasedSubject.contains) ||
             developerProgramTerms.contains(where: lowercasedSender.contains)
-    }
-
-    private static func isReplyOrForwardSubject(_ lowercasedSubject: String) -> Bool {
-        lowercasedSubject.range(of: #"^(?:re|fw|fwd)\s*:"#, options: .regularExpression) != nil
     }
 
     private static func knownDeveloperAgreementName(in lowercasedText: String) -> String? {
@@ -510,25 +506,9 @@ struct AppStoreNotificationPreviewExtractor {
     }
 
     private func firstRegexCaptures(in text: String, pattern: String) -> [String]? {
-        guard !text.isEmpty,
-              let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex..., in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: range),
-              match.numberOfRanges > 1 else {
-            return nil
-        }
-
-        let captures = (1..<match.numberOfRanges).compactMap { index -> String? in
-            guard let captureRange = Range(match.range(at: index), in: text) else {
-                return nil
-            }
-            let capture = PreviewTextUtilities.normalizedText(String(text[captureRange]))
-            return capture.isEmpty ? nil : capture
-        }
-        return captures.isEmpty ? nil : captures
+        let captures = PreviewTextUtilities.firstRegexCaptures(in: text, pattern: pattern)?
+            .filter { !$0.isEmpty }
+        return captures?.isEmpty == false ? captures : nil
     }
 }
 
