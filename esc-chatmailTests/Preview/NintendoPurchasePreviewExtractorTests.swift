@@ -283,6 +283,159 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
         XCTAssertNotEqual(result?.status, "Purchased")
     }
 
+    func testBuildPreview_nintendoItemNameContainingPlanWord_keepsWholeNameAsTitle() {
+        // Revert-check: dropping `\bmembership\b` from the `titleAndPlan` split
+        // titles these "Super Mario" and "Wii Party", with the rest as a "plan".
+        for itemName in ["Super Mario Family Party", "Wii Party Individual Challenge"] {
+            let result = purchasePreview(itemLine: "Purchased Item: \(itemName)")
+
+            XCTAssertEqual(result?.title, itemName)
+            XCTAssertNil(result?.subtitle)
+            XCTAssertEqual(result?.status, "Purchased")
+        }
+    }
+
+    func testBuildPreview_nintendoFamilyMembership_stillSplitsTitleAndPlan() {
+        let result = purchasePreview(
+            itemLine: "Purchased Membership: Nintendo Switch Online family 12-month (365-day) membership"
+        )
+
+        XCTAssertEqual(result?.title, "Nintendo Switch Online")
+        XCTAssertEqual(result?.subtitle, "Family 12-month (365-day) membership")
+    }
+
+    func testBuildPreview_nintendoRenewalDeadlineOnLineBelowLabel_keepsDeadline() {
+        // Revert-check: restoring the bare `contains(":")` next-line check in
+        // `labeledFields` drops the deadline, and the card reads "Renews every
+        // 365 days" instead.
+        let bodyText = NintendoNoticeFixtures.renewalBodyText.replacingOccurrences(
+            of: "Deadline to turn off automatic renewal: ",
+            with: "Deadline to turn off automatic renewal:\n"
+        )
+
+        for result in previewsFromPlainAndHTML(bodyText: bodyText, subject: NintendoNoticeFixtures.renewalSubject) {
+            XCTAssertEqual(result?.detailLine, "Turn off auto-renewal by 10/30/2027 06:58 PDT")
+        }
+    }
+
+    func testBuildPreview_nintendoTransactionDateOnLineBelowLabel_keepsDate() {
+        // Revert-check: restoring the bare `contains(":")` next-line check in
+        // `labeledFields` drops the date from the detail line.
+        let bodyText = NintendoNoticeFixtures.purchaseBodyText.replacingOccurrences(
+            of: "Transaction Date: ",
+            with: "Transaction Date:\n"
+        )
+
+        for result in previewsFromPlainAndHTML(bodyText: bodyText, subject: NintendoNoticeFixtures.purchaseSubject) {
+            XCTAssertEqual(result?.detailLine, "11/1/2026 • Transaction ID 52724694283")
+        }
+    }
+
+    func testBuildPreview_nintendoLabelFollowedByAnotherField_doesNotTakeItAsValue() {
+        // Revert-check: dropping the next-line check in `labeledFields` makes
+        // "Transaction ID: …" and the link the values of the two empty labels.
+        let result = purchasePreview(
+            itemLine: "Purchased Item:\nhttps://ec.nintendo.com/my/membership",
+            dateLine: "Transaction Date:"
+        )
+
+        XCTAssertEqual(result?.title, NintendoNoticeFixtures.purchaseSubject)
+        XCTAssertEqual(result?.detailLine, "Transaction ID 52724694283")
+    }
+
+    func testBuildPreview_nintendoHeadingAboveRenewalSentence_doesNotStretchTitleAcrossLines() {
+        // Revert-check: matching `membershipSentencePattern` over the whole body
+        // with its lines joined titles this card "account Nintendo Switch Online".
+        let result = renewalPreview(sentence: """
+        Manage your account
+        Nintendo Switch Online individual 12-month membership is set for automatic renewal.
+        """)
+
+        XCTAssertEqual(result?.title, NintendoNoticeFixtures.renewalSubject)
+        XCTAssertNil(result?.subtitle)
+    }
+
+    func testBuildPreview_nintendoEarlierYourOnRenewalSentenceLine_titlesFromLastYour() {
+        // Revert-check: dropping `(?!\byour\b)` from `membershipSentencePattern`
+        // titles this card "loyalty, your Nintendo Switch Online".
+        let result = renewalPreview(
+            sentence: "Thank you for your loyalty, your Nintendo Switch Online individual 12-month membership is set for automatic renewal."
+        )
+
+        XCTAssertEqual(result?.title, "Nintendo Switch Online")
+        XCTAssertEqual(result?.subtitle, "Individual 12-month membership")
+    }
+
+    func testBuildPreview_nintendoRenewalSentenceHardWrapped_titlesFromSubject() {
+        // Deliberate cost of reading the sentence line by line: a wrapped line
+        // cannot be told from a heading, so the card keeps the subject, which is
+        // still correct, rather than guessing at a join.
+        let result = renewalPreview(sentence: """
+        Your Nintendo Switch Online individual 12-month
+        membership is set for automatic renewal.
+        """)
+
+        XCTAssertEqual(result?.title, NintendoNoticeFixtures.renewalSubject)
+        XCTAssertEqual(result?.status, "Auto-Renewal")
+    }
+
+    private func purchasePreview(
+        itemLine: String,
+        dateLine: String = "Transaction Date: 11/1/2026 05:58:10 (24H PST)"
+    ) -> TransactionalPreviewModel? {
+        let bodyText = """
+        Thank you for your recent digital purchase from Nintendo. Details of this transaction are below:
+
+        \(dateLine)
+        Transaction ID: 52724694283
+
+        \(itemLine)
+
+        Total: $54.36
+        """
+        return builder.buildPreview(
+            canonicalHTML: NintendoNoticeFixtures.html(from: bodyText),
+            bodyText: bodyText,
+            senderName: NintendoNoticeFixtures.senderName,
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: NintendoNoticeFixtures.purchaseSubject
+        )
+    }
+
+    private func renewalPreview(sentence: String) -> TransactionalPreviewModel? {
+        let bodyText = """
+        \(sentence)
+
+        Automatic renewal term: 365 d
+        Price (subject to applicable taxes): $49.99
+        Deadline to turn off automatic renewal: 10/30/2027 06:58 (24H PDT)
+        """
+        return builder.buildPreview(
+            canonicalHTML: NintendoNoticeFixtures.html(from: bodyText),
+            bodyText: bodyText,
+            senderName: NintendoNoticeFixtures.senderName,
+            senderEmail: NintendoNoticeFixtures.senderEmail,
+            subject: NintendoNoticeFixtures.renewalSubject
+        )
+    }
+
+    /// The same body as a plain-text part and as HTML-only mail, whose fields
+    /// come from the extracted text.
+    private func previewsFromPlainAndHTML(
+        bodyText: String,
+        subject: String
+    ) -> [TransactionalPreviewModel?] {
+        [bodyText, nil].map { plainText in
+            builder.buildPreview(
+                canonicalHTML: NintendoNoticeFixtures.html(from: bodyText),
+                bodyText: plainText,
+                senderName: NintendoNoticeFixtures.senderName,
+                senderEmail: NintendoNoticeFixtures.senderEmail,
+                subject: subject
+            )
+        }
+    }
+
     private static let refundBodyText = """
     We have refunded your recent digital purchase from Nintendo.
 

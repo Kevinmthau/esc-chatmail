@@ -192,14 +192,12 @@ struct NintendoPurchasePreviewExtractor {
         subject: String?,
         noticeText: String
     ) -> NintendoPurchaseNotice {
-        let flattenedText = noticeText
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-        let membershipName = Self.firstRegexCapture(
-            in: flattenedText,
-            // `[^.:]` keeps an earlier "your" in the greeting or header from
-            // stretching the capture across sentences to this one.
-            pattern: #"\byour\s+([^.:]{3,120}?)\s+is\s+(?:now\s+)?set\s+for\s+automatic\s+renewal"#
-        )
+        // Read line by line: joined lines would run a heading ("Manage your
+        // account") into the sentence below it. A sentence hard-wrapped across
+        // lines looks the same as that, so it falls back to the subject.
+        let membershipName = Self.nonEmptyLines(in: noticeText).lazy
+            .compactMap { Self.firstRegexCapture(in: $0, pattern: membershipSentencePattern) }
+            .first
         let (title, subtitle) = titleAndPlan(
             from: membershipName,
             subject: subject,
@@ -223,7 +221,9 @@ struct NintendoPurchasePreviewExtractor {
 
     /// "Nintendo Switch Online + Expansion Pack individual 12-month (365-day)
     /// membership" reads as a product name followed by its plan; the card shows
-    /// the product as the title and the plan beneath it.
+    /// the product as the title and the plan beneath it. "Membership" must follow
+    /// the plan word, or a game ("Super Mario Family Party") would lose the end
+    /// of its name to a plan it does not have.
     private func titleAndPlan(
         from itemName: String?,
         subject: String?,
@@ -232,7 +232,7 @@ struct NintendoPurchasePreviewExtractor {
         if let itemName,
            let captures = Self.firstRegexCaptures(
             in: itemName,
-            pattern: #"^(.+?)\s+((?:individual|family)\b.+)$"#
+            pattern: #"^(.+?)\s+((?:individual|family)\b.*\bmembership\b.*)$"#
            ),
            captures.count == 2 {
             return (
@@ -261,12 +261,12 @@ struct NintendoPurchasePreviewExtractor {
     /// `Label: value` lines, keyed by the lowercased label with any
     /// parenthetical dropped ("Price (subject to applicable taxes)" → "price").
     /// A label alone on its line takes the next line as its value, for HTML
-    /// templates that put the two in separate cells. The first occurrence wins.
+    /// templates that stack the two in separate blocks (table cells extract onto
+    /// one line), unless that line is itself a field or a link. A colon between
+    /// digits is a clock time ("06:58"), so it doesn't count. The first occurrence
+    /// wins.
     private static func labeledFields(in text: String) -> [String: String] {
-        let lines = text
-            .components(separatedBy: .newlines)
-            .map { PreviewTextUtilities.normalizedText($0) }
-            .filter { !$0.isEmpty }
+        let lines = nonEmptyLines(in: text)
         var fields: [String: String] = [:]
 
         for (index, line) in lines.enumerated() {
@@ -287,7 +287,8 @@ struct NintendoPurchasePreviewExtractor {
             }
 
             var value = captures[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            if value.isEmpty, index + 1 < lines.count, !lines[index + 1].contains(":") {
+            if value.isEmpty, index + 1 < lines.count,
+               lines[index + 1].range(of: #"(?<!\d):|:(?!\d)"#, options: .regularExpression) == nil {
                 value = lines[index + 1]
             }
             guard !value.isEmpty, !value.lowercased().hasPrefix("//") else {
@@ -298,6 +299,13 @@ struct NintendoPurchasePreviewExtractor {
         }
 
         return fields
+    }
+
+    private static func nonEmptyLines(in text: String) -> [String] {
+        text
+            .components(separatedBy: .newlines)
+            .map { PreviewTextUtilities.normalizedText($0) }
+            .filter { !$0.isEmpty }
     }
 
     private static func firstValue(for labels: [String], in fields: [String: String]) -> String? {
@@ -373,6 +381,12 @@ private let automaticRenewalMarkers = [
 /// Where a notice's labeled fields begin; `reportsOtherOutcome` reads above it.
 private let noticeFieldPattern = ([transactionIDFieldPattern] + automaticRenewalMarkers)
     .joined(separator: "|")
+
+/// The renewal notice's "Your <membership> is set for automatic renewal", run on
+/// one line. The capture stops at sentence punctuation and starts after the last
+/// "your", so an earlier one in a greeting cannot stretch it.
+private let membershipSentencePattern =
+    #"\byour\s+((?:(?!\byour\b)[^.:]){3,120}?)\s+is\s+(?:now\s+)?set\s+for\s+automatic\s+renewal"#
 
 /// Word stems that say the transaction did not end as a purchase or a live renewal.
 private let otherOutcomePattern =
