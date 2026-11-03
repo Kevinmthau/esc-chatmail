@@ -59,6 +59,30 @@ enum PreviewTextUtilities {
         }
     }
 
+    static func isReplyOrForwardSubject(_ lowercasedSubject: String) -> Bool {
+        lowercasedSubject.range(of: #"^(?:re|fw|fwd)\s*:"#, options: .regularExpression) != nil
+    }
+
+    /// The first case-insensitive match's capture groups, normalized and in group
+    /// order: a group that took no part in the match, or captured only whitespace,
+    /// is "" so later groups keep their positions. Nil when nothing matches.
+    static func firstRegexCaptures(in text: String, pattern: String) -> [String]? {
+        guard !text.isEmpty,
+              let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              match.numberOfRanges > 1 else {
+            return nil
+        }
+
+        return (1..<match.numberOfRanges).map { index in
+            Range(match.range(at: index), in: text).map { normalizedText(String(text[$0])) } ?? ""
+        }
+    }
+
     static func aspectRatio(width: Int?, height: Int?) -> Double? {
         guard let width, let height, width > 0, height > 0 else {
             return nil

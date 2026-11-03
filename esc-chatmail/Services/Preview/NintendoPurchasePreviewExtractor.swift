@@ -1,15 +1,5 @@
 import Foundation
 
-/// Card fields read from a Nintendo purchase receipt or membership
-/// automatic-renewal notice.
-struct NintendoPurchaseNotice: Equatable {
-    let title: String
-    let subtitle: String?
-    let amount: String?
-    let status: String
-    let detailLine: String?
-}
-
 /// Detects Nintendo Account purchase receipts ("Thank you for your recent
 /// digital purchase from Nintendo", with a `Transaction ID:` line) and Nintendo
 /// Switch Online automatic-renewal notices, and reads their labeled fields into
@@ -70,36 +60,57 @@ struct NintendoPurchasePreviewExtractor {
     /// ("\non ", "from:") that Nintendo's own instruction lines ("On your PC or
     /// smart device") can trip, so the explicit quote markers below stand in
     /// for it.
-    static func isPurchaseNotice(senderEmail: String?, subject: String?, noticeText: String) -> Bool {
-        guard PreviewTextUtilities.senderDomain(senderEmail, matchesDomainOrSuffixIn: nintendoSenderDomainSuffixes) else {
+    ///
+    /// The sender is checked first and `noticeText` is only built past it: the
+    /// pipeline asks this about every previewed message, and building the text
+    /// can re-parse the canonical HTML.
+    static func isPurchaseNotice(
+        senderEmail: String?,
+        subject: String?,
+        noticeText: @autoclosure () -> String
+    ) -> Bool {
+        guard isNintendoSender(senderEmail) else {
             return false
         }
 
+        return acceptedKind(subject: subject, noticeText: noticeText()) != nil
+    }
+
+    private static func isNintendoSender(_ senderEmail: String?) -> Bool {
+        PreviewTextUtilities.senderDomain(senderEmail, matchesDomainOrSuffixIn: nintendoSenderDomainSuffixes)
+    }
+
+    /// The gate past the sender check, and the kind of notice it accepted.
+    private static func acceptedKind(subject: String?, noticeText: String) -> NoticeKind? {
         let lowercasedSubject = PreviewTextUtilities.normalizedComparableText(subject)
-        guard lowercasedSubject.range(of: #"^(?:re|fw|fwd)\s*:"#, options: .regularExpression) == nil else {
-            return false
+        guard !PreviewTextUtilities.isReplyOrForwardSubject(lowercasedSubject) else {
+            return nil
         }
 
         let lowercasedText = noticeText.lowercased()
-        guard !quotedConversationMarkers.contains(where: lowercasedText.contains) else {
-            return false
+        guard !quotedConversationMarkers.contains(where: lowercasedText.contains),
+              let kind = noticeKind(in: lowercasedText),
+              !reportsOtherOutcome(lowercasedSubject: lowercasedSubject, lowercasedText: lowercasedText) else {
+            return nil
         }
 
-        guard noticeKind(in: lowercasedText) != nil else {
-            return false
-        }
-
-        return !reportsOtherOutcome(lowercasedSubject: lowercasedSubject, lowercasedText: lowercasedText)
+        return kind
     }
 
     /// A refund, cancelled order, declined payment, lapsed renewal or support
     /// reply can carry these same labeled fields, and the card's fixed status
     /// ("Purchased", "Auto-Renewal") would then state the opposite of the mail.
-    /// Only the subject and the lead-in above the first field are read: the
-    /// how-to and legal sections below the fields can use these words on a
-    /// genuine notice. A mail this refuses takes the classifier's route, as any
-    /// other Nintendo mail does.
+    /// The word stems are read only in the subject and the lead-in above the
+    /// first field: the how-to and legal sections below the fields can use these
+    /// words on a genuine notice. Below the fields only a statement that it
+    /// happened counts ("has been refunded"), which a genuine notice's conditional
+    /// legal wording ("not eligible for a refund") doesn't make. A mail this
+    /// refuses takes the classifier's route, as any other Nintendo mail does.
     private static func reportsOtherOutcome(lowercasedSubject: String, lowercasedText: String) -> Bool {
+        if lowercasedText.range(of: statedOtherOutcomePattern, options: .regularExpression) != nil {
+            return true
+        }
+
         let firstField = lowercasedText.range(of: noticeFieldPattern, options: .regularExpression)
         let leadIn = firstField.map { String(lowercasedText[..<$0.lowerBound]) } ?? ""
         return [lowercasedSubject, leadIn].contains { text in
@@ -108,14 +119,18 @@ struct NintendoPurchasePreviewExtractor {
     }
 
     /// The card for a purchase notice, or nil when `isPurchaseNotice` refuses
-    /// the message.
+    /// the message. `noticeText` is only built for a Nintendo sender, as there.
     func notice(
         senderEmail: String?,
         subject: String?,
-        noticeText: String
+        noticeText makeNoticeText: @autoclosure () -> String
     ) -> NintendoPurchaseNotice? {
-        guard Self.isPurchaseNotice(senderEmail: senderEmail, subject: subject, noticeText: noticeText),
-              let kind = Self.noticeKind(in: noticeText.lowercased()) else {
+        guard Self.isNintendoSender(senderEmail) else {
+            return nil
+        }
+
+        let noticeText = makeNoticeText()
+        guard let kind = Self.acceptedKind(subject: subject, noticeText: noticeText) else {
             return nil
         }
 
@@ -156,7 +171,7 @@ struct NintendoPurchasePreviewExtractor {
         let (title, subtitle) = titleAndPlan(from: itemName, subject: subject, fallback: "Nintendo purchase")
 
         let transactionDate = Self.firstValue(for: ["transaction date", "purchase date", "date"], in: fields)
-            .flatMap(Self.datePart)
+            .map(Self.datePart)
         let transactionID = Self.firstValue(for: ["transaction id"], in: fields)
             .map { "Transaction ID \($0)" }
         let detailSegments = [transactionDate, transactionID].compactMap { $0 }
@@ -257,8 +272,7 @@ struct NintendoPurchasePreviewExtractor {
         for (index, line) in lines.enumerated() {
             guard let captures = firstRegexCaptures(
                 in: line,
-                pattern: #"^[•▼*\-\s]*([^:]{2,60}?)\s*:\s*(.*)$"#,
-                allowsEmptyCaptures: true
+                pattern: #"^[•▼*\-\s]*([^:]{2,60}?)\s*:\s*(.*)$"#
             ),
                   captures.count == 2 else {
                 continue
@@ -290,9 +304,12 @@ struct NintendoPurchasePreviewExtractor {
         labels.lazy.compactMap { fields[$0] }.first
     }
 
-    /// "11/1/2026 05:58:10 (24H PST)" → "11/1/2026".
-    private static func datePart(_ timestamp: String) -> String? {
-        firstRegexCapture(in: timestamp, pattern: #"(\d{1,2}/\d{1,2}/\d{2,4})"#) ?? normalizedTimestamp(timestamp)
+    /// "11/1/2026 05:58:10 (24H PST)" → "11/1/2026". The boundaries keep a
+    /// year-first date ("2026/11/01") whole rather than reading "26/11/01" from
+    /// the middle of its year.
+    private static func datePart(_ timestamp: String) -> String {
+        firstRegexCapture(in: timestamp, pattern: #"\b(\d{4}/\d{1,2}/\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4})\b"#)
+            ?? normalizedTimestamp(timestamp)
     }
 
     /// "10/30/2027 06:58 (24H PDT)" → "10/30/2027 06:58 PDT".
@@ -313,36 +330,14 @@ struct NintendoPurchasePreviewExtractor {
     }
 
     private static func firstRegexCapture(in text: String, pattern: String) -> String? {
-        firstRegexCaptures(in: text, pattern: pattern)?.first
+        guard let capture = firstRegexCaptures(in: text, pattern: pattern)?.first, !capture.isEmpty else {
+            return nil
+        }
+        return capture
     }
 
-    private static func firstRegexCaptures(
-        in text: String,
-        pattern: String,
-        allowsEmptyCaptures: Bool = false
-    ) -> [String]? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex..., in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: range),
-              match.numberOfRanges > 1 else {
-            return nil
-        }
-
-        var captures: [String] = []
-        for index in 1..<match.numberOfRanges {
-            guard let captureRange = Range(match.range(at: index), in: text) else {
-                return nil
-            }
-            let capture = text[captureRange].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard allowsEmptyCaptures || !capture.isEmpty else {
-                return nil
-            }
-            captures.append(capture)
-        }
-        return captures
+    private static func firstRegexCaptures(in text: String, pattern: String) -> [String]? {
+        PreviewTextUtilities.firstRegexCaptures(in: text, pattern: pattern)
     }
 }
 
@@ -382,6 +377,12 @@ private let noticeFieldPattern = ([transactionIDFieldPattern] + automaticRenewal
 /// Word stems that say the transaction did not end as a purchase or a live renewal.
 private let otherOutcomePattern =
     #"\b(?:refund|cancel|declin|fail|unsuccessful|unable|could not|couldn['’]t|turned off|expired|support)"#
+
+/// Statements that the transaction ended some other way, read over the whole
+/// body. A legal section that happens to phrase one this way costs that notice
+/// its card, which is the safe direction: a refund must not read "Purchased".
+private let statedOtherOutcomePattern =
+    #"\b(?:(?:has|have|had)\s+been|was|were)\s+(?:refunded|cancell?ed|declined|reversed)\b|\bwe(?:\s+have|['’]ve)?\s+refunded\b"#
 
 private let purchasedItemLabels = [
     "purchased membership",
