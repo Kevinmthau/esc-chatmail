@@ -48,8 +48,12 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
 
     func testBuildPreview_nintendoNoticeFromHTMLOnly_readsFieldsFromExtractedText() {
         // No plain-text part: the fields come from the HTML-derived text.
-        // Revert-check: dropping `extractedText` from
-        // `NintendoPurchasePreviewExtractor.noticeText` leaves the plain card.
+        // Revert-check: removing the `NintendoPurchasePreviewExtractor` branch from
+        // `TransactionalPreviewBuilder.buildPreview` loses the status and detail line.
+        // HONEST SCOPE: `noticeText`'s extracted and canonical branches read the
+        // same text here, so dropping either alone passes;
+        // `testNoticeText_extractedTextPresent_readsItAheadOfCanonicalHTML` and
+        // `testNoticeText_noPlainOrExtractedText_readsCanonicalHTMLLineByLine` pin them.
         let result = builder.buildPreview(
             canonicalHTML: NintendoNoticeFixtures.html(from: NintendoNoticeFixtures.renewalBodyText),
             bodyText: nil,
@@ -62,6 +66,19 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
         XCTAssertEqual(result?.amount, "$49.99")
         XCTAssertEqual(result?.status, "Auto-Renewal")
         XCTAssertEqual(result?.detailLine, "Turn off auto-renewal by 10/30/2027 06:58 PDT")
+    }
+
+    func testNoticeText_extractedTextPresent_readsItAheadOfCanonicalHTML() {
+        // Revert-check: dropping `extractedText` from
+        // `NintendoPurchasePreviewExtractor.noticeText` reads the canonical HTML instead.
+        XCTAssertEqual(
+            NintendoPurchasePreviewExtractor.noticeText(
+                plainText: nil,
+                extractedText: "Transaction ID: 52724694283",
+                canonicalHTML: "<p>Other text</p>"
+            ),
+            "Transaction ID: 52724694283"
+        )
     }
 
     func testNoticeText_noPlainOrExtractedText_readsCanonicalHTMLLineByLine() {
@@ -91,6 +108,22 @@ final class NintendoPurchasePreviewExtractorTests: XCTestCase {
         }
 
         XCTAssertFalse(NintendoPurchasePreviewExtractor.isPurchaseNotice(
+            senderEmail: "friend@example.com",
+            subject: NintendoNoticeFixtures.purchaseSubject,
+            noticeText: makeNoticeText()
+        ))
+        XCTAssertFalse(builtText)
+
+        // The builder's path, which reads the same text.
+        // Revert-check: building `makeNoticeText()` ahead of `isNintendoSender` in
+        // `notice` builds it for every transactional card.
+        let extractor = NintendoPurchasePreviewExtractor(
+            lineProcessor: PreviewLineProcessor(
+                config: PreviewLineProcessorConfig(footerStopPatterns: [], truncationTrailingMinDistance: 20)
+            ),
+            firstAmount: { _ in nil }
+        )
+        XCTAssertNil(extractor.notice(
             senderEmail: "friend@example.com",
             subject: NintendoNoticeFixtures.purchaseSubject,
             noticeText: makeNoticeText()
