@@ -45,7 +45,8 @@ struct ImageAttachmentBubble: View {
                 isLoading: thumbnailLoader.isLoading,
                 filename: attachment.filename,
                 presentation: reservedPresentation,
-                size: size
+                size: size,
+                backdrop: thumbnailLoader.imageBackdrop
             )
             .overlay {
                 // An overlay cannot enlarge the image's reserved frame.
@@ -97,11 +98,18 @@ struct ImageAttachmentBubbleContent: View {
     let filename: String
     let presentation: InlineImagePresentationPolicy
     let size: CGSize
+    var backdrop: ImageBackdropPolicy = .none
+
+    /// A loaded image with nothing to see in it takes the failed thumbnail's placeholder, which
+    /// at least names the attachment, rather than holding the reserved frame empty.
+    private var visibleImage: UIImage? {
+        backdrop == .nothingVisible ? nil : image
+    }
 
     var body: some View {
         let padding: CGFloat = presentation == .compact ? min(8, size.width / 2) : 0
         ZStack {
-            if let image {
+            if let image = visibleImage {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
@@ -134,9 +142,13 @@ struct ImageAttachmentBubbleContent: View {
     }
 
     private var backgroundColor: Color {
+        // Ahead of the compact chrome too: a black logo is no easier to see on the dark bubble.
+        if visibleImage != nil, let matte = backdrop.matteColor {
+            return matte
+        }
         if presentation == .compact {
             return MessageBubbleStyle.standard.recipientBubbleColor()
         }
-        return image == nil ? Color.gray.opacity(0.1) : .clear
+        return visibleImage == nil ? Color.gray.opacity(0.1) : .clear
     }
 }
