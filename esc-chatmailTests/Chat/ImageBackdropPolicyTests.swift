@@ -68,7 +68,7 @@ final class ImageBackdropPolicyTests: XCTestCase {
     /// The image the empty box could equally have held. `.light` would turn a black box into a
     /// white one, with nothing to see in either.
     /// Revert-check: without `ImageBackdropPolicy.resolve(for:)`'s `hasVisibleSample` guard this
-    /// divides by a zero alpha sum and takes the `.dark` branch.
+    /// divides by a zero alpha sum and falls through to `.none`, leaving the box empty.
     func testResolve_fullyTransparentImage_reportsNothingVisible() throws {
         let image = try decodedPNG(canvas: 500) { _ in }
         XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .nothingVisible)
