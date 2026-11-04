@@ -11,7 +11,8 @@ final class AttachmentThumbnailLoader: ObservableObject {
     @Published var isLoading = false
 
     private let cache = AttachmentCacheActor.shared
-    private var loadTask: Task<Void, Never>?
+    /// Readable so a test can await a retired load's end instead of sleeping past it.
+    private(set) var loadTask: Task<Void, Never>?
     private var currentRequest: LoadRequest?
     /// Seam for tests: production routes to AttachmentCacheActor's budgeted,
     /// deduplicated video-frame extraction.

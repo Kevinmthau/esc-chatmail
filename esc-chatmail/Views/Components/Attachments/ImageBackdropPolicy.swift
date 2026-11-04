@@ -9,17 +9,22 @@ import SwiftUI
 ///
 /// Decided from the pixels and never from the color scheme: the card follows the image, so it
 /// does not change when the appearance does. The single-attachment bubble reads `ImageProcessor`'s
-/// thumbnail, which keeps an image within its size limit byte for byte, transparency included,
-/// and flattens a larger one onto white. The grid reads the original, at any size.
+/// thumbnail, which keeps an image within its size limit byte for byte, transparency included.
+/// It reads the original when that thumbnail flattened the image onto white, which would leave
+/// this policy nothing to find (`ImageProcessor.thumbnailFlattensTransparency`). The grid reads
+/// the original, at any size.
 enum ImageBackdropPolicy: Equatable {
     /// Reads as an opaque picture, or holds mid-tone content that shows on either background;
     /// whatever is already behind it stays. A round headshot or a colorful logo floated fine on
     /// the transcript and must not gain a square around it.
     case none
-    /// Mostly dark content on transparency, which needs a light card.
+    /// Dark content on transparency, which needs a light card.
     case light
-    /// Mostly light content on transparency, which needs a dark card.
+    /// Light content on transparency, which needs a dark card.
     case dark
+    /// Dark and light content side by side, such as black text beside a bright icon. A white card
+    /// loses the light half and a dark card the black one, in either appearance; mid-gray shows both.
+    case neutral
     /// No pixel holds anything to see, so no card could help: this is the thumbnail placeholder's
     /// job, in the geometry the attachment's metadata already reserved.
     case nothingVisible
@@ -32,6 +37,9 @@ enum ImageBackdropPolicy: Equatable {
         case .dark:
             // The email reader's dark canvas (`HTMLDisplayWrapper.Theme`).
             return Color(red: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255)
+        case .neutral:
+            // Equally far from black and white: about 4.6:1 against each.
+            return Color(red: 0x76 / 255, green: 0x76 / 255, blue: 0x76 / 255)
         case .none, .nothingVisible:
             return nil
         }
@@ -39,11 +47,42 @@ enum ImageBackdropPolicy: Equatable {
 
     /// Off the main actor once there is a bitmap to read: a thumbnail decodes lazily, on its
     /// first draw. An image whose format has no alpha channel answers without one.
-    static func resolve(for image: UIImage?) async -> Self {
-        guard let cgImage = image?.cgImage, mayHaveTransparency(cgImage) else { return .none }
-        return await Task.detached(priority: .userInitiated) {
-            resolve(for: cgImage)
-        }.value
+    ///
+    /// A verdict stays with the image it read, so a row scrolling back into view reuses it through
+    /// the instance `AttachmentCacheActor` hands back. It can't outlive that instance, or cross an
+    /// account or a path change: each of those is a different image.
+    ///
+    /// Cancelled along with its caller. The draw itself can't be interrupted, so a check that has
+    /// started finishes and stores its verdict, sparing the next mount the work. One that hasn't
+    /// started answers `.none`, which only a cancelled caller sees, and stores nothing.
+    static func resolve(
+        for image: UIImage?,
+        analyze: @escaping @Sendable (CGImage) -> Self = { ImageBackdropPolicy.resolve(for: $0) }
+    ) async -> Self {
+        guard let image, let cgImage = image.cgImage, mayHaveTransparency(cgImage) else { return .none }
+        if let stored = storedVerdict(for: image) { return stored }
+        guard !Task.isCancelled else { return .none }
+
+        let analysis = Task.detached(priority: .userInitiated) { () -> Self in
+            guard !Task.isCancelled else { return .none }
+            let verdict = analyze(cgImage)
+            store(verdict, for: image)
+            return verdict
+        }
+        return await withTaskCancellationHandler {
+            await analysis.value
+        } onCancel: {
+            analysis.cancel()
+        }
+    }
+
+    /// The verdict already read from this image, if any.
+    static func storedVerdict(for image: UIImage) -> Self? {
+        objc_getAssociatedObject(image, verdictKey) as? Self
+    }
+
+    private static func store(_ verdict: Self, for image: UIImage) {
+        objc_setAssociatedObject(image, verdictKey, verdict, .OBJC_ASSOCIATION_RETAIN)
     }
 
     static func resolve(for cgImage: CGImage) -> Self {
@@ -71,28 +110,56 @@ enum ImageBackdropPolicy: Equatable {
         }
         guard didDraw else { return .none }
 
-        var hasVisibleSample = false
         var alphaSum = 0.0
-        var premultipliedLumaSum = 0.0
+        var visibleCoverage = 0.0
+        var darkCoverage = 0.0
+        var lightCoverage = 0.0
+        var toneCoverage = [Double](repeating: 0, count: toneBinCount)
         for offset in stride(from: 0, to: pixels.count, by: 4) {
             let alpha = pixels[offset + 3]
-            if alpha >= visibleAlphaFloor { hasVisibleSample = true }
             alphaSum += Double(alpha)
-            premultipliedLumaSum += 0.2126 * Double(pixels[offset])
-                + 0.7152 * Double(pixels[offset + 1])
-                + 0.0722 * Double(pixels[offset + 2])
+            guard alpha >= visibleAlphaFloor else { continue }
+
+            let coverage = Double(alpha)
+            visibleCoverage += coverage
+            // Per sample, not over the image: the average of black text and a bright icon is a
+            // mid-tone that reads fine on anything, while the text itself vanishes on black.
+            let luminance = 0.2126 * linearChannel(pixels[offset], alpha: alpha)
+                + 0.7152 * linearChannel(pixels[offset + 1], alpha: alpha)
+                + 0.0722 * linearChannel(pixels[offset + 2], alpha: alpha)
+            if luminance < darkContentLuminanceCeiling {
+                darkCoverage += coverage
+            } else if luminance > lightContentLuminanceFloor {
+                lightCoverage += coverage
+            }
+            // The square root spaces the bins roughly as the eye does.
+            let toneBin = min(toneBinCount - 1, Int(luminance.squareRoot() * Double(toneBinCount)))
+            toneCoverage[toneBin] += coverage
         }
-        guard hasVisibleSample else { return .nothingVisible }
+        guard visibleCoverage > 0 else { return .nothingVisible }
 
         let transparentShare = 1 - alphaSum / (255 * Double(sampleSide * sampleSide))
         guard transparentShare >= minimumTransparentShare else { return .none }
 
-        // Premultiplied channels already weigh each sample by its coverage, so this is the mean
-        // over what is visible, not diluted by the transparent canvas around it.
-        let meanLuma = premultipliedLumaSum / alphaSum
-        if meanLuma < darkContentLumaCeiling { return .light }
-        if meanLuma > lightContentLumaFloor { return .dark }
-        return .none
+        let topToneCoverage = toneCoverage.sorted(by: >).prefix(flatArtToneCount).reduce(0, +)
+        let isFlatArt = topToneCoverage / visibleCoverage >= flatArtMinimumToneShare
+        let requiredShare = isFlatArt ? flatArtContentShare : photoContentShare
+        switch (darkCoverage / visibleCoverage >= requiredShare, lightCoverage / visibleCoverage >= requiredShare) {
+        case (true, true):
+            return .neutral
+        case (true, false):
+            return .light
+        case (false, true):
+            return .dark
+        case (false, false):
+            return .none
+        }
+    }
+
+    /// Linear light, 0 to 1, of one premultiplied channel in a sample of the given alpha.
+    private static func linearChannel(_ premultiplied: UInt8, alpha: UInt8) -> Double {
+        let encoded = (Int(premultiplied) * 255 + Int(alpha) / 2) / Int(alpha)
+        return linearFromEncoded[min(encoded, 255)]
     }
 
     private static func mayHaveTransparency(_ cgImage: CGImage) -> Bool {
@@ -112,9 +179,33 @@ enum ImageBackdropPolicy: Equatable {
     private static let minimumTransparentShare = 0.05
     /// Alpha, out of 255, under which a sample holds nothing anyone could see.
     private static let visibleAlphaFloor: UInt8 = 5
-    /// sRGB-encoded luma, 0 to 1, below which content is too dark to read on black. About 2.5:1
-    /// against it, the same contrast `lightContentLumaFloor` leaves against white.
-    private static let darkContentLumaCeiling = 0.3
-    /// sRGB-encoded luma, 0 to 1, above which content is too light to read on white.
-    private static let lightContentLumaFloor = 0.65
+    /// Luminance, 0 to 1, below which content is too dark to read on black: about 2.5:1 against
+    /// it, the same contrast `lightContentLuminanceFloor` leaves against white. Luminance rather
+    /// than encoded luma, which would call pure red (5:1 on black) too dark to read.
+    private static let darkContentLuminanceCeiling = 0.073
+    /// Luminance, 0 to 1, above which content is too light to read on white.
+    private static let lightContentLuminanceFloor = 0.38
+
+    /// Flat art keeps its coverage in a few tones, where a photo's spreads across the range. Top
+    /// three of sixteen bins: over this share in a logo, well under it in a photo, even one with a
+    /// white background and a black jacket.
+    private static let toneBinCount = 16
+    private static let flatArtToneCount = 3
+    private static let flatArtMinimumToneShare = 0.8
+    /// The share of a logo's visible content that has to be lost for a card to be worth it. Text
+    /// beside a solid icon holds about this much coverage even when the icon is large. Below it,
+    /// a small detail doesn't decide the card; the rest of the logo does.
+    private static let flatArtContentShare = 0.15
+    /// A photo needs a majority before it gets a card. Its shadows and highlights still read as
+    /// part of the picture around them, so a round headshot with dark hair stays card-free.
+    private static let photoContentShare = 0.5
+
+    private static let linearFromEncoded: [Double] = (0...255).map { value in
+        let encoded = Double(value) / 255
+        return encoded <= 0.04045 ? encoded / 12.92 : pow((encoded + 0.055) / 1.055, 2.4)
+    }
+    /// Identifies the stored verdict among a `UIImage`'s associated objects, by address only.
+    private static let verdictKey = UnsafeRawPointer(
+        UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1)
+    )
 }

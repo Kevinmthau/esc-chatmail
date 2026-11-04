@@ -77,6 +77,22 @@ struct ImageProcessor {
         return nil
     }
     
+    /// Whether `generateThumbnail` flattened this image onto white, which a white logo doesn't
+    /// survive. Over the size limit it re-encodes as JPEG; within it the bytes are unchanged. A JPEG
+    /// original had no transparency to lose, so reading it instead would only cost a bigger decode.
+    /// Answers from the attachment's stored metadata, so it needs no read of either file.
+    static func thumbnailFlattensTransparency(
+        pixelWidth: CGFloat,
+        pixelHeight: CGFloat,
+        mimeType: String
+    ) -> Bool {
+        let normalizedMimeType = mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return max(pixelWidth, pixelHeight) > maxThumbnailDimension
+            && normalizedMimeType.hasPrefix("image/")
+            && normalizedMimeType != "image/jpeg"
+            && normalizedMimeType != "image/jpg"
+    }
+
     static func generatePDFThumbnail(from data: Data) -> Data? {
         guard let document = PDFDocument(data: data),
               let firstPage = document.page(at: 0) else {

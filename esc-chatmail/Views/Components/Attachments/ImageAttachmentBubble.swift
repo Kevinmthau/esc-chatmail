@@ -31,14 +31,17 @@ struct ImageAttachmentBubble: View {
         _reservedPresentation = State(initialValue: presentation)
     }
 
-    var body: some View {
-        let size = ImageAttachmentLayout.size(
+    private var size: CGSize {
+        ImageAttachmentLayout.size(
             pixelWidth: reservedPixelSize.width,
             pixelHeight: reservedPixelSize.height,
             maxWidth: maxWidth,
             displayScale: displayScale,
             presentation: reservedPresentation
         )
+    }
+
+    var body: some View {
         Button(action: onTap) {
             ImageAttachmentBubbleContent(
                 image: thumbnailLoader.image,
@@ -60,11 +63,7 @@ struct ImageAttachmentBubble: View {
         .opacity([.downloaded, .uploaded, .failed].contains(attachment.state) ? 1.0 : 0.7)
         .disabled(!attachment.isReady && attachment.state != .failed)
         .onAppear {
-            thumbnailLoader.load(
-                attachmentId: attachment.id,
-                messageId: attachment.message?.id,
-                previewPath: attachment.previewURL
-            )
+            loadThumbnail()
             // Download if queued, failed, or file is missing from disk
             let waitsForRetry = InlineImagePresentationPolicy.requiresExplicitRetry(
                 attachment: attachment, isFromMe: attachment.message?.isFromMe ?? false
@@ -75,17 +74,42 @@ struct ImageAttachmentBubble: View {
                 }
             }
         }
-        .onChange(of: attachment.previewURL) { _, newValue in
+        .onChange(of: attachment.previewURL) { _, _ in
             // Path identity participates in the loader request, so migration
             // must replace any image decoded from the previous path.
-            thumbnailLoader.load(
-                attachmentId: attachment.id,
-                messageId: attachment.message?.id,
-                previewPath: newValue
-            )
+            loadThumbnail()
+        }
+        .onChange(of: attachment.localURL) { _, _ in
+            loadThumbnail()
         }
         .onDisappear {
             thumbnailLoader.cancel()
+        }
+    }
+
+    /// An image whose thumbnail flattened onto white reads its original instead: a white logo has
+    /// nothing left in that thumbnail for a card to show. This also covers thumbnails already on
+    /// disk. The preview stays the fallback until the original is here.
+    private func loadThumbnail() {
+        if ImageProcessor.thumbnailFlattensTransparency(
+            pixelWidth: CGFloat(attachment.width),
+            pixelHeight: CGFloat(attachment.height),
+            mimeType: attachment.mimeType
+        ) {
+            thumbnailLoader.loadDownsampled(
+                attachmentId: attachment.id,
+                messageId: attachment.message?.id,
+                localPath: attachment.localURL,
+                previewPath: attachment.previewURL,
+                targetSize: size,
+                isImage: true
+            )
+        } else {
+            thumbnailLoader.load(
+                attachmentId: attachment.id,
+                messageId: attachment.message?.id,
+                previewPath: attachment.previewURL
+            )
         }
     }
 }

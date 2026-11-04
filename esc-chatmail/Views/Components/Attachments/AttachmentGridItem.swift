@@ -6,7 +6,6 @@ struct AttachmentGridItem: View {
     let showOverlay: Bool
     let overlayCount: Int
     var imagePresentation: InlineImagePresentationPolicy = .standard
-    @Environment(\.displayScale) private var displayScale
     let onTap: () -> Void
     @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
@@ -19,43 +18,15 @@ struct AttachmentGridItem: View {
         }) {
             GeometryReader { geometry in
                 ZStack {
-                    if let image = thumbnailLoader.image, thumbnailLoader.imageBackdrop != .nothingVisible {
-                        let matte = thumbnailLoader.imageBackdrop.matteColor
-                        if imagePresentation == .compact {
-                            let size = InlineImagePresentationPolicy.fittedSize(
-                                pixelWidth: CGFloat(attachment.width), pixelHeight: CGFloat(attachment.height),
-                                maxWidth: max(0, geometry.size.width - 16), displayScale: displayScale
-                            )
-                            Image(uiImage: image)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: size.width, height: min(size.height, max(0, geometry.size.height - 16)))
-                                .frame(width: geometry.size.width, height: geometry.size.height)
-                                .background(matte ?? MessageBubbleStyle.standard.recipientBubbleColor())
-                        } else {
-                            Image(uiImage: image)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .frame(width: geometry.size.width, height: geometry.size.height)
-                                .clipped()
-                                .background(matte ?? .clear)
-                        }
-                    } else {
-                        Rectangle()
-                            .fill(Color.gray.opacity(0.1))
-                            .overlay(
-                                Group {
-                                if thumbnailLoader.isLoading {
-                                    ProgressView()
-                                        .progressViewStyle(CircularProgressViewStyle())
-                                        .scaleEffect(0.6)
-                                } else {
-                                    Image(systemName: placeholderIconName)
-                                        .foregroundColor(.gray)
-                                }
-                            }
+                    AttachmentGridThumbnail(
+                        image: thumbnailLoader.image,
+                        backdrop: thumbnailLoader.imageBackdrop,
+                        isLoading: thumbnailLoader.isLoading,
+                        placeholderIconName: placeholderIconName,
+                        presentation: imagePresentation,
+                        pixelSize: CGSize(width: CGFloat(attachment.width), height: CGFloat(attachment.height)),
+                        cellSize: geometry.size
                     )
-                    }
 
                     if showOverlay {
                         Rectangle()

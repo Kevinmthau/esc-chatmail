@@ -106,11 +106,12 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
 
         loader.load(attachmentId: makeAttachmentID(), previewPath: try writeTransparentLogo())
         await waitUntil { gate.startCount == 1 }
+        let retiredLoad = try XCTUnwrap(loader.loadTask)
         loader.cancel()
 
         gate.release(with: .light)
-        // Give the (cancelled) task a chance to run its completion.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Its end, not a delay: past this the retired load has no way left to publish.
+        await retiredLoad.value
 
         XCTAssertNil(loader.image)
         XCTAssertEqual(loader.imageBackdrop, .none)
@@ -125,10 +126,11 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
 
         loader.load(attachmentId: makeAttachmentID(), previewPath: try writeTransparentLogo())
         await waitUntil { gate.startCount == 1 }
+        let retiredLoad = try XCTUnwrap(loader.loadTask)
         loader.load(attachmentId: makeAttachmentID(), previewPath: nil)
 
         gate.release(with: .light)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        await retiredLoad.value
 
         XCTAssertNil(loader.image)
         XCTAssertEqual(loader.imageBackdrop, .none)
@@ -161,7 +163,113 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
         XCTAssertEqual(loader.imageBackdrop, .none)
     }
 
+    // MARK: - Oversized images
+
+    /// The thumbnail of an oversized white logo is a white JPEG, with no sign left of the logo.
+    /// The original still has it, which is why the bubble's oversized path reads that.
+    /// Revert-check: fails if `loadDownsampled` prefers the preview over the original.
+    func testLoadDownsampled_oversizedWhiteLogo_findsTheCardItsThumbnailLost() async throws {
+        let original = makeTransparentLogo(color: .white, canvas: 2_000)
+        let thumbnail = try XCTUnwrap(ImageProcessor.generateThumbnail(from: original, mimeType: "image/png"))
+        let originalPath = try write(original)
+        let previewPath = try write(thumbnail)
+
+        let thumbnailLoader = AttachmentThumbnailLoader()
+        thumbnailLoader.load(attachmentId: makeAttachmentID(), previewPath: previewPath)
+        await waitUntil { thumbnailLoader.image != nil }
+        XCTAssertEqual(thumbnailLoader.imageBackdrop, .none)
+
+        let originalLoader = AttachmentThumbnailLoader()
+        originalLoader.loadDownsampled(
+            attachmentId: makeAttachmentID(),
+            localPath: originalPath,
+            previewPath: previewPath,
+            targetSize: CGSize(width: 280, height: 280),
+            isImage: true
+        )
+        await waitUntil { originalLoader.image != nil }
+        XCTAssertEqual(originalLoader.imageBackdrop, .dark)
+    }
+
+    // MARK: - The pixel check's cost
+
+    /// Scrolling away cancels the load, and that has to reach the detached check.
+    /// Revert-check: fails if `ImageBackdropPolicy.resolve(for:analyze:)` drops its
+    /// `withTaskCancellationHandler`: the check runs out its deadline without seeing the cancel.
+    func testLoad_cancelledDuringThePixelCheck_cancelsTheCheck() async throws {
+        let probe = CancellationProbe()
+        let loader = AttachmentThumbnailLoader(resolveBackdropOperation: { image in
+            await ImageBackdropPolicy.resolve(for: image, analyze: { _ in probe.runUntilCancelled() })
+        })
+
+        loader.load(attachmentId: makeAttachmentID(), previewPath: try write(makeTransparentLogo()))
+        await waitUntil { probe.didStart }
+        let retiredLoad = try XCTUnwrap(loader.loadTask)
+        loader.cancel()
+        await retiredLoad.value
+
+        XCTAssertTrue(probe.sawCancellation)
+        XCTAssertNil(loader.image)
+    }
+
+    /// A row scrolling back into view gets a new loader but the same cached image.
+    /// Revert-check: fails if `ImageBackdropPolicy.resolve(for:analyze:)` stops reading the stored
+    /// verdict, or if `AttachmentCacheActor` stops handing back the instance holding it.
+    func testLoad_sameAttachmentInANewLoader_checksThePixelsOnce() async throws {
+        let counter = AnalysisCounter()
+        let attachmentID = makeAttachmentID()
+        let previewPath = try write(makeTransparentLogo())
+
+        for _ in 0..<2 {
+            let loader = AttachmentThumbnailLoader(resolveBackdropOperation: { image in
+                await ImageBackdropPolicy.resolve(for: image, analyze: { cgImage in
+                    counter.increment()
+                    return ImageBackdropPolicy.resolve(for: cgImage)
+                })
+            })
+            loader.load(attachmentId: attachmentID, previewPath: previewPath)
+            await waitUntil { loader.image != nil }
+            XCTAssertEqual(loader.imageBackdrop, .light)
+        }
+
+        XCTAssertEqual(counter.count, 1)
+    }
+
     // MARK: - Helpers
+
+    /// Stands in for the check, holding it open until it is cancelled or a deadline passes.
+    /// Lock-guarded because it runs off the MainActor.
+    private final class CancellationProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _didStart = false
+        private var _sawCancellation = false
+
+        var didStart: Bool { lock.withLock { _didStart } }
+        var sawCancellation: Bool { lock.withLock { _sawCancellation } }
+
+        func runUntilCancelled() -> ImageBackdropPolicy {
+            lock.withLock { _didStart = true }
+            let deadline = Date().addingTimeInterval(5)
+            while !Task.isCancelled, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+            let wasCancelled = Task.isCancelled
+            lock.withLock { _sawCancellation = wasCancelled }
+            return .none
+        }
+    }
+
+    /// Lock-guarded because the analysis runs off the MainActor.
+    private final class AnalysisCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _count = 0
+
+        var count: Int { lock.withLock { _count } }
+
+        func increment() {
+            lock.withLock { _count += 1 }
+        }
+    }
 
     private func makeLoader(gate: BackdropGate) -> AttachmentThumbnailLoader {
         AttachmentThumbnailLoader(resolveBackdropOperation: { _ in
@@ -178,16 +286,23 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
 
     /// A black bar on a transparent canvas, the shape of the reported logo.
     private func writeTransparentLogo() throws -> String {
+        try write(makeTransparentLogo())
+    }
+
+    private func makeTransparentLogo(color: UIColor = .black, canvas: CGFloat = 1_000) -> Data {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = false
-        let data = UIGraphicsImageRenderer(
-            size: CGSize(width: 1_000, height: 1_000),
+        return UIGraphicsImageRenderer(
+            size: CGSize(width: canvas, height: canvas),
             format: format
         ).pngData { context in
-            UIColor.black.setFill()
-            context.fill(CGRect(x: 250, y: 400, width: 500, height: 200))
+            color.setFill()
+            context.fill(CGRect(x: canvas * 0.25, y: canvas * 0.4, width: canvas * 0.5, height: canvas * 0.2))
         }
+    }
+
+    private func write(_ data: Data) throws -> String {
         AttachmentPaths.setupDirectories()
         let path = AttachmentPaths.previewPath(
             idOrUUID: "backdrop-test-\(UUID().uuidString)",

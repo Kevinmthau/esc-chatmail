@@ -7,6 +7,19 @@ import XCTest
 /// logo on dark mode's black was a 280pt box with its image loaded and nothing visible in it.
 @MainActor
 final class ImageBackdropPolicyTests: XCTestCase {
+    private var writtenPaths: [String] = []
+    private var attachmentIDs: [String] = []
+
+    override func tearDown() async throws {
+        writtenPaths.forEach { AttachmentPaths.deleteFile(at: $0) }
+        writtenPaths.removeAll()
+        for attachmentID in attachmentIDs {
+            await AttachmentCacheActor.shared.removeFromCache(attachmentID)
+        }
+        attachmentIDs.removeAll()
+        try await super.tearDown()
+    }
+
     // MARK: - Decision
 
     func testResolve_darkLogoOnTransparentCanvas_choosesLightBackdrop() throws {
@@ -25,6 +38,8 @@ final class ImageBackdropPolicyTests: XCTestCase {
         XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .light)
     }
 
+    /// Revert-check: with `flatArtContentShare` at 0.1, the detail decides the card and this
+    /// answers `.neutral`.
     func testResolve_mostlyDarkContentWithALightDetail_followsTheMajority() throws {
         let image = try decodedPNG(canvas: 200) { context in
             UIColor.black.setFill()
@@ -36,8 +51,8 @@ final class ImageBackdropPolicyTests: XCTestCase {
     }
 
     /// Mid-tone content was already visible on both backgrounds, so it keeps floating.
-    /// Revert-check: with a single luma threshold in `ImageBackdropPolicy.resolve(for:)`, these
-    /// gain a card.
+    /// Revert-check: with a single threshold between dark and light content in
+    /// `ImageBackdropPolicy.resolve(for:)`, these gain a card.
     func testResolve_midToneContentOnTransparentCanvas_leavesTheBackgroundAlone() throws {
         for gray: CGFloat in [0.35, 0.45, 0.6] {
             XCTAssertEqual(try backdrop(logo: UIColor(white: gray, alpha: 1), canvas: 500), .none)
@@ -45,14 +60,90 @@ final class ImageBackdropPolicyTests: XCTestCase {
     }
 
     /// A round headshot: 21% transparent corners around a mid-tone photo.
-    /// Revert-check: with a single luma threshold in `ImageBackdropPolicy.resolve(for:)`, this
-    /// sits on a white square.
+    /// Revert-check: with a single threshold between dark and light content in
+    /// `ImageBackdropPolicy.resolve(for:)`, this sits on a square.
     func testResolve_circularMidTonePhoto_leavesTheBackgroundAlone() throws {
         let image = try decodedPNG(canvas: 300) { _ in
             UIColor(white: 0.45, alpha: 1).setFill()
             UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 300, height: 300)).fill()
         }
         XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .none)
+    }
+
+    /// The dark half is what an average hides: this logo's mean is a mid-tone, so it got no card
+    /// and its text vanished on dark mode's black.
+    /// Revert-check: back on a mean over the whole image, this answers `.none`.
+    func testResolve_blackTextBesideBrightIcon_choosesNeutralBackdrop() throws {
+        let yellow = UIColor(red: 1, green: 0xE0 / 255, blue: 0x40 / 255, alpha: 1)
+        XCTAssertEqual(try twoToneLogo(text: .black, icon: yellow), .neutral)
+    }
+
+    /// Revert-check: back on a mean over the whole image, this answers `.dark`, and the dark card
+    /// swallows the text.
+    func testResolve_blackTextBesideLargeWhiteIcon_choosesNeutralBackdrop() throws {
+        XCTAssertEqual(try twoToneLogo(text: .black, icon: .white, iconSide: 200), .neutral)
+    }
+
+    /// The icon reads on anything, so only the text decides, and a white card shows them both.
+    /// Revert-check: back on a mean over the whole image, this answers `.none`.
+    func testResolve_blackTextBesideMidToneIcon_choosesLightBackdrop() throws {
+        XCTAssertEqual(try twoToneLogo(text: .black, icon: Self.midToneBlue), .light)
+    }
+
+    /// Revert-check: back on a mean over the whole image, this answers `.none`.
+    func testResolve_whiteTextBesideMidToneIcon_choosesDarkBackdrop() throws {
+        XCTAssertEqual(try twoToneLogo(text: .white, icon: Self.midToneBlue), .dark)
+    }
+
+    /// Pure red reads on black, so nothing here is dark and a dark card shows it all.
+    /// Revert-check: with `darkContentLuminanceCeiling` compared against encoded luma, red counts
+    /// as dark and this answers `.neutral`.
+    func testResolve_whiteTextBesideRedIcon_choosesDarkBackdrop() throws {
+        XCTAssertEqual(try twoToneLogo(text: .white, icon: .red), .dark)
+    }
+
+    /// Shadows and highlights, all the way across the range: a photo, not a two-tone logo.
+    /// Revert-check: with `photoContentShare` set to `flatArtContentShare`, this sits on a gray square.
+    func testResolve_roundPhotoWithShadowsAndHighlights_leavesTheBackgroundAlone() throws {
+        let image = try decodedPNG(canvas: 320) { context in
+            self.fillRoundToneRamp(from: 0, to: 1, canvas: 320, context: context)
+        }
+        XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .none)
+    }
+
+    /// The photo the `isFlatArt` constants are measured against: real areas of pure white and pure
+    /// black, with the mid-tones between them still spread across several bins.
+    /// Revert-check: with `flatArtMinimumToneShare` at 0.6, this counts as flat art and sits on a
+    /// gray square.
+    func testResolve_roundPhotoOnWhiteWithBlackJacket_leavesTheBackgroundAlone() throws {
+        let image = try decodedPNG(canvas: 320) { context in
+            UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 320, height: 320)).addClip()
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 320, height: 130))
+            for row in 130..<250 {
+                UIColor(white: 0.35 + 0.25 * CGFloat(row - 130) / 120, alpha: 1).setFill()
+                context.fill(CGRect(x: 0, y: CGFloat(row), width: 320, height: 1))
+            }
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 250, width: 320, height: 70))
+        }
+        XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .none)
+    }
+
+    /// Revert-check: with no card for anything that isn't flat art, this stays lost on black.
+    func testResolve_mostlyShadowPhoto_choosesLightBackdrop() throws {
+        let image = try decodedPNG(canvas: 320) { context in
+            self.fillRoundToneRamp(from: 0, to: 0.5, canvas: 320, context: context)
+        }
+        XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .light)
+    }
+
+    /// Revert-check: with no card for anything that isn't flat art, this stays lost on white.
+    func testResolve_mostlyHighlightPhoto_choosesDarkBackdrop() throws {
+        let image = try decodedPNG(canvas: 320) { context in
+            self.fillRoundToneRamp(from: 0.5, to: 1, canvas: 320, context: context)
+        }
+        XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .dark)
     }
 
     func testResolve_navyLogoOnTransparentCanvas_choosesLightBackdrop() throws {
@@ -67,8 +158,8 @@ final class ImageBackdropPolicyTests: XCTestCase {
 
     /// The image the empty box could equally have held. `.light` would turn a black box into a
     /// white one, with nothing to see in either.
-    /// Revert-check: without `ImageBackdropPolicy.resolve(for:)`'s `hasVisibleSample` guard this
-    /// divides by a zero alpha sum and falls through to `.none`, leaving the box empty.
+    /// Revert-check: without `ImageBackdropPolicy.resolve(for:)`'s `visibleCoverage` guard this
+    /// divides by zero coverage and falls through to `.none`, leaving the box empty.
     func testResolve_fullyTransparentImage_reportsNothingVisible() throws {
         let image = try decodedPNG(canvas: 500) { _ in }
         XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .nothingVisible)
@@ -121,7 +212,97 @@ final class ImageBackdropPolicyTests: XCTestCase {
         XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .light)
     }
 
+    // MARK: - Resolving off the main actor
+
+    /// Revert-check: fails if `resolve(for:analyze:)` stops reading the stored verdict.
+    func testResolveImage_sameImageTwice_checksThePixelsOnce() async throws {
+        let image = try XCTUnwrap(UIImage(data: blackLogoPNG()))
+        let counter = AnalysisCounter()
+        let analyze: @Sendable (CGImage) -> ImageBackdropPolicy = { cgImage in
+            counter.increment()
+            return ImageBackdropPolicy.resolve(for: cgImage)
+        }
+
+        let first = await ImageBackdropPolicy.resolve(for: image, analyze: analyze)
+        let second = await ImageBackdropPolicy.resolve(for: image, analyze: analyze)
+
+        XCTAssertEqual(first, .light)
+        XCTAssertEqual(second, .light)
+        XCTAssertEqual(counter.count, 1)
+    }
+
+    /// A cancelled check's `.none` is only a stand-in for no answer. Stored, it would take the
+    /// image's card away for good.
+    /// Revert-check: fails if `resolve(for:analyze:)` drops both of its `Task.isCancelled` guards.
+    /// HONEST SCOPE: with only the one inside the detached task gone this still passes, because
+    /// the outer guard stops an already cancelled caller first. That inner guard covers a cancel
+    /// landing between the spawn and the task starting, which no test here can hold open.
+    func testResolveImage_callerAlreadyCancelled_skipsTheCheckAndStoresNothing() async throws {
+        let image = try XCTUnwrap(UIImage(data: blackLogoPNG()))
+        let counter = AnalysisCounter()
+
+        let cancelled = Task { () -> ImageBackdropPolicy in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await ImageBackdropPolicy.resolve(for: image, analyze: { cgImage in
+                counter.increment()
+                return ImageBackdropPolicy.resolve(for: cgImage)
+            })
+        }
+        let cancelledVerdict = await cancelled.value
+
+        XCTAssertEqual(cancelledVerdict, .none)
+        XCTAssertEqual(counter.count, 0)
+        XCTAssertNil(ImageBackdropPolicy.storedVerdict(for: image))
+        let liveVerdict = await ImageBackdropPolicy.resolve(for: image)
+        XCTAssertEqual(liveVerdict, .light)
+    }
+
     // MARK: - The thumbnail this policy never sees
+
+    /// Keeps the metadata check honest against what `generateThumbnail` really does, on either
+    /// side of its limit.
+    /// Revert-check: fails if `thumbnailFlattensTransparency` compares with `>=`, or against any
+    /// limit but `maxThumbnailDimension`.
+    func testThumbnailFlattensTransparency_agreesWithGenerateThumbnail() throws {
+        for canvas: CGFloat in [1_600, 1_601] {
+            let original = try png(canvas: canvas) { context in
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 400, y: 600, width: 800, height: 300))
+            }
+            let thumbnail = ImageProcessor.generateThumbnail(from: original, mimeType: "image/png")
+            XCTAssertEqual(
+                ImageProcessor.thumbnailFlattensTransparency(
+                    pixelWidth: canvas,
+                    pixelHeight: canvas,
+                    mimeType: "image/png"
+                ),
+                thumbnail != original,
+                "canvas \(canvas)"
+            )
+        }
+    }
+
+    /// Revert-check: fails if `thumbnailFlattensTransparency` drops either JPEG comparison, or
+    /// looks at one dimension only.
+    func testThumbnailFlattensTransparency_answersFromMetadata() {
+        func flattens(_ width: CGFloat, _ height: CGFloat, _ mimeType: String) -> Bool {
+            ImageProcessor.thumbnailFlattensTransparency(
+                pixelWidth: width,
+                pixelHeight: height,
+                mimeType: mimeType
+            )
+        }
+
+        XCTAssertTrue(flattens(2_000, 100, "image/png"))
+        XCTAssertTrue(flattens(100, 2_000, "image/webp"))
+        XCTAssertTrue(flattens(2_000, 2_000, " IMAGE/PNG "))
+        XCTAssertFalse(flattens(2_000, 2_000, "image/jpeg"))
+        XCTAssertFalse(flattens(2_000, 2_000, "image/jpg"))
+        XCTAssertFalse(flattens(2_000, 2_000, "application/pdf"))
+        XCTAssertFalse(flattens(1_000, 1_000, "image/png"))
+        // Unknown dimensions: the thumbnail is all there is to go on.
+        XCTAssertFalse(flattens(0, 0, "image/png"))
+    }
 
     /// Pins the claim the policy's header makes, and the reason an oversized logo was never part
     /// of this bug: its thumbnail is a JPEG, flattened onto white rather than black.
@@ -206,6 +387,22 @@ final class ImageBackdropPolicyTests: XCTestCase {
         XCTAssertGreaterThan(rendered.color(x: 40, y: 40)[0], 5)
     }
 
+    /// Either half alone would be lost on a white or a dark card; here both are on the same one.
+    /// Revert-check: without `matteColor`'s `.neutral` branch the corner renders transcript black.
+    func testRenderedContent_twoToneLogo_showsBothHalvesOnAGrayCard() throws {
+        let image = try UIImage(data: png(canvas: 1_000) { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 100, y: 100, width: 300, height: 800))
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 600, y: 100, width: 300, height: 800))
+        })
+        let rendered = try renderedOnDarkTranscript(image: XCTUnwrap(image), backdrop: .neutral)
+
+        XCTAssertEqual(rendered.color(x: rendered.width / 2, y: rendered.height / 2), [0x76, 0x76, 0x76])
+        XCTAssertEqual(rendered.color(x: rendered.width / 4, y: rendered.height / 2), [0, 0, 0])
+        XCTAssertEqual(rendered.color(x: rendered.width * 3 / 4, y: rendered.height / 2), [255, 255, 255])
+    }
+
     func testMountedContent_everyBackdrop_keepsTheReservedSize() throws {
         let size = ImageAttachmentLayout.size(
             pixelWidth: 1_000,
@@ -215,7 +412,7 @@ final class ImageBackdropPolicyTests: XCTestCase {
             presentation: .standard
         )
         let image = try UIImage(data: png(canvas: 1_000) { _ in })
-        for backdrop: ImageBackdropPolicy in [.none, .light, .dark, .nothingVisible] {
+        for backdrop: ImageBackdropPolicy in [.none, .light, .dark, .neutral, .nothingVisible] {
             let host = try mountInTestWindow(ImageAttachmentBubbleContent(
                 image: XCTUnwrap(image),
                 isLoading: false,
@@ -230,7 +427,307 @@ final class ImageBackdropPolicyTests: XCTestCase {
         }
     }
 
+    // MARK: - The grid cell
+
+    /// Revert-check: fails if the standard branch of `AttachmentGridThumbnail` drops its matte.
+    func testGridThumbnail_darkLogo_showsTheLogoOnALightCard() throws {
+        let rendered = try renderedGridCell(image: blackLogoImage(), backdrop: .light)
+
+        XCTAssertEqual(rendered.color(x: 10, y: 10), [255, 255, 255])
+        XCTAssertEqual(rendered.color(x: 100, y: 100), [0, 0, 0])
+    }
+
+    func testGridThumbnail_lightLogo_showsTheLogoOnADarkCard() throws {
+        let image = try XCTUnwrap(UIImage(data: png(canvas: 1_000) { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 250, y: 400, width: 500, height: 200))
+        }))
+        let rendered = try renderedGridCell(image: image, backdrop: .dark)
+
+        XCTAssertEqual(rendered.color(x: 10, y: 10), [0x1C, 0x1C, 0x1E])
+        XCTAssertEqual(rendered.color(x: 100, y: 100), [255, 255, 255])
+    }
+
+    func testGridThumbnail_twoToneLogo_showsItOnAGrayCard() throws {
+        let rendered = try renderedGridCell(image: blackLogoImage(), backdrop: .neutral)
+
+        XCTAssertEqual(rendered.color(x: 10, y: 10), [0x76, 0x76, 0x76])
+        XCTAssertEqual(rendered.color(x: 100, y: 100), [0, 0, 0])
+    }
+
+    /// No backdrop stays no backdrop: a headshot must not gain a square here either.
+    /// Revert-check: fails if `AttachmentGridThumbnail`'s standard branch defaults to a card.
+    func testGridThumbnail_noBackdrop_leavesTheTranscriptShowing() throws {
+        let rendered = try renderedGridCell(image: blackLogoImage(), backdrop: .none)
+
+        XCTAssertEqual(rendered.color(x: 10, y: 10), [0, 0, 0])
+    }
+
+    /// Revert-check: fails if `AttachmentGridThumbnail` drops its `.nothingVisible` check: the
+    /// transparent image draws with no placeholder, and the cell is nothing but transcript black.
+    func testGridThumbnail_nothingVisible_showsThePlaceholder() throws {
+        let image = try XCTUnwrap(UIImage(data: png(canvas: 500) { _ in }))
+        let rendered = try renderedGridCell(image: image, backdrop: .nothingVisible)
+
+        // `Color.gray.opacity(0.1)` over black, the placeholder's fill.
+        XCTAssertGreaterThan(rendered.color(x: 10, y: 10)[0], 5)
+    }
+
+    /// Compact chrome is the dark bubble color, which a black logo is just as lost on.
+    /// Revert-check: fails if the compact branch of `AttachmentGridThumbnail` drops its matte.
+    func testGridThumbnail_compactPresentation_prefersTheCardOverTheBubbleColor() throws {
+        let rendered = try renderedGridCell(
+            image: blackLogoImage(),
+            backdrop: .light,
+            presentation: .compact
+        )
+
+        XCTAssertEqual(rendered.color(x: 2, y: 2), [255, 255, 255])
+    }
+
+    /// Revert-check: fails if the compact branch stops falling back to the bubble color.
+    func testGridThumbnail_compactWithNoBackdrop_keepsTheBubbleColor() throws {
+        let rendered = try renderedGridCell(
+            image: blackLogoImage(),
+            backdrop: .none,
+            presentation: .compact
+        )
+
+        // `Color.gray.opacity(0.2)` over black.
+        XCTAssertGreaterThan(rendered.color(x: 2, y: 2)[0], 5)
+        XCTAssertLessThan(rendered.color(x: 2, y: 2)[0], 60)
+    }
+
+    // MARK: - Real views, real files
+
+    /// The grid item's own wiring, from the file on disk to the pixels on screen.
+    /// Revert-check: fails if `AttachmentGridItem` stops passing `imageBackdrop` to its thumbnail.
+    func testMountedGridItem_darkLogo_showsTheLogoOnALightCard() async throws {
+        let (attachment, downloader) = try makeDownloadedAttachment(
+            localData: blackLogoPNG(),
+            previewData: nil,
+            pixelSide: 1_000
+        )
+        let host = try mountOnDarkTranscript(
+            AttachmentGridItem(
+                attachment: attachment,
+                downloader: downloader,
+                showOverlay: false,
+                overlayCount: 0,
+                onTap: {}
+            )
+            .frame(width: 200, height: 200)
+        )
+
+        await waitUntilSnapshot(of: host) { bitmap in
+            bitmap.color(x: 10, y: 10) == [255, 255, 255] && bitmap.color(x: 100, y: 100) == [0, 0, 0]
+        }
+    }
+
+    /// The finding end to end: a white logo over the thumbnail limit, its preview already
+    /// flattened to a white JPEG, in a single-attachment bubble.
+    /// Revert-check: fails if `ImageAttachmentBubble.loadThumbnail` always reads the thumbnail:
+    /// the box stays blank white and the card never appears.
+    func testMountedBubble_oversizedWhiteLogo_showsTheLogoOnADarkCard() async throws {
+        let original = try png(canvas: 2_000) { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 500, y: 800, width: 1_000, height: 400))
+        }
+        let (attachment, downloader) = try makeDownloadedAttachment(
+            localData: original,
+            previewData: XCTUnwrap(ImageProcessor.generateThumbnail(from: original, mimeType: "image/png")),
+            pixelSide: 2_000
+        )
+        let host = try mountOnDarkTranscript(
+            ImageAttachmentBubble(attachment: attachment, downloader: downloader, onTap: {})
+        )
+
+        await waitUntilSnapshot(of: host) { $0.color(x: 20, y: 20) == [0x1C, 0x1C, 0x1E] }
+    }
+
+    /// Within the limit the thumbnail holds the same bytes, so the original is never read. The two
+    /// files differ here only so the card shows which one was.
+    /// Revert-check: fails if `thumbnailFlattensTransparency` answers true at any size: the white
+    /// logo on disk would bring a dark card instead.
+    func testMountedBubble_withinTheLimit_readsTheThumbnail() async throws {
+        let whiteLogo = try png(canvas: 1_000) { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 250, y: 400, width: 500, height: 200))
+        }
+        let (attachment, downloader) = try makeDownloadedAttachment(
+            localData: whiteLogo,
+            previewData: blackLogoPNG(),
+            pixelSide: 1_000
+        )
+        let host = try mountOnDarkTranscript(
+            ImageAttachmentBubble(attachment: attachment, downloader: downloader, onTap: {})
+        )
+
+        await waitUntilSnapshot(of: host) { $0.color(x: 20, y: 20) == [255, 255, 255] }
+    }
+
     // MARK: - Helpers
+
+    private static let midToneBlue = UIColor(red: 0x0A / 255, green: 0x84 / 255, blue: 1, alpha: 1)
+
+    /// Lock-guarded because the analysis runs off the MainActor.
+    private final class AnalysisCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _count = 0
+
+        var count: Int { lock.withLock { _count } }
+
+        func increment() {
+            lock.withLock { _count += 1 }
+        }
+    }
+
+    /// A solid icon over a thin line of text, about the proportions of a real lockup.
+    private func twoToneLogo(
+        text: UIColor,
+        icon: UIColor,
+        iconSide: CGFloat = 160
+    ) throws -> ImageBackdropPolicy {
+        let image = try decodedPNG(canvas: 400) { context in
+            icon.setFill()
+            context.fill(CGRect(x: 200 - iconSide / 2, y: 40, width: iconSide, height: iconSide))
+            text.setFill()
+            context.fill(CGRect(x: 60, y: 320, width: 280, height: 40))
+        }
+        return ImageBackdropPolicy.resolve(for: image)
+    }
+
+    /// A circle of smoothly changing tone, the shape and tonal spread of a round photo.
+    private func fillRoundToneRamp(
+        from start: CGFloat,
+        to end: CGFloat,
+        canvas: Int,
+        context: UIGraphicsImageRendererContext
+    ) {
+        let side = CGFloat(canvas)
+        UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: side, height: side)).addClip()
+        for row in 0..<canvas {
+            UIColor(white: start + (end - start) * CGFloat(row) / side, alpha: 1).setFill()
+            context.fill(CGRect(x: 0, y: CGFloat(row), width: side, height: 1))
+        }
+    }
+
+    private func blackLogoPNG() throws -> Data {
+        try png(canvas: 1_000) { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 250, y: 400, width: 500, height: 200))
+        }
+    }
+
+    private func blackLogoImage() throws -> UIImage {
+        try XCTUnwrap(UIImage(data: blackLogoPNG()))
+    }
+
+    private func renderedGridCell(
+        image: UIImage,
+        backdrop: ImageBackdropPolicy,
+        presentation: InlineImagePresentationPolicy = .standard
+    ) throws -> RGBABitmap {
+        let view = ZStack {
+            Color.black
+            AttachmentGridThumbnail(
+                image: image,
+                backdrop: backdrop,
+                isLoading: false,
+                placeholderIconName: "photo",
+                presentation: presentation,
+                pixelSize: CGSize(width: 1_000, height: 1_000),
+                cellSize: CGSize(width: 200, height: 200)
+            )
+        }
+        .frame(width: 200, height: 200)
+        .environment(\.colorScheme, .dark)
+        .environment(\.displayScale, 3)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 1
+        return try rgbaBitmap(of: XCTUnwrap(renderer.cgImage))
+    }
+
+    /// A downloaded PNG attachment over real files. `local_` IDs need no message-scoped path to
+    /// read as storage, and a local file on disk starts no download.
+    private func makeDownloadedAttachment(
+        localData: Data,
+        previewData: Data?,
+        pixelSide: Int16
+    ) throws -> (Attachment, AttachmentDownloader) {
+        let attachmentID = "local_backdrop-test-\(UUID().uuidString)"
+        attachmentIDs.append(attachmentID)
+        var builder = AttachmentBuilder()
+            .withId(attachmentID)
+            .asImage(width: pixelSide, height: pixelSide)
+            .withMimeType("image/png")
+            .withFilename("logo.png")
+            .downloaded()
+            .withLocalURL(try write(localData))
+        if let previewData {
+            builder = builder.withPreviewURL(try write(previewData))
+        }
+        let attachment = builder.build(in: TestCoreDataStack().makeMainQueueViewContext())
+        let downloader = AttachmentDownloader(
+            apiClient: MockGmailAPIClient(),
+            prepareDownloadDirectories: {}
+        )
+        return (attachment, downloader)
+    }
+
+    private func write(_ data: Data) throws -> String {
+        AttachmentPaths.setupDirectories()
+        let path = AttachmentPaths.previewPath(
+            idOrUUID: "backdrop-test-\(UUID().uuidString)",
+            ext: "png"
+        )
+        XCTAssertTrue(AttachmentPaths.saveData(data, to: path))
+        writtenPaths.append(path)
+        return path
+    }
+
+    /// Pinned to the window's top-left corner, so a sample's position is the view's own.
+    private func mountOnDarkTranscript<Content: View>(
+        _ content: Content
+    ) throws -> UIHostingController<some View> {
+        try mountInTestWindow(
+            ZStack(alignment: .topLeading) {
+                Color.black
+                content
+            }
+            .environment(\.colorScheme, .dark)
+        )
+    }
+
+    private func snapshot<Content: View>(of host: UIHostingController<Content>) throws -> RGBABitmap {
+        let bounds = host.view.bounds
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in
+            host.view.drawHierarchy(in: bounds, afterScreenUpdates: true)
+        }
+        return try rgbaBitmap(of: XCTUnwrap(image.cgImage))
+    }
+
+    private func waitUntilSnapshot<Content: View>(
+        of host: UIHostingController<Content>,
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: (RGBABitmap) -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let bitmap = try? snapshot(of: host), condition(bitmap) { return }
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for the rendered condition", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+    }
 
     private static let indexedLogoPNGBase64 =
         "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAMAAADz0U65AAAABlBMVEX///8AAABVwtN+AAAAAnRSTlMA/1uRIrUAAAASSURBVHicY2DABxiBAJWBCwAAAWgACeAQWKsAAAAASUVORK5CYII="
