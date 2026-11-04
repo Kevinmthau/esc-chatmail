@@ -5,6 +5,9 @@ import UIKit
 @MainActor
 final class AttachmentThumbnailLoader: ObservableObject {
     @Published var image: UIImage?
+    /// What `image` needs behind it. Published in the same turn as the image, so a transparent
+    /// image never draws for a frame without its card.
+    @Published private(set) var imageBackdrop: ImageBackdropPolicy = .none
     @Published var isLoading = false
 
     private let cache = AttachmentCacheActor.shared
@@ -18,6 +21,8 @@ final class AttachmentThumbnailLoader: ObservableObject {
         _ localPath: String?,
         _ targetSize: CGSize
     ) async -> UIImage?
+    /// Seam for tests: holds the suspension between a decoded image and its publication open.
+    private let resolveBackdropOperation: @Sendable (UIImage?) async -> ImageBackdropPolicy
 
     private enum LoadRequest: Equatable {
         case thumbnail(
@@ -44,8 +49,12 @@ final class AttachmentThumbnailLoader: ObservableObject {
     init(
         loadVideoThumbnailOperation: (@Sendable (
             String, String?, String?, CGSize
-        ) async -> UIImage?)? = nil
+        ) async -> UIImage?)? = nil,
+        resolveBackdropOperation: @escaping @Sendable (UIImage?) async -> ImageBackdropPolicy = { image in
+            await ImageBackdropPolicy.resolve(for: image)
+        }
     ) {
+        self.resolveBackdropOperation = resolveBackdropOperation
         self.loadVideoThumbnailOperation = loadVideoThumbnailOperation
             ?? { attachmentId, messageId, localPath, targetSize in
                 await AttachmentCacheActor.shared.loadVideoThumbnail(
@@ -92,8 +101,7 @@ final class AttachmentThumbnailLoader: ObservableObject {
                 from: previewPath
             )
             guard !Task.isCancelled else { return }
-            self.image = loadedImage
-            self.isLoading = false
+            await publish(loadedImage)
         }
     }
 
@@ -167,8 +175,7 @@ final class AttachmentThumbnailLoader: ObservableObject {
             }
 
             guard !Task.isCancelled else { return }
-            self.image = loadedImage
-            self.isLoading = false
+            await publish(loadedImage)
         }
     }
 
@@ -220,6 +227,7 @@ final class AttachmentThumbnailLoader: ObservableObject {
     func reset() {
         cancel()
         image = nil
+        imageBackdrop = .none
         currentRequest = nil
     }
 
@@ -228,7 +236,18 @@ final class AttachmentThumbnailLoader: ObservableObject {
         loadTask?.cancel()
         loadTask = nil
         image = nil
+        imageBackdrop = .none
         isLoading = false
         currentRequest = request
+    }
+
+    /// Resolving the backdrop suspends, so the caller's cancellation check has to run again
+    /// after it: `cancel()` or a newer request may have landed in between.
+    private func publish(_ loadedImage: UIImage?) async {
+        let backdrop = await resolveBackdropOperation(loadedImage)
+        guard !Task.isCancelled else { return }
+        image = loadedImage
+        imageBackdrop = backdrop
+        isLoading = false
     }
 }
