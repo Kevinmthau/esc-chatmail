@@ -37,10 +37,15 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
     }
 
     private var writtenPaths: [String] = []
+    private var attachmentIDs: [String] = []
 
     override func tearDown() async throws {
         writtenPaths.forEach { AttachmentPaths.deleteFile(at: $0) }
         writtenPaths.removeAll()
+        for attachmentID in attachmentIDs {
+            await AttachmentCacheActor.shared.removeFromCache(attachmentID)
+        }
+        attachmentIDs.removeAll()
         try await super.tearDown()
     }
 
@@ -49,7 +54,7 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
     func testLoad_transparentThumbnail_publishesItsBackdrop() async throws {
         let loader = AttachmentThumbnailLoader()
 
-        loader.load(attachmentId: Self.makeAttachmentID(), previewPath: try writeTransparentLogo())
+        loader.load(attachmentId: makeAttachmentID(), previewPath: try writeTransparentLogo())
         await waitUntil { loader.image != nil }
 
         XCTAssertEqual(loader.imageBackdrop, .light)
@@ -63,7 +68,7 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
         let loader = AttachmentThumbnailLoader()
 
         loader.loadDownsampled(
-            attachmentId: Self.makeAttachmentID(),
+            attachmentId: makeAttachmentID(),
             localPath: try writeTransparentLogo(),
             previewPath: nil,
             targetSize: CGSize(width: 200, height: 200),
@@ -76,11 +81,11 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
 
     /// Revert-check: fails if `publish` assigns `image` before awaiting the backdrop: the image
     /// would draw on the transcript's black until the resolution landed.
-    func testLoad_imageWaitsForItsBackdrop() async throws {
+    func testLoad_backdropStillResolving_holdsTheImageBack() async throws {
         let gate = BackdropGate()
         let loader = makeLoader(gate: gate)
 
-        loader.load(attachmentId: Self.makeAttachmentID(), previewPath: try writeTransparentLogo())
+        loader.load(attachmentId: makeAttachmentID(), previewPath: try writeTransparentLogo())
         await waitUntil { gate.startCount == 1 }
 
         XCTAssertNil(loader.image)
@@ -99,7 +104,7 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
         let gate = BackdropGate()
         let loader = makeLoader(gate: gate)
 
-        loader.load(attachmentId: Self.makeAttachmentID(), previewPath: try writeTransparentLogo())
+        loader.load(attachmentId: makeAttachmentID(), previewPath: try writeTransparentLogo())
         await waitUntil { gate.startCount == 1 }
         loader.cancel()
 
@@ -118,9 +123,9 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
         let gate = BackdropGate()
         let loader = makeLoader(gate: gate)
 
-        loader.load(attachmentId: Self.makeAttachmentID(), previewPath: try writeTransparentLogo())
+        loader.load(attachmentId: makeAttachmentID(), previewPath: try writeTransparentLogo())
         await waitUntil { gate.startCount == 1 }
-        loader.load(attachmentId: Self.makeAttachmentID(), previewPath: nil)
+        loader.load(attachmentId: makeAttachmentID(), previewPath: nil)
 
         gate.release(with: .light)
         try await Task.sleep(nanoseconds: 50_000_000)
@@ -133,20 +138,20 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
     /// attachment's placeholder state would carry the previous image's verdict.
     func testLoad_newRequest_clearsThePreviousBackdrop() async throws {
         let loader = AttachmentThumbnailLoader()
-        loader.load(attachmentId: Self.makeAttachmentID(), previewPath: try writeTransparentLogo())
+        loader.load(attachmentId: makeAttachmentID(), previewPath: try writeTransparentLogo())
         await waitUntil { loader.image != nil }
         XCTAssertEqual(loader.imageBackdrop, .light)
 
-        loader.load(attachmentId: Self.makeAttachmentID(), previewPath: nil)
+        loader.load(attachmentId: makeAttachmentID(), previewPath: nil)
 
         XCTAssertNil(loader.image)
         XCTAssertEqual(loader.imageBackdrop, .none)
     }
 
     /// Revert-check: fails if `reset()` stops clearing `imageBackdrop`.
-    func testReset_clearsTheBackdrop() async throws {
+    func testReset_afterLoad_clearsTheBackdrop() async throws {
         let loader = AttachmentThumbnailLoader()
-        loader.load(attachmentId: Self.makeAttachmentID(), previewPath: try writeTransparentLogo())
+        loader.load(attachmentId: makeAttachmentID(), previewPath: try writeTransparentLogo())
         await waitUntil { loader.image != nil }
         XCTAssertEqual(loader.imageBackdrop, .light)
 
@@ -165,8 +170,10 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
     }
 
     /// `local_` IDs need no message-scoped path to read as storage.
-    private static func makeAttachmentID() -> String {
-        "local_backdrop-test-\(UUID().uuidString)"
+    private func makeAttachmentID() -> String {
+        let attachmentID = "local_backdrop-test-\(UUID().uuidString)"
+        attachmentIDs.append(attachmentID)
+        return attachmentID
     }
 
     /// A black bar on a transparent canvas, the shape of the reported logo.

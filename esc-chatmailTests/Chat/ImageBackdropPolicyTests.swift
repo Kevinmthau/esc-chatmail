@@ -35,6 +35,36 @@ final class ImageBackdropPolicyTests: XCTestCase {
         XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .light)
     }
 
+    /// Mid-tone content was already visible on both backgrounds, so it keeps floating.
+    /// Revert-check: with a single luma threshold in `ImageBackdropPolicy.resolve(for:)`, these
+    /// gain a card.
+    func testResolve_midToneContentOnTransparentCanvas_leavesTheBackgroundAlone() throws {
+        for gray: CGFloat in [0.35, 0.45, 0.6] {
+            XCTAssertEqual(try backdrop(logo: UIColor(white: gray, alpha: 1), canvas: 500), .none)
+        }
+    }
+
+    /// A round headshot: 21% transparent corners around a mid-tone photo.
+    /// Revert-check: with a single luma threshold in `ImageBackdropPolicy.resolve(for:)`, this
+    /// sits on a white square.
+    func testResolve_circularMidTonePhoto_leavesTheBackgroundAlone() throws {
+        let image = try decodedPNG(canvas: 300) { _ in
+            UIColor(white: 0.45, alpha: 1).setFill()
+            UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 300, height: 300)).fill()
+        }
+        XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .none)
+    }
+
+    func testResolve_navyLogoOnTransparentCanvas_choosesLightBackdrop() throws {
+        let navy = UIColor(red: 0, green: 0x1F / 255, blue: 0x5B / 255, alpha: 1)
+        XCTAssertEqual(try backdrop(logo: navy, canvas: 500), .light)
+    }
+
+    func testResolve_paleYellowLogoOnTransparentCanvas_choosesDarkBackdrop() throws {
+        let yellow = UIColor(red: 1, green: 0xE0 / 255, blue: 0x40 / 255, alpha: 1)
+        XCTAssertEqual(try backdrop(logo: yellow, canvas: 500), .dark)
+    }
+
     /// The image the empty box could equally have held. `.light` would turn a black box into a
     /// white one, with nothing to see in either.
     /// Revert-check: without `ImageBackdropPolicy.resolve(for:)`'s `hasVisibleSample` guard this

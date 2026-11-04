@@ -12,7 +12,9 @@ import SwiftUI
 /// thumbnail, which keeps an image within its size limit byte for byte, transparency included,
 /// and flattens a larger one onto white. The grid reads the original, at any size.
 enum ImageBackdropPolicy: Equatable {
-    /// Reads as an opaque picture; whatever is already behind it stays.
+    /// Reads as an opaque picture, or holds mid-tone content that shows on either background;
+    /// whatever is already behind it stays. A round headshot or a colorful logo floated fine on
+    /// the transcript and must not gain a square around it.
     case none
     /// Mostly dark content on transparency, which needs a light card.
     case light
@@ -87,7 +89,10 @@ enum ImageBackdropPolicy: Equatable {
 
         // Premultiplied channels already weigh each sample by its coverage, so this is the mean
         // over what is visible, not diluted by the transparent canvas around it.
-        return premultipliedLumaSum / alphaSum < darkContentLumaCeiling ? .light : .dark
+        let meanLuma = premultipliedLumaSum / alphaSum
+        if meanLuma < darkContentLumaCeiling { return .light }
+        if meanLuma > lightContentLumaFloor { return .dark }
+        return .none
     }
 
     private static func mayHaveTransparency(_ cgImage: CGImage) -> Bool {
@@ -107,6 +112,9 @@ enum ImageBackdropPolicy: Equatable {
     private static let minimumTransparentShare = 0.05
     /// Alpha, out of 255, under which a sample holds nothing anyone could see.
     private static let visibleAlphaFloor: UInt8 = 5
-    /// sRGB-encoded luma, 0 to 1, that splits content wanting a light card from a dark one.
-    private static let darkContentLumaCeiling = 0.5
+    /// sRGB-encoded luma, 0 to 1, below which content is too dark to read on black. About 2.5:1
+    /// against it, the same contrast `lightContentLumaFloor` leaves against white.
+    private static let darkContentLumaCeiling = 0.3
+    /// sRGB-encoded luma, 0 to 1, above which content is too light to read on white.
+    private static let lightContentLumaFloor = 0.65
 }
