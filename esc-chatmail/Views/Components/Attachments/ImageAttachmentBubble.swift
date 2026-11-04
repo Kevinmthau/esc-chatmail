@@ -89,7 +89,7 @@ struct ImageAttachmentBubble: View {
 
     /// An image whose thumbnail flattened onto white reads its original instead: a white logo has
     /// nothing left in that thumbnail for a card to show. This also covers thumbnails already on
-    /// disk. The preview stays the fallback until the original is here.
+    /// disk. The preview stays the fallback while the original is missing.
     private func loadThumbnail() {
         if ImageProcessor.thumbnailFlattensTransparency(
             pixelWidth: CGFloat(attachment.width),
@@ -99,8 +99,8 @@ struct ImageAttachmentBubble: View {
             thumbnailLoader.loadDownsampled(
                 attachmentId: attachment.id,
                 messageId: attachment.message?.id,
-                localPath: attachment.localURL,
-                previewPath: attachment.previewURL,
+                localPath: attachment.readableLocalURLValue,
+                previewPath: attachment.readablePreviewURLValue,
                 targetSize: size,
                 isImage: true
             )
@@ -108,7 +108,7 @@ struct ImageAttachmentBubble: View {
             thumbnailLoader.load(
                 attachmentId: attachment.id,
                 messageId: attachment.message?.id,
-                previewPath: attachment.previewURL
+                previewPath: attachment.readablePreviewURLValue
             )
         }
     }

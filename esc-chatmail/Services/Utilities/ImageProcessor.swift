@@ -77,9 +77,8 @@ struct ImageProcessor {
         return nil
     }
     
-    /// Whether `generateThumbnail` flattened this image onto white, which a white logo doesn't
-    /// survive. Over the size limit it re-encodes as JPEG; within it the bytes are unchanged. A JPEG
-    /// original had no transparency to lose, so reading it instead would only cost a bigger decode.
+    /// Whether `generateThumbnail` flattened this image onto white where a transparent logo could
+    /// have been lost. Over the size limit it re-encodes as JPEG; within it the bytes are unchanged.
     /// Answers from the attachment's stored metadata, so it needs no read of either file.
     static func thumbnailFlattensTransparency(
         pixelWidth: CGFloat,
@@ -88,10 +87,15 @@ struct ImageProcessor {
     ) -> Bool {
         let normalizedMimeType = mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return max(pixelWidth, pixelHeight) > maxThumbnailDimension
-            && normalizedMimeType.hasPrefix("image/")
-            && normalizedMimeType != "image/jpeg"
-            && normalizedMimeType != "image/jpg"
+            && logoMimeTypes.contains(normalizedMimeType)
     }
+
+    /// The formats a transparent logo actually comes in. Leaves out JPEG, which has no transparency
+    /// to lose, and HEIC, which can hold it but in practice is a camera photo: reading the original
+    /// would swap every iPhone photo's small preview for a full decode in the transcript.
+    private static let logoMimeTypes: Set<String> = [
+        "image/png", "image/x-png", "image/webp", "image/gif", "image/avif", "image/tiff"
+    ]
 
     static func generatePDFThumbnail(from data: Data) -> Data? {
         guard let document = PDFDocument(data: data),

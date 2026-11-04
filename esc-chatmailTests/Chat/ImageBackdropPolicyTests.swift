@@ -282,8 +282,9 @@ final class ImageBackdropPolicyTests: XCTestCase {
         }
     }
 
-    /// Revert-check: fails if `thumbnailFlattensTransparency` drops either JPEG comparison, or
-    /// looks at one dimension only.
+    /// A HEIC is an iPhone photo: it must keep its small preview rather than decode the original.
+    /// Revert-check: fails if `logoMimeTypes` gains JPEG or HEIC, loses a logo format, or if
+    /// `thumbnailFlattensTransparency` looks at one dimension only.
     func testThumbnailFlattensTransparency_answersFromMetadata() {
         func flattens(_ width: CGFloat, _ height: CGFloat, _ mimeType: String) -> Bool {
             ImageProcessor.thumbnailFlattensTransparency(
@@ -296,8 +297,11 @@ final class ImageBackdropPolicyTests: XCTestCase {
         XCTAssertTrue(flattens(2_000, 100, "image/png"))
         XCTAssertTrue(flattens(100, 2_000, "image/webp"))
         XCTAssertTrue(flattens(2_000, 2_000, " IMAGE/PNG "))
+        XCTAssertTrue(flattens(2_000, 2_000, "image/gif"))
         XCTAssertFalse(flattens(2_000, 2_000, "image/jpeg"))
         XCTAssertFalse(flattens(2_000, 2_000, "image/jpg"))
+        XCTAssertFalse(flattens(2_000, 2_000, "image/heic"))
+        XCTAssertFalse(flattens(2_000, 2_000, "image/heif"))
         XCTAssertFalse(flattens(2_000, 2_000, "application/pdf"))
         XCTAssertFalse(flattens(1_000, 1_000, "image/png"))
         // Unknown dimensions: the thumbnail is all there is to go on.
@@ -541,6 +545,43 @@ final class ImageBackdropPolicyTests: XCTestCase {
         let host = try mountOnDarkTranscript(
             ImageAttachmentBubble(attachment: attachment, downloader: downloader, onTap: {})
         )
+
+        await waitUntilSnapshot(of: host) { $0.color(x: 20, y: 20) == [0x1C, 0x1C, 0x1E] }
+    }
+
+    /// The original can land after its preview, under a path the preview load never looked at.
+    /// Revert-check: fails if `ImageAttachmentBubble` drops `.onChange(of: attachment.localURL)`:
+    /// the flattened preview stays up until the row remounts.
+    func testMountedBubble_originalArrivingAfterItsPreview_showsTheCard() async throws {
+        let original = try png(canvas: 2_000) { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 500, y: 800, width: 1_000, height: 400))
+        }
+        let attachmentID = "local_backdrop-test-\(UUID().uuidString)"
+        attachmentIDs.append(attachmentID)
+        // Uploading with no local file yet starts no download.
+        let attachment = try AttachmentBuilder()
+            .withId(attachmentID)
+            .asImage(width: 2_000, height: 2_000)
+            .withMimeType("image/png")
+            .withFilename("logo.png")
+            .downloading()
+            .withPreviewURL(write(XCTUnwrap(ImageProcessor.generateThumbnail(from: original, mimeType: "image/png"))))
+            .build(in: TestCoreDataStack().makeMainQueueViewContext())
+        let downloader = AttachmentDownloader(
+            apiClient: MockGmailAPIClient(),
+            prepareDownloadDirectories: {}
+        )
+        let host = try mountOnDarkTranscript(
+            ImageAttachmentBubble(attachment: attachment, downloader: downloader, onTap: {})
+        )
+        // The flattened preview, dimmed as an attachment still in flight is, but well above the
+        // placeholder's fill.
+        await waitUntilSnapshot(of: host) { $0.color(x: 20, y: 20)[0] > 40 }
+
+        attachment.localURL = try write(original)
+        attachment.state = .downloaded
+        downloader.objectWillChange.send()
 
         await waitUntilSnapshot(of: host) { $0.color(x: 20, y: 20) == [0x1C, 0x1C, 0x1E] }
     }
