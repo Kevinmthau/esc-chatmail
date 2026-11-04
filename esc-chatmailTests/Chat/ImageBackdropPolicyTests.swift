@@ -102,6 +102,62 @@ final class ImageBackdropPolicyTests: XCTestCase {
         XCTAssertEqual(try twoToneLogo(text: .white, icon: .red), .dark)
     }
 
+    /// The badge keeps its glyph readable on anything, so neither gets a card, however much of the
+    /// badge the glyph covers.
+    /// Revert-check: fails if `samplesExposedToTheBackground` counts every dark and light sample:
+    /// each of these then sits on a square.
+    func testResolve_glyphInsideABadge_leavesTheBackgroundAlone() throws {
+        let orange = UIColor(red: 1, green: 0.55, blue: 0, alpha: 1)
+        let cases: [(badge: UIColor, glyph: UIColor)] = [
+            (.red, .white), (Self.midToneBlue, .white), (orange, .black)
+        ]
+        for (badge, glyph) in cases {
+            let image = try decodedPNG(canvas: 400) { context in
+                badge.setFill()
+                UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 400, height: 400)).fill()
+                glyph.setFill()
+                context.fill(CGRect(x: 120, y: 120, width: 160, height: 160))
+            }
+            XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .none)
+        }
+    }
+
+    /// Revert-check: fails if `samplesExposedToTheBackground` counts every dark and light sample.
+    func testResolve_whiteTextInsideABlueBanner_leavesTheBackgroundAlone() throws {
+        let image = try decodedPNG(canvas: 400) { context in
+            Self.midToneBlue.setFill()
+            context.fill(CGRect(x: 0, y: 100, width: 400, height: 200))
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 60, y: 170, width: 280, height: 60))
+        }
+        XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .none)
+    }
+
+    /// The sticker's white is what a white transcript swallows, and its black text was never at
+    /// risk, so this wants a dark card, not the two-tone gray.
+    /// Revert-check: fails if `samplesExposedToTheBackground` counts every dark and light sample:
+    /// the text then reads as a second tone and this answers `.neutral`.
+    func testResolve_blackTextOnAWhiteSticker_choosesDarkBackdrop() throws {
+        let image = try decodedPNG(canvas: 400) { context in
+            UIColor.white.setFill()
+            UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 400, height: 400)).fill()
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 120, y: 120, width: 160, height: 160))
+        }
+        XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .dark)
+    }
+
+    /// No sample here is fully transparent, but the whole image lets the background through.
+    /// Revert-check: fails if `samplesExposedToTheBackground` stops counting the image's outer
+    /// edge: nothing is left to start from, and this answers `.none`.
+    func testResolve_translucentDarkImage_choosesLightBackdrop() throws {
+        let image = try decodedPNG(canvas: 300) { context in
+            UIColor(white: 0, alpha: 0.5).setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 300, height: 300))
+        }
+        XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .light)
+    }
+
     /// Shadows and highlights, all the way across the range: a photo, not a two-tone logo.
     /// Revert-check: with `photoContentShare` set to `flatArtContentShare`, this sits on a gray square.
     func testResolve_roundPhotoWithShadowsAndHighlights_leavesTheBackgroundAlone() throws {
@@ -144,6 +200,15 @@ final class ImageBackdropPolicyTests: XCTestCase {
             self.fillRoundToneRamp(from: 0.5, to: 1, canvas: 320, context: context)
         }
         XCTAssertEqual(ImageBackdropPolicy.resolve(for: image), .dark)
+    }
+
+    /// Bright, saturated and plainly visible on white, though their luminance alone says otherwise.
+    /// Revert-check: with `lightContentLuminanceFloor` at 0.38, these sit on a dark square.
+    func testResolve_brightOrangeAndSkyBlueLogos_leaveTheBackgroundAlone() throws {
+        let orange = UIColor(red: 1, green: 0.55, blue: 0, alpha: 1)
+        let skyBlue = UIColor(red: 0.35, green: 0.7, blue: 1, alpha: 1)
+        XCTAssertEqual(try backdrop(logo: orange, canvas: 500), .none)
+        XCTAssertEqual(try backdrop(logo: skyBlue, canvas: 500), .none)
     }
 
     func testResolve_navyLogoOnTransparentCanvas_choosesLightBackdrop() throws {

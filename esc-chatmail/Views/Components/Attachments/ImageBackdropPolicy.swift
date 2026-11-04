@@ -29,6 +29,15 @@ enum ImageBackdropPolicy: Equatable {
     /// job, in the geometry the attachment's metadata already reserved.
     case nothingVisible
 
+    /// How one sample of the decision bitmap reads against a background.
+    private enum SampleTone {
+        /// Too transparent to see, so the background shows here.
+        case hidden
+        case dark
+        case mid
+        case light
+    }
+
     /// The card to draw behind the image; nil when the backdrop leaves the background alone.
     var matteColor: Color? {
         switch self {
@@ -112,8 +121,7 @@ enum ImageBackdropPolicy: Equatable {
 
         var alphaSum = 0.0
         var visibleCoverage = 0.0
-        var darkCoverage = 0.0
-        var lightCoverage = 0.0
+        var tones = [SampleTone](repeating: .hidden, count: sampleSide * sampleSide)
         var toneCoverage = [Double](repeating: 0, count: toneBinCount)
         for offset in stride(from: 0, to: pixels.count, by: 4) {
             let alpha = pixels[offset + 3]
@@ -128,9 +136,11 @@ enum ImageBackdropPolicy: Equatable {
                 + 0.7152 * linearChannel(pixels[offset + 1], alpha: alpha)
                 + 0.0722 * linearChannel(pixels[offset + 2], alpha: alpha)
             if luminance < darkContentLuminanceCeiling {
-                darkCoverage += coverage
+                tones[offset / 4] = .dark
             } else if luminance > lightContentLuminanceFloor {
-                lightCoverage += coverage
+                tones[offset / 4] = .light
+            } else {
+                tones[offset / 4] = .mid
             }
             // The square root spaces the bins roughly as the eye does.
             let toneBin = min(toneBinCount - 1, Int(luminance.squareRoot() * Double(toneBinCount)))
@@ -140,6 +150,17 @@ enum ImageBackdropPolicy: Equatable {
 
         let transparentShare = 1 - alphaSum / (255 * Double(sampleSide * sampleSide))
         guard transparentShare >= minimumTransparentShare else { return .none }
+
+        var darkCoverage = 0.0
+        var lightCoverage = 0.0
+        for index in samplesExposedToTheBackground(in: tones) {
+            let coverage = Double(pixels[index * 4 + 3])
+            if tones[index] == .dark {
+                darkCoverage += coverage
+            } else {
+                lightCoverage += coverage
+            }
+        }
 
         let topToneCoverage = toneCoverage.sorted(by: >).prefix(flatArtToneCount).reduce(0, +)
         let isFlatArt = topToneCoverage / visibleCoverage >= flatArtMinimumToneShare
@@ -154,6 +175,42 @@ enum ImageBackdropPolicy: Equatable {
         case (false, false):
             return .none
         }
+    }
+
+    /// The dark and light samples whatever is behind the image can actually touch: those on the
+    /// image's outer edge or beside a transparent sample, and any sample of the same tone joined to
+    /// one of them. This is what tells text beside an icon, which a background can swallow, from a
+    /// white glyph inside a red badge, which the badge keeps readable on anything.
+    private static func samplesExposedToTheBackground(in tones: [SampleTone]) -> [Int] {
+        func neighbours(of index: Int) -> [Int] {
+            var result: [Int] = []
+            if index % sampleSide > 0 { result.append(index - 1) }
+            if index % sampleSide < sampleSide - 1 { result.append(index + 1) }
+            if index >= sampleSide { result.append(index - sampleSide) }
+            if index < tones.count - sampleSide { result.append(index + sampleSide) }
+            return result
+        }
+
+        var isExposed = [Bool](repeating: false, count: tones.count)
+        var exposed: [Int] = []
+        for index in tones.indices where tones[index] == .dark || tones[index] == .light {
+            let adjacent = neighbours(of: index)
+            // Fewer than four neighbours puts it on the image's outer edge.
+            if adjacent.count < 4 || adjacent.contains(where: { tones[$0] == .hidden }) {
+                isExposed[index] = true
+                exposed.append(index)
+            }
+        }
+        var next = 0
+        while next < exposed.count {
+            let index = exposed[next]
+            next += 1
+            for neighbour in neighbours(of: index) where !isExposed[neighbour] && tones[neighbour] == tones[index] {
+                isExposed[neighbour] = true
+                exposed.append(neighbour)
+            }
+        }
+        return exposed
     }
 
     /// Linear light, 0 to 1, of one premultiplied channel in a sample of the given alpha.
@@ -180,11 +237,12 @@ enum ImageBackdropPolicy: Equatable {
     /// Alpha, out of 255, under which a sample holds nothing anyone could see.
     private static let visibleAlphaFloor: UInt8 = 5
     /// Luminance, 0 to 1, below which content is too dark to read on black: about 2.5:1 against
-    /// it, the same contrast `lightContentLuminanceFloor` leaves against white. Luminance rather
-    /// than encoded luma, which would call pure red (5:1 on black) too dark to read.
+    /// it. Luminance rather than encoded luma, which would call pure red (5:1 on black) too dark.
     private static let darkContentLuminanceCeiling = 0.073
-    /// Luminance, 0 to 1, above which content is too light to read on white.
-    private static let lightContentLuminanceFloor = 0.38
+    /// Luminance, 0 to 1, above which content is too light to read on white: about 2:1 against it.
+    /// Lower than the dark side's contrast on purpose, because hue carries saturated colors: bright
+    /// orange and sky blue sit near 2.3:1 and are plainly visible on white.
+    private static let lightContentLuminanceFloor = 0.45
 
     /// Flat art keeps its coverage in a few tones, where a photo's spreads across the range. Top
     /// three of sixteen bins: over this share in a logo, well under it in a photo, even one with a
@@ -192,11 +250,11 @@ enum ImageBackdropPolicy: Equatable {
     private static let toneBinCount = 16
     private static let flatArtToneCount = 3
     private static let flatArtMinimumToneShare = 0.8
-    /// The share of a logo's visible content that has to be lost for a card to be worth it. Text
+    /// The share of a logo's visible content that has to be at risk for a card to be worth it. Text
     /// beside a solid icon holds about this much coverage even when the icon is large. Below it,
     /// a small detail doesn't decide the card; the rest of the logo does.
     private static let flatArtContentShare = 0.15
-    /// A photo needs a majority before it gets a card. Its shadows and highlights still read as
+    /// A photo needs a majority at risk before it gets a card. Its shadows and highlights still read as
     /// part of the picture around them, so a round headshot with dark hair stays card-free.
     private static let photoContentShare = 0.5
 
