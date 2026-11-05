@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getLabelReconciledAt, getLastSuccessfulSyncAt, setLastSuccessfulSyncAt } from '@/db/kv'
 import type { ChatmailDB } from '@/db/schema'
+import { RateLimitError } from '@/gmail/errors'
 import { HistoryIdExpiredError } from '@/gmail/historyError'
 import type { HistoryListResponse } from '@/gmail/types'
 import { calculateParticipantHash } from '@/identity/participantSet'
 import { makeRollup } from '@/rollup/rollup'
 import { MAX_ABANDONED_RETRIES, persistentFailedIds } from './abandoned'
+import { FETCH_CONCURRENCY } from './fetch'
 import {
   applyHistoryLabelOps,
   INCREMENTAL_FETCH_SLICE_SIZE,
@@ -176,6 +178,42 @@ describe('runIncrementalSync', () => {
     expect(result.historyIdAdvanced).toBe(true)
     expect(await db.messages.count()).toBe(total)
     expect((await aliceConversation()).lastMessageDate).toBe(NOW - 100_000 + total - 1)
+  })
+
+  // Revert-check: `concurrency: fetchConcurrency` in the phase-2 slice loop.
+  // Without it every slice restarts fetchMessagesBounded at full width, so a
+  // 429 in the first slice no longer narrows the second.
+  it('keeps the 429-narrowed fetch width across slices', async () => {
+    await seedAccount(db)
+    const total = INCREMENTAL_FETCH_SLICE_SIZE + 50
+    seedBulkHistory(total)
+    let inFlight = 0
+    let fullCalls = 0
+    let throttledOnce = false
+    const laterSliceWidths: number[] = []
+    const getMessage = api.getMessage.bind(api)
+    api.getMessage = async (id, format) => {
+      if (format !== 'full') return getMessage(id, format)
+      fullCalls += 1
+      inFlight += 1
+      if (fullCalls > INCREMENTAL_FETCH_SLICE_SIZE + 1) laterSliceWidths.push(inFlight)
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1))
+        if (!throttledOnce) {
+          throttledOnce = true
+          throw new RateLimitError(0)
+        }
+        return await getMessage(id, format)
+      } finally {
+        inFlight -= 1
+      }
+    }
+
+    const result = (await runIncrementalSync(testDeps(db, api))) as IncrementalSyncResult
+
+    expect(result.newMessageCount).toBe(total)
+    expect(laterSliceWidths.length).toBeGreaterThan(0)
+    expect(Math.max(...laterSliceWidths)).toBeLessThanOrEqual(Math.floor(FETCH_CONCURRENCY / 2))
   })
 
   // HONEST SCOPE: pins that a failure in a later slice still freezes the

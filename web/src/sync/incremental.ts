@@ -505,12 +505,19 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
   // later slice still freezes the cursor over the ids already persisted.
   let persistedMessageCount = 0
   let sliceIndex = 0
+  // fetchMessagesBounded halves its width on a 429 for the rest of a batch.
+  // Each slice is its own batch, so the narrowed width carries into the next
+  // slice: restarting every slice at full width against a throttled account
+  // would only turn more fetches into retry sleeps and exhausted attempts.
+  let fetchConcurrency: number | undefined
   for (let start = 0; start < history.newMessageIds.length; start += INCREMENTAL_FETCH_SLICE_SIZE) {
     const sliceIds = history.newMessageIds.slice(start, start + INCREMENTAL_FETCH_SLICE_SIZE)
     const fetchResult = await fetchMessagesBounded(api, sliceIds, {
+      concurrency: fetchConcurrency,
       sleep: depsSleep(deps),
       random: depsRandom(deps),
     })
+    fetchConcurrency = fetchResult.effectiveConcurrency
     failedIds.push(...fetchResult.failed.map((f) => f.id))
     const plans = await preparePersist(fetchResult.fetched, ctx)
     failedIds.push(...retryableFailurePlanIds(plans))

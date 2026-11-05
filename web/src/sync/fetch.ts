@@ -40,9 +40,16 @@ export interface BoundedFetchResult {
   /** 404 — the message no longer exists server-side (dropped silently). */
   goneIds: string[]
   failed: FetchFailure[]
+  /**
+   * The in-flight width the batch ended at, after any 429 halving. A caller
+   * that splits one pass into several batches passes it on as the next
+   * batch's `concurrency`, so the backpressure holds for the whole pass.
+   */
+  effectiveConcurrency: number
 }
 
 export interface FetchMessagesOptions {
+  /** Starting in-flight width (default FETCH_CONCURRENCY). */
   concurrency?: number
   /** Attempts per message (default 3). */
   maxAttempts?: number
@@ -179,5 +186,5 @@ export async function fetchMessagesBounded(
   })
 
   if (runAbortError !== null) throw runAbortError
-  return { fetched: chronological(fetched), goneIds, failed }
+  return { fetched: chronological(fetched), goneIds, failed, effectiveConcurrency }
 }
