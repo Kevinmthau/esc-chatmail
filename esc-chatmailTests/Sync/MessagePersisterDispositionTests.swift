@@ -30,7 +30,10 @@ final class MessagePersisterDispositionTests: XCTestCase {
     private func makePersister(
         conversationCreationError: Error? = nil,
         coreDataStack: CoreDataStack? = nil,
-        messageProcessor: MessageProcessor = MessageProcessor()
+        messageProcessor: MessageProcessor = MessageProcessor(),
+        saveHTML: @escaping (String, String) -> HTMLSaveResult = { _, messageId in
+            .savedWithoutWriting(messageId: messageId)
+        }
     ) -> MessagePersister {
         let conversationManager: ConversationManager
         if let conversationCreationError {
@@ -46,7 +49,7 @@ final class MessagePersisterDispositionTests: XCTestCase {
         return MessagePersister(
             coreDataStack: coreDataStack ?? self.coreDataStack,
             messageProcessor: messageProcessor,
-            saveHTML: { _, _ in nil },
+            saveHTML: saveHTML,
             conversationManager: conversationManager
         )
     }
@@ -88,6 +91,193 @@ final class MessagePersisterDispositionTests: XCTestCase {
             ),
             sizeEstimate: 30_000
         )
+    }
+
+    // MARK: - Body write failures
+
+    private func makeHTMLMessage(id: String) -> GmailMessage {
+        GmailMessageBuilder()
+            .withId(id)
+            .withFrom("alice@example.com", name: "Alice Smith")
+            .withTo([Self.myEmail])
+            .withSubject("Subject \(id)")
+            .withBodyHtml("<p>Body of \(id)</p>")
+            .build()
+    }
+
+    private func messageCount(in context: NSManagedObjectContext) async -> Int {
+        await context.perform {
+            (try? context.count(for: Message.fetchRequest())) ?? -1
+        }
+    }
+
+    /// A full disk says nothing about the message and fails every write after it, so the batch
+    /// aborts with no verdict, like an account-scoped API error. As `.failed` it would spend the
+    /// escape hatch on the whole backlog; persisted body-less, it was a permanent text bubble
+    /// behind an advancing cursor.
+    /// Revert-check: `case .outOfSpace: throw SyncResourceAbort.insufficientStorage` in
+    /// `MessagePersister.dispositionAfterBodyWriteFailure`.
+    @MainActor
+    func testSaveMessages_outOfSpaceBodyWrite_abortsTheBatchWithNoVerdictOrRow() async throws {
+        let persister = makePersister(saveHTML: { _, _ in .outOfSpace })
+        let context = coreDataStack.newBackgroundContext()
+
+        do {
+            _ = try await persister.saveMessages(
+                [makeHTMLMessage(id: "m-enospc-1"), makeHTMLMessage(id: "m-enospc-2")],
+                myAliases: [Self.myEmail],
+                in: context
+            )
+            XCTFail("A full disk must abort the batch")
+        } catch let abort as SyncResourceAbort {
+            XCTAssertEqual(abort, .insufficientStorage)
+        }
+
+        let rowCount = await messageCount(in: context)
+        XCTAssertEqual(rowCount, 0, "An aborted batch must leave no body-less row behind")
+    }
+
+    /// Any other write failure blocks this message only: the cursor holds and the re-scan
+    /// retries it, and the batch goes on.
+    /// Revert-check: the `throw failure` on a failed body write in
+    /// `MessagePersister+Creation.swift` (the row is then persisted body-less as `.persisted`).
+    @MainActor
+    func testSaveMessages_failedBodyWrite_reportsFailedWithoutARowAndPersistsTheRest() async throws {
+        let persister = makePersister(saveHTML: { _, messageId in
+            messageId == "m-io-fail" ? .ioFailure : .savedWithoutWriting(messageId: messageId)
+        })
+        let context = coreDataStack.newBackgroundContext()
+
+        let report = try await persister.saveMessages(
+            [makeHTMLMessage(id: "m-io-fail"), makeHTMLMessage(id: "m-io-ok")],
+            myAliases: [Self.myEmail],
+            in: context
+        )
+
+        XCTAssertEqual(report.failedIds, ["m-io-fail"])
+        XCTAssertEqual(report.persistedIds, ["m-io-ok"])
+        let failedRowCount: Int = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "m-io-fail")
+            return (try? context.count(for: request)) ?? -1
+        }
+        XCTAssertEqual(failedRowCount, 0)
+    }
+
+    /// A boundary that closed under the write is account teardown: it throws cancellation, never
+    /// a per-message verdict.
+    /// Revert-check: `case .boundaryClosed: throw CancellationError()` in
+    /// `MessagePersister.dispositionAfterBodyWriteFailure`.
+    @MainActor
+    func testSaveMessages_bodyWriteAfterBoundaryClosed_throwsCancellationWithNoRow() async throws {
+        let persister = makePersister(saveHTML: { _, _ in .boundaryClosed })
+        let context = coreDataStack.newBackgroundContext()
+
+        do {
+            _ = try await persister.saveMessages(
+                [makeHTMLMessage(id: "m-closed")],
+                myAliases: [Self.myEmail],
+                in: context
+            )
+            XCTFail("A closed boundary must surface as cancellation")
+        } catch is CancellationError {}
+
+        let rowCount = await messageCount(in: context)
+        XCTAssertEqual(rowCount, 0)
+    }
+
+    /// The update path classifies the same way and changes nothing on the stored row first.
+    /// Revert-check: the `case let failedSave?:` early return in `MessagePersister+Updates.swift`
+    /// (the row is then updated with its stale body and reported `.persisted`).
+    @MainActor
+    func testSaveMessages_existingRowWhoseNewBodyCannotBeWritten_isLeftUnchanged() async throws {
+        let context = coreDataStack.newBackgroundContext()
+        let original = GmailMessageBuilder()
+            .withId("m-update-fail")
+            .withFrom("alice@example.com", name: "Alice Smith")
+            .withTo([Self.myEmail])
+            .withSubject("Original subject")
+            .withSnippet("Original snippet")
+            .build()
+        _ = try await makePersister().saveMessages([original], myAliases: [Self.myEmail], in: context)
+
+        let refetched = GmailMessageBuilder()
+            .withId("m-update-fail")
+            .withFrom("alice@example.com", name: "Alice Smith")
+            .withTo([Self.myEmail])
+            .withSubject("Original subject")
+            .withSnippet("Changed snippet")
+            .withBodyHtml("<p>New body</p>")
+            .build()
+        let report = try await makePersister(saveHTML: { _, _ in .ioFailure })
+            .saveMessages([refetched], myAliases: [Self.myEmail], in: context)
+
+        XCTAssertEqual(report.failedIds, ["m-update-fail"])
+        let stored: (snippet: String?, bodyStorageURI: String?) = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "m-update-fail")
+            let message = try? context.fetch(request).first
+            return (message?.snippet, message?.bodyStorageURI)
+        }
+        XCTAssertEqual(stored.snippet, "Original snippet")
+        XCTAssertNil(stored.bodyStorageURI)
+
+        do {
+            _ = try await makePersister(saveHTML: { _, _ in .outOfSpace })
+                .saveMessages([refetched], myAliases: [Self.myEmail], in: context)
+            XCTFail("A full disk must abort the batch on the update path too")
+        } catch let abort as SyncResourceAbort {
+            XCTAssertEqual(abort, .insufficientStorage)
+        }
+    }
+
+    /// A refetch usually brings the body already on disk. The update used to rewrite those
+    /// identical bytes every time, so once a failed write blocked the whole update, a transient
+    /// write error dropped the fetch's label and read-state changes and held the cursor for a
+    /// body that was already stored.
+    /// Revert-check: the `unchangedBodyStorageURI` skip in `MessagePersister+Updates.swift` (the
+    /// refetch then attempts the write, fails, and reports `.failed`).
+    @MainActor
+    func testSaveMessages_refetchWithTheStoredBody_skipsTheWriteAndAppliesLabels() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MessagePersisterDispositionTests-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func makePersister(saveHTML: @escaping (String, String) -> HTMLSaveResult) -> MessagePersister {
+            MessagePersister(
+                coreDataStack: coreDataStack,
+                htmlContentHandler: handler,
+                saveHTML: saveHTML,
+                conversationManager: ConversationManager(currentUserEmail: { Self.myEmail })
+            )
+        }
+        func makeMessage(labels: [String]) -> GmailMessage {
+            GmailMessageBuilder()
+                .withId("m-same-body")
+                .withFrom("alice@example.com", name: "Alice Smith")
+                .withTo([Self.myEmail])
+                .withSubject("Same body")
+                .withBodyHtml("<p>The body already on disk</p>")
+                .withLabels(labels)
+                .build()
+        }
+        let context = coreDataStack.newBackgroundContext()
+        let first = try await makePersister(saveHTML: { html, id in handler.saveHTMLResult(html, for: id) })
+            .saveMessages([makeMessage(labels: ["INBOX", "UNREAD"])], myAliases: [Self.myEmail], in: context)
+        XCTAssertEqual(first.persistedIds, ["m-same-body"])
+        XCTAssertTrue(handler.htmlFileExists(for: "m-same-body"))
+
+        let refetch = try await makePersister(saveHTML: { _, _ in .ioFailure })
+            .saveMessages([makeMessage(labels: ["INBOX"])], myAliases: [Self.myEmail], in: context)
+
+        XCTAssertEqual(refetch.persistedIds, ["m-same-body"], "An unchanged body needs no write")
+        XCTAssertTrue(refetch.failedIds.isEmpty)
+        let isUnread: Bool? = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "m-same-body")
+            return (try? context.fetch(request).first)?.isUnread
+        }
+        XCTAssertEqual(isUnread, false, "The refetch's read state must apply")
     }
 
     // MARK: - Large-body fetch failures
@@ -574,6 +764,37 @@ final class MessagePersisterDispositionTests: XCTestCase {
 
         XCTAssertEqual(report.failedIds, ["m-doomed"], "A routing failure is a blocking per-message failure")
         XCTAssertTrue(report.persistedIds.isEmpty)
+    }
+
+    /// A full disk can surface from conversation routing (its shell-context save fails with
+    /// `SQLITE_FULL`) before any body write, as for a plain-text message. That proves nothing
+    /// about the message, so it aborts the run like a full-disk body write instead of becoming a
+    /// per-message `.failed` that spends the escape hatch.
+    /// Revert-check: the `catch let error where StorageErrorClassifier.isOutOfSpace(error)` arm
+    /// around `createNewMessage` in `MessagePersister.persist` (the message is then `.failed`).
+    @MainActor
+    func testConversationRoutingOutOfSpace_abortsTheBatchWithNoVerdictOrRow() async throws {
+        let sqliteFull = NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSPersistentStoreSaveError,
+            userInfo: [NSSQLiteErrorDomain: NSNumber(value: StorageErrorClassifier.SQLiteResultCode.full)]
+        )
+        let persister = makePersister(conversationCreationError: sqliteFull)
+        let context = coreDataStack.newBackgroundContext()
+
+        do {
+            _ = try await persister.saveMessages(
+                [makeFullMessage(id: "m-routing-enospc")],
+                myAliases: [Self.myEmail],
+                in: context
+            )
+            XCTFail("A full disk during routing must abort the batch")
+        } catch let abort as SyncResourceAbort {
+            XCTAssertEqual(abort, .insufficientStorage)
+        }
+
+        let rowCount = await messageCount(in: context)
+        XCTAssertEqual(rowCount, 0)
     }
 
     /// A failed existing-message lookup must be `.lookupFailed` — creating

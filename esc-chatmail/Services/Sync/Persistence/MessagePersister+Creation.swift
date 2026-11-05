@@ -46,9 +46,13 @@ extension MessagePersister {
         let saveHTML = self.saveHTML
         let htmlContentHandler = self.htmlContentHandler
         let canonicalHTML = processedMessage.storedHTML
-        let savedBodyStorageURI = canonicalHTML.flatMap {
-            saveHTML($0, processedMessage.id)?.absoluteString
+        // Before routing or inserting anything: a body that could not be written must not
+        // become a body-less row (`MessageProcessor`'s body-materialization contract).
+        let saveResult = canonicalHTML.map { saveHTML($0, processedMessage.id) }
+        if let failure = saveResult?.bodyWriteFailure {
+            throw failure
         }
+        let savedBodyStorageURI = saveResult?.savedURL?.absoluteString
         let conversationObjectID: NSManagedObjectID
         if let anchoredListConversationObjectID =
             remoteCommittedSendMutation?.anchoredListConversationObjectID {

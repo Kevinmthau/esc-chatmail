@@ -283,74 +283,73 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
 
     // MARK: - Failed save
 
-    func testCreateNewMessage_failedHTMLSave_doesNotStampFromTheInHandHTML() async throws {
+    /// A body that could not be written used to become a body-less row with a known `.notRich`
+    /// verdict that no backfill revisits, a text bubble for good. Now nothing is inserted, and
+    /// `MessagePersister.persist` reports the message `.failed` (`MessagePersisterDispositionTests`).
+    /// Revert-check: the `throw failure` on a failed body write in
+    /// `MessagePersister+Creation.swift`.
+    func testCreateNewMessage_failedHTMLSave_insertsNoRow() async throws {
         let id = uniqueID("failed-save-create")
-        let persister = makePersister(saveHTML: { _, _ in nil })
+        let persister = makePersister(saveHTML: { _, _ in .ioFailure })
+        let context = testStack.newBackgroundContext()
 
-        let row = try await createRow(
-            makeProcessedMessage(
-                id: id,
-                html: RichVerdictFixture.richHTML,
-                prerun: RichContentPrerun(html: RichVerdictFixture.richHTML, isRich: true)
-            ),
-            using: persister
-        )
+        do {
+            try await persister.createNewMessage(
+                makeProcessedMessage(
+                    id: id,
+                    html: RichVerdictFixture.richHTML,
+                    prerun: RichContentPrerun(html: RichVerdictFixture.richHTML, isRich: true)
+                ),
+                labelIds: nil,
+                myAliases: RichVerdictFixture.myAliases,
+                in: context
+            )
+            XCTFail("A failed body write must not create the row")
+        } catch let failure as MessageBodyWriteFailure {
+            XCTAssertEqual(failure, .ioError)
+        }
 
-        // The stored state has no HTML at all: no URI, no file, a plain body.
-        XCTAssertNil(row.inputs.bodyStorageURI)
+        let insertedCount: Int = await context.perform {
+            let request: NSFetchRequest<Message> = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            return (try? context.count(for: request)) ?? -1
+        }
+        XCTAssertEqual(insertedCount, 0)
         XCTAssertFalse(handler.htmlFileExists(for: id))
-
-        // Revert-check: `savedHTML: savedBodyStorageURI == nil ? nil :
-        // canonicalHTML` in MessagePersister+Creation.swift. Passing the
-        // in-hand string after a failed save stores `.rich` for a row that
-        // has nothing to render as a card.
-        XCTAssertEqual(row.verdict, .notRich)
     }
 
-    func testCreateNewMessage_failedHTMLSaveOverAnEarlierFile_stampsFromTheStoredFile() async throws {
-        let id = uniqueID("failed-save-earlier-file")
-        // An earlier attempt left this message's file behind.
-        XCTAssertNotNil(handler.saveHTML(RichVerdictFixture.richHTML, for: id))
-        let persister = makePersister(saveHTML: { _, _ in nil })
-
-        let row = try await createRow(
-            makeProcessedMessage(
-                id: id,
-                html: RichVerdictFixture.personalHTML,
-                prerun: RichContentPrerun(html: RichVerdictFixture.personalHTML, isRich: false)
-            ),
-            using: persister
-        )
-
-        // Revert-check: same guard as above, from the other side. A failed
-        // save does not prove no HTML is stored; vouching for the in-hand
-        // string stores `.notRich` over a rich file the bubble will load.
-        XCTAssertNil(row.inputs.bodyStorageURI)
-        XCTAssertEqual(row.verdict, .rich)
-    }
-
-    func testUpdateExistingMessage_failedHTMLSave_doesNotStampFromTheInHandHTML() async throws {
+    /// The update path leaves the row exactly as it was, verdict included, rather than re-stamping
+    /// it from inputs that changed without their body.
+    /// Revert-check: the `case let failedSave?:` early return in `MessagePersister+Updates.swift`.
+    func testUpdateExistingMessage_failedHTMLSave_leavesTheVerdictUntouched() async throws {
         let id = uniqueID("failed-save-update")
-        let persister = makePersister(saveHTML: { _, _ in nil })
-        _ = try await createRow(makeProcessedMessage(id: id, html: nil), using: persister)
-        // Unknown opens the re-stamp gate without any input changing, so the
-        // assertion below is on a verdict this update wrote.
+        _ = try await createRow(makeProcessedMessage(id: id, html: nil), using: makePersister())
+        // Unknown would let any update that went ahead re-stamp, so a changed raw value below
+        // could only come from an update that should not have happened.
         try await overwriteRawVerdict(0, forMessageID: id)
+        let before = try await storedRow(id: id)
 
-        let row = try await updateRow(
+        let context = testStack.newBackgroundContext()
+        let outcome = await makePersister(saveHTML: { _, _ in .ioFailure }).updateExistingMessageOutcome(
             makeProcessedMessage(
                 id: id,
                 html: RichVerdictFixture.richHTML,
                 prerun: RichContentPrerun(html: RichVerdictFixture.richHTML, isRich: true)
             ),
-            using: persister
+            labelIds: nil,
+            myAliases: RichVerdictFixture.myAliases,
+            modificationTransaction: nil,
+            reroutedSourceRollupBuffer: nil,
+            remoteCommittedSendMutation: nil,
+            in: context
         )
+        try await commit(context)
 
-        // Revert-check: `savedHTML: savedBodyStorageURI == nil ? nil :
-        // canonicalHTML` in MessagePersister+Updates.swift. Passing the
-        // in-hand string stores `.rich`.
-        XCTAssertNil(row.inputs.bodyStorageURI)
-        XCTAssertEqual(row.verdict, .notRich)
+        XCTAssertEqual(outcome, .bodyWriteFailed(.ioError))
+        let after = try await storedRow(id: id)
+        XCTAssertEqual(after.rawVerdict, before.rawVerdict)
+        XCTAssertEqual(after.inputs, before.inputs)
+        XCTAssertNil(after.inputs.bodyStorageURI)
     }
 
     // MARK: - Update path
@@ -536,7 +535,7 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
     /// A persister whose default `saveHTML` writes through the isolated
     /// handler. Pass `saveHTML` to simulate a failed write.
     private func makePersister(
-        saveHTML: ((String, String) -> URL?)? = nil
+        saveHTML: ((String, String) -> HTMLSaveResult)? = nil
     ) -> MessagePersister {
         MessagePersister(
             coreDataStack: coreDataStack,

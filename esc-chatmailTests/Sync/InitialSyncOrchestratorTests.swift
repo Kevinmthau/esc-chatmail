@@ -191,7 +191,7 @@ final class InitialSyncOrchestratorPageDurabilityTests: XCTestCase {
         )
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
-            saveHTML: { _, _ in nil },
+            saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
             conversationManager: conversationManager
         )
         return InitialSyncOrchestrator(
@@ -279,7 +279,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         let conversationManager = ConversationManager(currentUserEmail: { profile.emailAddress })
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
-            saveHTML: { _, _ in nil },
+            saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
             conversationManager: conversationManager
         )
         let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
@@ -354,7 +354,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         )
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
-            saveHTML: { _, _ in nil },
+            saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
             conversationManager: conversationManager
         )
         let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
@@ -471,7 +471,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         )
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
-            saveHTML: { _, _ in nil },
+            saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
             conversationManager: conversationManager
         )
         let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
@@ -663,7 +663,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         )
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
-            saveHTML: { _, _ in nil },
+            saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
             conversationManager: conversationManager
         )
         let sut = InitialSyncOrchestrator(
@@ -755,7 +755,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         )
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
-            saveHTML: { _, _ in nil },
+            saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
             conversationManager: conversationManager
         )
         let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)

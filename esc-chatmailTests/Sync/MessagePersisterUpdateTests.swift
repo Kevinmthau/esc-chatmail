@@ -3048,11 +3048,11 @@ private final class HTMLSaveSpy {
         return lastHTML
     }
 
-    func save(_ html: String, messageId: String) -> URL? {
+    func save(_ html: String, messageId: String) -> HTMLSaveResult {
         lock.lock()
         callCount += 1
         lastHTML = html
         lock.unlock()
-        return URL(fileURLWithPath: "/tmp/\(messageId).html")
+        return .saved(URL(fileURLWithPath: "/tmp/\(messageId).html"))
     }
 }

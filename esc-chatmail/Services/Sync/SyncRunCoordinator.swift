@@ -207,6 +207,13 @@ actor SyncRunCoordinator {
         activeRun != nil
     }
 
+    /// True when `beginRun` / `beginRunWithTask` would refuse right now: a run is active, or an
+    /// account transition owns the boundary. A snapshot; the answer can change before the caller
+    /// acts on it.
+    func isBoundaryHeld() -> Bool {
+        activeRun != nil || isQuiescing
+    }
+
     func activeRunKind() -> SyncRunKind? {
         activeRun?.run.kind
     }

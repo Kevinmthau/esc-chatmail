@@ -216,21 +216,54 @@ final class HTMLContentHandler: @unchecked Sendable {
         for messageId: String,
         expectedGeneration: HTMLContentAccountGeneration?
     ) -> URL? {
+        saveHTMLResult(html, for: messageId, expectedGeneration: expectedGeneration).savedURL
+    }
+
+    /// `saveHTML` with the reason a write did not happen. Sync persistence needs it: a closed
+    /// boundary is teardown, a full volume stops the whole run, and any other write failure
+    /// blocks only this message. All three used to come back as the same nil, so a full disk
+    /// stored a body-less row behind an advancing cursor.
+    func saveHTMLResult(
+        _ html: String,
+        for messageId: String,
+        expectedGeneration: HTMLContentAccountGeneration? = nil
+    ) -> HTMLSaveResult {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
 
         do {
-            return try accountBoundary.perform(
+            guard let savedURL = try accountBoundary.perform(
                 directoryKey: directoryKey,
-                expectedGeneration: expectedGeneration
-            ) {
-                try html.write(to: fileURL, atomically: true, encoding: .utf8)
-                cacheHTML(html, for: fileURL)
-                refreshSignatureCache(for: fileURL)
-                return fileURL
+                expectedGeneration: expectedGeneration,
+                {
+                    do {
+                        try html.write(to: fileURL, atomically: true, encoding: .utf8)
+                    } catch {
+                        // The directory is created only at init and on reopen, so one that is
+                        // gone (its creation failed on a full disk, or something removed it)
+                        // would fail every later write, and sync would mark each message as its
+                        // own failure. Recreate it under the boundary and retry once. A
+                        // creation that fails throws its own error, so a full disk still reads
+                        // as out of space.
+                        guard !FileManager.default.fileExists(atPath: messagesDirectory.path) else {
+                            throw error
+                        }
+                        try FileManager.default.createDirectory(
+                            at: messagesDirectory,
+                            withIntermediateDirectories: true
+                        )
+                        try html.write(to: fileURL, atomically: true, encoding: .utf8)
+                    }
+                    cacheHTML(html, for: fileURL)
+                    refreshSignatureCache(for: fileURL)
+                    return fileURL
+                }
+            ) else {
+                return .boundaryClosed
             }
+            return .saved(savedURL)
         } catch {
-            Log.error("Failed to save HTML for message \(messageId)", category: .general, error: error)
-            return nil
+            Log.error("Failed to save HTML for message \(Log.hashIdentifier(messageId))", category: .general, error: error)
+            return .writeFailed(error)
         }
     }
 
@@ -283,6 +316,15 @@ final class HTMLContentHandler: @unchecked Sendable {
 
     func loadHTML(for messageId: String) -> String? {
         loadHTML(for: messageId, expectedGeneration: nil)
+    }
+
+    /// The body file's URL when it already holds exactly `html`, so a refetch can skip
+    /// rewriting identical bytes (`MessagePersister`'s update path). Nil when the file is
+    /// missing, holds anything else, or the boundary is closed.
+    func storedHTMLURL(ifMatching html: String, for messageId: String) -> URL? {
+        let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
+        guard loadHTML(from: fileURL) == html else { return nil }
+        return fileURL
     }
 
     func loadHTML(

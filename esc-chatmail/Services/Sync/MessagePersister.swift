@@ -119,7 +119,9 @@ actor MessagePersister {
     let coreDataStack: CoreDataStack
     let messageProcessor: MessageProcessor
     let htmlContentHandler: HTMLContentHandler
-    let saveHTML: (String, String) -> URL?
+    /// Writes a message's HTML body. Returns the reason when it could not, because each reason
+    /// gets a different verdict (`dispositionAfterBodyWriteFailure`).
+    let saveHTML: (String, String) -> HTMLSaveResult
     let conversationManager: ConversationManager
     let conversationRouter: MessageConversationRouter
     let photoPrefetcher: @Sendable ([String]) async -> Void
@@ -131,7 +133,7 @@ actor MessagePersister {
         coreDataStack: CoreDataStack = .shared,
         messageProcessor: MessageProcessor = MessageProcessor(),
         htmlContentHandler: HTMLContentHandler = HTMLContentHandler(),
-        saveHTML: ((String, String) -> URL?)? = nil,
+        saveHTML: ((String, String) -> HTMLSaveResult)? = nil,
         conversationManager: ConversationManager = ConversationManager(),
         conversationRouter: MessageConversationRouter? = nil,
         photoPrefetcher: (@Sendable ([String]) async -> Void)? = nil,
@@ -141,7 +143,7 @@ actor MessagePersister {
         self.messageProcessor = messageProcessor
         self.htmlContentHandler = htmlContentHandler
         self.saveHTML = saveHTML ?? { html, messageId in
-            htmlContentHandler.saveHTML(html, for: messageId)
+            htmlContentHandler.saveHTMLResult(html, for: messageId)
         }
         self.conversationManager = conversationManager
         self.conversationRouter = conversationRouter ?? MessageConversationRouter(
@@ -596,6 +598,8 @@ actor MessagePersister {
                 // Creating here could insert a duplicate of a row that
                 // exists but could not be read.
                 return .failed
+            case .bodyWriteFailed(let failure):
+                return try Self.dispositionAfterBodyWriteFailure(failure)
             case .notPresent:
                 break
             }
@@ -611,10 +615,18 @@ actor MessagePersister {
                     in: context
                 )
                 return .persisted
+            } catch let bodyWriteFailure as MessageBodyWriteFailure {
+                return try Self.dispositionAfterBodyWriteFailure(bodyWriteFailure)
             } catch CoreDataError.entityCreationFailed(let entity) {
                 // Model/schema mismatch: every message in the run fails the
                 // same way, so this is run-fatal, not a per-message verdict.
                 throw CoreDataError.entityCreationFailed(entity)
+            } catch let error where StorageErrorClassifier.isOutOfSpace(error) {
+                // A full disk can surface from Core Data instead of the body write: conversation
+                // routing saves its own shell context. It proves nothing about this message, so
+                // it ends the run like a full-disk body write (`dispositionAfterBodyWriteFailure`)
+                // rather than spending the escape hatch on a per-message `.failed`.
+                throw SyncResourceAbort.insufficientStorage
             } catch {
                 Log.error("Failed to create message \(processedMessage.id): \(error)", category: .sync)
                 return .failed
@@ -625,4 +637,26 @@ actor MessagePersister {
 
 extension MessagePersister {
     static let excludedMailboxLabelIDs: Set<String> = ["SPAM", "DRAFT", "TRASH"]
+
+    /// The verdict for a message whose body could not be written. Nothing was persisted for it.
+    ///
+    /// - A closed boundary is account teardown, so it throws cancellation, which is never a
+    ///   per-message verdict.
+    /// - A full volume throws `SyncResourceAbort.insufficientStorage`: a run-level abort, like an
+    ///   account-scoped API error. No bucket, no further requests, nothing commits. As `.failed` it
+    ///   would freeze the cursor correctly but spend the escape hatch on every message in the
+    ///   backlog, and the next write would fail the same way.
+    /// - Any other write failure is `.failed`: the cursor holds and the re-scan retries it.
+    static func dispositionAfterBodyWriteFailure(
+        _ failure: MessageBodyWriteFailure
+    ) throws -> MessagePersistDisposition {
+        switch failure {
+        case .boundaryClosed:
+            throw CancellationError()
+        case .outOfSpace:
+            throw SyncResourceAbort.insufficientStorage
+        case .ioError:
+            return .failed
+        }
+    }
 }

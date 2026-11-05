@@ -264,6 +264,11 @@ final class ForegroundSyncCoordinator {
         case .skippedNoNetwork:
             log.debug("Skipping foreground sync (\(reason)): network unavailable")
             return .skipped
+        case .skippedInsufficientStorage:
+            // The engine owns the storage backoff, so the periodic loop can keep its cadence:
+            // a refused run fetches nothing, and the engine admits one once space is freed.
+            log.debug("Skipping foreground sync (\(reason)): not enough storage")
+            return .skipped
         }
     }
 

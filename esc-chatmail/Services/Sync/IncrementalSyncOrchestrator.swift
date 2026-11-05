@@ -655,6 +655,9 @@ final class IncrementalSyncOrchestrator {
                 // and affects the whole account. Let the outer transaction
                 // abort so no cursor, counter, message, or drain state moves.
                 throw apiError
+            } catch let abort as SyncResourceAbort {
+                // A full disk fails every later write too, so it ends the run the same way.
+                throw abort
             } catch is CancellationError {
                 throw CancellationError()
             } catch {

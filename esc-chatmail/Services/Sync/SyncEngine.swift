@@ -12,6 +12,19 @@ enum ForegroundSyncRequestResult {
     case started
     case alreadyInProgress
     case skippedNoNetwork
+    /// Refused before fetching anything: the disk is too full, or a recent run hit a full disk
+    /// and its backoff has not run out (`SyncStorageBackoff`).
+    case skippedInsufficientStorage
+}
+
+/// How a run ended, as `SyncEngine.runSyncTask` reports it to the entry point that started it.
+private enum SyncRunTaskOutcome: Equatable {
+    case succeeded
+    case cancelled
+    /// Stopped on a full disk (`SyncResourceAbort.isInsufficientStorage`). Kept apart from
+    /// `.failed` because it opens the storage backoff rather than an immediate retry.
+    case insufficientStorage
+    case failed
 }
 
 /// Captures the result produced inside the coordinator-owned `Task<Void, Error>`
@@ -56,6 +69,15 @@ final class SyncEngine: ObservableObject, Sendable {
     var syncProgress: Double { uiState.syncProgress }
     var syncStatus: String { uiState.syncStatus }
 
+    /// True while sync is held back because the disk is full: set when a run is refused or
+    /// stops on a full disk, cleared by the next run that finishes.
+    @Published private(set) var isBlockedByInsufficientStorage = false
+
+    static let insufficientStorageStatus = "Not enough storage to sync new mail"
+
+    /// Admission and backoff for a full disk. Main-actor state, read before every run starts.
+    private var storageBackoff = SyncStorageBackoff()
+
     // MARK: - Dependencies
 
     private let initialSyncOrchestrator: InitialSyncOrchestrator
@@ -65,6 +87,8 @@ final class SyncEngine: ObservableObject, Sendable {
     private let attachmentDownloader: AttachmentDownloader
     private let networkMonitor: NetworkMonitorService
     private let syncRunCoordinator: SyncRunCoordinator
+    private let clock: any SyncClock
+    private let availableStorageBytes: @Sendable () -> Int64?
 
     private let log = LogCategory.sync.logger
 
@@ -97,7 +121,9 @@ final class SyncEngine: ObservableObject, Sendable {
         coreDataStack: CoreDataStack,
         attachmentDownloader: AttachmentDownloader,
         networkMonitor: NetworkMonitorService,
-        syncRunCoordinator: SyncRunCoordinator
+        syncRunCoordinator: SyncRunCoordinator,
+        clock: any SyncClock = SystemSyncClock(),
+        availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() }
     ) {
         let reconciliation = SyncReconciliation(
             messageFetcher: messageFetcher
@@ -108,6 +134,8 @@ final class SyncEngine: ObservableObject, Sendable {
         self.attachmentDownloader = attachmentDownloader
         self.networkMonitor = networkMonitor
         self.syncRunCoordinator = syncRunCoordinator
+        self.clock = clock
+        self.availableStorageBytes = availableStorageBytes
 
         self.initialSyncOrchestrator = InitialSyncOrchestrator(
             messageFetcher: messageFetcher,
@@ -144,6 +172,7 @@ final class SyncEngine: ObservableObject, Sendable {
 
     /// Performs initial full sync
     func performInitialSync() async throws {
+        guard await storageAdmission() == .admitted else { return }
         // Create the foreground task only after acquiring the shared sync-run boundary.
         let syncRunTask = await syncRunCoordinator.beginRunWithTask(kind: .foregroundInitial) {
             Task { [weak self] in
@@ -172,11 +201,11 @@ final class SyncEngine: ObservableObject, Sendable {
         case .started(let syncRunTask):
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let success = await self.runSyncTask(
+                let outcome = await self.runSyncTask(
                     syncRunTask,
                     syncType: "Incremental"
                 )
-                guard success,
+                guard outcome == .succeeded,
                       let result = await resultRecorder.recordedResult() else {
                     return
                 }
@@ -188,6 +217,8 @@ final class SyncEngine: ObservableObject, Sendable {
             return .alreadyInProgress
         case .skippedNoNetwork:
             return .skippedNoNetwork
+        case .skippedInsufficientStorage:
+            return .skippedInsufficientStorage
         }
     }
 
@@ -205,12 +236,15 @@ final class SyncEngine: ObservableObject, Sendable {
             allowsExpensiveRecovery: budget.allowsExpensiveRecovery
         ) {
         case .started(let syncRunTask):
-            let success = await withTaskCancellationHandler {
+            let outcome = await withTaskCancellationHandler {
                 await runSyncTask(syncRunTask, syncType: "Background incremental")
             } onCancel: {
                 syncRunTask.task.cancel()
             }
-            guard success,
+            if outcome == .insufficientStorage {
+                return .deferredForInsufficientStorage
+            }
+            guard outcome == .succeeded,
                   let result = await resultRecorder.recordedResult() else {
                 return .failed
             }
@@ -221,6 +255,8 @@ final class SyncEngine: ObservableObject, Sendable {
             return .blocked(by: activeKind)
         case .skippedNoNetwork:
             return .failed
+        case .skippedInsufficientStorage:
+            return .deferredForInsufficientStorage
         }
     }
 
@@ -231,23 +267,76 @@ final class SyncEngine: ObservableObject, Sendable {
     /// Executes a sync task with unified error handling
     /// Note: Task is already set atomically by the shared sync-run coordinator.
     @discardableResult
-    private func runSyncTask(_ syncRunTask: SyncRunTask, syncType: String) async -> Bool {
+    private func runSyncTask(_ syncRunTask: SyncRunTask, syncType: String) async -> SyncRunTaskOutcome {
 
         do {
             try await syncRunTask.task.value
             await syncRunCoordinator.endRun(syncRunTask.run)
-            return true
+            // The backoff itself is reset where the run reports how much mail it stored
+            // (`recordSuccessfulRun(storedMessageCount:)`). Any finished run lifts the banner:
+            // sync is working again.
+            setBlockedByInsufficientStorage(false)
+            return .succeeded
         } catch is CancellationError {
             await syncRunCoordinator.endRun(syncRunTask.run)
             log.info("\(syncType) sync was cancelled")
             uiState.update(isSyncing: false, status: "Sync cancelled")
-            return false
+            return .cancelled
+        } catch let error where SyncResourceAbort.isInsufficientStorage(error) {
+            await syncRunCoordinator.endRun(syncRunTask.run)
+            // The run rolled back and recorded no per-message failure, so the ledger and the
+            // escape-hatch counter are untouched. Only the backoff moves.
+            storageBackoff.recordInsufficientStorage(now: clock.now(), availableBytes: availableStorageBytes())
+            setBlockedByInsufficientStorage(true)
+            log.error("\(syncType) sync stopped: not enough storage", error: error)
+            uiState.update(isSyncing: false, status: Self.insufficientStorageStatus)
+            return .insufficientStorage
         } catch {
             await syncRunCoordinator.endRun(syncRunTask.run)
             log.error("\(syncType) sync failed", error: error)
             uiState.update(isSyncing: false, status: "Sync failed: \(formatSyncError(error))")
-            return false
+            return .failed
         }
+    }
+
+    /// Publishes only a change: `@Published` notifies on every assignment, and the conversation
+    /// list observes this engine, so clearing it after every successful run would re-render the
+    /// list once a minute for nothing.
+    private func setBlockedByInsufficientStorage(_ isBlocked: Bool) {
+        guard isBlockedByInsufficientStorage != isBlocked else { return }
+        isBlockedByInsufficientStorage = isBlocked
+    }
+
+    /// What the storage gate decided for a run about to start.
+    private enum StorageAdmission: Equatable {
+        case admitted
+        /// Refused, and nothing else holds the run boundary, so the refusal is published.
+        case refused
+        /// Refused while another run or an account transition holds the boundary. Nothing is
+        /// published, and the caller answers as if the boundary had refused it.
+        case boundaryBusy
+    }
+
+    /// Refuses a run the disk cannot hold, before it fetches anything (`SyncStorageBackoff`).
+    ///
+    /// A refusal while the run boundary is held publishes nothing. The run holding it may be the
+    /// very one filling the disk: marking sync as stopped would clear `isSyncing` and raise the
+    /// banner under a run still in progress, whose own outcome owns the status. It answers
+    /// `.boundaryBusy` instead, which callers report as already in progress, exactly what
+    /// `beginRunWithTask` would have said. A caller that queues a request behind the run meets
+    /// this gate again once the run ends.
+    private func storageAdmission() async -> StorageAdmission {
+        if storageBackoff.admitsRun(now: clock.now(), availableBytes: availableStorageBytes()) {
+            return .admitted
+        }
+        guard await !syncRunCoordinator.isBoundaryHeld() else {
+            log.debug("Not enough storage to sync, but the run boundary is held; not publishing")
+            return .boundaryBusy
+        }
+        log.info("Not enough storage to sync; skipping run")
+        setBlockedByInsufficientStorage(true)
+        uiState.update(isSyncing: false, status: Self.insufficientStorageStatus)
+        return .refused
     }
 
     // MARK: - Private Implementation
@@ -259,6 +348,7 @@ final class SyncEngine: ObservableObject, Sendable {
             self?.uiState.update(progress: progress, status: status)
         }
 
+        storageBackoff.recordSuccessfulRun(storedMessageCount: result.messagesProcessed)
         let finalStatus = result.hadWarnings ? "Sync completed with warnings" : "Sync complete"
         uiState.update(isSyncing: false, progress: 1.0, status: finalStatus)
 
@@ -293,6 +383,7 @@ final class SyncEngine: ObservableObject, Sendable {
             }
         )
 
+        storageBackoff.recordSuccessfulRun(storedMessageCount: result.newMessagesCount)
         let finalStatus = result.hadWarnings ? "Sync completed with warnings" : "Sync complete"
         uiState.update(isSyncing: false, progress: 1.0, status: finalStatus)
 
@@ -306,6 +397,7 @@ final class SyncEngine: ObservableObject, Sendable {
         case started(SyncRunTask)
         case alreadyInProgress
         case skippedNoNetwork
+        case skippedInsufficientStorage
     }
 
     private func prepareIncrementalSync(
@@ -314,6 +406,15 @@ final class SyncEngine: ObservableObject, Sendable {
         historyPageSize: Int? = nil,
         allowsExpensiveRecovery: Bool = true
     ) async -> IncrementalSyncPreparationResult {
+        // Ahead of the network check: when both refuse, the full disk is what the user can fix.
+        switch await storageAdmission() {
+        case .admitted:
+            break
+        case .refused:
+            return .skippedInsufficientStorage
+        case .boundaryBusy:
+            return .alreadyInProgress
+        }
         guard await networkMonitor.isNetworkAvailable() else {
             log.info("Network not available, skipping sync")
             uiState.update(isSyncing: false, status: "Network unavailable")

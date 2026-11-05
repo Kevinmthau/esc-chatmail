@@ -319,7 +319,6 @@ final class LogRedactionTests: XCTestCase {
         "esc-chatmail/Services/ErrorHandling/FileSystemErrorHandler.swift|Log.debug(\"Failed to list contents of \\(url.lastPathComponent)\", category: category)",
         "esc-chatmail/Services/HTMLContent/HTMLContentHandler.swift|Log.debug(\"Failed to read creation date for \\(fileURL.lastPathComponent)\", category: .general)",
         "esc-chatmail/Services/HTMLContent/HTMLContentHandler.swift|Log.error(\"Failed to load HTML from \\(url)\", category: .general, error: error)",
-        "esc-chatmail/Services/HTMLContent/HTMLContentHandler.swift|Log.error(\"Failed to save HTML for message \\(messageId)\", category: .general, error: error)",
         "esc-chatmail/Services/HTMLContent/HTMLContentLoader+SourcePreparation.swift|Log.debug(\"wrappedHTMLIfMeaningful: original preferHTML content not meaningful for \\(messageId) (len=\\(safeHTML.count))\", category: .ui)",
         "esc-chatmail/Services/HTMLContent/HTMLContentLoader+SourcePreparation.swift|Log.debug(\"wrappedHTMLIfMeaningful: sanitized HTML not meaningful for \\(messageId) (len=\\(sanitizedHTML.count))\", category: .ui)",
         "esc-chatmail/Services/HTMLContent/HTMLContentLoader+SourcePreparation.swift|Log.debug(\"wrappedHTMLIfMeaningful: wrapped HTML not meaningful for \\(messageId) (len=\\(wrapped.count))\", category: .ui)",
