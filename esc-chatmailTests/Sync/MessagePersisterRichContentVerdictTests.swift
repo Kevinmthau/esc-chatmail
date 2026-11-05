@@ -320,7 +320,8 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
 
     /// The update path leaves the row exactly as it was, verdict included, rather than re-stamping
     /// it from inputs that changed without their body.
-    /// Revert-check: the `case let failedSave?:` early return in `MessagePersister+Updates.swift`.
+    /// Revert-check: the `if let bodyWriteFailure = saveResult?.bodyWriteFailure` early return in
+    /// `MessagePersister+Updates.swift`.
     func testUpdateExistingMessage_failedHTMLSave_leavesTheVerdictUntouched() async throws {
         let id = uniqueID("failed-save-update")
         _ = try await createRow(makeProcessedMessage(id: id, html: nil), using: makePersister())

@@ -72,4 +72,28 @@ struct SyncStorageBackoff: Equatable {
         guard storedMessageCount > 0 else { return }
         self = SyncStorageBackoff()
     }
+
+    /// Whether a run that just finished lifts the "storage is full" banner
+    /// (`SyncEngine.isBlockedByInsufficientStorage`). Call it after the run has reported what it
+    /// stored (`recordSuccessfulRun(storedMessageCount:)`).
+    ///
+    /// The banner follows the same evidence as the backoff. While a full-disk stop is outstanding
+    /// (`consecutiveFailures > 0`) it lifts only on what would also end the backoff: the run
+    /// stored mail (which has already reset the backoff, so this sees no failure), or a reading
+    /// shows space freed since the stop, the test `admitsRun` uses to end a window early. A run
+    /// that merely succeeded proves nothing on a disk still too full for message bodies: it used
+    /// to lift the banner after every run with no new mail, and the next real message raised it
+    /// again. A reading at or above the admission threshold is not enough on its own either,
+    /// because the stop being answered happened on a disk that read above it.
+    ///
+    /// With no stop outstanding, the banner came from an admission refusal alone, and this run
+    /// passed that same admission gate on its way in, so it lifts.
+    func liftsInsufficientStorageBanner(
+        availableBytes: Int64?,
+        threshold: Int64 = StoreVolumeFreeSpace.lowStorageThresholdBytes
+    ) -> Bool {
+        guard consecutiveFailures > 0 else { return true }
+        guard let availableBytes, let availableBytesAtFailure else { return false }
+        return availableBytes >= availableBytesAtFailure + threshold
+    }
 }

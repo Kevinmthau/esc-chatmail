@@ -67,6 +67,41 @@ final class AuthSessionTests: XCTestCase {
         }
     }
 
+    // `SyncEngine.shared` outlives sign-out, so the previous account's full-disk backoff and
+    // banner used to carry into the next account. Both sign-out paths retire them, inside the
+    // transition and before the store is reset.
+    // Revert-check: fails if the `resetSyncStorageState()` calls are removed from
+    // AuthSession.signOut() and signOutAndDisconnect() (firstIndex(of:) goes nil).
+    // HONEST SCOPE: the sign-in and restore calls sit on paths that publish a GIDGoogleUser, which
+    // these tests cannot construct, so only the two sign-out paths are pinned here.
+    func testSignOutPaths_resetSyncStorageStateBeforeStoreCleanup() async {
+        for disconnects in [false, true] {
+            let cleanup = AuthSessionCleanupRecorder()
+            let session = makeAuthSession(
+                resetSyncStorageState: { cleanup.record("sync-storage-reset") },
+                resetCoreDataStore: { cleanup.record("store-reset") }
+            )
+            session.isAuthenticated = true
+
+            if disconnects {
+                // No user means no revocation token: disconnect throws after its local cleanup.
+                try? await session.signOutAndDisconnect()
+            } else {
+                let didSignOut = await session.signOut()
+                XCTAssertTrue(didSignOut)
+            }
+
+            let path = disconnects ? "signOutAndDisconnect" : "signOut"
+            let storageResetIndex = cleanup.events.firstIndex(of: "sync-storage-reset")
+            let storeResetIndex = cleanup.events.firstIndex(of: "store-reset")
+            XCTAssertNotNil(storageResetIndex, "\(path) must reset the sync storage state")
+            XCTAssertNotNil(storeResetIndex, "\(path) must reset the store")
+            if let storageResetIndex, let storeResetIndex {
+                XCTAssertLessThan(storageResetIndex, storeResetIndex, path)
+            }
+        }
+    }
+
     func testWithFreshToken_reusesSingleInjectedTokenManagerInstance() async throws {
         let factory = AuthSessionTokenManagerFactory()
         let session = makeAuthSession(tokenManagerProvider: { factory.makeDistinctTokenManager() })
@@ -2965,6 +3000,7 @@ final class AuthSessionTests: XCTestCase {
         reopenDownloads: @escaping @MainActor @Sendable () async -> Bool = { true },
         resetPendingActionRetryState: @escaping @MainActor @Sendable () async -> Void = {},
         pendingActionAuthenticationDidRecover: @escaping @MainActor @Sendable () async -> Void = {},
+        resetSyncStorageState: @escaping @MainActor @Sendable () -> Void = {},
         cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {},
         resetCoreDataStore: @escaping @Sendable () async throws -> Void = {},
         fetchStoredAccountEmails: @escaping @Sendable () async throws -> [String] = { [] },
@@ -2993,6 +3029,7 @@ final class AuthSessionTests: XCTestCase {
             reopenDownloads: reopenDownloads,
             resetPendingActionRetryState: resetPendingActionRetryState,
             pendingActionAuthenticationDidRecover: pendingActionAuthenticationDidRecover,
+            resetSyncStorageState: resetSyncStorageState,
             cancelBackgroundTaskRequests: cancelBackgroundTaskRequests,
             resetCoreDataStore: resetCoreDataStore,
             inspectLocalMailboxStore: {

@@ -70,13 +70,22 @@ final class SyncEngine: ObservableObject, Sendable {
     var syncStatus: String { uiState.syncStatus }
 
     /// True while sync is held back because the disk is full: set when a run is refused or
-    /// stops on a full disk, cleared by the next run that finishes.
+    /// stops on a full disk, cleared by a finished run that shows the disk takes mail again
+    /// (`SyncStorageBackoff.liftsInsufficientStorageBanner`) and at every account transition
+    /// (`resetStorageStateForAccountTransition()`).
     @Published private(set) var isBlockedByInsufficientStorage = false
 
     static let insufficientStorageStatus = "Not enough storage to sync new mail"
 
     /// Admission and backoff for a full disk. Main-actor state, read before every run starts.
-    private var storageBackoff = SyncStorageBackoff()
+    /// Readable for tests; written only here.
+    private(set) var storageBackoff = SyncStorageBackoff()
+
+    /// Bumped by `resetStorageStateForAccountTransition()`. An admission refusal suspends on the
+    /// run coordinator before it publishes, and a transition can reset the state in that gap;
+    /// the refusal captures this first and publishes nothing once it has moved, so the previous
+    /// account's full-disk verdict never raises the next account's banner.
+    private var storageStateGeneration: UInt64 = 0
 
     // MARK: - Dependencies
 
@@ -271,11 +280,11 @@ final class SyncEngine: ObservableObject, Sendable {
 
         do {
             try await syncRunTask.task.value
+            // Before `endRun`, like the full-disk arm below: an account transition's
+            // `beginQuiescence()` waits for this run to end, then resets the storage state, so
+            // a write after `endRun` could land in the next account.
+            recordRunFinished()
             await syncRunCoordinator.endRun(syncRunTask.run)
-            // The backoff itself is reset where the run reports how much mail it stored
-            // (`recordSuccessfulRun(storedMessageCount:)`). Any finished run lifts the banner:
-            // sync is working again.
-            setBlockedByInsufficientStorage(false)
             return .succeeded
         } catch is CancellationError {
             await syncRunCoordinator.endRun(syncRunTask.run)
@@ -283,11 +292,11 @@ final class SyncEngine: ObservableObject, Sendable {
             uiState.update(isSyncing: false, status: "Sync cancelled")
             return .cancelled
         } catch let error where SyncResourceAbort.isInsufficientStorage(error) {
-            await syncRunCoordinator.endRun(syncRunTask.run)
             // The run rolled back and recorded no per-message failure, so the ledger and the
-            // escape-hatch counter are untouched. Only the backoff moves.
-            storageBackoff.recordInsufficientStorage(now: clock.now(), availableBytes: availableStorageBytes())
-            setBlockedByInsufficientStorage(true)
+            // escape-hatch counter are untouched. Only the backoff moves, before `endRun` (see
+            // the success arm).
+            recordRunStoppedOnFullDisk()
+            await syncRunCoordinator.endRun(syncRunTask.run)
             log.error("\(syncType) sync stopped: not enough storage", error: error)
             uiState.update(isSyncing: false, status: Self.insufficientStorageStatus)
             return .insufficientStorage
@@ -297,6 +306,34 @@ final class SyncEngine: ObservableObject, Sendable {
             uiState.update(isSyncing: false, status: "Sync failed: \(formatSyncError(error))")
             return .failed
         }
+    }
+
+    /// A run finished without error. The backoff itself was already reset where the run
+    /// reported how much mail it stored (`recordSuccessfulRun(storedMessageCount:)`); the banner
+    /// lifts only on the evidence that ends the backoff, so a run with no new mail on a disk still
+    /// too full for message bodies leaves it up.
+    func recordRunFinished() {
+        if storageBackoff.liftsInsufficientStorageBanner(availableBytes: availableStorageBytes()) {
+            setBlockedByInsufficientStorage(false)
+        }
+    }
+
+    /// A started run stopped on a full disk: open, or lengthen, the backoff window.
+    func recordRunStoppedOnFullDisk() {
+        storageBackoff.recordInsufficientStorage(now: clock.now(), availableBytes: availableStorageBytes())
+        setBlockedByInsufficientStorage(true)
+    }
+
+    /// Forgets the previous account's full-disk verdict: the backoff window and the banner.
+    /// `AuthSession` calls it inside every account transition, after `beginQuiescence()` has
+    /// drained the run boundary, so no run of the previous account can write it afterwards
+    /// (`runSyncTask` records before `endRun`, and an in-flight admission refusal checks
+    /// `storageStateGeneration`). The disk is no emptier for it: the next run still meets the
+    /// admission threshold, and a refusal there raises the banner again for the new account.
+    func resetStorageStateForAccountTransition() {
+        storageStateGeneration &+= 1
+        storageBackoff = SyncStorageBackoff()
+        setBlockedByInsufficientStorage(false)
     }
 
     /// Publishes only a change: `@Published` notifies on every assignment, and the conversation
@@ -329,7 +366,9 @@ final class SyncEngine: ObservableObject, Sendable {
         if storageBackoff.admitsRun(now: clock.now(), availableBytes: availableStorageBytes()) {
             return .admitted
         }
-        guard await !syncRunCoordinator.isBoundaryHeld() else {
+        let generation = storageStateGeneration
+        guard await !syncRunCoordinator.isBoundaryHeld(),
+              generation == storageStateGeneration else {
             log.debug("Not enough storage to sync, but the run boundary is held; not publishing")
             return .boundaryBusy
         }

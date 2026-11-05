@@ -92,4 +92,37 @@ final class SyncStorageBackoffTests: XCTestCase {
         )
         XCTAssertTrue(backoff.admitsRun(now: later.addingTimeInterval(240), availableBytes: plenty))
     }
+
+    /// The banner follows the backoff's evidence. A run with no new mail succeeds on a disk still
+    /// too full for message bodies, and lifting the banner on it hid a full disk until the next
+    /// real message raised it again.
+    /// Revert-check: the `consecutiveFailures > 0` and freed-space checks in
+    /// `SyncStorageBackoff.liftsInsufficientStorageBanner(availableBytes:threshold:)` (a run that
+    /// stored nothing then lifts the banner over a still-full disk).
+    func testLiftsInsufficientStorageBanner_afterAFullDiskStop_onlyOnStoredMailOrFreedSpace() {
+        var backoff = SyncStorageBackoff()
+        XCTAssertTrue(
+            backoff.liftsInsufficientStorageBanner(availableBytes: plenty),
+            "With no stop outstanding an admitted run lifts a refusal's banner"
+        )
+        backoff.recordInsufficientStorage(now: start, availableBytes: plenty)
+
+        backoff.recordSuccessfulRun(storedMessageCount: 0)
+        XCTAssertFalse(
+            backoff.liftsInsufficientStorageBanner(availableBytes: plenty),
+            "A reading above the threshold is what the stop happened on"
+        )
+        XCTAssertFalse(backoff.liftsInsufficientStorageBanner(availableBytes: plenty + threshold - 1))
+        XCTAssertFalse(backoff.liftsInsufficientStorageBanner(availableBytes: nil))
+        XCTAssertTrue(
+            backoff.liftsInsufficientStorageBanner(availableBytes: plenty + threshold),
+            "Space freed since the stop lifts it, as it ends the backoff window"
+        )
+
+        backoff.recordSuccessfulRun(storedMessageCount: 1)
+        XCTAssertTrue(
+            backoff.liftsInsufficientStorageBanner(availableBytes: plenty),
+            "Stored mail proves the disk takes writes"
+        )
+    }
 }

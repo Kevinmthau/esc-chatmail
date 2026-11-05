@@ -1,5 +1,6 @@
 import XCTest
 import CoreData
+import os
 @testable import esc_chatmail
 
 /// Pins the per-ID persistence dispositions that gate cursor advancement:
@@ -187,8 +188,8 @@ final class MessagePersisterDispositionTests: XCTestCase {
     }
 
     /// The update path classifies the same way and changes nothing on the stored row first.
-    /// Revert-check: the `case let failedSave?:` early return in `MessagePersister+Updates.swift`
-    /// (the row is then updated with its stale body and reported `.persisted`).
+    /// Revert-check: the `if let bodyWriteFailure = saveResult?.bodyWriteFailure` early return in
+    /// `MessagePersister+Updates.swift` (the row is then updated with its stale body and reported `.persisted`).
     @MainActor
     func testSaveMessages_existingRowWhoseNewBodyCannotBeWritten_isLeftUnchanged() async throws {
         let context = coreDataStack.newBackgroundContext()
@@ -278,6 +279,61 @@ final class MessagePersisterDispositionTests: XCTestCase {
             return (try? context.fetch(request).first)?.isUnread
         }
         XCTAssertEqual(isUnread, false, "The refetch's read state must apply")
+    }
+
+    /// The skip must be decided from the disk. `htmlContentCache` is process-wide and keeps a
+    /// body after its file is deleted behind the handler's back; answering from it skipped the
+    /// write and kept a `bodyStorageURI` naming a file that no longer existed, although the
+    /// refetch carried the bytes to restore it.
+    /// Revert-check: the uncached read in `HTMLContentHandler.storedHTMLURL(ifMatching:for:)`
+    /// (back to `loadHTML(from:)`, the refetch skips the write and the file stays missing).
+    @MainActor
+    func testSaveMessages_refetchAfterTheCachedBodyFileWasDeleted_rewritesTheFile() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MessagePersisterDispositionTests-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let body = "<p>The body whose file was deleted</p>"
+        let writeCount = OSAllocatedUnfairLock(initialState: 0)
+        let persister = MessagePersister(
+            coreDataStack: coreDataStack,
+            htmlContentHandler: handler,
+            saveHTML: { html, id in
+                writeCount.withLock { $0 += 1 }
+                return handler.saveHTMLResult(html, for: id)
+            },
+            conversationManager: ConversationManager(currentUserEmail: { Self.myEmail })
+        )
+        let message = GmailMessageBuilder()
+            .withId("m-deleted-body")
+            .withFrom("alice@example.com", name: "Alice Smith")
+            .withTo([Self.myEmail])
+            .withSubject("Deleted body")
+            .withBodyHtml(body)
+            .build()
+        let context = coreDataStack.newBackgroundContext()
+        let first = try await persister.saveMessages([message], myAliases: [Self.myEmail], in: context)
+        XCTAssertEqual(first.persistedIds, ["m-deleted-body"])
+        let fileURL = directory.appendingPathComponent("m-deleted-body.html")
+        // Prime the cache the way any bubble load does, then delete the file without the handler.
+        XCTAssertNotNil(handler.loadHTML(from: fileURL), "The cache must hold the body first")
+        try FileManager.default.removeItem(at: fileURL)
+        XCTAssertEqual(writeCount.withLock { $0 }, 1)
+
+        let refetch = try await persister.saveMessages([message], myAliases: [Self.myEmail], in: context)
+
+        XCTAssertEqual(refetch.persistedIds, ["m-deleted-body"])
+        XCTAssertEqual(writeCount.withLock { $0 }, 2, "A missing file must be rewritten, not skipped")
+        XCTAssertEqual(try? String(contentsOf: fileURL, encoding: .utf8), body)
+        let bodyStorageURI: String? = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "m-deleted-body")
+            return (try? context.fetch(request).first)?.bodyStorageURI
+        }
+        XCTAssertEqual(
+            bodyStorageURI.flatMap(URL.init(string:))?.standardizedFileURL.path,
+            fileURL.standardizedFileURL.path
+        )
     }
 
     // MARK: - Large-body fetch failures
