@@ -717,6 +717,37 @@ final class MessagePersisterDispositionTests: XCTestCase {
         XCTAssertTrue(report.persistedIds.isEmpty)
     }
 
+    /// A full disk can surface from conversation routing (its shell-context save fails with
+    /// `SQLITE_FULL`) before any body write, as for a plain-text message. That proves nothing
+    /// about the message, so it aborts the run like a full-disk body write instead of becoming a
+    /// per-message `.failed` that spends the escape hatch.
+    /// Revert-check: the `catch let error where StorageErrorClassifier.isOutOfSpace(error)` arm
+    /// around `createNewMessage` in `MessagePersister.persist` (the message is then `.failed`).
+    @MainActor
+    func testConversationRoutingOutOfSpace_abortsTheBatchWithNoVerdictOrRow() async throws {
+        let sqliteFull = NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSPersistentStoreSaveError,
+            userInfo: [NSSQLiteErrorDomain: NSNumber(value: StorageErrorClassifier.SQLiteResultCode.full)]
+        )
+        let persister = makePersister(conversationCreationError: sqliteFull)
+        let context = coreDataStack.newBackgroundContext()
+
+        do {
+            _ = try await persister.saveMessages(
+                [makeFullMessage(id: "m-routing-enospc")],
+                myAliases: [Self.myEmail],
+                in: context
+            )
+            XCTFail("A full disk during routing must abort the batch")
+        } catch let abort as SyncResourceAbort {
+            XCTAssertEqual(abort, .insufficientStorage)
+        }
+
+        let rowCount = await messageCount(in: context)
+        XCTAssertEqual(rowCount, 0)
+    }
+
     /// A failed existing-message lookup must be `.lookupFailed` — creating
     /// anyway could insert a duplicate of a row that exists but could not be
     /// read.

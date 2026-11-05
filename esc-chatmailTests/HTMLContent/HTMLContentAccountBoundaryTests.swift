@@ -113,13 +113,35 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
             return XCTFail("A stale generation is teardown, not a write failure")
         }
 
+        // A regular file where the directory should be: the write fails, and the handler must
+        // not delete or replace it, only report the failure.
         try FileManager.default.removeItem(at: directory)
-        let failed = handler.saveHTMLResult("<p>no directory</p>", for: "missing")
+        try Data("not a directory".utf8).write(to: directory)
+        let failed = handler.saveHTMLResult("<p>blocked</p>", for: "blocked")
         guard case .writeFailed = failed else {
-            return XCTFail("A write into a missing directory must report the write failure")
+            return XCTFail("A write that cannot reach the directory must report the write failure")
         }
         XCTAssertEqual(failed.bodyWriteFailure, .ioError)
-        XCTAssertNil(handler.saveHTML("<p>no directory</p>", for: "missing"))
+        XCTAssertNil(handler.saveHTML("<p>blocked</p>", for: "blocked"))
+    }
+
+    /// The Messages directory is created only at init and on reopen. One that is gone would
+    /// fail every body write, and sync would record each message as its own `.failed`, freezing
+    /// the cursor and spending the escape hatch on mail that was never at fault.
+    /// Revert-check: the missing-directory recreate-and-retry in
+    /// `HTMLContentHandler.saveHTMLResult` (the save then returns `.writeFailed`).
+    func testSaveHTMLResult_missingMessagesDirectory_isRecreatedAndTheBodySaved() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTMLContentAccountBoundaryTests-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.removeItem(at: directory)
+
+        guard case .saved(let url) = handler.saveHTMLResult("<p>recovered</p>", for: "recovered") else {
+            return XCTFail("A missing Messages directory must be recreated, not fail the write")
+        }
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "<p>recovered</p>")
     }
 
     func testStaleGenerationCannotDeleteReopenedAccountHTML() async throws {

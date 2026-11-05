@@ -242,7 +242,24 @@ final class HTMLContentHandler: @unchecked Sendable {
                 directoryKey: directoryKey,
                 expectedGeneration: expectedGeneration,
                 {
-                    try html.write(to: fileURL, atomically: true, encoding: .utf8)
+                    do {
+                        try html.write(to: fileURL, atomically: true, encoding: .utf8)
+                    } catch {
+                        // The directory is created only at init and on reopen, so one that is
+                        // gone (its creation failed on a full disk, or something removed it)
+                        // would fail every later write, and sync would mark each message as its
+                        // own failure. Recreate it under the boundary and retry once. A
+                        // creation that fails throws its own error, so a full disk still reads
+                        // as out of space.
+                        guard !FileManager.default.fileExists(atPath: messagesDirectory.path) else {
+                            throw error
+                        }
+                        try FileManager.default.createDirectory(
+                            at: messagesDirectory,
+                            withIntermediateDirectories: true
+                        )
+                        try html.write(to: fileURL, atomically: true, encoding: .utf8)
+                    }
                     cacheHTML(html, for: fileURL)
                     refreshSignatureCache(for: fileURL)
                     return fileURL

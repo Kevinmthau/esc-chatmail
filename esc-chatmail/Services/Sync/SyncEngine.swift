@@ -172,7 +172,7 @@ final class SyncEngine: ObservableObject, Sendable {
 
     /// Performs initial full sync
     func performInitialSync() async throws {
-        guard admitsRunForStorage() else { return }
+        guard await storageAdmission() == .admitted else { return }
         // Create the foreground task only after acquiring the shared sync-run boundary.
         let syncRunTask = await syncRunCoordinator.beginRunWithTask(kind: .foregroundInitial) {
             Task { [weak self] in
@@ -305,15 +305,36 @@ final class SyncEngine: ObservableObject, Sendable {
         isBlockedByInsufficientStorage = isBlocked
     }
 
+    /// What the storage gate decided for a run about to start.
+    private enum StorageAdmission: Equatable {
+        case admitted
+        /// Refused, and nothing else holds the run boundary, so the refusal is published.
+        case refused
+        /// Refused while another run or an account transition holds the boundary. Nothing is
+        /// published, and the caller answers as if the boundary had refused it.
+        case boundaryBusy
+    }
+
     /// Refuses a run the disk cannot hold, before it fetches anything (`SyncStorageBackoff`).
-    private func admitsRunForStorage() -> Bool {
-        guard storageBackoff.admitsRun(now: clock.now(), availableBytes: availableStorageBytes()) else {
-            log.info("Not enough storage to sync; skipping run")
-            setBlockedByInsufficientStorage(true)
-            uiState.update(isSyncing: false, status: Self.insufficientStorageStatus)
-            return false
+    ///
+    /// A refusal while the run boundary is held publishes nothing. The run holding it may be the
+    /// very one filling the disk: marking sync as stopped would clear `isSyncing` and raise the
+    /// banner under a run still in progress, whose own outcome owns the status. It answers
+    /// `.boundaryBusy` instead, which callers report as already in progress, exactly what
+    /// `beginRunWithTask` would have said. A caller that queues a request behind the run meets
+    /// this gate again once the run ends.
+    private func storageAdmission() async -> StorageAdmission {
+        if storageBackoff.admitsRun(now: clock.now(), availableBytes: availableStorageBytes()) {
+            return .admitted
         }
-        return true
+        guard await !syncRunCoordinator.isBoundaryHeld() else {
+            log.debug("Not enough storage to sync, but the run boundary is held; not publishing")
+            return .boundaryBusy
+        }
+        log.info("Not enough storage to sync; skipping run")
+        setBlockedByInsufficientStorage(true)
+        uiState.update(isSyncing: false, status: Self.insufficientStorageStatus)
+        return .refused
     }
 
     // MARK: - Private Implementation
@@ -382,8 +403,13 @@ final class SyncEngine: ObservableObject, Sendable {
         allowsExpensiveRecovery: Bool = true
     ) async -> IncrementalSyncPreparationResult {
         // Ahead of the network check: when both refuse, the full disk is what the user can fix.
-        guard admitsRunForStorage() else {
+        switch await storageAdmission() {
+        case .admitted:
+            break
+        case .refused:
             return .skippedInsufficientStorage
+        case .boundaryBusy:
+            return .alreadyInProgress
         }
         guard await networkMonitor.isNetworkAvailable() else {
             log.info("Network not available, skipping sync")

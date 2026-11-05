@@ -621,6 +621,12 @@ actor MessagePersister {
                 // Model/schema mismatch: every message in the run fails the
                 // same way, so this is run-fatal, not a per-message verdict.
                 throw CoreDataError.entityCreationFailed(entity)
+            } catch let error where StorageErrorClassifier.isOutOfSpace(error) {
+                // A full disk can surface from Core Data instead of the body write: conversation
+                // routing saves its own shell context. It proves nothing about this message, so
+                // it ends the run like a full-disk body write (`dispositionAfterBodyWriteFailure`)
+                // rather than spending the escape hatch on a per-message `.failed`.
+                throw SyncResourceAbort.insufficientStorage
             } catch {
                 Log.error("Failed to create message \(processedMessage.id): \(error)", category: .sync)
                 return .failed
