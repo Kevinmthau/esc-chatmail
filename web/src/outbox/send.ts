@@ -30,8 +30,9 @@
 //    of re-picking files whose bytes only exist on this device
 //    (GmailSendService+OptimisticUpdates.handleFailedOptimisticMessage).
 
-import Dexie, { type Table } from 'dexie'
+import type { Table } from 'dexie'
 import { BlobQuotaExceededError, putBlob } from '@/db/blobs'
+import { conversationMessagesQuery } from '@/db/conversationMessages'
 import type { ChatmailDB } from '@/db/schema'
 import type { AttachmentRow, MessageRow, OutboundSendRow } from '@/db/types'
 import {
@@ -870,10 +871,7 @@ async function markAttachmentState(
  */
 async function deleteEmptyConversation(db: ChatmailDB, conversationId: string): Promise<void> {
   await db.transaction('rw', [db.conversations, db.convoParticipants, db.messages], async () => {
-    const remaining = await db.messages
-      .where('[conversationId+internalDate]')
-      .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey])
-      .count()
+    const remaining = await conversationMessagesQuery(db, conversationId).count()
     if (remaining > 0) return
     await db.conversations.delete(conversationId)
     await db.convoParticipants.where('conversationId').equals(conversationId).delete()
@@ -1084,10 +1082,7 @@ async function rollbackFailedSend(db: ChatmailDB, journalId: string, now: number
 
       const conversation = await db.conversations.get(journal.conversationId)
       if (conversation !== undefined) {
-        const remaining = await db.messages
-          .where('[conversationId+internalDate]')
-          .between([conversation.id, Dexie.minKey], [conversation.id, Dexie.maxKey])
-          .count()
+        const remaining = await conversationMessagesQuery(db, conversation.id).count()
         if (journal.newlyInsertedConversation === 1 && remaining === 0) {
           await db.conversations.delete(conversation.id)
           await db.convoParticipants.where('conversationId').equals(conversation.id).delete()

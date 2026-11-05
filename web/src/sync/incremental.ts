@@ -503,6 +503,19 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
   // added the messages, and each is persisted oldest first. Only the cursor,
   // the continuation and the final rollups wait for finalize: a failure in a
   // later slice still freezes the cursor over the ids already persisted.
+  //
+  // applyPersist's chronological order therefore holds within a slice, not
+  // across slices, deliberately. History carries no internalDate, so a global
+  // sort would need every slice fetched first, which is what slicing avoids.
+  // The one order-sensitive step is conversation resolution: an INBOX or sent
+  // arrival reactivates an archived epoch, and any other arrival mints a new
+  // one, so which of two such messages lands first can decide the epoch. A
+  // message added in a later slice is the same as one added after a sync
+  // finished, which a device syncing more often would see as two runs, and
+  // initial sync already applies its newest-first pages in page order. The
+  // rest is order-free: applyFastUpdateForNewMessage only lets a newer date
+  // replace the preview, the unread arithmetic commutes, and finalize rolls
+  // up every touched conversation from its stored messages anyway.
   let persistedMessageCount = 0
   let sliceIndex = 0
   // fetchMessagesBounded halves its width on a 429 for the rest of a batch.

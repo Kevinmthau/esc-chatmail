@@ -6,7 +6,7 @@
 // (latestNonListReplyMessage), and the reply-from alias is selected via the
 // shared sync/replyFrom ladder.
 
-import Dexie from 'dexie'
+import { conversationMessagesQuery } from '@/db/conversationMessages'
 import type { ChatmailDB } from '@/db/schema'
 import type { MessageRow, MsgParticipantRow, SendAsAlias } from '@/db/types'
 import { normalizeEmail } from '@/identity/normalizeEmail'
@@ -209,10 +209,7 @@ export async function buildReplyMetadata(
     .map((row) => row.email)
     .filter((email) => !myAliases.has(normalizeEmail(email)))
 
-  const messages = await db.messages
-    .where('[conversationId+internalDate]')
-    .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey])
-    .toArray()
+  const messages = await conversationMessagesQuery(db, conversationId).toArray()
   const newestFirst = [...messages].reverse()
   const latest = await latestReplyTarget(db, newestFirst)
   // A thread-less local row blocks older thread metadata but is no reply

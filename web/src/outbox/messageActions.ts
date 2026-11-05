@@ -7,7 +7,7 @@
 // Dexie tx rule: everything below is compute → plan → apply with Dexie-only
 // awaits inside the transactions.
 
-import Dexie from 'dexie'
+import { conversationMessagesQuery } from '@/db/conversationMessages'
 import type { ChatmailDB } from '@/db/schema'
 import type { ConversationRow, MessageRow } from '@/db/types'
 import { enqueue } from './pendingActions'
@@ -17,12 +17,6 @@ const ACTION_TABLES = ['messages', 'conversations', 'pendingActions', 'outboundS
 
 function actionTables(db: ChatmailDB) {
   return ACTION_TABLES.map((t) => db[t])
-}
-
-function conversationMessagesQuery(db: ChatmailDB, conversationId: string) {
-  return db.messages
-    .where('[conversationId+internalDate]')
-    .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey])
 }
 
 async function unreadInboxMessages(db: ChatmailDB, conversationId: string): Promise<MessageRow[]> {

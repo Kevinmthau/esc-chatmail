@@ -3,8 +3,8 @@
 // (Services/Sync/Persistence/) on the PersistPlan pattern: no network, crypto
 // or parsing inside a transaction.
 
-import Dexie from 'dexie'
 import { BlobQuotaExceededError, putBlob } from '@/db/blobs'
+import { conversationMessagesQuery } from '@/db/conversationMessages'
 import type { ChatmailDB } from '@/db/schema'
 import type {
   AttachmentRow,
@@ -390,12 +390,6 @@ export function retryableFailurePlanIds(plans: readonly PersistPlan[]): string[]
 // ---------------------------------------------------------------------------
 // Apply phase (Dexie-only inside transactions)
 // ---------------------------------------------------------------------------
-
-function conversationMessagesQuery(db: ChatmailDB, conversationId: string) {
-  return db.messages
-    .where('[conversationId+internalDate]')
-    .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey])
-}
 
 /** Deletes a message and its dependents; returns its conversationId. */
 async function deleteMessageCascade(db: ChatmailDB, messageId: string): Promise<string | null> {
