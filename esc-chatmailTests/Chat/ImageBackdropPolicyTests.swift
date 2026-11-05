@@ -406,8 +406,8 @@ final class ImageBackdropPolicyTests: XCTestCase {
     // MARK: - Rendering on the dark transcript
 
     /// The reported bug, end to end: 280pt of nothing but black before, the logo on a light card
-    /// now. Revert-check: without the matte branch in `ImageAttachmentBubbleContent`'s
-    /// `backgroundColor` every pixel here renders black and the white assertion fails.
+    /// now. Revert-check: without `ImageAttachmentBubbleContent.backgroundColor`'s read of
+    /// `ImageBackdropPolicy.cardColor(for:)` every pixel here renders black and the white assertion fails.
     func testRenderedContent_darkLogoOnDarkTranscript_showsTheLogoOnALightCard() throws {
         let image = try UIImage(data: png(canvas: 1_000) { context in
             UIColor.black.setFill()
@@ -431,7 +431,8 @@ final class ImageBackdropPolicyTests: XCTestCase {
     }
 
     /// Compact chrome is the dark bubble color, which a black logo is just as lost on.
-    /// Revert-check: moving the matte branch below the compact check fails this.
+    /// Revert-check: with `ImageBackdropPolicy.cardColor(for:)` checking the compact chrome before
+    /// the matte, this fails.
     func testRenderedContent_compactPresentation_prefersTheCardOverTheBubbleColor() throws {
         let image = try UIImage(data: png(canvas: 300) { context in
             UIColor.black.setFill()
@@ -446,7 +447,8 @@ final class ImageBackdropPolicyTests: XCTestCase {
         XCTAssertEqual(rendered.color(x: 20, y: 20), [255, 255, 255])
     }
 
-    /// Revert-check: without `visibleImage` this draws the transparent image with no placeholder,
+    /// Revert-check: without `ImageBackdropPolicy.visibleImage(_:)`'s `.nothingVisible` check this
+    /// draws the transparent image with no placeholder,
     /// and the box renders as nothing but transcript black.
     func testRenderedContent_nothingVisible_showsThePlaceholderInsteadOfAnEmptyBox() throws {
         let image = try UIImage(data: png(canvas: 500) { _ in })
@@ -498,7 +500,7 @@ final class ImageBackdropPolicyTests: XCTestCase {
 
     // MARK: - The grid cell
 
-    /// Revert-check: fails if the standard branch of `AttachmentGridThumbnail` drops its matte.
+    /// Revert-check: fails if the standard branch of `AttachmentGridThumbnail` drops its card.
     func testGridThumbnail_darkLogo_showsTheLogoOnALightCard() throws {
         let rendered = try renderedGridCell(image: blackLogoImage(), backdrop: .light)
 
@@ -525,14 +527,15 @@ final class ImageBackdropPolicyTests: XCTestCase {
     }
 
     /// No backdrop stays no backdrop: a headshot must not gain a square here either.
-    /// Revert-check: fails if `AttachmentGridThumbnail`'s standard branch defaults to a card.
+    /// Revert-check: fails if `ImageBackdropPolicy.cardColor(for:)` gives the standard presentation a
+    /// card when there is no matte.
     func testGridThumbnail_noBackdrop_leavesTheTranscriptShowing() throws {
         let rendered = try renderedGridCell(image: blackLogoImage(), backdrop: .none)
 
         XCTAssertEqual(rendered.color(x: 10, y: 10), [0, 0, 0])
     }
 
-    /// Revert-check: fails if `AttachmentGridThumbnail` drops its `.nothingVisible` check: the
+    /// Revert-check: fails if `AttachmentGridThumbnail` stops asking `ImageBackdropPolicy.visibleImage(_:)`: the
     /// transparent image draws with no placeholder, and the cell is nothing but transcript black.
     func testGridThumbnail_nothingVisible_showsThePlaceholder() throws {
         let image = try XCTUnwrap(UIImage(data: png(canvas: 500) { _ in }))
@@ -543,7 +546,7 @@ final class ImageBackdropPolicyTests: XCTestCase {
     }
 
     /// Compact chrome is the dark bubble color, which a black logo is just as lost on.
-    /// Revert-check: fails if the compact branch of `AttachmentGridThumbnail` drops its matte.
+    /// Revert-check: fails if the compact branch of `AttachmentGridThumbnail` drops its card.
     func testGridThumbnail_compactPresentation_prefersTheCardOverTheBubbleColor() throws {
         let rendered = try renderedGridCell(
             image: blackLogoImage(),
@@ -554,7 +557,8 @@ final class ImageBackdropPolicyTests: XCTestCase {
         XCTAssertEqual(rendered.color(x: 2, y: 2), [255, 255, 255])
     }
 
-    /// Revert-check: fails if the compact branch stops falling back to the bubble color.
+    /// Revert-check: fails if `ImageBackdropPolicy.cardColor(for:)` stops falling back to the bubble
+    /// color for the compact presentation.
     func testGridThumbnail_compactWithNoBackdrop_keepsTheBubbleColor() throws {
         let rendered = try renderedGridCell(
             image: blackLogoImage(),
@@ -565,6 +569,36 @@ final class ImageBackdropPolicyTests: XCTestCase {
         // `Color.gray.opacity(0.2)` over black.
         XCTAssertGreaterThan(rendered.color(x: 2, y: 2)[0], 5)
         XCTAssertLessThan(rendered.color(x: 2, y: 2)[0], 60)
+    }
+
+    // MARK: - The shared view decisions
+
+    /// The bubble and the grid both ask the policy, so each case has one answer for both.
+    /// Revert-check: fails if `ImageBackdropPolicy.visibleImage(_:)` stops hiding a `.nothingVisible`
+    /// image, or hides any other case's.
+    func testVisibleImage_onlyNothingVisibleTakesThePlaceholder() throws {
+        let image = try XCTUnwrap(UIImage(data: png(canvas: 10) { _ in }))
+        XCTAssertNil(ImageBackdropPolicy.nothingVisible.visibleImage(image))
+        for backdrop: ImageBackdropPolicy in [.none, .light, .dark, .neutral] {
+            XCTAssertTrue(backdrop.visibleImage(image) === image, "\(backdrop)")
+        }
+        XCTAssertNil(ImageBackdropPolicy.light.visibleImage(nil))
+    }
+
+    /// Revert-check: fails if `ImageBackdropPolicy.cardColor(for:)` puts the compact chrome ahead of
+    /// the matte, drops the chrome fallback, or gives the standard presentation a card of its own.
+    func testCardColor_matteWinsThenCompactChromeThenNothing() {
+        let bubbleColor = MessageBubbleStyle.standard.recipientBubbleColor()
+        for presentation: InlineImagePresentationPolicy in [.standard, .compact] {
+            XCTAssertEqual(ImageBackdropPolicy.light.cardColor(for: presentation), .white)
+            XCTAssertEqual(
+                ImageBackdropPolicy.neutral.cardColor(for: presentation),
+                ImageBackdropPolicy.neutral.matteColor
+            )
+        }
+        XCTAssertEqual(ImageBackdropPolicy.none.cardColor(for: .compact), bubbleColor)
+        XCTAssertNil(ImageBackdropPolicy.none.cardColor(for: .standard))
+        XCTAssertNil(ImageBackdropPolicy.nothingVisible.cardColor(for: .standard))
     }
 
     // MARK: - Real views, real files

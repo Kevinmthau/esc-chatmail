@@ -15,8 +15,8 @@ struct AttachmentGridThumbnail: View {
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        if let image, backdrop != .nothingVisible {
-            let matte = backdrop.matteColor
+        if let image = backdrop.visibleImage(image) {
+            let card = backdrop.cardColor(for: presentation)
             if presentation == .compact {
                 let size = InlineImagePresentationPolicy.fittedSize(
                     pixelWidth: pixelSize.width, pixelHeight: pixelSize.height,
@@ -27,14 +27,14 @@ struct AttachmentGridThumbnail: View {
                     .aspectRatio(contentMode: .fit)
                     .frame(width: size.width, height: min(size.height, max(0, cellSize.height - 16)))
                     .frame(width: cellSize.width, height: cellSize.height)
-                    .background(matte ?? MessageBubbleStyle.standard.recipientBubbleColor())
+                    .background(card ?? .clear)
             } else {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: cellSize.width, height: cellSize.height)
                     .clipped()
-                    .background(matte ?? .clear)
+                    .background(card ?? .clear)
             }
         } else {
             Rectangle()

@@ -54,6 +54,21 @@ enum ImageBackdropPolicy: Equatable {
         }
     }
 
+    /// The image worth drawing, or nil when the slot should show its placeholder: a loaded image
+    /// with nothing to see in it takes the placeholder too. The bubble and the grid both decide
+    /// this here, so they can't drift apart.
+    func visibleImage(_ image: UIImage?) -> UIImage? {
+        self == .nothingVisible ? nil : image
+    }
+
+    /// The card behind a visible image: the matte when the image needs one, else the compact
+    /// chrome's bubble color. A black logo is no easier to see on the dark bubble, so the matte
+    /// wins over the chrome. Nil leaves the transcript showing.
+    func cardColor(for presentation: InlineImagePresentationPolicy) -> Color? {
+        if let matteColor { return matteColor }
+        return presentation == .compact ? MessageBubbleStyle.standard.recipientBubbleColor() : nil
+    }
+
     /// Off the main actor once there is a bitmap to read: a thumbnail decodes lazily, on its
     /// first draw. An image whose format has no alpha channel answers without one.
     ///
@@ -182,21 +197,28 @@ enum ImageBackdropPolicy: Equatable {
     /// one of them. This is what tells text beside an icon, which a background can swallow, from a
     /// white glyph inside a red badge, which the badge keeps readable on anything.
     private static func samplesExposedToTheBackground(in tones: [SampleTone]) -> [Int] {
-        func neighbours(of index: Int) -> [Int] {
-            var result: [Int] = []
-            if index % sampleSide > 0 { result.append(index - 1) }
-            if index % sampleSide < sampleSide - 1 { result.append(index + 1) }
-            if index >= sampleSide { result.append(index - sampleSide) }
-            if index < tones.count - sampleSide { result.append(index + sampleSide) }
-            return result
+        /// Calls `body` with each in-grid neighbour of `index`, and answers whether `index` is on
+        /// the image's outer edge, which is fewer than four neighbours. No array: this runs once per
+        /// sample and again per flood step, and building one would allocate on every call.
+        @discardableResult
+        func forEachNeighbour(of index: Int, _ body: (Int) -> Void) -> Bool {
+            let column = index % sampleSide
+            var count = 0
+            if column > 0 { body(index - 1); count += 1 }
+            if column < sampleSide - 1 { body(index + 1); count += 1 }
+            if index >= sampleSide { body(index - sampleSide); count += 1 }
+            if index < tones.count - sampleSide { body(index + sampleSide); count += 1 }
+            return count < 4
         }
 
         var isExposed = [Bool](repeating: false, count: tones.count)
         var exposed: [Int] = []
         for index in tones.indices where tones[index] == .dark || tones[index] == .light {
-            let adjacent = neighbours(of: index)
-            // Fewer than four neighbours puts it on the image's outer edge.
-            if adjacent.count < 4 || adjacent.contains(where: { tones[$0] == .hidden }) {
+            var touchesHidden = false
+            let isOnOuterEdge = forEachNeighbour(of: index) { neighbour in
+                if tones[neighbour] == .hidden { touchesHidden = true }
+            }
+            if isOnOuterEdge || touchesHidden {
                 isExposed[index] = true
                 exposed.append(index)
             }
@@ -204,8 +226,10 @@ enum ImageBackdropPolicy: Equatable {
         var next = 0
         while next < exposed.count {
             let index = exposed[next]
+            let tone = tones[index]
             next += 1
-            for neighbour in neighbours(of: index) where !isExposed[neighbour] && tones[neighbour] == tones[index] {
+            forEachNeighbour(of: index) { neighbour in
+                guard !isExposed[neighbour], tones[neighbour] == tone else { return }
                 isExposed[neighbour] = true
                 exposed.append(neighbour)
             }

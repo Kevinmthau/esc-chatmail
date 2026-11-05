@@ -127,7 +127,7 @@ struct ImageAttachmentBubbleContent: View {
     /// A loaded image with nothing to see in it takes the failed thumbnail's placeholder, which
     /// at least names the attachment, rather than holding the reserved frame empty.
     private var visibleImage: UIImage? {
-        backdrop == .nothingVisible ? nil : image
+        backdrop.visibleImage(image)
     }
 
     var body: some View {
@@ -166,13 +166,13 @@ struct ImageAttachmentBubbleContent: View {
     }
 
     private var backgroundColor: Color {
-        // Ahead of the compact chrome too: a black logo is no easier to see on the dark bubble.
-        if visibleImage != nil, let matte = backdrop.matteColor {
-            return matte
+        if visibleImage != nil {
+            return backdrop.cardColor(for: presentation) ?? .clear
         }
+        // The placeholder keeps the compact chrome, or a faint well in the standard frame.
         if presentation == .compact {
             return MessageBubbleStyle.standard.recipientBubbleColor()
         }
-        return visibleImage == nil ? Color.gray.opacity(0.1) : .clear
+        return Color.gray.opacity(0.1)
     }
 }
