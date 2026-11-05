@@ -6,7 +6,7 @@
 //   1  history collection (≤50 pages per slice, resuming from a stored
 //      continuation token; truncation keeps the ORIGINAL cursor and stages
 //      the next page token instead)
-//   2  fetch + persist new messages
+//   2  fetch + persist new messages, in slices of INCREMENTAL_FETCH_SLICE_SIZE
 //   2b abandoned drain (failures never block cursor advancement)
 //   3  label ops — AFTER fetch so the rows exist — deletions, then adds, then
 //      removals, respecting the 30-min localModifiedAt guard
@@ -57,6 +57,11 @@ import { findMissedMessageIds, reconcileLabels, SYNC_QUERY_EXCLUSIONS } from './
 import { recordUnprocessableMessages, unprocessablePlanIds } from './unprocessable'
 
 export const MAX_HISTORY_PAGES = 50
+/**
+ * New-message ids fetched and persisted per phase-2 slice. A full slice of
+ * format=full messages is the most phase 2 holds in memory at once.
+ */
+export const INCREMENTAL_FETCH_SLICE_SIZE = 100
 /** History-recovery lookback: lastSync − 10 min, floored at install − 5 min. */
 export const RECOVERY_LAST_SYNC_BUFFER_MS = 10 * 60 * 1000
 export const RECOVERY_INSTALL_BUFFER_MS = 5 * 60 * 1000
@@ -490,24 +495,39 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
   const touched = new Set<string>()
   const failedIds: string[] = []
 
-  // Phase 2: fetch + persist new messages.
-  const fetchResult = await fetchMessagesBounded(api, history.newMessageIds, {
-    sleep: depsSleep(deps),
-    random: depsRandom(deps),
-  })
-  failedIds.push(...fetchResult.failed.map((f) => f.id))
-  const plans = await preparePersist(fetchResult.fetched, ctx)
-  failedIds.push(...retryableFailurePlanIds(plans))
-  // A message that fetched fine but produced no persistable plan (parser
-  // rejected it) must not be dropped without a trace — but it is terminal, not
-  // transient: the identical response reparses to the identical null, so
-  // feeding it into failedIds would keep hadFailures true forever, freezing
-  // lastSuccessfulSyncAt and stalling the cursor two syncs out of three. Park
-  // it in the abandoned registry as a tombstone instead.
-  await recordUnprocessableMessages(db, unprocessablePlanIds(plans), depsNow(deps))
-  const applied = await applyPersist(db, plans, depsNow(deps))
-  failedIds.push(...applied.retryableMessageIds)
-  for (const id of applied.touchedConversationIds) touched.add(id)
+  // Phase 2: fetch + persist new messages, one slice at a time
+  // (scalability review web-incremental-fetch-unpaged). A slice's full
+  // messages are released once it is persisted, so a backlog of up to 5,000
+  // ids never sits in memory at once, and its rows appear as each slice lands
+  // instead of all at the end. Slices follow history order, the order Gmail
+  // added the messages, and each is persisted oldest first. Only the cursor,
+  // the continuation and the final rollups wait for finalize: a failure in a
+  // later slice still freezes the cursor over the ids already persisted.
+  let persistedMessageCount = 0
+  let sliceIndex = 0
+  for (let start = 0; start < history.newMessageIds.length; start += INCREMENTAL_FETCH_SLICE_SIZE) {
+    const sliceIds = history.newMessageIds.slice(start, start + INCREMENTAL_FETCH_SLICE_SIZE)
+    const fetchResult = await fetchMessagesBounded(api, sliceIds, {
+      sleep: depsSleep(deps),
+      random: depsRandom(deps),
+    })
+    failedIds.push(...fetchResult.failed.map((f) => f.id))
+    const plans = await preparePersist(fetchResult.fetched, ctx)
+    failedIds.push(...retryableFailurePlanIds(plans))
+    // A message that fetched fine but produced no persistable plan (parser
+    // rejected it) must not be dropped without a trace — but it is terminal, not
+    // transient: the identical response reparses to the identical null, so
+    // feeding it into failedIds would keep hadFailures true forever, freezing
+    // lastSuccessfulSyncAt and stalling the cursor two syncs out of three. Park
+    // it in the abandoned registry as a tombstone instead.
+    await recordUnprocessableMessages(db, unprocessablePlanIds(plans), depsNow(deps))
+    const applied = await applyPersist(db, plans, depsNow(deps))
+    failedIds.push(...applied.retryableMessageIds)
+    for (const id of applied.touchedConversationIds) touched.add(id)
+    persistedMessageCount += applied.persistedMessageIds.size
+    sliceIndex += 1
+    await deps.hooks?.onPhase?.(`incremental:fetch:slice:${sliceIndex}`)
+  }
   await deps.hooks?.onPhase?.('incremental:afterFetch')
 
   // Phase 2b: abandoned drain — one attempt each, never blocks the cursor.
@@ -586,7 +606,7 @@ export async function runIncrementalSync(deps: SyncDeps): Promise<SyncRunResult>
 
   return {
     mode: 'incremental',
-    newMessageCount: applied.persistedMessageIds.size,
+    newMessageCount: persistedMessageCount,
     historyIdAdvanced: advance,
     wasTruncated: history.wasTruncated,
     continuationStaged: move.kind === 'stage',

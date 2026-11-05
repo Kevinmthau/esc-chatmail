@@ -8,6 +8,7 @@ import { makeRollup } from '@/rollup/rollup'
 import { MAX_ABANDONED_RETRIES, persistentFailedIds } from './abandoned'
 import {
   applyHistoryLabelOps,
+  INCREMENTAL_FETCH_SLICE_SIZE,
   MAX_HISTORY_PAGES,
   recoveryQueryStartMs,
   runIncrementalSync,
@@ -129,6 +130,70 @@ describe('runIncrementalSync', () => {
     expect(conversation.snippet).toBe('New arrival')
     expect((await db.accounts.get(ME))?.historyId).toBe('h2')
     expect(await getLastSuccessfulSyncAt(db)).toBe(NOW)
+  })
+
+  /** Seeds `count` new alice messages behind one history page; returns their ids oldest first. */
+  function seedBulkHistory(count: number): string[] {
+    const ids = Array.from({ length: count }, (_, i) => `bulk-${String(i).padStart(3, '0')}`)
+    ids.forEach((id, i) => {
+      api.messages.set(
+        id,
+        textMessage({ id, from: 'alice@example.com', internalDate: NOW - 100_000 + i }),
+      )
+    })
+    api.historyPages = [
+      historyPage({
+        history: ids.map((id, i) => ({
+          id: String(1000 + i),
+          messagesAdded: [{ message: { id, threadId: `t-${id}`, labelIds: ['INBOX'] } }],
+        })),
+      }),
+    ]
+    return ids
+  }
+
+  // Revert-check: the INCREMENTAL_FETCH_SLICE_SIZE loop in phase 2. With one
+  // fetch over every id, nothing is persisted until all of them are fetched,
+  // so the first fetch past the first slice sees an empty store.
+  it('persists each fetch slice before fetching the next', async () => {
+    await seedAccount(db)
+    const total = INCREMENTAL_FETCH_SLICE_SIZE + 50
+    seedBulkHistory(total)
+    const persistedAtSecondSlice: number[] = []
+    const getMessage = api.getMessage.bind(api)
+    api.getMessage = async (id, format) => {
+      if (format === 'full' && api.getMessageCalls.length === INCREMENTAL_FETCH_SLICE_SIZE) {
+        persistedAtSecondSlice.push(await db.messages.count())
+      }
+      return getMessage(id, format)
+    }
+
+    const result = (await runIncrementalSync(testDeps(db, api))) as IncrementalSyncResult
+
+    expect(persistedAtSecondSlice.length).toBeGreaterThan(0)
+    expect(new Set(persistedAtSecondSlice)).toEqual(new Set([INCREMENTAL_FETCH_SLICE_SIZE]))
+    expect(result.newMessageCount).toBe(total)
+    expect(result.historyIdAdvanced).toBe(true)
+    expect(await db.messages.count()).toBe(total)
+    expect((await aliceConversation()).lastMessageDate).toBe(NOW - 100_000 + total - 1)
+  })
+
+  // HONEST SCOPE: pins that a failure in a later slice still freezes the
+  // cursor over the slices already persisted. The unpaged fetch had the same
+  // outcome, so this test survives a revert of the slice loop.
+  it('freezes the cursor when a later slice fails and keeps the earlier slices', async () => {
+    await seedAccount(db)
+    const total = INCREMENTAL_FETCH_SLICE_SIZE + 50
+    const ids = seedBulkHistory(total)
+    const failing = ids[total - 1]!
+    api.getMessageErrors.set(failing, () => new Error('undecodable response'))
+
+    const result = (await runIncrementalSync(testDeps(db, api))) as IncrementalSyncResult
+
+    expect(result.historyIdAdvanced).toBe(false)
+    expect((await db.accounts.get(ME))?.historyId).toBe('h1')
+    expect(await db.messages.count()).toBe(total - 1)
+    expect(await db.messages.get(failing)).toBeUndefined()
   })
 
   it('holds the cursor for a transient large-body failure and later persists the full body', async () => {
