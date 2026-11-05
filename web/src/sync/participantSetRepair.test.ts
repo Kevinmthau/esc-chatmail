@@ -4,6 +4,7 @@ import type { MsgParticipantRow } from '@/db/types'
 import { makeParticipantSetIdentity } from '@/identity/participantSet'
 import { convoRow, msgRow } from '@/outbox/testSupport'
 import {
+  PARTICIPANT_SET_REPAIR_PROGRESS_KEY,
   PARTICIPANT_SET_REPAIR_SIGNATURE_KEY,
   repairParticipantSetConversations,
 } from './participantSetRepair'
@@ -731,5 +732,238 @@ describe('repairParticipantSetConversations', () => {
     const retry = await repairParticipantSetConversations(db, ME, NOW + 1)
     expect(retry).toMatchObject({ performed: true, movedMessageCount: 1 })
     expect((await db.messages.get('retry-message'))?.conversationId).toBe(destination.id)
+  })
+
+  // Revert-check: the PARTICIPANT_SET_REPAIR_PROGRESS_KEY row each chunk
+  // commits (nextProgress). Without it every chunk restarts from the oldest
+  // message, so the walk never ends and the chunk guard below throws.
+  it('resumes an interrupted chunked pass from its cursor and writes the signature only at the end', async () => {
+    const destination = convoRow({
+      id: 'resume-destination',
+      participantHash: hashFor(ALICE),
+      displayName: 'Alice',
+    })
+    const sources = [1, 2, 3].map((n) =>
+      convoRow({ id: `resume-source-${n}`, participantHash: hashFor(ALICE, RELAY) }),
+    )
+    await db.conversations.bulkAdd([destination, ...sources])
+    await db.messages.bulkAdd(
+      sources.map((source, index) =>
+        msgRow({
+          id: `resume-${index + 1}`,
+          conversationId: source.id,
+          internalDate: 100 * (index + 1),
+        }),
+      ),
+    )
+    await db.msgParticipants.bulkAdd(
+      [1, 2, 3].flatMap((n) => [
+        participant(`resume-${n}`, ALICE, 'from', 'Alice'),
+        participant(`resume-${n}`, ME, 'to'),
+        participant(`resume-${n}`, RELAY, 'cc'),
+      ]),
+    )
+    await db.people.bulkPut([
+      { email: ALICE, displayName: 'Alice' },
+      { email: RELAY, displayName: 'Hide My Email' },
+    ])
+    await db.convoParticipants.bulkPut([
+      { conversationId: destination.id, email: ALICE, role: 'normal' },
+      ...sources.flatMap((source) => [
+        { conversationId: source.id, email: ALICE, role: 'normal' as const },
+        { conversationId: source.id, email: RELAY, role: 'normal' as const },
+      ]),
+    ])
+
+    // The tab dies while the second chunk is still uncommitted.
+    await expect(
+      repairParticipantSetConversations(db, ME, NOW, {
+        chunkSize: 1,
+        beforeChunkCommit: (chunkIndex) => {
+          if (chunkIndex === 1) throw new Error('tab killed')
+        },
+      }),
+    ).rejects.toThrow('tab killed')
+
+    expect((await db.messages.get('resume-1'))?.conversationId).toBe(destination.id)
+    expect((await db.messages.get('resume-2'))?.conversationId).toBe('resume-source-2')
+    expect(await db.conversations.get('resume-source-1')).toBeUndefined()
+    expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)).toBeUndefined()
+    expect((await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY))?.value).toMatchObject({
+      throughInternalDate: 100,
+      blockedByActiveSend: false,
+    })
+
+    const chunks: number[] = []
+    const resumed = await repairParticipantSetConversations(db, ME, NOW + 1, {
+      chunkSize: 1,
+      beforeChunkCommit: (chunkIndex) => {
+        chunks.push(chunkIndex)
+        if (chunkIndex > 10) throw new Error('walk did not resume')
+      },
+    })
+
+    // resume-2, resume-3, then the empty chunk that ends the walk.
+    expect(chunks).toEqual([0, 1, 2])
+    expect(resumed).toMatchObject({
+      performed: true,
+      movedMessageCount: 2,
+      deletedConversationCount: 2,
+    })
+    for (const n of [1, 2, 3]) {
+      expect((await db.messages.get(`resume-${n}`))?.conversationId).toBe(destination.id)
+    }
+    expect(await db.conversations.count()).toBe(1)
+    expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)).toBeDefined()
+    expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)).toBeUndefined()
+  })
+
+  // Revert-check: `progress.blockedByActiveSend ||` in the chunk's next
+  // progress row. Without it the later, unblocked chunk clears the deferral
+  // the first chunk recorded, and the end of the walk writes the signature.
+  it('withholds the signature when an earlier chunk deferred to an active send', async () => {
+    const protectedConversation = convoRow({
+      id: 'journal-protected',
+      participantHash: hashFor(ALICE),
+      displayName: 'Stale Alice',
+    })
+    const healthy = convoRow({
+      id: 'healthy-bob',
+      participantHash: hashFor(BOB),
+      displayName: 'Bob',
+    })
+    await db.conversations.bulkAdd([protectedConversation, healthy])
+    await db.messages.bulkAdd([
+      msgRow({
+        id: 'protected-resident',
+        conversationId: protectedConversation.id,
+        internalDate: 100,
+      }),
+      msgRow({ id: 'healthy-message', conversationId: healthy.id, internalDate: 200 }),
+    ])
+    await db.msgParticipants.bulkAdd([
+      participant('protected-resident', ALICE, 'from', 'Alice'),
+      participant('protected-resident', ME, 'to'),
+      participant('healthy-message', BOB, 'from', 'Bob'),
+      participant('healthy-message', ME, 'to'),
+    ])
+    await db.people.bulkPut([
+      { email: ALICE, displayName: 'Alice' },
+      { email: BOB, displayName: 'Bob' },
+    ])
+    await db.convoParticipants.bulkPut([
+      { conversationId: protectedConversation.id, email: ALICE, role: 'normal' },
+      { conversationId: healthy.id, email: BOB, role: 'normal' },
+    ])
+    // The journal-before-row edge: the outbox published the journal, but not
+    // yet the optimistic row, so only the journal protects the conversation.
+    await db.outboundSends.add({
+      id: 'journal-only-send',
+      conversationId: protectedConversation.id,
+      newlyInsertedConversation: 0,
+      createdAt: NOW,
+      status: 'pending',
+      conversationSnapshot: null,
+      remoteCommittedMessageId: '',
+      remoteCommittedThreadId: '',
+    })
+
+    const result = await repairParticipantSetConversations(db, ME, NOW, { chunkSize: 1 })
+
+    expect(result).toMatchObject({ performed: true, rebuiltConversationCount: 0 })
+    expect(await db.conversations.get(protectedConversation.id)).toEqual(protectedConversation)
+    expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)).toBeUndefined()
+    // The walk ended; the next pass starts fresh rather than resuming.
+    expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)).toBeUndefined()
+  })
+
+  // Revert-check: the type/displayName comparison before the resident
+  // conversations.put. Without it the rows-only repair below rewrites a
+  // conversation row whose fields did not change.
+  it('rebuilds stale addressing rows without rewriting an unchanged conversation row', async () => {
+    const healthy = convoRow({
+      id: 'healthy-alice',
+      participantHash: hashFor(ALICE),
+      displayName: 'Alice',
+    })
+    const staleRows = convoRow({
+      id: 'stale-rows-bob',
+      participantHash: hashFor(BOB),
+      displayName: 'Bob',
+    })
+    await db.conversations.bulkAdd([healthy, staleRows])
+    await db.messages.bulkAdd([
+      msgRow({ id: 'healthy-alice-message', conversationId: healthy.id, internalDate: 100 }),
+      msgRow({ id: 'stale-rows-message', conversationId: staleRows.id, internalDate: 200 }),
+    ])
+    await db.msgParticipants.bulkAdd([
+      participant('healthy-alice-message', ALICE, 'from', 'Alice'),
+      participant('healthy-alice-message', ME, 'to'),
+      participant('stale-rows-message', BOB, 'from', 'Bob'),
+      participant('stale-rows-message', ME, 'to'),
+    ])
+    await db.people.bulkPut([
+      { email: ALICE, displayName: 'Alice' },
+      { email: BOB, displayName: 'Bob' },
+    ])
+    await db.convoParticipants.bulkPut([
+      { conversationId: healthy.id, email: ALICE, role: 'normal' },
+      { conversationId: staleRows.id, email: BOB, role: 'normal' },
+      { conversationId: staleRows.id, email: ME, role: 'me' },
+    ])
+    const putSpy = vi.spyOn(db.conversations, 'put')
+
+    const result = await repairParticipantSetConversations(db, ME, NOW)
+    // Read before mockRestore, which also clears the recorded calls.
+    const putCalls = putSpy.mock.calls.length
+    putSpy.mockRestore()
+
+    expect(result).toMatchObject({ performed: true, rebuiltConversationCount: 1 })
+    expect(putCalls).toBe(0)
+    expect(
+      await db.convoParticipants.where('conversationId').equals(staleRows.id).toArray(),
+    ).toEqual([{ conversationId: staleRows.id, email: BOB, role: 'normal' }])
+    expect(await db.conversations.get(healthy.id)).toEqual(healthy)
+    expect(await db.conversations.get(staleRows.id)).toEqual(staleRows)
+  })
+
+  // Revert-check: the `storedProgress.signature === signature` comparison.
+  // Without it a walk left by an older alias set resumes past messages it
+  // never examined under the current one.
+  it('restarts a walk left by an older signature from the oldest message', async () => {
+    const source = convoRow({ id: 'restart-source', participantHash: hashFor(ALICE, RELAY) })
+    const destination = convoRow({ id: 'restart-destination', participantHash: hashFor(ALICE) })
+    await db.conversations.bulkAdd([source, destination])
+    await db.messages.add(
+      msgRow({ id: 'restart-message', conversationId: source.id, internalDate: 100 }),
+    )
+    await db.msgParticipants.bulkAdd([
+      participant('restart-message', ALICE, 'from'),
+      participant('restart-message', RELAY, 'cc'),
+    ])
+    await db.people.bulkPut([
+      { email: ALICE, displayName: 'Alice' },
+      { email: RELAY, displayName: 'Hide My Email' },
+    ])
+    await db.convoParticipants.bulkPut([
+      { conversationId: source.id, email: ALICE, role: 'normal' },
+      { conversationId: source.id, email: RELAY, role: 'normal' },
+      { conversationId: destination.id, email: ALICE, role: 'normal' },
+    ])
+    await db.syncState.put({
+      key: PARTICIPANT_SET_REPAIR_PROGRESS_KEY,
+      value: {
+        signature: 'older-signature',
+        throughInternalDate: NOW,
+        blockedByActiveSend: false,
+        createdDestinationIds: [],
+      },
+    })
+
+    const result = await repairParticipantSetConversations(db, ME, NOW)
+
+    expect(result).toMatchObject({ performed: true, movedMessageCount: 1 })
+    expect((await db.messages.get('restart-message'))?.conversationId).toBe(destination.id)
+    expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)).toBeUndefined()
   })
 })
