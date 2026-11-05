@@ -427,6 +427,33 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(taskScheduler.retryBackoffs, [60])
     }
 
+    // A full disk is not a retryable failure: the 60s/120s failure backoff would only start
+    // another run against the same disk. The ordinary cadence the handlers queued is the retry,
+    // and the shared failure backoff stays unspent for the next real failure.
+    // Revert-check: fails if `.deferredForInsufficientStorage` routes through
+    // `scheduleFailureBackoffRetryIfRunnable` like `.failed`.
+    func testModelV3Executor_insufficientStorageSchedulesNoEarlyRetryAndSpendsNoBackoff() async {
+        let executor = await MainActor.run {
+            SequencedBackgroundMailboxSyncExecutorSpy(
+                results: [.deferredForInsufficientStorage, .deferredForInsufficientStorage, .failed]
+            )
+        }
+        let manager = makeManager(
+            authoritativeSyncExecutor: executor
+        )
+
+        let firstSuccess = await manager.performAuthoritativeSync()
+        _ = await manager.performAuthoritativeSync()
+
+        XCTAssertFalse(firstSuccess)
+        XCTAssertTrue(taskScheduler.retryBackoffs.isEmpty)
+        XCTAssertEqual(taskScheduler.processingScheduleCount, 0)
+
+        _ = await manager.performAuthoritativeSync()
+        // Still the first strike's delay: the storage deferrals counted for nothing.
+        XCTAssertEqual(taskScheduler.retryBackoffs, [60])
+    }
+
     // Revert-check: fails if `scheduleFailureBackoffRetry()` stops routing through
     // `BackgroundSyncStateManager.incrementRetryAndGetBackoff()` (e.g. is replaced
     // by a fixed delay), which would lose the escalation and the skipped slot.

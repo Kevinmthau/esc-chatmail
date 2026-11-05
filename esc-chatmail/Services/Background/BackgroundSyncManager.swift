@@ -6,6 +6,9 @@ enum BackgroundMailboxSyncExecutionResult: Equatable, Sendable {
     case needsFollowUp
     case blocked(by: SyncRunKind?)
     case failed
+    /// Refused or stopped because the disk is full. Not a retryable failure: the short failure
+    /// backoff would only start another run against the same full disk.
+    case deferredForInsufficientStorage
 }
 
 enum BackgroundMailboxSyncBudget: Equatable, Sendable {
@@ -393,6 +396,11 @@ final class BackgroundSyncManager {
             // instead of the bounded exponential backoff every other failure
             // path uses.
             await scheduleFailureBackoffRetryIfRunnable(schedulingGate: schedulingGate)
+            return false
+        case .deferredForInsufficientStorage:
+            // The handlers already queued the next ordinary cycle (15 minutes for refresh, an
+            // hour for processing), which is the right pace for a disk the user has to clear.
+            // Neither retries early nor spends the shared failure backoff.
             return false
         }
     }

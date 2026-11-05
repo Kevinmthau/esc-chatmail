@@ -58,6 +58,45 @@ final class StorageErrorClassifierTests: XCTestCase {
         }
     }
 
+    /// A sync page save fails through `CoreDataStack.saveAsync`, which wraps the error in
+    /// `CoreDataError.saveFailed`. A Swift enum bridges to `NSError` with no underlying error, so
+    /// the full disk behind it was invisible and the run looked like any other failure.
+    /// Revert-check: drop the `CoreDataError.underlyingError` step in
+    /// `StorageErrorClassifier.errorChain`.
+    func testIsOutOfSpace_seesThroughCoreDataErrorWrapping() {
+        let sqliteFull = NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSFileWriteUnknownError,
+            userInfo: [NSSQLiteErrorDomain: NSNumber(value: 13)]
+        )
+        XCTAssertTrue(StorageErrorClassifier.isOutOfSpace(CoreDataError.saveFailed(sqliteFull)))
+        XCTAssertTrue(SyncResourceAbort.isInsufficientStorage(CoreDataError.saveFailed(sqliteFull)))
+        XCTAssertTrue(StorageErrorClassifier.isOutOfSpace(
+            CoreDataError.persistentFailure(NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC)))
+        ))
+        XCTAssertFalse(StorageErrorClassifier.isOutOfSpace(
+            CoreDataError.saveFailed(NSError(domain: NSCocoaErrorDomain, code: NSValidationMissingMandatoryPropertyError))
+        ))
+        XCTAssertFalse(StorageErrorClassifier.isOutOfSpace(CoreDataError.entityCreationFailed("Message")))
+    }
+
+    func testHTMLSaveResult_classifiesWhyTheBodyIsNotOnDisk() {
+        XCTAssertNil(HTMLSaveResult.saved(URL(fileURLWithPath: "/tmp/m.html")).bodyWriteFailure)
+        XCTAssertEqual(HTMLSaveResult.boundaryClosed.bodyWriteFailure, .boundaryClosed)
+        XCTAssertEqual(
+            HTMLSaveResult.writeFailed(NSError(
+                domain: NSCocoaErrorDomain,
+                code: NSFileWriteOutOfSpaceError,
+                userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))]
+            )).bodyWriteFailure,
+            .outOfSpace
+        )
+        XCTAssertEqual(
+            HTMLSaveResult.writeFailed(NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError)).bodyWriteFailure,
+            .ioError
+        )
+    }
+
     func testSQLitePrimaryResultCodes_masksExtendedCodes() {
         let error = Self.wrapping(NSError(
             domain: NSCocoaErrorDomain,

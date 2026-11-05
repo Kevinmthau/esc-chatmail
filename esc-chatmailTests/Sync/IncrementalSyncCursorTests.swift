@@ -234,6 +234,106 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(durableFailureCount, 1)
     }
 
+    /// A full disk is a run-level resource abort, like an account-scoped API error: the run
+    /// rethrows, nothing it staged commits, and it is not a strike. As a `.failed` message the
+    /// cursor would freeze too, but every message in the backlog would count toward the escape
+    /// hatch for a fault that was never theirs.
+    /// Revert-check: return `.failed` for `.outOfSpace` in
+    /// `MessagePersister.dispositionAfterBodyWriteFailure` and the run returns normally with the
+    /// failure counter at 1 and a deferred ledger row.
+    @MainActor
+    func testOutOfSpaceBodyWriteAbortsTheRunWithCursorAndCounterFrozen() async throws {
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-enospc"))],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        apiClient.getMessageResponses["m-enospc"] = GmailMessageBuilder()
+            .withId("m-enospc")
+            .withFrom("alice@example.com", name: "Alice")
+            .withTo([Self.myEmail])
+            .withSubject("Newsletter")
+            .withBodyHtml("<table><tr><td>Weekly digest</td></tr></table>")
+            .build()
+
+        do {
+            _ = try await makeOrchestrator(saveHTML: { _, _ in .outOfSpace }).performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("A full disk must abort the run")
+        } catch let abort as SyncResourceAbort {
+            XCTAssertEqual(abort, .insufficientStorage)
+        }
+
+        XCTAssertGreaterThanOrEqual(apiClient.getMessageCallCount, 1, "Positive control: the fetch succeeded")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let checkpoint = try await fetchHistoryCheckpoint()
+        XCTAssertNil(checkpoint)
+        let durableFailureCount = try await fetchFailureCounter()
+        XCTAssertEqual(durableFailureCount ?? 0, 0, "A full disk is not a strike")
+        let rows = await fetchLedgerRows()
+        XCTAssertTrue(rows.isEmpty, "No message may be recorded as failed")
+        let persisted = await messageExists(id: "m-enospc")
+        XCTAssertFalse(persisted, "No body-less row may be committed")
+    }
+
+    /// The abandoned-message drain swallows its own persistence failures ("proves nothing about
+    /// the fetched messages") so a drain hiccup never holds the history window. A full disk is
+    /// not drain-local: every later write fails too, so it ends the run like the main fetch does.
+    /// Revert-check: drop the `catch let abort as SyncResourceAbort` rethrow in
+    /// `IncrementalSyncOrchestrator.retryAbandonedMessages` and the run returns normally,
+    /// advancing the cursor to "2000" over a disk that cannot hold the run's writes.
+    @MainActor
+    func testOutOfSpaceDuringTheAbandonedDrainAbortsTheRun() async throws {
+        try await seedLedgerRow(id: "m-drain", state: .abandoned)
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(history: [], nextPageToken: nil, historyId: "2000")
+            )
+        ])
+        apiClient.getMessageResponses["m-drain"] = GmailMessageBuilder()
+            .withId("m-drain")
+            .withFrom("alice@example.com", name: "Alice")
+            .withTo([Self.myEmail])
+            .withSubject("Abandoned newsletter")
+            .withBodyHtml("<table><tr><td>Digest</td></tr></table>")
+            .build()
+
+        do {
+            _ = try await makeOrchestrator(saveHTML: { _, _ in .outOfSpace }).performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("A full disk during the drain must abort the run")
+        } catch let abort as SyncResourceAbort {
+            XCTAssertEqual(abort, .insufficientStorage)
+        }
+
+        XCTAssertGreaterThanOrEqual(apiClient.getMessageCallCount, 1, "Positive control: the drain fetched")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.map(\.gmailMessageId), ["m-drain"])
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.abandoned.rawValue)
+    }
+
     /// A deterministically malformed payload (no payload/headers) can never
     /// succeed on retry; treating it as a failure would freeze the cursor
     /// forever, so it must be recorded as unprocessable and released.
@@ -1963,6 +2063,9 @@ final class IncrementalSyncCursorTests: XCTestCase {
         historyPageLimit: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
         authenticatedAccountEmail: (() -> String?)? = nil,
         messageProcessor: MessageProcessor = MessageProcessor(),
+        saveHTML: @escaping (String, String) -> HTMLSaveResult = { _, messageId in
+            .savedWithoutWriting(messageId: messageId)
+        },
         makeSyncContext: (() -> NSManagedObjectContext)? = nil
     ) -> IncrementalSyncOrchestrator {
         let conversationManager: ConversationManager
@@ -1981,7 +2084,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
             messageProcessor: messageProcessor,
-            saveHTML: { _, _ in nil },
+            saveHTML: saveHTML,
             conversationManager: conversationManager
         )
         let messageFetcher = MessageFetcher(apiClient: apiClient, clock: FakeSyncClock())

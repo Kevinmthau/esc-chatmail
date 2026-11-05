@@ -350,52 +350,44 @@ final class RichContentVerdictIngestLoaderEquivalenceTests: XCTestCase {
         XCTAssertEqual(updated.row.knownRichContentVerdict, true)
     }
 
-    /// The pre-run is the classifier's answer for the incoming HTML. When the
-    /// save of that HTML fails, the row keeps the file an earlier sync stored,
-    /// and the stamp has to classify that file, as the load will.
+    /// The pre-run is the classifier's answer for the incoming HTML. When the save of that HTML
+    /// fails, the update now changes nothing: the row keeps the file an earlier sync stored, its
+    /// inputs, and the verdict stamped for them, so the load still agrees with it. The message is
+    /// reported `.failed`, and the re-scan retries it.
     ///
-    /// Revert-check: drop the `prerun.html == html` comparison in
-    /// `MessagePersister.stampRichContentVerdict` (reuse `prerun.isRich`
-    /// whenever a pre-run exists) and the row is stamped rich from HTML that
-    /// was never stored, while its load classifies the stored file not rich.
+    /// Revert-check: drop the `case let failedSave?:` early return in
+    /// `MessagePersister+Updates.swift` and the update goes ahead without its body: the snippet
+    /// below is rewritten and the message reports `.persisted` over a body it never stored.
+    /// HONEST SCOPE: a failed save no longer reaches `MessagePersister.stampRichContentVerdict`,
+    /// so this test no longer pins that function's `prerun.html == html` comparison, which it
+    /// did before failed writes were classified.
     @MainActor
-    func testUpdatePath_failedHTMLSave_doesNotReusePrerunForStaleStoredHTML() async throws {
+    func testUpdatePath_failedHTMLSave_leavesTheRowAndItsVerdictAsTheLoaderReadsThem() async throws {
         let id = uniqueMessageID("failed-save")
         let syncContext = coreDataStack.newBackgroundContext()
         try await persist([makeMessage(id: id, html: Self.personalHTML)], using: makePersister(), in: syncContext)
+        let original = try fetchRow(id: id)
 
         let refetched = makeMessage(id: id, html: Self.richAlertHTML, snippet: Self.refetchedSnippet)
-        let failingSavePersister = makePersister(saveHTML: { _, _ in nil })
-
-        // Without a live pre-run for the incoming HTML the stamp classifies
-        // for itself and the guard under test is never consulted.
-        let prepared = try await failingSavePersister.prepareMessage(refetched, myAliases: [Self.myEmail])
-        guard case .processed(let processed) = prepared else {
-            return XCTFail("Precondition: the refetched message must process")
+        let failingSavePersister = makePersister(saveHTML: { _, _ in .ioFailure })
+        let report = try await failingSavePersister.saveMessages(
+            [refetched],
+            myAliases: [Self.myEmail],
+            in: syncContext
+        )
+        try await syncContext.perform {
+            guard syncContext.hasChanges else { return }
+            try syncContext.save()
         }
-        let prerun = try XCTUnwrap(
-            processed.richContentPrerun,
-            "Precondition: a received HTML row without fallback text must carry a pre-run"
-        )
-        XCTAssertEqual(prerun.html, processed.storedHTML, "The pre-run must be keyed to the string persistence saves")
-        XCTAssertTrue(prerun.isRich, "Precondition: the incoming HTML must classify rich")
 
-        try await persist([refetched], using: failingSavePersister, in: syncContext)
+        XCTAssertEqual(report.failedIds, [id])
+        XCTAssertTrue(report.persistedIds.isEmpty)
+        XCTAssertEqual(handler.loadHTML(for: id), Self.personalHTML, "The failed save must leave the earlier HTML stored")
+        let unchanged = try fetchRow(id: id)
+        XCTAssertEqual(unchanged.row.snippet, original.row.snippet, "Nothing on the row may change without its body")
 
-        XCTAssertEqual(
-            handler.loadHTML(for: id),
-            Self.personalHTML,
-            "Precondition: the failed save must leave the earlier HTML stored"
-        )
-        let updated = try fetchRow(id: id)
-        XCTAssertEqual(
-            updated.row.snippet,
-            Self.refetchedSnippet,
-            "Precondition: the update must have rewritten a verdict input, or it never re-stamps"
-        )
-
-        let published = await loadAndAssertEquivalence(updated, harness: makeLoaderHarness(), "failed-save")
-        XCTAssertEqual(updated.stored, .notRich)
+        let published = await loadAndAssertEquivalence(unchanged, harness: makeLoaderHarness(), "failed-save")
+        XCTAssertEqual(unchanged.stored, .notRich)
         XCTAssertFalse(published)
     }
 
@@ -407,7 +399,7 @@ final class RichContentVerdictIngestLoaderEquivalenceTests: XCTestCase {
 
     /// - Parameter saveHTML: nil keeps the persister's default, which writes
     ///   through `handler`.
-    private func makePersister(saveHTML: ((String, String) -> URL?)? = nil) -> MessagePersister {
+    private func makePersister(saveHTML: ((String, String) -> HTMLSaveResult)? = nil) -> MessagePersister {
         let myEmail = Self.myEmail
         return MessagePersister(
             coreDataStack: coreDataStack,

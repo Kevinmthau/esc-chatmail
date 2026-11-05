@@ -263,7 +263,7 @@ final class InitialSyncScaleBoundTests: XCTestCase {
         )
         let messagePersister = MessagePersister(
             coreDataStack: coreDataStack,
-            saveHTML: { _, _ in nil },
+            saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
             conversationManager: conversationManager
         )
         return InitialSyncOrchestrator(

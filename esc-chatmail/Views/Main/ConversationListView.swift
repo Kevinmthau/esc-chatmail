@@ -5,6 +5,9 @@ struct ConversationListView: View {
     @ObservedObject private var authSession: AuthSession
     @StateObject private var viewModel: ConversationListViewModel
     @StateObject private var abandonedActions: AbandonedPendingActionsModel
+    /// Observed only for `isBlockedByInsufficientStorage`; sync progress publishes through its
+    /// own `SyncUIState`, so this does not re-render the list while a run is in flight.
+    @ObservedObject private var syncEngine: SyncEngine
     private let deps: Dependencies
     private let viewContext: NSManagedObjectContext
     /// Built once at init instead of inside `navigationDestination`: the bundle
@@ -22,6 +25,7 @@ struct ConversationListView: View {
         self.viewContext = resolvedDeps.viewContext
         self.chatDependencies = resolvedDeps.makeChatDependencies()
         _authSession = ObservedObject(wrappedValue: resolvedDeps.authSession)
+        _syncEngine = ObservedObject(wrappedValue: resolvedDeps.syncEngine)
         _viewModel = StateObject(
             wrappedValue: ConversationListViewModel(
                 dependencies: resolvedDeps.makeConversationListDependencies()
@@ -49,6 +53,13 @@ struct ConversationListView: View {
 
     private var conversationList: some View {
         List {
+            if syncEngine.isBlockedByInsufficientStorage {
+                InsufficientStorageBanner(onTryAgain: {
+                    Task { await viewModel.performSync() }
+                })
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden, edges: .top)
+            }
             if let summary = abandonedActions.summary {
                 AbandonedPendingActionsBanner(
                     summary: summary,

@@ -216,21 +216,44 @@ final class HTMLContentHandler: @unchecked Sendable {
         for messageId: String,
         expectedGeneration: HTMLContentAccountGeneration?
     ) -> URL? {
+        guard case .saved(let fileURL) = saveHTMLResult(
+            html,
+            for: messageId,
+            expectedGeneration: expectedGeneration
+        ) else {
+            return nil
+        }
+        return fileURL
+    }
+
+    /// `saveHTML` with the reason a write did not happen. Sync persistence needs it: a closed
+    /// boundary is teardown, a full volume stops the whole run, and any other write failure
+    /// blocks only this message. All three used to come back as the same nil, so a full disk
+    /// stored a body-less row behind an advancing cursor.
+    func saveHTMLResult(
+        _ html: String,
+        for messageId: String,
+        expectedGeneration: HTMLContentAccountGeneration? = nil
+    ) -> HTMLSaveResult {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
 
         do {
-            return try accountBoundary.perform(
+            guard let savedURL = try accountBoundary.perform(
                 directoryKey: directoryKey,
-                expectedGeneration: expectedGeneration
-            ) {
-                try html.write(to: fileURL, atomically: true, encoding: .utf8)
-                cacheHTML(html, for: fileURL)
-                refreshSignatureCache(for: fileURL)
-                return fileURL
+                expectedGeneration: expectedGeneration,
+                {
+                    try html.write(to: fileURL, atomically: true, encoding: .utf8)
+                    cacheHTML(html, for: fileURL)
+                    refreshSignatureCache(for: fileURL)
+                    return fileURL
+                }
+            ) else {
+                return .boundaryClosed
             }
+            return .saved(savedURL)
         } catch {
-            Log.error("Failed to save HTML for message \(messageId)", category: .general, error: error)
-            return nil
+            Log.error("Failed to save HTML for message \(Log.hashIdentifier(messageId))", category: .general, error: error)
+            return .writeFailed(error)
         }
     }
 

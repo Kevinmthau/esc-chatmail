@@ -10,6 +10,9 @@ private struct MessageUpdateResult {
     /// not fall through to creation on a failed lookup — that risks inserting
     /// a duplicate of a row that exists.
     var lookupFailed: Bool = false
+    /// Set when the incoming body could not be written. The row is left exactly as it was: the
+    /// write runs before any field changes, so a failed one never leaves a half-updated row.
+    var bodyWriteFailure: MessageBodyWriteFailure?
     let modifiedConversationID: NSManagedObjectID?
     let reroutedFromConversationID: NSManagedObjectID?
     let shouldInvalidateRenderedContent: Bool
@@ -19,11 +22,14 @@ private struct MessageUpdateResult {
     let participantDisplayNameUpdateConversationIDs: Set<NSManagedObjectID>
 }
 
-/// Three-way outcome of an existing-message update attempt.
-enum ExistingMessageUpdateOutcome: Sendable {
+/// Outcome of an existing-message update attempt.
+enum ExistingMessageUpdateOutcome: Sendable, Equatable {
     case updated
     case notPresent
     case lookupFailed
+    /// The row exists but its new body could not be written, so nothing was changed. Must not
+    /// fall through to creation either: the row is there.
+    case bodyWriteFailed(MessageBodyWriteFailure)
 }
 
 extension MessagePersister {
@@ -110,6 +116,7 @@ extension MessagePersister {
             in: context
         )
         if result.didUpdate { return .updated }
+        if let bodyWriteFailure = result.bodyWriteFailure { return .bodyWriteFailed(bodyWriteFailure) }
         return result.lookupFailed ? .lookupFailed : .notPresent
     }
 
@@ -217,8 +224,26 @@ extension MessagePersister {
             let incomingHTMLSourceSignature = canonicalHTML.flatMap {
                 htmlContentHandler.canonicalHTMLSourceSignature(for: $0)
             }
-            let savedBodyStorageURI = canonicalHTML.flatMap {
-                saveHTML($0, processedMessage.id)?.absoluteString
+            let savedBodyStorageURI: String?
+            switch canonicalHTML.map({ saveHTML($0, processedMessage.id) }) {
+            case nil:
+                savedBodyStorageURI = nil
+            case .saved(let url)?:
+                savedBodyStorageURI = url.absoluteString
+            case let failedSave?:
+                // Nothing above this point changed the row. Updating it without the new body
+                // would keep a stale or missing body behind an advancing cursor.
+                return MessageUpdateResult(
+                    didUpdate: false,
+                    bodyWriteFailure: failedSave.bodyWriteFailure ?? .ioError,
+                    modifiedConversationID: nil,
+                    reroutedFromConversationID: nil,
+                    shouldInvalidateRenderedContent: false,
+                    htmlSourceDidChange: false,
+                    changedHTMLSourceSignature: nil,
+                    participantDisplayNameUpdateEmails: [],
+                    participantDisplayNameUpdateConversationIDs: []
+                )
             }
 
             existingMessage.gmThreadId = processedMessage.gmThreadId
