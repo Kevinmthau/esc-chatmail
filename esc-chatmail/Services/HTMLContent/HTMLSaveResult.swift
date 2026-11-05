@@ -13,6 +13,12 @@ enum HTMLSaveResult {
     /// The write itself failed: a full volume, or any other file-system error.
     case writeFailed(Error)
 
+    /// Where the body is on disk, or nil when it could not be written.
+    var savedURL: URL? {
+        guard case .saved(let url) = self else { return nil }
+        return url
+    }
+
     /// Why the body is not on disk, or nil when it is.
     var bodyWriteFailure: MessageBodyWriteFailure? {
         switch self {

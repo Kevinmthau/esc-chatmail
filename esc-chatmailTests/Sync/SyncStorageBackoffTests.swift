@@ -36,9 +36,7 @@ final class SyncStorageBackoffTests: XCTestCase {
         backoff.recordInsufficientStorage(now: start, availableBytes: plenty)
 
         XCTAssertFalse(backoff.admitsRun(now: start.addingTimeInterval(59), availableBytes: plenty))
-        XCTAssertEqual(backoff.nextAdmissionDate(now: start), start.addingTimeInterval(60))
         XCTAssertTrue(backoff.admitsRun(now: start.addingTimeInterval(60), availableBytes: plenty))
-        XCTAssertNil(backoff.nextAdmissionDate(now: start.addingTimeInterval(60)))
 
         backoff.recordInsufficientStorage(now: start.addingTimeInterval(60), availableBytes: plenty)
         XCTAssertFalse(backoff.admitsRun(now: start.addingTimeInterval(179), availableBytes: plenty))
@@ -58,16 +56,40 @@ final class SyncStorageBackoffTests: XCTestCase {
         XCTAssertFalse(backoff.admitsRun(now: soon, availableBytes: nil))
     }
 
-    /// Revert-check: fails if `recordSuccessfulRun` leaves the failure count in place.
-    func testRecordSuccessfulRun_startsTheBackoffOver() {
+    /// Revert-check: fails if `recordSuccessfulRun(storedMessageCount:)` leaves the failure count
+    /// in place.
+    func testRecordSuccessfulRun_thatStoredMail_startsTheBackoffOver() {
         var backoff = SyncStorageBackoff()
         backoff.recordInsufficientStorage(now: start, availableBytes: plenty)
         backoff.recordInsufficientStorage(now: start, availableBytes: plenty)
         XCTAssertEqual(backoff.consecutiveFailures, 2)
 
-        backoff.recordSuccessfulRun()
+        backoff.recordSuccessfulRun(storedMessageCount: 1)
         XCTAssertEqual(backoff, SyncStorageBackoff())
         backoff.recordInsufficientStorage(now: start, availableBytes: plenty)
-        XCTAssertEqual(backoff.nextAdmissionDate(now: start), start.addingTimeInterval(60))
+        XCTAssertFalse(backoff.admitsRun(now: start.addingTimeInterval(59), availableBytes: plenty))
+        XCTAssertTrue(backoff.admitsRun(now: start.addingTimeInterval(60), availableBytes: plenty))
+    }
+
+    /// A run that stored no mail (no new mail, a label-only slice) can succeed on a disk still too
+    /// full for message bodies. Resetting on it held the backoff at its first minute while the
+    /// disk stayed full.
+    /// Revert-check: the `storedMessageCount > 0` guard in
+    /// `SyncStorageBackoff.recordSuccessfulRun(storedMessageCount:)`.
+    func testRecordSuccessfulRun_thatStoredNoMail_keepsTheBackoffGrowing() {
+        var backoff = SyncStorageBackoff()
+        backoff.recordInsufficientStorage(now: start, availableBytes: plenty)
+        backoff.recordInsufficientStorage(now: start, availableBytes: plenty)
+
+        backoff.recordSuccessfulRun(storedMessageCount: 0)
+        XCTAssertEqual(backoff.consecutiveFailures, 2)
+
+        let later = start.addingTimeInterval(600)
+        backoff.recordInsufficientStorage(now: later, availableBytes: plenty)
+        XCTAssertFalse(
+            backoff.admitsRun(now: later.addingTimeInterval(239), availableBytes: plenty),
+            "The third failure in a row waits four minutes"
+        )
+        XCTAssertTrue(backoff.admitsRun(now: later.addingTimeInterval(240), availableBytes: plenty))
     }
 }

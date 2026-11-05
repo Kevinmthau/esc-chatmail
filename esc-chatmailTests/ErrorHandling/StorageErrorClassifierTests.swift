@@ -80,6 +80,26 @@ final class StorageErrorClassifierTests: XCTestCase {
         XCTAssertFalse(StorageErrorClassifier.isOutOfSpace(CoreDataError.entityCreationFailed("Message")))
     }
 
+    /// The unwrap used to apply to the top-level error only, so a `CoreDataError` reached any
+    /// other way stayed opaque and its full disk read as an ordinary failure.
+    /// Revert-check: move the `CoreDataError.underlyingError` step in
+    /// `StorageErrorClassifier.errorChain` back out of the loop, to the top-level error only.
+    func testIsOutOfSpace_seesThroughCoreDataErrorAtAnyDepth() {
+        let sqliteFull = NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSFileWriteUnknownError,
+            userInfo: [NSSQLiteErrorDomain: NSNumber(value: 13)]
+        )
+        XCTAssertTrue(StorageErrorClassifier.isOutOfSpace(
+            CoreDataError.persistentFailure(CoreDataError.saveFailed(sqliteFull))
+        ), "wrapped twice")
+        XCTAssertTrue(StorageErrorClassifier.isOutOfSpace(NSError(
+            domain: "SyncPage",
+            code: 1,
+            userInfo: [NSUnderlyingErrorKey: CoreDataError.saveFailed(sqliteFull) as NSError]
+        )), "under another error's NSUnderlyingErrorKey")
+    }
+
     func testHTMLSaveResult_classifiesWhyTheBodyIsNotOnDisk() {
         XCTAssertNil(HTMLSaveResult.saved(URL(fileURLWithPath: "/tmp/m.html")).bodyWriteFailure)
         XCTAssertEqual(HTMLSaveResult.boundaryClosed.bodyWriteFailure, .boundaryClosed)

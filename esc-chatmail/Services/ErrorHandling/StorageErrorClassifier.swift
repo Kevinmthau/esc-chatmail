@@ -49,20 +49,23 @@ enum StorageErrorClassifier {
 
     /// The error followed by everything reachable through
     /// `NSUnderlyingErrorKey`, `NSMultipleUnderlyingErrorsKey` and Core Data's
-    /// `NSDetailedErrorsKey`, breadth first. A `CoreDataError` contributes the
-    /// error it wraps (`CoreDataError.underlyingError`), which bridging alone
-    /// would drop: without it a sync save failing with `SQLITE_FULL` behind
-    /// `saveAsync`'s `.saveFailed` read as not out of space.
+    /// `NSDetailedErrorsKey`, breadth first. A `CoreDataError` anywhere in the
+    /// chain contributes the error it wraps (`CoreDataError.underlyingError`),
+    /// which bridging alone would drop: without it a sync save failing with
+    /// `SQLITE_FULL` behind `saveAsync`'s `.saveFailed` read as not out of
+    /// space, and so would one wrapped twice or placed under another error's
+    /// `NSUnderlyingErrorKey`.
     static func errorChain(_ error: Error) -> [NSError] {
         var chain: [NSError] = []
         var queue: [NSError] = [error as NSError]
-        if let underlying = (error as? CoreDataError)?.underlyingError {
-            queue.append(underlying as NSError)
-        }
         while !queue.isEmpty, chain.count < maximumChainLength {
             let next = queue.removeFirst()
             guard !chain.contains(where: { $0 === next }) else { continue }
             chain.append(next)
+            // A bridged Swift error casts back to its own type.
+            if let underlying = ((next as Error) as? CoreDataError)?.underlyingError {
+                queue.append(underlying as NSError)
+            }
             if let underlying = next.userInfo[NSUnderlyingErrorKey] as? NSError {
                 queue.append(underlying)
             }

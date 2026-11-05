@@ -286,7 +286,7 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
     /// A body that could not be written used to become a body-less row with a known `.notRich`
     /// verdict that no backfill revisits, a text bubble for good. Now nothing is inserted, and
     /// `MessagePersister.persist` reports the message `.failed` (`MessagePersisterDispositionTests`).
-    /// Revert-check: the `case let result?: throw MessageBodyWriteError` arm in
+    /// Revert-check: the `throw failure` on a failed body write in
     /// `MessagePersister+Creation.swift`.
     func testCreateNewMessage_failedHTMLSave_insertsNoRow() async throws {
         let id = uniqueID("failed-save-create")
@@ -305,8 +305,8 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
                 in: context
             )
             XCTFail("A failed body write must not create the row")
-        } catch let error as MessageBodyWriteError {
-            XCTAssertEqual(error.failure, .ioError)
+        } catch let failure as MessageBodyWriteFailure {
+            XCTAssertEqual(failure, .ioError)
         }
 
         let insertedCount: Int = await context.perform {

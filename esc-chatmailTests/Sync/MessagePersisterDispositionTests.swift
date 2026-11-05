@@ -139,7 +139,7 @@ final class MessagePersisterDispositionTests: XCTestCase {
 
     /// Any other write failure blocks this message only: the cursor holds and the re-scan
     /// retries it, and the batch goes on.
-    /// Revert-check: the `case let result?: throw MessageBodyWriteError` arm in
+    /// Revert-check: the `throw failure` on a failed body write in
     /// `MessagePersister+Creation.swift` (the row is then persisted body-less as `.persisted`).
     @MainActor
     func testSaveMessages_failedBodyWrite_reportsFailedWithoutARowAndPersistsTheRest() async throws {
@@ -229,6 +229,55 @@ final class MessagePersisterDispositionTests: XCTestCase {
         } catch let abort as SyncResourceAbort {
             XCTAssertEqual(abort, .insufficientStorage)
         }
+    }
+
+    /// A refetch usually brings the body already on disk. The update used to rewrite those
+    /// identical bytes every time, so once a failed write blocked the whole update, a transient
+    /// write error dropped the fetch's label and read-state changes and held the cursor for a
+    /// body that was already stored.
+    /// Revert-check: the `unchangedBodyStorageURI` skip in `MessagePersister+Updates.swift` (the
+    /// refetch then attempts the write, fails, and reports `.failed`).
+    @MainActor
+    func testSaveMessages_refetchWithTheStoredBody_skipsTheWriteAndAppliesLabels() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MessagePersisterDispositionTests-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func makePersister(saveHTML: @escaping (String, String) -> HTMLSaveResult) -> MessagePersister {
+            MessagePersister(
+                coreDataStack: coreDataStack,
+                htmlContentHandler: handler,
+                saveHTML: saveHTML,
+                conversationManager: ConversationManager(currentUserEmail: { Self.myEmail })
+            )
+        }
+        func makeMessage(labels: [String]) -> GmailMessage {
+            GmailMessageBuilder()
+                .withId("m-same-body")
+                .withFrom("alice@example.com", name: "Alice Smith")
+                .withTo([Self.myEmail])
+                .withSubject("Same body")
+                .withBodyHtml("<p>The body already on disk</p>")
+                .withLabels(labels)
+                .build()
+        }
+        let context = coreDataStack.newBackgroundContext()
+        let first = try await makePersister(saveHTML: { html, id in handler.saveHTMLResult(html, for: id) })
+            .saveMessages([makeMessage(labels: ["INBOX", "UNREAD"])], myAliases: [Self.myEmail], in: context)
+        XCTAssertEqual(first.persistedIds, ["m-same-body"])
+        XCTAssertTrue(handler.htmlFileExists(for: "m-same-body"))
+
+        let refetch = try await makePersister(saveHTML: { _, _ in .ioFailure })
+            .saveMessages([makeMessage(labels: ["INBOX"])], myAliases: [Self.myEmail], in: context)
+
+        XCTAssertEqual(refetch.persistedIds, ["m-same-body"], "An unchanged body needs no write")
+        XCTAssertTrue(refetch.failedIds.isEmpty)
+        let isUnread: Bool? = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "m-same-body")
+            return (try? context.fetch(request).first)?.isUnread
+        }
+        XCTAssertEqual(isUnread, false, "The refetch's read state must apply")
     }
 
     // MARK: - Large-body fetch failures

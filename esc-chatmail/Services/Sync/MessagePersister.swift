@@ -615,8 +615,8 @@ actor MessagePersister {
                     in: context
                 )
                 return .persisted
-            } catch let bodyWriteError as MessageBodyWriteError {
-                return try Self.dispositionAfterBodyWriteFailure(bodyWriteError.failure)
+            } catch let bodyWriteFailure as MessageBodyWriteFailure {
+                return try Self.dispositionAfterBodyWriteFailure(bodyWriteFailure)
             } catch CoreDataError.entityCreationFailed(let entity) {
                 // Model/schema mismatch: every message in the run fails the
                 // same way, so this is run-fatal, not a per-message verdict.

@@ -216,14 +216,7 @@ final class HTMLContentHandler: @unchecked Sendable {
         for messageId: String,
         expectedGeneration: HTMLContentAccountGeneration?
     ) -> URL? {
-        guard case .saved(let fileURL) = saveHTMLResult(
-            html,
-            for: messageId,
-            expectedGeneration: expectedGeneration
-        ) else {
-            return nil
-        }
-        return fileURL
+        saveHTMLResult(html, for: messageId, expectedGeneration: expectedGeneration).savedURL
     }
 
     /// `saveHTML` with the reason a write did not happen. Sync persistence needs it: a closed
@@ -323,6 +316,15 @@ final class HTMLContentHandler: @unchecked Sendable {
 
     func loadHTML(for messageId: String) -> String? {
         loadHTML(for: messageId, expectedGeneration: nil)
+    }
+
+    /// The body file's URL when it already holds exactly `html`, so a refetch can skip
+    /// rewriting identical bytes (`MessagePersister`'s update path). Nil when the file is
+    /// missing, holds anything else, or the boundary is closed.
+    func storedHTMLURL(ifMatching html: String, for messageId: String) -> URL? {
+        let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
+        guard loadHTML(from: fileURL) == html else { return nil }
+        return fileURL
     }
 
     func loadHTML(

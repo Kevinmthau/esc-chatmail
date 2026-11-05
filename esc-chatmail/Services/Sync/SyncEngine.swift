@@ -272,7 +272,9 @@ final class SyncEngine: ObservableObject, Sendable {
         do {
             try await syncRunTask.task.value
             await syncRunCoordinator.endRun(syncRunTask.run)
-            storageBackoff.recordSuccessfulRun()
+            // The backoff itself is reset where the run reports how much mail it stored
+            // (`recordSuccessfulRun(storedMessageCount:)`). Any finished run lifts the banner:
+            // sync is working again.
             setBlockedByInsufficientStorage(false)
             return .succeeded
         } catch is CancellationError {
@@ -346,6 +348,7 @@ final class SyncEngine: ObservableObject, Sendable {
             self?.uiState.update(progress: progress, status: status)
         }
 
+        storageBackoff.recordSuccessfulRun(storedMessageCount: result.messagesProcessed)
         let finalStatus = result.hadWarnings ? "Sync completed with warnings" : "Sync complete"
         uiState.update(isSyncing: false, progress: 1.0, status: finalStatus)
 
@@ -380,6 +383,7 @@ final class SyncEngine: ObservableObject, Sendable {
             }
         )
 
+        storageBackoff.recordSuccessfulRun(storedMessageCount: result.newMessagesCount)
         let finalStatus = result.hadWarnings ? "Sync completed with warnings" : "Sync complete"
         uiState.update(isSyncing: false, progress: 1.0, status: finalStatus)
 

@@ -16,8 +16,10 @@ import Foundation
 ///   be trusted, so later runs wait 1, 2, 4 … minutes, up to 30. Freeing space ends the wait
 ///   at once: a reading at least the threshold above the one taken at the failure admits the run.
 ///
-/// A nil reading (the volume could not be queried) never refuses a run, as on the launch screen
-/// (`AppLoadingPolicy`). Pure value type; `SyncEngine` owns the instance and the clock.
+/// A nil reading (the volume could not be queried) never trips the admission threshold, as on
+/// the launch screen (`AppLoadingPolicy`). Inside a backoff window it does refuse: a run just hit a
+/// full disk, and a reading that cannot be taken cannot show that space was freed, so the window
+/// runs its course. Pure value type; `SyncEngine` owns the instance and the clock.
 struct SyncStorageBackoff: Equatable {
     static let initialDelay: TimeInterval = 60
     static let maximumDelay: TimeInterval = 30 * 60
@@ -50,12 +52,6 @@ struct SyncStorageBackoff: Equatable {
         return availableBytes >= availableBytesAtFailure + threshold
     }
 
-    /// When the next run may start, for a caller scheduling its own retry. Nil when nothing waits.
-    func nextAdmissionDate(now: Date) -> Date? {
-        guard let retryNotBefore, now < retryNotBefore else { return nil }
-        return retryNotBefore
-    }
-
     /// A started run stopped on a full disk: open, or lengthen, the backoff window.
     mutating func recordInsufficientStorage(now: Date, availableBytes: Int64?) {
         consecutiveFailures += 1
@@ -63,10 +59,17 @@ struct SyncStorageBackoff: Equatable {
         availableBytesAtFailure = availableBytes
     }
 
-    /// A run finished, so its writes reached disk: the next storage failure starts the backoff
-    /// over. A run that failed for any other reason changes nothing here, because a network or
-    /// API failure can end a run before it writes anything.
-    mutating func recordSuccessfulRun() {
+    /// A run finished. Only one that stored mail proves the disk takes message writes, so only
+    /// that one starts the backoff over. A run that stored nothing (no new mail, a label-only
+    /// slice, a deferred history recovery) can succeed on a disk still too full for message
+    /// bodies, and resetting on it would hold the backoff at its first minute while the disk
+    /// stays full. A run that failed for any other reason does not reach here, because a network
+    /// or API failure can end a run before it writes anything.
+    ///
+    /// History recovery reports no new messages even when it stored some, so it leaves the
+    /// backoff as it was. That only makes the next window longer than it needed to be.
+    mutating func recordSuccessfulRun(storedMessageCount: Int) {
+        guard storedMessageCount > 0 else { return }
         self = SyncStorageBackoff()
     }
 }

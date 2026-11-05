@@ -224,18 +224,24 @@ extension MessagePersister {
             let incomingHTMLSourceSignature = canonicalHTML.flatMap {
                 htmlContentHandler.canonicalHTMLSourceSignature(for: $0)
             }
-            let savedBodyStorageURI: String?
-            switch canonicalHTML.map({ saveHTML($0, processedMessage.id) }) {
-            case nil:
-                savedBodyStorageURI = nil
-            case .saved(let url)?:
-                savedBodyStorageURI = url.absoluteString
-            case let failedSave?:
+            // A refetch usually brings the body already on disk. Rewriting identical bytes is
+            // wasted I/O, and because a failed write blocks the whole update, a transient write
+            // error would also drop this fetch's label and read-state changes. Skip the write only
+            // when the canonical file holds exactly this HTML and the row already points at it,
+            // so everything below sees what a rewrite would have produced.
+            let unchangedBodyStorageURI = canonicalHTML
+                .flatMap { htmlContentHandler.storedHTMLURL(ifMatching: $0, for: processedMessage.id) }
+                .map(\.absoluteString)
+                .flatMap { $0 == previousBodyStorageURI ? $0 : nil }
+            let saveResult = unchangedBodyStorageURI == nil
+                ? canonicalHTML.map { saveHTML($0, processedMessage.id) }
+                : nil
+            if let bodyWriteFailure = saveResult?.bodyWriteFailure {
                 // Nothing above this point changed the row. Updating it without the new body
                 // would keep a stale or missing body behind an advancing cursor.
                 return MessageUpdateResult(
                     didUpdate: false,
-                    bodyWriteFailure: failedSave.bodyWriteFailure ?? .ioError,
+                    bodyWriteFailure: bodyWriteFailure,
                     modifiedConversationID: nil,
                     reroutedFromConversationID: nil,
                     shouldInvalidateRenderedContent: false,
@@ -245,6 +251,7 @@ extension MessagePersister {
                     participantDisplayNameUpdateConversationIDs: []
                 )
             }
+            let savedBodyStorageURI = unchangedBodyStorageURI ?? saveResult?.savedURL?.absoluteString
 
             existingMessage.gmThreadId = processedMessage.gmThreadId
             existingMessage.subject = MessagePreviewText.preservingExisting(
