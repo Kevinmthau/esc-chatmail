@@ -1,15 +1,17 @@
 import XCTest
 import CoreData
+import os
 @testable import esc_chatmail
 
 /// Below the free-space threshold no run starts, foreground or background, so a full disk can no
 /// longer re-fetch the uncommitted backlog every minute (`SyncStorageBackoff`).
 ///
-/// HONEST SCOPE: these pin the admission gate. A run that starts and then stops on a full disk
-/// records into the backoff in `SyncEngine.runSyncTask`. That path is covered at its parts (the
-/// abort in `IncrementalSyncCursorTests`, the classification in `StorageErrorClassifierTests`,
-/// the windows in `SyncStorageBackoffTests`), not end to end through the engine, which would
-/// need a full scripted Gmail account.
+/// HONEST SCOPE: these pin the admission gate, and the banner and account-transition state through
+/// the recorders `SyncEngine.runSyncTask` calls (`recordRunFinished`, `recordRunStoppedOnFullDisk`).
+/// That a run's outcome reaches those recorders is covered at its parts (the abort in
+/// `IncrementalSyncCursorTests`, the classification in `StorageErrorClassifierTests`, the windows
+/// in `SyncStorageBackoffTests`), not end to end through the engine, which would need a full
+/// scripted Gmail account.
 @MainActor
 final class SyncEngineStorageAdmissionTests: XCTestCase {
     private var testStack: TestCoreDataStack!
@@ -31,6 +33,13 @@ final class SyncEngineStorageAdmissionTests: XCTestCase {
         availableBytes: Int64?,
         syncRunCoordinator: SyncRunCoordinator = SyncRunCoordinator()
     ) -> SyncEngine {
+        makeEngine(readingAvailableBytes: { availableBytes }, syncRunCoordinator: syncRunCoordinator)
+    }
+
+    private func makeEngine(
+        readingAvailableBytes: @escaping @Sendable () -> Int64?,
+        syncRunCoordinator: SyncRunCoordinator = SyncRunCoordinator()
+    ) -> SyncEngine {
         let coreDataStack = CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
         let conversationManager = ConversationManager(currentUserEmail: { "me@example.com" })
         return SyncEngine(
@@ -48,7 +57,7 @@ final class SyncEngineStorageAdmissionTests: XCTestCase {
             networkMonitor: NetworkMonitorService(),
             syncRunCoordinator: syncRunCoordinator,
             clock: FakeSyncClock(),
-            availableStorageBytes: { availableBytes }
+            availableStorageBytes: readingAvailableBytes
         )
     }
 
@@ -124,5 +133,46 @@ final class SyncEngineStorageAdmissionTests: XCTestCase {
         XCTAssertTrue(engine.isBlockedByInsufficientStorage)
         XCTAssertEqual(apiClient.getProfileCallCount, 0)
         XCTAssertEqual(apiClient.listHistoryCallCount, 0)
+    }
+
+    /// A run with no new mail succeeds on a disk still too full for message bodies. Lifting the
+    /// banner on it hid the full disk until the next real message raised it again.
+    /// Revert-check: the `liftsInsufficientStorageBanner` guard in `SyncEngine.recordRunFinished`
+    /// (back to an unconditional `setBlockedByInsufficientStorage(false)`, the first run that
+    /// stored nothing lifts the banner).
+    func testRecordRunFinished_afterAFullDiskStop_keepsTheBannerUntilSpaceIsFreed() {
+        let threshold = StoreVolumeFreeSpace.lowStorageThresholdBytes
+        let atStop: Int64 = 300 * 1024 * 1024
+        let reading = OSAllocatedUnfairLock<Int64?>(initialState: atStop)
+        let engine = makeEngine(readingAvailableBytes: { reading.withLock { $0 } })
+
+        engine.recordRunStoppedOnFullDisk()
+        XCTAssertTrue(engine.isBlockedByInsufficientStorage)
+
+        engine.recordRunFinished()
+        XCTAssertTrue(
+            engine.isBlockedByInsufficientStorage,
+            "A run that stored nothing proves nothing about a disk that just stopped a run"
+        )
+
+        reading.withLock { $0 = atStop + threshold }
+        engine.recordRunFinished()
+        XCTAssertFalse(engine.isBlockedByInsufficientStorage, "Freed space lifts it")
+    }
+
+    /// `SyncEngine.shared` outlives sign-out: the previous account's backoff window and banner
+    /// used to greet the next account.
+    /// Revert-check: the body of `SyncEngine.resetStorageStateForAccountTransition()` (the banner
+    /// and the backoff both survive the call).
+    func testResetStorageStateForAccountTransition_forgetsTheBackoffAndTheBanner() {
+        let engine = makeEngine(availableBytes: 300 * 1024 * 1024)
+        engine.recordRunStoppedOnFullDisk()
+        XCTAssertTrue(engine.isBlockedByInsufficientStorage)
+        XCTAssertNotEqual(engine.storageBackoff, SyncStorageBackoff())
+
+        engine.resetStorageStateForAccountTransition()
+
+        XCTAssertFalse(engine.isBlockedByInsufficientStorage)
+        XCTAssertEqual(engine.storageBackoff, SyncStorageBackoff())
     }
 }

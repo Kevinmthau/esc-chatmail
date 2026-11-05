@@ -272,6 +272,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private let reopenDownloads: @MainActor @Sendable () async -> Bool
     private let resetPendingActionRetryState: @MainActor @Sendable () async -> Void
     private let pendingActionAuthenticationDidRecover: @MainActor @Sendable () async -> Void
+    private let resetSyncStorageState: @MainActor @Sendable () -> Void
     private let cancelBackgroundTaskRequests: @MainActor @Sendable () -> Void
     private let resetCoreDataStore: @Sendable () async throws -> Void
     private let inspectLocalMailboxStore: @Sendable () async throws -> LocalMailboxStoreInspection
@@ -345,6 +346,13 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         },
         pendingActionAuthenticationDidRecover: @escaping @MainActor @Sendable () async -> Void = {
             PendingActionsManager.shared.authenticationDidRecover()
+        },
+        resetSyncStorageState: @escaping @MainActor @Sendable () -> Void = {
+            // `SyncEngine.shared` outlives sign-out, so without this the previous account's
+            // full-disk backoff and banner carried into the next account. Called beside
+            // `resetPendingActionRetryState` on every path, always inside quiescence, after the
+            // run boundary has drained (`SyncEngine.resetStorageStateForAccountTransition`).
+            SyncEngine.shared.resetStorageStateForAccountTransition()
         },
         cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {
             // A pending BGTask request re-arms itself at handler entry before
@@ -424,6 +432,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         self.reopenDownloads = reopenDownloads
         self.resetPendingActionRetryState = resetPendingActionRetryState
         self.pendingActionAuthenticationDidRecover = pendingActionAuthenticationDidRecover
+        self.resetSyncStorageState = resetSyncStorageState
         self.cancelBackgroundTaskRequests = cancelBackgroundTaskRequests
         self.resetCoreDataStore = resetCoreDataStore
         self.inspectLocalMailboxStore = inspectLocalMailboxStore
@@ -593,6 +602,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         var didReopenAccountWork = false
         if restoredUser.user != nil {
             await resetPendingActionRetryState()
+            resetSyncStorageState()
             let reopenOutcome = await reopenAccountWork(after: outboundTransition)
             // The restore callback already persisted background-readable
             // credentials and cleared the cleanup marker, so every refusal
@@ -659,6 +669,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                 throw CancellationError()
             }
             await resetPendingActionRetryState()
+            resetSyncStorageState()
             didResetPendingActionRetryState = true
             // Interactive sign-in stays all-or-none for every refusal cause: its
             // catch clears the session it just replaced, so no per-cause
@@ -676,6 +687,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     clearFailedGoogleSession()
                     if !didResetPendingActionRetryState {
                         await resetPendingActionRetryState()
+                        resetSyncStorageState()
                     }
                 } else if wasAuthenticated {
                     await reopenPreSignInAccountWork(after: outboundTransition)
@@ -805,6 +817,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
         await resetPendingActionRetryState()
+        resetSyncStorageState()
         await clearParticipantCaches()
         signOutGoogleSession()
         currentUser = nil
@@ -960,6 +973,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
         await resetPendingActionRetryState()
+        resetSyncStorageState()
         await clearParticipantCaches()
 
         // Capture the old credential before local SDK sign-out clears it. Use
@@ -1605,6 +1619,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
         await resetPendingActionRetryState()
+        resetSyncStorageState()
         await clearParticipantCaches()
 
         GIDSignIn.sharedInstance.signOut()
@@ -1668,6 +1683,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await syncRunCoordinator.beginQuiescence()
         await outboundTaskRegistry.cancelAndAwaitAll()
         await resetPendingActionRetryState()
+        resetSyncStorageState()
         await clearParticipantCaches()
 
         GIDSignIn.sharedInstance.signOut()

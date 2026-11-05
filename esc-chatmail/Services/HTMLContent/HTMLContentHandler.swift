@@ -321,10 +321,21 @@ final class HTMLContentHandler: @unchecked Sendable {
     /// The body file's URL when it already holds exactly `html`, so a refetch can skip
     /// rewriting identical bytes (`MessagePersister`'s update path). Nil when the file is
     /// missing, holds anything else, or the boundary is closed.
+    ///
+    /// Reads the file itself, never `htmlContentCache`. That cache is process-wide and keeps a
+    /// body after its file is removed behind the handler's back, and approving the skip from it
+    /// left `bodyStorageURI` pointing at nothing while the refetch carried the very bytes that
+    /// would have restored the file. The read costs less than the write it can save, and this
+    /// runs only on a refetch of a row that already has a body.
     func storedHTMLURL(ifMatching html: String, for messageId: String) -> URL? {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
-        guard loadHTML(from: fileURL) == html else { return nil }
-        return fileURL
+        let matches = accountBoundary.perform(
+            directoryKey: directoryKey,
+            expectedGeneration: nil
+        ) {
+            (try? String(contentsOf: fileURL, encoding: .utf8)) == html
+        } ?? false
+        return matches ? fileURL : nil
     }
 
     func loadHTML(

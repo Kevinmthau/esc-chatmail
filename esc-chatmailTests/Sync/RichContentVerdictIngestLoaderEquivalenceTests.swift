@@ -355,7 +355,7 @@ final class RichContentVerdictIngestLoaderEquivalenceTests: XCTestCase {
     /// inputs, and the verdict stamped for them, so the load still agrees with it. The message is
     /// reported `.failed`, and the re-scan retries it.
     ///
-    /// Revert-check: drop the `case let failedSave?:` early return in
+    /// Revert-check: drop the `if let bodyWriteFailure = saveResult?.bodyWriteFailure` early return in
     /// `MessagePersister+Updates.swift` and the update goes ahead without its body: the snippet
     /// below is rewritten and the message reports `.persisted` over a body it never stored.
     /// HONEST SCOPE: a failed save no longer reaches `MessagePersister.stampRichContentVerdict`,
