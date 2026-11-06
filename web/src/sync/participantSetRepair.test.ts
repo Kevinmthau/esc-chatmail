@@ -1363,49 +1363,113 @@ describe('repairParticipantSetConversations', () => {
       expect(await db.conversations.get('source-indexed-move')).toBeDefined()
     })
 
-    // Revert-check: the `destination.isArchived !== 0` guard on
-    // createdDestinationIds.add (the active hash(BOB) shell is carried too)
-    // and createdDestinationIds.delete on reactivation (the reactivated shell
-    // stays listed).
-    it('carries only created shells that are still archived in the progress row', async () => {
-      await seedRelayMoves(
-        [
-          { id: 'archived-first', internalDate: 100, archived: true },
-          { id: 'active-later', internalDate: 300 },
-        ],
-        { withDestination: false },
-      )
+    /**
+     * A hash(ALICE, RELAY) source holding `messages`, each received (from
+     * Alice, not in INBOX) or sent by me, which all merge into one new
+     * hash(ALICE) shell once RELAY is classified Hide My Email.
+     */
+    async function seedShellMerge(
+      sourceId: string,
+      archived: boolean,
+      messages: ReadonlyArray<{ id: string; internalDate: number; sent: boolean }>,
+    ): Promise<void> {
       await db.conversations.add(
-        convoRow({ id: 'bob-relay-source', participantHash: hashFor(BOB, RELAY) }),
+        convoRow({
+          id: sourceId,
+          participantHash: hashFor(ALICE, RELAY),
+          ...(archived ? { archivedAt: 50, isArchived: 1 } : {}),
+        }),
       )
-      await db.messages.add(
-        msgRow({ id: 'bob-message', conversationId: 'bob-relay-source', internalDate: 200 }),
-      )
-      await db.msgParticipants.bulkAdd([
-        participant('bob-message', BOB, 'from', 'Bob'),
-        participant('bob-message', ME, 'to'),
-        participant('bob-message', RELAY, 'cc'),
-      ])
       await db.convoParticipants.bulkPut([
-        { conversationId: 'bob-relay-source', email: BOB, role: 'normal' },
-        { conversationId: 'bob-relay-source', email: RELAY, role: 'normal' },
+        { conversationId: sourceId, email: ALICE, role: 'normal' },
+        { conversationId: sourceId, email: RELAY, role: 'normal' },
       ])
-      await db.people.put({ email: BOB, displayName: 'Bob' })
-      const carried: string[][] = []
+      for (const message of messages) {
+        await db.messages.add(
+          msgRow({
+            id: message.id,
+            conversationId: sourceId,
+            internalDate: message.internalDate,
+            ...(message.sent
+              ? { isFromMe: 1, labelIds: ['SENT'], senderEmail: ME }
+              : { labelIds: [], senderEmail: ALICE }),
+          }),
+        )
+        await db.msgParticipants.bulkAdd(
+          message.sent
+            ? [
+                participant(message.id, ME, 'from'),
+                participant(message.id, ALICE, 'to'),
+                participant(message.id, RELAY, 'cc'),
+              ]
+            : [
+                participant(message.id, ALICE, 'from', 'Alice'),
+                participant(message.id, ME, 'to'),
+                participant(message.id, RELAY, 'cc'),
+              ],
+        )
+      }
+      await db.people.bulkPut([
+        { email: ALICE, displayName: 'Alice' },
+        { email: RELAY, displayName: 'Hide My Email' },
+      ])
+    }
 
+    /** Runs the walk one message per chunk; returns the shell's archivedAt at each commit. */
+    async function walkOneMessagePerChunk(shellMessageId: string): Promise<number[]> {
+      const archivedAtCommit: number[] = []
       await repairParticipantSetConversations(db, ME, NOW, {
         chunkSize: 1,
         beforeChunkCommit: async () => {
-          const progress = (await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY))?.value as
-            { createdDestinationIds: string[] } | undefined
-          if (progress !== undefined) carried.push(progress.createdDestinationIds)
+          const shellId = (await db.messages.get(shellMessageId))?.conversationId
+          const shell = shellId === undefined ? undefined : await db.conversations.get(shellId)
+          if (shell !== undefined) archivedAtCommit.push(shell.archivedAt)
         },
       })
+      return archivedAtCommit
+    }
 
-      const archivedShell = (await db.messages.get('archived-first'))?.conversationId
-      expect(archivedShell).toBeDefined()
-      expect((await db.messages.get('active-later'))?.conversationId).toBe(archivedShell)
-      expect(carried).toEqual([[archivedShell], [archivedShell], []])
+    // Revert-check: the unconditional createdDestinationIds.add for a new
+    // shell. Carrying only shells created archived leaves this one, created
+    // active and then auto-archived by chunk 0's rollup, out of the set, so
+    // chunk 1 moves the active source's reply into it without reactivating.
+    it('reactivates a shell created active that an earlier chunk rollup archived', async () => {
+      await seedShellMerge('active-source', false, [
+        { id: 'received-first', internalDate: 100, sent: false },
+        { id: 'reply-later', internalDate: 200, sent: true },
+      ])
+
+      const archivedAtCommit = await walkOneMessagePerChunk('received-first')
+
+      // Chunk 0's rollup auto-archived the shell; chunk 1 moved the reply in.
+      expect(archivedAtCommit.slice(0, 2)).toEqual([NOW, 0])
+      const shellId = (await db.messages.get('received-first'))?.conversationId
+      expect((await db.messages.get('reply-later'))?.conversationId).toBe(shellId)
+      expect(await db.conversations.get(shellId!)).toMatchObject({ isArchived: 0, archivedAt: 0 })
+    })
+
+    // Revert-check: keeping a reactivated shell in createdDestinationIds
+    // (dropping it on reactivation). Chunk 1 reactivates the shell, its
+    // rollup archives it again, and chunk 2 must still reactivate it.
+    it('reactivates a shell again after a later chunk rollup re-archived it', async () => {
+      await seedShellMerge('archived-source', true, [
+        { id: 'archived-first', internalDate: 100, sent: false },
+      ])
+      await seedShellMerge('active-source', false, [
+        { id: 'received-middle', internalDate: 200, sent: false },
+        { id: 'reply-last', internalDate: 300, sent: true },
+      ])
+
+      const archivedAtCommit = await walkOneMessagePerChunk('archived-first')
+
+      // Seeded archived from its source (50), reactivated by chunk 1 and
+      // auto-archived again by that chunk's rollup (NOW), and reactivated
+      // for good by chunk 2.
+      expect(archivedAtCommit.slice(0, 3)).toEqual([50, NOW, 0])
+      const shellId = (await db.messages.get('archived-first'))?.conversationId
+      expect((await db.messages.get('received-middle'))?.conversationId).toBe(shellId)
+      expect((await db.messages.get('reply-last'))?.conversationId).toBe(shellId)
+      expect(await db.conversations.get(shellId!)).toMatchObject({ isArchived: 0, archivedAt: 0 })
     })
   })
 })

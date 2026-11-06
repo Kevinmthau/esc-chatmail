@@ -252,11 +252,13 @@ interface RepairProgress {
   /** An earlier chunk deferred work for an active send, so the end of the walk must not write the signature. */
   blockedByActiveSend: boolean
   /**
-   * Shells this walk created archived and has not yet reactivated: "active
-   * wins" applies to them in later chunks too. A shell created active, or one
-   * already reactivated, has nothing left for that rule to do, so the row
-   * does not carry every shell the walk ever made. (A row written before this
-   * narrowing may still list active ones, which the rule ignores.)
+   * Every shell this walk created: "active wins" applies to them in later
+   * chunks too. The set is not narrowed to shells that are archived now.
+   * Each chunk's rollup can auto-archive a shell that was created active or
+   * already reactivated (its latest moved message is received and not in
+   * INBOX), and a later chunk that moves an active source's message into it
+   * must still reactivate it. Otherwise the chat's archive state would depend
+   * on where the chunk boundaries fall.
    */
   createdDestinationIds: string[]
 }
@@ -781,7 +783,8 @@ async function repairParticipantSetChunk(
             }
             await db.conversations.put(destination)
           }
-          if (destination.isArchived !== 0) createdDestinationIds.add(destination.id)
+          // Every created shell, archived or not: see RepairProgress.
+          createdDestinationIds.add(destination.id)
           conversationsById.set(destination.id, destination)
           conversationsByHash.set(identity.participantHash, [destination])
           createdConversationCount += 1
@@ -798,7 +801,6 @@ async function repairParticipantSetChunk(
           destination = { ...destination, archivedAt: 0, isArchived: 0 }
           await db.conversations.put(destination)
           conversationsById.set(destination.id, destination)
-          createdDestinationIds.delete(destination.id)
         }
         destinationByHash.set(identity.participantHash, destination)
 
