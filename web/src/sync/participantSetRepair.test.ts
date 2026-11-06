@@ -966,4 +966,510 @@ describe('repairParticipantSetConversations', () => {
     expect((await db.messages.get('restart-message'))?.conversationId).toBe(destination.id)
     expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)).toBeUndefined()
   })
+
+  describe('PR 362 review follow-ups', () => {
+    /**
+     * One source per message, each keyed with RELAY in its hash, and (unless
+     * `withDestination` is false) the healthy hash(ALICE) destination they
+     * all merge into once RELAY is classified Hide My Email.
+     */
+    async function seedRelayMoves(
+      messages: ReadonlyArray<{ id: string; internalDate: number; archived?: boolean }>,
+      options: { relayName?: string; withDestination?: boolean } = {},
+    ): Promise<string> {
+      const destinationId = 'relay-destination'
+      if (options.withDestination !== false) {
+        await db.conversations.add(
+          convoRow({ id: destinationId, participantHash: hashFor(ALICE), displayName: 'Alice' }),
+        )
+        await db.convoParticipants.put({
+          conversationId: destinationId,
+          email: ALICE,
+          role: 'normal',
+        })
+      }
+      for (const message of messages) {
+        const sourceId = `source-${message.id}`
+        await db.conversations.add(
+          convoRow({
+            id: sourceId,
+            participantHash: hashFor(ALICE, RELAY),
+            ...(message.archived === true ? { archivedAt: 50, isArchived: 1 } : {}),
+          }),
+        )
+        await db.messages.add(
+          msgRow({
+            id: message.id,
+            conversationId: sourceId,
+            internalDate: message.internalDate,
+            ...(message.archived === true ? { labelIds: [] } : {}),
+          }),
+        )
+        await db.msgParticipants.bulkAdd([
+          participant(message.id, ALICE, 'from', 'Alice'),
+          participant(message.id, ME, 'to'),
+          participant(message.id, RELAY, 'cc'),
+        ])
+        await db.convoParticipants.bulkPut([
+          { conversationId: sourceId, email: ALICE, role: 'normal' },
+          { conversationId: sourceId, email: RELAY, role: 'normal' },
+        ])
+      }
+      await db.people.bulkPut([
+        { email: ALICE, displayName: 'Alice' },
+        { email: RELAY, displayName: options.relayName ?? 'Hide My Email' },
+      ])
+      return destinationId
+    }
+
+    async function seedHealthyBob(id: string, internalDate: number): Promise<void> {
+      await db.conversations.add(
+        convoRow({ id: `healthy-${id}`, participantHash: hashFor(BOB), displayName: 'Bob' }),
+      )
+      await db.messages.add(msgRow({ id, conversationId: `healthy-${id}`, internalDate }))
+      await db.msgParticipants.bulkAdd([
+        participant(id, BOB, 'from', 'Bob'),
+        participant(id, ME, 'to'),
+      ])
+      await db.convoParticipants.put({
+        conversationId: `healthy-${id}`,
+        email: BOB,
+        role: 'normal',
+      })
+      await db.people.put({ email: BOB, displayName: 'Bob' })
+    }
+
+    // Revert-check: the PARTICIPANT_SET_REPAIR_PROGRESS_KEY delete in the
+    // matching-marker branch (the stale row survives and resumes later), and
+    // its `storedProgress !== undefined` guard (the usual no-op deletes).
+    it('discards a stale progress row beside a matching marker and keeps the usual no-op read-only', async () => {
+      await seedRelayMoves([{ id: 'stale-progress-message', internalDate: 100 }])
+      await repairParticipantSetConversations(db, ME, NOW)
+      expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)).toBeDefined()
+      // Aliases A completed, a walk under B was killed past its first chunk,
+      // and the aliases are back to A.
+      await db.syncState.put({
+        key: PARTICIPANT_SET_REPAIR_PROGRESS_KEY,
+        value: {
+          signature: 'walk-under-other-aliases',
+          throughInternalDate: 100,
+          blockedByActiveSend: false,
+          createdDestinationIds: [],
+        },
+      })
+
+      expect(await repairParticipantSetConversations(db, ME, NOW + 1)).toMatchObject({
+        performed: false,
+      })
+      expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)).toBeUndefined()
+
+      const deleteSpy = vi.spyOn(db.syncState, 'delete')
+      const putSpy = vi.spyOn(db.syncState, 'put')
+      const noOp = await repairParticipantSetConversations(db, ME, NOW + 2)
+      const writes = deleteSpy.mock.calls.length + putSpy.mock.calls.length
+      deleteSpy.mockRestore()
+      putSpy.mockRestore()
+      expect(noOp).toMatchObject({ performed: false })
+      expect(writes).toBe(0)
+    })
+
+    // Revert-check: the retireStaleMarker delete after a chunk's progress
+    // write. Without it the old marker outlives the killed walk's moves and
+    // the return to the old aliases is a no-op.
+    it('retires the previous marker with the first chunk of a walk under new inputs', async () => {
+      const destination = convoRow({
+        id: 'round-trip-destination',
+        participantHash: hashFor(ALICE),
+      })
+      await db.conversations.add(destination)
+      await db.convoParticipants.put({
+        conversationId: destination.id,
+        email: ALICE,
+        role: 'normal',
+      })
+      for (const [index, date] of [100, 200].entries()) {
+        const sourceId = `round-trip-source-${index}`
+        await db.conversations.add(
+          convoRow({ id: sourceId, participantHash: hashFor(ALICE, WORK_ALIAS) }),
+        )
+        await db.messages.add(
+          msgRow({ id: `round-trip-${index}`, conversationId: sourceId, internalDate: date }),
+        )
+        await db.msgParticipants.bulkAdd([
+          participant(`round-trip-${index}`, ALICE, 'from'),
+          participant(`round-trip-${index}`, WORK_ALIAS, 'to'),
+        ])
+        await db.convoParticipants.bulkPut([
+          { conversationId: sourceId, email: ALICE, role: 'normal' },
+          { conversationId: sourceId, email: WORK_ALIAS, role: 'normal' },
+        ])
+      }
+      await db.people.put({ email: ALICE, displayName: 'Alice' })
+
+      await repairParticipantSetConversations(db, ME, NOW)
+      const markerA = (await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY))?.value
+      expect(markerA).toBeDefined()
+
+      const account = await db.accounts.get(ME)
+      await db.accounts.put({ ...account!, aliases: [ME, WORK_ALIAS] })
+      await expect(
+        repairParticipantSetConversations(db, ME, NOW + 1, {
+          chunkSize: 1,
+          beforeChunkCommit: (chunkIndex) => {
+            if (chunkIndex === 1) throw new Error('tab killed')
+          },
+        }),
+      ).rejects.toThrow('tab killed')
+      expect((await db.messages.get('round-trip-0'))?.conversationId).toBe(destination.id)
+      expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)).toBeUndefined()
+
+      await db.accounts.put({ ...account!, aliases: [ME] })
+      const back = await repairParticipantSetConversations(db, ME, NOW + 2)
+
+      expect(back).toMatchObject({ performed: true })
+      expect((await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY))?.value).toBe(markerA)
+      expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)).toBeUndefined()
+    })
+
+    // Revert-check: the `else if (previousSignature !== undefined)` marker
+    // delete in the walk's final chunk. A PR 362 build kept the old marker
+    // through a walk; one that ends blocked must still retire it.
+    it('retires a stale marker when a walk inherited from an older build ends blocked', async () => {
+      await seedRelayMoves([{ id: 'inherited-walk', internalDate: 100 }])
+      await repairParticipantSetConversations(db, ME, NOW)
+      const current = (await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY))?.value
+      expect(current).toBeDefined()
+      await db.syncState.put({ key: PARTICIPANT_SET_REPAIR_SIGNATURE_KEY, value: 'older-marker' })
+      await db.syncState.put({
+        key: PARTICIPANT_SET_REPAIR_PROGRESS_KEY,
+        value: {
+          signature: current,
+          throughInternalDate: NOW,
+          blockedByActiveSend: true,
+          createdDestinationIds: [],
+        },
+      })
+
+      expect(await repairParticipantSetConversations(db, ME, NOW + 1)).toMatchObject({
+        performed: true,
+      })
+      expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)).toBeUndefined()
+      expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)).toBeUndefined()
+    })
+
+    // Revert-check: the `message.sendState === 'pending'` term in
+    // hasRowlessActiveOutgoing. Without a journal, only it protects the row.
+    // HONEST SCOPE: this and the next test pin that the keys-first rewrite is
+    // exactly as strict as the old full-row scan; nothing here observes which
+    // rows it loads, so a revert to the scan would still pass both.
+    it('still protects a conversation holding a journal-less pending rowless send', async () => {
+      await seedRelayMoves([{ id: 'beside-pending', internalDate: 100 }])
+      await db.messages.add(
+        msgRow({
+          id: 'journal-less-pending',
+          conversationId: 'source-beside-pending',
+          internalDate: 200,
+          isFromMe: 1,
+          labelIds: ['SENT'],
+          sendState: 'pending',
+        }),
+      )
+
+      const result = await repairParticipantSetConversations(db, ME, NOW)
+
+      expect(result).toMatchObject({ performed: true, movedMessageCount: 0 })
+      expect((await db.messages.get('beside-pending'))?.conversationId).toBe(
+        'source-beside-pending',
+      )
+      expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)).toBeUndefined()
+    })
+
+    // Revert-check: the withParticipantRows filter in hasRowlessActiveOutgoing.
+    // Without it a pending send that already has participant rows protects
+    // its conversation as if it were rowless.
+    it('does not protect a conversation whose pending send has participant rows', async () => {
+      const destination = await seedRelayMoves([{ id: 'beside-addressed', internalDate: 100 }])
+      await db.messages.add(
+        msgRow({
+          id: 'addressed-pending',
+          conversationId: 'source-beside-addressed',
+          internalDate: 200,
+          isFromMe: 1,
+          labelIds: ['SENT'],
+          sendState: 'pending',
+        }),
+      )
+      await db.msgParticipants.bulkAdd([
+        participant('addressed-pending', ME, 'from'),
+        participant('addressed-pending', ALICE, 'to'),
+        participant('addressed-pending', RELAY, 'cc'),
+      ])
+
+      const result = await repairParticipantSetConversations(db, ME, NOW)
+
+      expect(result).toMatchObject({ performed: true })
+      expect((await db.messages.get('beside-addressed'))?.conversationId).toBe(destination)
+    })
+
+    // Revert-check: `state.inputs === null ||` in the chunk's fullRead test.
+    // Without the carried snapshot every chunk reads the whole people table.
+    it('reads the people table once per call plus once to confirm the signature', async () => {
+      await seedRelayMoves([
+        { id: 'snapshot-1', internalDate: 100 },
+        { id: 'snapshot-2', internalDate: 200 },
+        { id: 'snapshot-3', internalDate: 300 },
+      ])
+      const toArraySpy = vi.spyOn(db.people, 'toArray')
+
+      const result = await repairParticipantSetConversations(db, ME, NOW, { chunkSize: 1 })
+      const fullReads = toArraySpy.mock.calls.length
+      toArraySpy.mockRestore()
+
+      expect(result).toMatchObject({ performed: true, movedMessageCount: 3 })
+      expect(fullReads).toBe(2)
+    })
+
+    // Revert-check: the `messages.length === 0 && !fullRead` retry. Without
+    // it the walk writes the signature it began under although a Person read
+    // only by an earlier chunk changed class after that chunk committed.
+    it('confirms the signature with a full read before ending the walk', async () => {
+      const destination = await seedRelayMoves([{ id: 'early-relay', internalDate: 100 }], {
+        relayName: 'Relay',
+      })
+      await seedHealthyBob('late-bob', 200)
+
+      const result = await repairParticipantSetConversations(db, ME, NOW, {
+        chunkSize: 1,
+        beforeChunkCommit: async (chunkIndex) => {
+          if (chunkIndex === 0) await db.people.put({ email: RELAY, displayName: 'Hide My Email' })
+        },
+      })
+
+      expect(result).toMatchObject({ performed: true, movedMessageCount: 1 })
+      expect((await db.messages.get('early-relay'))?.conversationId).toBe(destination)
+      expect(await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)).toBeDefined()
+    })
+
+    // Revert-check: the Hide-My-Email comparison against the snapshot in the
+    // per-chunk Person refresh. Without it the change is found only at the
+    // end of the walk, which then walks every chunk a second time.
+    it('restarts at the first chunk that reads a Person whose class changed', async () => {
+      await seedHealthyBob('first-bob', 100)
+      const destination = await seedRelayMoves([{ id: 'later-relay', internalDate: 200 }], {
+        relayName: 'Relay',
+      })
+      const chunks: number[] = []
+
+      await repairParticipantSetConversations(db, ME, NOW, {
+        chunkSize: 1,
+        beforeChunkCommit: async (chunkIndex) => {
+          chunks.push(chunkIndex)
+          if (chunkIndex === 0) await db.people.put({ email: RELAY, displayName: 'Hide My Email' })
+        },
+      })
+
+      // first-bob, then the restart: first-bob, later-relay, the empty end.
+      expect(chunks).toEqual([0, 1, 2, 3])
+      expect((await db.messages.get('later-relay'))?.conversationId).toBe(destination)
+    })
+
+    // Revert-check: the restOfDate read in readMessageChunk. Without it the
+    // resumed walk starts above the split date and never sees tie-c.
+    it('splits a date shared by more messages than a chunk holds without skipping any', async () => {
+      const destination = await seedRelayMoves([
+        { id: 'tie-a', internalDate: 100 },
+        { id: 'tie-b', internalDate: 100 },
+        { id: 'tie-c', internalDate: 100 },
+      ])
+
+      await expect(
+        repairParticipantSetConversations(db, ME, NOW, {
+          chunkSize: 2,
+          beforeChunkCommit: (chunkIndex) => {
+            if (chunkIndex === 1) throw new Error('tab killed')
+          },
+        }),
+      ).rejects.toThrow('tab killed')
+      // The first chunk held exactly two of the three tied messages.
+      expect((await db.messages.get('tie-a'))?.conversationId).toBe(destination)
+      expect((await db.messages.get('tie-b'))?.conversationId).toBe(destination)
+      expect((await db.messages.get('tie-c'))?.conversationId).toBe('source-tie-c')
+      expect((await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY))?.value).toMatchObject({
+        throughInternalDate: 100,
+        throughMessageId: 'tie-b',
+      })
+
+      const resumed = await repairParticipantSetConversations(db, ME, NOW + 1, { chunkSize: 2 })
+
+      expect(resumed).toMatchObject({ performed: true, movedMessageCount: 1 })
+      expect((await db.messages.get('tie-c'))?.conversationId).toBe(destination)
+    })
+
+    // Revert-check: the `row.throughMessageId === undefined ||` acceptance in
+    // isRepairProgress. Without it a row written before the field existed is
+    // rejected and the walk restarts from the oldest message.
+    it('resumes a progress row written before throughMessageId existed after its date', async () => {
+      await seedRelayMoves([
+        { id: 'legacy-1', internalDate: 100 },
+        { id: 'legacy-2', internalDate: 200 },
+      ])
+      await expect(
+        repairParticipantSetConversations(db, ME, NOW, {
+          chunkSize: 1,
+          beforeChunkCommit: (chunkIndex) => {
+            if (chunkIndex === 1) throw new Error('tab killed')
+          },
+        }),
+      ).rejects.toThrow('tab killed')
+      const stored = (await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY))?.value as Record<
+        string,
+        unknown
+      >
+      const { throughMessageId, ...legacy } = stored
+      expect(throughMessageId).toBe('legacy-1')
+      await db.syncState.put({ key: PARTICIPANT_SET_REPAIR_PROGRESS_KEY, value: legacy })
+      const chunks: number[] = []
+
+      const resumed = await repairParticipantSetConversations(db, ME, NOW + 1, {
+        chunkSize: 1,
+        beforeChunkCommit: (chunkIndex) => {
+          chunks.push(chunkIndex)
+        },
+      })
+
+      // legacy-2, then the empty chunk that ends the walk.
+      expect(chunks).toEqual([0, 1])
+      expect(resumed).toMatchObject({ performed: true, movedMessageCount: 1 })
+    })
+
+    // Revert-check: `if (!state.everyMessageIndexed) continue` in the
+    // drained-source loop. Without it the source reads as drained through
+    // the index and is deleted under the row the index cannot see.
+    it('keeps a source holding a message the internalDate index cannot see', async () => {
+      const destination = await seedRelayMoves([{ id: 'indexed-move', internalDate: 100 }])
+      await db.messages.add(
+        msgRow({
+          id: 'unindexed-row',
+          conversationId: 'source-indexed-move',
+          internalDate: Number.NaN,
+        }),
+      )
+      expect(await db.messages.orderBy('internalDate').count()).toBe(1)
+
+      const result = await repairParticipantSetConversations(db, ME, NOW)
+
+      expect(result).toMatchObject({ movedMessageCount: 1, deletedConversationCount: 0 })
+      expect((await db.messages.get('indexed-move'))?.conversationId).toBe(destination)
+      expect(await db.conversations.get('source-indexed-move')).toBeDefined()
+    })
+
+    /**
+     * A hash(ALICE, RELAY) source holding `messages`, each received (from
+     * Alice, not in INBOX) or sent by me, which all merge into one new
+     * hash(ALICE) shell once RELAY is classified Hide My Email.
+     */
+    async function seedShellMerge(
+      sourceId: string,
+      archived: boolean,
+      messages: ReadonlyArray<{ id: string; internalDate: number; sent: boolean }>,
+    ): Promise<void> {
+      await db.conversations.add(
+        convoRow({
+          id: sourceId,
+          participantHash: hashFor(ALICE, RELAY),
+          ...(archived ? { archivedAt: 50, isArchived: 1 } : {}),
+        }),
+      )
+      await db.convoParticipants.bulkPut([
+        { conversationId: sourceId, email: ALICE, role: 'normal' },
+        { conversationId: sourceId, email: RELAY, role: 'normal' },
+      ])
+      for (const message of messages) {
+        await db.messages.add(
+          msgRow({
+            id: message.id,
+            conversationId: sourceId,
+            internalDate: message.internalDate,
+            ...(message.sent
+              ? { isFromMe: 1, labelIds: ['SENT'], senderEmail: ME }
+              : { labelIds: [], senderEmail: ALICE }),
+          }),
+        )
+        await db.msgParticipants.bulkAdd(
+          message.sent
+            ? [
+                participant(message.id, ME, 'from'),
+                participant(message.id, ALICE, 'to'),
+                participant(message.id, RELAY, 'cc'),
+              ]
+            : [
+                participant(message.id, ALICE, 'from', 'Alice'),
+                participant(message.id, ME, 'to'),
+                participant(message.id, RELAY, 'cc'),
+              ],
+        )
+      }
+      await db.people.bulkPut([
+        { email: ALICE, displayName: 'Alice' },
+        { email: RELAY, displayName: 'Hide My Email' },
+      ])
+    }
+
+    /** Runs the walk one message per chunk; returns the shell's archivedAt at each commit. */
+    async function walkOneMessagePerChunk(shellMessageId: string): Promise<number[]> {
+      const archivedAtCommit: number[] = []
+      await repairParticipantSetConversations(db, ME, NOW, {
+        chunkSize: 1,
+        beforeChunkCommit: async () => {
+          const shellId = (await db.messages.get(shellMessageId))?.conversationId
+          const shell = shellId === undefined ? undefined : await db.conversations.get(shellId)
+          if (shell !== undefined) archivedAtCommit.push(shell.archivedAt)
+        },
+      })
+      return archivedAtCommit
+    }
+
+    // Revert-check: the unconditional createdDestinationIds.add for a new
+    // shell. Carrying only shells created archived leaves this one, created
+    // active and then auto-archived by chunk 0's rollup, out of the set, so
+    // chunk 1 moves the active source's reply into it without reactivating.
+    it('reactivates a shell created active that an earlier chunk rollup archived', async () => {
+      await seedShellMerge('active-source', false, [
+        { id: 'received-first', internalDate: 100, sent: false },
+        { id: 'reply-later', internalDate: 200, sent: true },
+      ])
+
+      const archivedAtCommit = await walkOneMessagePerChunk('received-first')
+
+      // Chunk 0's rollup auto-archived the shell; chunk 1 moved the reply in.
+      expect(archivedAtCommit.slice(0, 2)).toEqual([NOW, 0])
+      const shellId = (await db.messages.get('received-first'))?.conversationId
+      expect((await db.messages.get('reply-later'))?.conversationId).toBe(shellId)
+      expect(await db.conversations.get(shellId!)).toMatchObject({ isArchived: 0, archivedAt: 0 })
+    })
+
+    // Revert-check: keeping a reactivated shell in createdDestinationIds
+    // (dropping it on reactivation). Chunk 1 reactivates the shell, its
+    // rollup archives it again, and chunk 2 must still reactivate it.
+    it('reactivates a shell again after a later chunk rollup re-archived it', async () => {
+      await seedShellMerge('archived-source', true, [
+        { id: 'archived-first', internalDate: 100, sent: false },
+      ])
+      await seedShellMerge('active-source', false, [
+        { id: 'received-middle', internalDate: 200, sent: false },
+        { id: 'reply-last', internalDate: 300, sent: true },
+      ])
+
+      const archivedAtCommit = await walkOneMessagePerChunk('archived-first')
+
+      // Seeded archived from its source (50), reactivated by chunk 1 and
+      // auto-archived again by that chunk's rollup (NOW), and reactivated
+      // for good by chunk 2.
+      expect(archivedAtCommit.slice(0, 3)).toEqual([50, NOW, 0])
+      const shellId = (await db.messages.get('archived-first'))?.conversationId
+      expect((await db.messages.get('received-middle'))?.conversationId).toBe(shellId)
+      expect((await db.messages.get('reply-last'))?.conversationId).toBe(shellId)
+      expect(await db.conversations.get(shellId!)).toMatchObject({ isArchived: 0, archivedAt: 0 })
+    })
+  })
 })

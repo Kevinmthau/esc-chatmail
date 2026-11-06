@@ -5,7 +5,8 @@
 // in bounded chunks, one transaction each (scalability review
 // web-participant-repair-full-load), never one transaction over the store.
 
-import Dexie from 'dexie'
+import { cmp } from 'dexie'
+import { conversationMessagesQuery } from '@/db/conversationMessages'
 import { sha256Hex } from '@/identity/hash'
 import { isHideMyEmailDisplayName, normalizeEmail } from '@/identity/normalizeEmail'
 import {
@@ -55,10 +56,6 @@ interface PlannedMove {
   message: MessageRow
   sourceId: string
   destinationId: string
-}
-
-function byMessageOrder(a: MessageRow, b: MessageRow): number {
-  return a.internalDate - b.internalDate || compareSwiftStrings(a.id, b.id)
 }
 
 function participantRowsByMessage(
@@ -223,8 +220,8 @@ function conversationNeedsIdentityRepair(
 export const PARTICIPANT_SET_REPAIR_PROGRESS_KEY = 'participantSetRepairProgress'
 
 /**
- * Messages read per chunk transaction. A chunk always ends on an internalDate
- * boundary, so it exceeds this when several messages share its last date.
+ * Messages read per chunk transaction, never more: a chunk may end partway
+ * through the messages sharing one internalDate (see RepairProgress).
  */
 export const PARTICIPANT_SET_REPAIR_CHUNK_SIZE = 500
 
@@ -239,11 +236,30 @@ export const PARTICIPANT_SET_REPAIR_CHUNK_SIZE = 500
 interface RepairProgress {
   /** The signature this walk is computing. A different current signature restarts it. */
   signature: string
-  /** Every message dated at or before this has been processed; null before the first chunk. */
+  /**
+   * With throughMessageId, the walk's position in the internalDate index:
+   * every message ordered at or before (throughInternalDate, throughMessageId)
+   * has been processed. Null before the first chunk.
+   */
   throughInternalDate: number | null
+  /**
+   * The last processed message of throughInternalDate, in IndexedDB key order
+   * (the index orders equal dates by primary key). Null or absent means the
+   * whole date has been processed: rows written before this field existed
+   * always ended a chunk on a date boundary.
+   */
+  throughMessageId?: string | null
   /** An earlier chunk deferred work for an active send, so the end of the walk must not write the signature. */
   blockedByActiveSend: boolean
-  /** Shells this walk created. "Active wins" applies to them in later chunks too. */
+  /**
+   * Every shell this walk created: "active wins" applies to them in later
+   * chunks too. The set is not narrowed to shells that are archived now.
+   * Each chunk's rollup can auto-archive a shell that was created active or
+   * already reactivated (its latest moved message is received and not in
+   * INBOX), and a later chunk that moves an active source's message into it
+   * must still reactivate it. Otherwise the chat's archive state would depend
+   * on where the chunk boundaries fall.
+   */
   createdDestinationIds: string[]
 }
 
@@ -253,6 +269,9 @@ function isRepairProgress(value: unknown): value is RepairProgress {
   return (
     typeof row.signature === 'string' &&
     (row.throughInternalDate === null || typeof row.throughInternalDate === 'number') &&
+    (row.throughMessageId === undefined ||
+      row.throughMessageId === null ||
+      typeof row.throughMessageId === 'string') &&
     typeof row.blockedByActiveSend === 'boolean' &&
     Array.isArray(row.createdDestinationIds) &&
     row.createdDestinationIds.every((id) => typeof id === 'string')
@@ -271,6 +290,8 @@ export interface ParticipantSetRepairOptions {
 
 type ChunkOutcome =
   | { kind: 'notPerformed' }
+  /** Committed nothing; run the same chunk again with a full read of its inputs. */
+  | { kind: 'retry' }
   | {
       kind: 'chunk'
       done: boolean
@@ -281,37 +302,44 @@ type ChunkOutcome =
     }
 
 /**
- * Every message of a conversation, through the [conversationId+internalDate]
- * index. Every writer stores a finite internalDate (parse.ts falls back to
- * Date.now(), the outbox uses its send time), so no row is missing from it.
- */
-function messagesOfConversation(db: ChatmailDB, conversationId: string) {
-  return db.messages
-    .where('[conversationId+internalDate]')
-    .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey], true, true)
-}
-
-/**
- * The next chunk after `throughInternalDate`, sorted oldest first. It ends on
- * a date boundary: the next chunk starts strictly after its last date, so
- * every message sharing that date must be in this one.
+ * The next at most `chunkSize` messages after the progress position, in
+ * internalDate index order: by date, and by primary key within a date. That
+ * order is a compound (internalDate, id) cursor over a single-field index, so
+ * a date shared by more messages than a chunk holds is split across chunks
+ * instead of being read whole (the store has no [internalDate+id] index, and
+ * index changes wait for scalability step 14). The rest of a split date is
+ * found by its primary keys alone, so even a huge tie group costs ids, not
+ * rows. Processing follows the same order; nothing re-sorts the chunk, since
+ * its last row must be the cursor's next position.
  */
 async function readMessageChunk(
   db: ChatmailDB,
-  throughInternalDate: number | null,
+  progress: Pick<RepairProgress, 'throughInternalDate' | 'throughMessageId'>,
   chunkSize: number,
 ): Promise<MessageRow[]> {
-  const collection =
-    throughInternalDate === null
-      ? db.messages.orderBy('internalDate')
-      : db.messages.where('internalDate').above(throughInternalDate)
-  const head = await collection.limit(chunkSize).toArray()
-  if (head.length < chunkSize) return head.sort(byMessageOrder)
-  const lastDate = head[head.length - 1]!.internalDate
-  const ties = await db.messages.where('internalDate').equals(lastDate).toArray()
-  return [...head.filter((message) => message.internalDate !== lastDate), ...ties].sort(
-    byMessageOrder,
-  )
+  const date = progress.throughInternalDate
+  if (date === null) return db.messages.orderBy('internalDate').limit(chunkSize).toArray()
+
+  const chunk: MessageRow[] = []
+  const throughId = progress.throughMessageId ?? null
+  if (throughId !== null) {
+    const restOfDate = (await db.messages.where('internalDate').equals(date).primaryKeys())
+      .filter((id) => cmp(id, throughId) > 0)
+      .slice(0, chunkSize)
+    for (const row of await db.messages.bulkGet(restOfDate)) {
+      if (row !== undefined) chunk.push(row)
+    }
+  }
+  if (chunk.length < chunkSize) {
+    chunk.push(
+      ...(await db.messages
+        .where('internalDate')
+        .above(date)
+        .limit(chunkSize - chunk.length)
+        .toArray()),
+    )
+  }
+  return chunk
 }
 
 /**
@@ -319,23 +347,61 @@ async function readMessageChunk(
  * MsgParticipant rows. The single-transaction pass found these by scanning
  * every message; a chunk sees only its own, so each conversation it consults
  * is checked through its own messages.
+ *
+ * Keys first: the conversation's message ids and the ids among them that have
+ * participant rows both come from indexes without loading a message, so only
+ * the rowless messages (optimistic sends, legacy imports) are read in full.
+ * Neither sendState nor isFromMe is indexed, so this is the narrowest exact
+ * candidate set; the predicate itself is unchanged.
  */
 async function hasRowlessActiveOutgoing(
   db: ChatmailDB,
   conversationId: string,
   activeOutboundMessageIds: ReadonlySet<string>,
 ): Promise<boolean> {
-  const candidateIds = await messagesOfConversation(db, conversationId)
-    .filter(
-      (message) =>
-        isOutgoing(message) &&
-        (message.sendState === 'pending' || activeOutboundMessageIds.has(message.id)),
-    )
-    .primaryKeys()
-  for (const messageId of candidateIds) {
-    if ((await db.msgParticipants.where('messageId').equals(messageId).count()) === 0) return true
+  const messageIds = await conversationMessagesQuery(db, conversationId).primaryKeys()
+  if (messageIds.length === 0) return false
+  const withParticipantRows = new Set(
+    await db.msgParticipants.where('messageId').anyOf(messageIds).uniqueKeys(),
+  )
+  const rowlessIds = messageIds.filter((id) => !withParticipantRows.has(id))
+  if (rowlessIds.length === 0) return false
+  for (const message of await db.messages.bulkGet(rowlessIds)) {
+    if (
+      message !== undefined &&
+      isOutgoing(message) &&
+      (message.sendState === 'pending' || activeOutboundMessageIds.has(message.id))
+    ) {
+      return true
+    }
   }
   return false
+}
+
+/**
+ * The walk's view of its signature inputs, carried from chunk to chunk within
+ * one call so a chunk need not re-read the whole people table (scalability
+ * review, PR 362 follow-up). See repairParticipantSetChunk for how a change
+ * between chunks is still detected.
+ */
+interface WalkInputs {
+  /** The normalized alias set the snapshot was taken under. */
+  aliasesKey: string
+  /** repairSignature over the full people read. */
+  signature: string
+  /** Normalized email -> display name: the full read, refreshed per chunk for the emails it reads. */
+  names: Map<string, string>
+}
+
+interface WalkState {
+  /** Null forces the next chunk to read every Person and recompute the signature. */
+  inputs: WalkInputs | null
+  /** Whether the [conversationId+internalDate] index holds every message row; computed on first need. */
+  everyMessageIndexed: boolean | null
+}
+
+function aliasesKeyOf(myAliases: ReadonlySet<string>): string {
+  return JSON.stringify([...myAliases].sort(compareSwiftStrings))
 }
 
 /**
@@ -359,16 +425,22 @@ export async function repairParticipantSetConversations(
 ): Promise<ParticipantSetRepairResult> {
   const chunkSize = Math.max(1, options.chunkSize ?? PARTICIPANT_SET_REPAIR_CHUNK_SIZE)
   const total: ParticipantSetRepairResult = { ...NOT_PERFORMED }
-  for (let chunkIndex = 0; ; chunkIndex += 1) {
+  const state: WalkState = { inputs: null, everyMessageIndexed: null }
+  for (let chunkIndex = 0; ;) {
     const outcome = await repairParticipantSetChunk(
       db,
       accountEmail,
       now,
       chunkSize,
       chunkIndex,
+      state,
       options.beforeChunkCommit,
     )
     if (outcome.kind === 'notPerformed') return total
+    // A retry committed nothing and always leaves state.inputs null, so the
+    // repeat reads its inputs in full and cannot ask for another retry.
+    if (outcome.kind === 'retry') continue
+    chunkIndex += 1
     total.performed = true
     total.movedMessageCount += outcome.movedMessageCount
     total.createdConversationCount += outcome.createdConversationCount
@@ -384,6 +456,7 @@ async function repairParticipantSetChunk(
   now: number,
   chunkSize: number,
   chunkIndex: number,
+  state: WalkState,
   beforeChunkCommit: ParticipantSetRepairOptions['beforeChunkCommit'],
 ): Promise<ChunkOutcome> {
   return db.transaction(
@@ -410,28 +483,67 @@ async function repairParticipantSetChunk(
       )
       if (myAliases.size === 0) return { kind: 'notPerformed' }
 
-      // Recomputed every chunk: People enrichment or an alias change between
-      // chunks makes the remaining walk's inputs differ from its signature.
-      const people = await db.people.toArray()
-      const signature = repairSignature(myAliases, people)
-      const previousSignature = await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)
-      if (previousSignature?.value === signature) return { kind: 'notPerformed' }
+      // People enrichment or an alias change between chunks makes the rest of
+      // the walk's inputs differ from its signature, and the walk must then
+      // restart. The first chunk of a call reads every Person; later chunks
+      // reuse that snapshot and re-read only the Person rows of the emails
+      // they consult (below), so a chunk costs its own rows, not the people
+      // table. A chunk's identities depend only on those emails' names, so a
+      // Hide-My-Email change elsewhere cannot alter its moves; it is caught
+      // by the full read before the end of the walk writes the signature.
+      const aliasesKey = aliasesKeyOf(myAliases)
+      const fullRead = state.inputs === null || state.inputs.aliasesKey !== aliasesKey
+      let previousSignature: unknown = undefined
+      if (fullRead) {
+        const people = await db.people.toArray()
+        state.inputs = {
+          aliasesKey,
+          signature: repairSignature(myAliases, people),
+          names: personNames(people),
+        }
+        previousSignature = (await db.syncState.get(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY))?.value
+      }
+      const inputs = state.inputs!
+      const signature = inputs.signature
+
+      const storedProgress = (await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY))?.value
+      if (fullRead && previousSignature === signature) {
+        // A progress row beside a matching marker was left by a walk under
+        // another signature that never finished (aliases A done, walk B
+        // killed, back to A). Resuming it when B returns would skip every
+        // message at or before its cursor, so it goes. With no such row this
+        // stays the read-only no-op that most calls are.
+        if (storedProgress !== undefined) {
+          await db.syncState.delete(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)
+        }
+        return { kind: 'notPerformed' }
+      }
 
       // A walk for another signature restarts from the oldest message: its
       // committed chunks were computed under aliases or Hide-My-Email
       // classifications that no longer hold.
-      const storedProgress = (await db.syncState.get(PARTICIPANT_SET_REPAIR_PROGRESS_KEY))?.value
-      const progress: RepairProgress =
-        isRepairProgress(storedProgress) && storedProgress.signature === signature
-          ? storedProgress
-          : {
-              signature,
-              throughInternalDate: null,
-              blockedByActiveSend: false,
-              createdDestinationIds: [],
-            }
+      const resuming = isRepairProgress(storedProgress) && storedProgress.signature === signature
+      if (!fullRead && !resuming) {
+        state.inputs = null
+        return { kind: 'retry' }
+      }
+      const progress: RepairProgress = resuming
+        ? storedProgress
+        : {
+            signature,
+            throughInternalDate: null,
+            throughMessageId: null,
+            blockedByActiveSend: false,
+            createdDestinationIds: [],
+          }
 
-      const messages = await readMessageChunk(db, progress.throughInternalDate, chunkSize)
+      const messages = await readMessageChunk(db, progress, chunkSize)
+      if (messages.length === 0 && !fullRead) {
+        // The signature this walk began under is written only after a full
+        // read confirms it still holds; a mismatch restarts the walk there.
+        state.inputs = null
+        return { kind: 'retry' }
+      }
       if (messages.length === 0) {
         // Last write of the walk, by design. A deferral recorded by any chunk
         // withholds the marker, so the same inputs walk again once the send
@@ -439,6 +551,9 @@ async function repairParticipantSetChunk(
         await db.syncState.delete(PARTICIPANT_SET_REPAIR_PROGRESS_KEY)
         if (!progress.blockedByActiveSend) {
           await db.syncState.put({ key: PARTICIPANT_SET_REPAIR_SIGNATURE_KEY, value: signature })
+        } else if (previousSignature !== undefined) {
+          // See retireStaleMarker below.
+          await db.syncState.delete(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)
         }
         await beforeChunkCommit?.(chunkIndex)
         return {
@@ -465,7 +580,38 @@ async function repairParticipantSetChunk(
       const rowsByConversation = participantRowsByConversation(
         await db.convoParticipants.where('conversationId').anyOf(sourceIds).toArray(),
       )
-      const names = personNames(people)
+      const names = inputs.names
+      if (!fullRead) {
+        // Every name this chunk's identities can read: its messages' rows and
+        // senders, and its source conversations' rows (destinations are
+        // chosen by hash alone). A Hide-My-Email classification that differs
+        // from the snapshot means the signature may have moved, so the chunk
+        // is redone after a full read; any other name change is taken as is.
+        const emails = new Set<string>()
+        for (const rows of rowsByMessage.values()) {
+          for (const row of rows) emails.add(normalizeEmail(row.email))
+        }
+        for (const message of messages) emails.add(normalizeEmail(message.senderEmail))
+        for (const rows of rowsByConversation.values()) {
+          for (const row of rows) emails.add(normalizeEmail(row.email))
+        }
+        emails.delete('')
+        const keys = [...emails]
+        const fresh = await db.people.bulkGet(keys)
+        for (const [index, person] of fresh.entries()) {
+          if (person === undefined) continue
+          if (
+            isHideMyEmailDisplayName(person.displayName) !==
+            isHideMyEmailDisplayName(names.get(keys[index]!))
+          ) {
+            state.inputs = null
+            return { kind: 'retry' }
+          }
+        }
+        for (const [index, person] of fresh.entries()) {
+          if (person !== undefined) names.set(keys[index]!, person.displayName)
+        }
+      }
       const identityByMessageId = new Map<string, ParticipantSetIdentity>()
       // An 'ambiguous' journal retains its row as sent under a local id until
       // the echo adopts it; moving or merging that row away would orphan the
@@ -637,6 +783,7 @@ async function repairParticipantSetChunk(
             }
             await db.conversations.put(destination)
           }
+          // Every created shell, archived or not: see RepairProgress.
           createdDestinationIds.add(destination.id)
           conversationsById.set(destination.id, destination)
           conversationsByHash.set(identity.participantHash, [destination])
@@ -695,7 +842,19 @@ async function repairParticipantSetChunk(
       const replacementByDeletedSource = new Map<string, string>()
 
       for (const [sourceId, destinationId] of lastDestinationBySource) {
-        if ((await messagesOfConversation(db, sourceId).count()) !== 0) continue
+        if ((await conversationMessagesQuery(db, sourceId).count()) !== 0) continue
+        // The count above sees only rows in the [conversationId+internalDate]
+        // index, as does the walk. A row whose internalDate is not a valid key
+        // (no writer stores one, but nothing enforces it) is in neither, so
+        // its conversation would read as drained and be deleted under it.
+        // Comparing the index's size with the table's is two key-only counts,
+        // taken once per call: every writer stores a valid date, so a store
+        // that passes cannot gain such a row between chunks. One that fails
+        // keeps every drained source, which is merely an empty chat.
+        state.everyMessageIndexed ??=
+          (await db.messages.count()) ===
+          (await db.messages.orderBy('[conversationId+internalDate]').count())
+        if (!state.everyMessageIndexed) continue
         // Normally a live send has a rowless optimistic MessageRow, which is
         // counted above. This also protects the tiny journal-before-row recovery
         // edge if another outbox transaction published only the journal.
@@ -817,13 +976,22 @@ async function repairParticipantSetChunk(
         }
       }
 
+      const lastMessage = messages[messages.length - 1]!
       const nextProgress: RepairProgress = {
         signature,
-        throughInternalDate: messages[messages.length - 1]!.internalDate,
+        throughInternalDate: lastMessage.internalDate,
+        throughMessageId: lastMessage.id,
         blockedByActiveSend: progress.blockedByActiveSend || blockedByActiveSend,
         createdDestinationIds: [...createdDestinationIds],
       }
       await db.syncState.put({ key: PARTICIPANT_SET_REPAIR_PROGRESS_KEY, value: nextProgress })
+      // retireStaleMarker: a marker for another signature claims a completed
+      // walk over a store this chunk has now partly repaired under different
+      // inputs. Left in place, a return to those inputs would no-op against
+      // it with this chunk's moves still applied, so it goes with the moves.
+      if (previousSignature !== undefined) {
+        await db.syncState.delete(PARTICIPANT_SET_REPAIR_SIGNATURE_KEY)
+      }
       await beforeChunkCommit?.(chunkIndex)
 
       return {

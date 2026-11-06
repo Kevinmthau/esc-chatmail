@@ -13,7 +13,7 @@
 // isArchived mirror of archivedAt covers list filtering, so hidden=true maps
 // to isArchived=1 and hidden=false to isArchived=0.
 
-import Dexie from 'dexie'
+import { conversationMessagesQuery } from '@/db/conversationMessages'
 import type { ChatmailDB } from '@/db/schema'
 import type { ConversationRow, ConvoParticipantRow, MessageRow, PersonRow } from '@/db/types'
 import {
@@ -294,10 +294,7 @@ export async function rollupConversation(
     [db.messages, db.conversations, db.convoParticipants, db.people],
     async () => {
       const [messages, conversation] = await Promise.all([
-        db.messages
-          .where('[conversationId+internalDate]')
-          .between([conversationId, Dexie.minKey], [conversationId, Dexie.maxKey])
-          .toArray(),
+        conversationMessagesQuery(db, conversationId).toArray(),
         db.conversations.get(conversationId),
       ])
       if (conversation === undefined) return
