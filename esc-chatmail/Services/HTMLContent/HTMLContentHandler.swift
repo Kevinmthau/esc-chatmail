@@ -190,6 +190,12 @@ final class HTMLContentHandler: @unchecked Sendable {
     /// Removes canonical HTML after `closeAccountWork()` has rejected all new
     /// readers and writers. Await completion before reopening account work.
     func deleteAllHTMLFromClosedAccount() async throws {
+        #if os(macOS)
+        // Outside the App Sandbox this is the user's real ~/Documents/Messages.
+        // Account removal runs this before AuthSession's attachment cleanup,
+        // so it needs its own guard (docs/mac-app-plan.md, PR C).
+        try SandboxTripwire.ensureDestructiveCleanupPermitted(.accountRemovalMessageBodies)
+        #endif
         let messagesDirectory = messagesDirectory
         let deleteHTMLFiles = deleteHTMLFiles
         try await Task.detached(priority: .utility) {
@@ -543,6 +549,13 @@ final class HTMLContentHandler: @unchecked Sendable {
         validMessageIds: Set<String>,
         expectedGeneration: HTMLContentAccountGeneration? = nil
     ) {
+        #if os(macOS)
+        // Outside the App Sandbox this sweep would delete every file in the
+        // user's real ~/Documents/Messages (docs/mac-app-plan.md, PR C).
+        guard SandboxTripwire.permitsDestructiveCleanup(.orphanedMessageBodySweep) else {
+            return
+        }
+        #endif
         _ = accountBoundary.perform(directoryKey: directoryKey, expectedGeneration: expectedGeneration) {
             let contents = FileSystemErrorHandler.contentsOfDirectory(at: messagesDirectory, category: .general)
             for fileURL in contents {

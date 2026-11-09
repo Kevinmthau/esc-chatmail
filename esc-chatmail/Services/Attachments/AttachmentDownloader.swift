@@ -1263,6 +1263,14 @@ final class AttachmentDownloader: ObservableObject {
     /// Cleans up orphaned attachment files that no longer have corresponding Core Data entities.
     /// Runs all operations in background to avoid blocking the main thread.
     func cleanupOrphanedFiles() async {
+        #if os(macOS)
+        // Outside the App Sandbox this sweep would delete files in the shared
+        // ~/Library/Application Support/{Attachments,Previews}
+        // (docs/mac-app-plan.md, PR C).
+        guard SandboxTripwire.permitsDestructiveCleanup(.orphanedAttachmentFileSweep) else {
+            return
+        }
+        #endif
         guard let task = startDownloadOperation({ [weak self] generation in
             await self?.performCleanupOrphanedFiles(generation: generation)
         }) else { return }

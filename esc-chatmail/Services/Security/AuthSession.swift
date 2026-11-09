@@ -878,6 +878,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     }
 
     private nonisolated static func deleteAttachmentFilesFromDisk() throws {
+        #if os(macOS)
+        // Outside the App Sandbox these folders are the user's own. The thrown
+        // refusal fails the durable cleanup, which keeps its reset marker
+        // rather than reporting the files gone (docs/mac-app-plan.md, PR C).
+        try SandboxTripwire.ensureDestructiveCleanupPermitted(.accountRemovalAttachmentFiles)
+        #endif
         let fileManager = FileManager.default
 
         // Get app support directory

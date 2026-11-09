@@ -45,6 +45,7 @@ final class KeychainService: KeychainServiceProtocol {
 
     private let service: String
     private let accessGroup: String?
+    private let itemOperations: KeychainItemOperations
 
     // MARK: - Access Levels
     enum AccessLevel: Equatable {
@@ -93,9 +94,14 @@ final class KeychainService: KeychainServiceProtocol {
     }
 
     // MARK: - Initialization
-    init(service: String? = nil, accessGroup: String? = nil) {
+    init(
+        service: String? = nil,
+        accessGroup: String? = nil,
+        itemOperations: KeychainItemOperations = .system
+    ) {
         self.service = service ?? Bundle.main.bundleIdentifier ?? "com.esc.inboxchat"
         self.accessGroup = accessGroup
+        self.itemOperations = itemOperations
     }
 
     // MARK: - Core Operations
@@ -105,7 +111,7 @@ final class KeychainService: KeychainServiceProtocol {
         query[kSecValueData as String] = data
         query[kSecAttrAccessible as String] = access.attribute
 
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let status = itemOperations.add(query as CFDictionary, nil)
 
         switch status {
         case errSecSuccess:
@@ -123,7 +129,7 @@ final class KeychainService: KeychainServiceProtocol {
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = itemOperations.copyMatching(query as CFDictionary, &result)
 
         switch status {
         case errSecSuccess:
@@ -140,7 +146,7 @@ final class KeychainService: KeychainServiceProtocol {
 
     func delete(for key: String) throws {
         let query = baseQuery(for: key)
-        let status = SecItemDelete(query as CFDictionary)
+        let status = itemOperations.delete(query as CFDictionary)
 
         switch status {
         case errSecSuccess, errSecItemNotFound:
@@ -155,7 +161,7 @@ final class KeychainService: KeychainServiceProtocol {
         query[kSecReturnData as String] = false
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        let status = itemOperations.copyMatching(query as CFDictionary, nil)
         return status == errSecSuccess
     }
 
@@ -166,7 +172,7 @@ final class KeychainService: KeychainServiceProtocol {
             attributes[kSecAttrAccessible as String] = access.attribute
         }
 
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        let status = itemOperations.update(query as CFDictionary, attributes as CFDictionary)
 
         switch status {
         case errSecSuccess:
@@ -179,13 +185,12 @@ final class KeychainService: KeychainServiceProtocol {
     }
 
     func clearAll() throws {
-        // Clear all keychain items for this service
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service
-        ]
+        // Clear all keychain items for this service. Unlike `baseQuery(for:)`,
+        // this sets no access group, so it matches the service's items in any
+        // group.
+        let query = serviceQuery()
 
-        let status = SecItemDelete(query as CFDictionary)
+        let status = itemOperations.delete(query as CFDictionary)
 
         switch status {
         case errSecSuccess, errSecItemNotFound:
@@ -215,12 +220,28 @@ final class KeychainService: KeychainServiceProtocol {
 
     // MARK: - Private Helpers
 
-    private func baseQuery(for key: String) -> [String: Any] {
-        var query: [String: Any] = [
+    /// What every query this service issues starts from: its generic-password
+    /// items in the data protection keychain.
+    ///
+    /// On macOS, a query without `kSecUseDataProtectionKeychain` goes to the
+    /// older file-based keychain, where the `kSecAttrAccessible…` levels in
+    /// `AccessLevel` don't apply. Without both this flag and the Mac build's
+    /// `keychain-access-groups` entitlement, sign-in appears to work but the
+    /// session is gone after a relaunch (docs/mac-app-plan.md, PR C). iOS has
+    /// only the data protection keychain, so the flag changes nothing there:
+    /// items that builds without it saved still match (`KeychainServiceTests`).
+    /// `GoogleSignInKeychainProbe` in `AuthSession.swift` passes the same flag.
+    private func serviceQuery() -> [String: Any] {
+        [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: key
+            kSecUseDataProtectionKeychain as String: true
         ]
+    }
+
+    private func baseQuery(for key: String) -> [String: Any] {
+        var query = serviceQuery()
+        query[kSecAttrAccount as String] = key
 
         if let accessGroup = accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup

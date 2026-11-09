@@ -267,6 +267,14 @@ struct FreshInstallHandler {
     }
 
     private func clearAttachmentFiles() {
+        #if os(macOS)
+        // Outside the App Sandbox these folders are the user's real ~/Documents
+        // and the shared Application Support. Refuse before deleting or
+        // recreating anything (docs/mac-app-plan.md, PR C).
+        guard SandboxTripwire.permitsDestructiveCleanup(.freshInstallAttachmentFiles) else {
+            return
+        }
+        #endif
         Log.debug("Clearing attachment files", category: .attachment)
         let fileManager = FileManager.default
 
