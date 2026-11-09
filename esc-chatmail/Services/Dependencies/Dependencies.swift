@@ -83,7 +83,10 @@ final class Dependencies: ObservableObject {
     let syncEngine: SyncEngine
     let foregroundSyncCoordinator: ForegroundSyncCoordinator
     let attachmentDownloader: AttachmentDownloader
+    #if os(iOS)
+    /// iOS only, like the rest of the BGTask layer it fronts.
     let backgroundSyncManager: BackgroundSyncManager
+    #endif
     let outboundSendMutationTracker: any OutboundSendMutationTracking
     private let outboundMessageCoordinatorOverride: (any OutboundMessageCoordinating)?
 
@@ -372,7 +375,6 @@ final class Dependencies: ObservableObject {
         syncEngine: SyncEngine? = nil,
         foregroundSyncCoordinator: ForegroundSyncCoordinator? = nil,
         attachmentDownloader: AttachmentDownloader? = nil,
-        backgroundSyncManager: BackgroundSyncManager = BackgroundSyncManager.shared,
         participantLoader: ParticipantLoader? = nil,
         conversationManager: ConversationManager? = nil,
         outboundSendMutationTracker: (any OutboundSendMutationTracking)? = nil,
@@ -403,7 +405,9 @@ final class Dependencies: ObservableObject {
         self.syncEngine = resolvedSyncEngine
         self.foregroundSyncCoordinator = resolvedForegroundSyncCoordinator
         self.attachmentDownloader = resolvedAttachmentDownloader
-        self.backgroundSyncManager = backgroundSyncManager
+        #if os(iOS)
+        self.backgroundSyncManager = BackgroundSyncManager.shared
+        #endif
         self.outboundSendMutationTracker = outboundSendMutationTracker ?? OutboundSendMutationTracker()
         self.outboundMessageCoordinatorOverride = outboundMessageCoordinator
         self.participantLoader = participantLoader ?? ParticipantLoader(

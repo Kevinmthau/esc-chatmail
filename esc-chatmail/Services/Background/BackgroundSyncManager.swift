@@ -1,57 +1,12 @@
+#if os(iOS)
 import Foundation
 import BackgroundTasks
 
-enum BackgroundMailboxSyncExecutionResult: Equatable, Sendable {
-    case completed
-    case needsFollowUp
-    case blocked(by: SyncRunKind?)
-    case failed
-    /// Refused or stopped because the disk is full. Not a retryable failure: the short failure
-    /// backoff would only start another run against the same full disk.
-    case deferredForInsufficientStorage
-}
-
-enum BackgroundMailboxSyncBudget: Equatable, Sendable {
-    case appRefresh
-    case processing
-
-    var historyPageLimit: Int {
-        switch self {
-        case .appRefresh:
-            return SyncConfig.maxHistoryPagesPerAppRefreshSlice
-        case .processing:
-            return SyncConfig.maxHistoryPagesPerProcessingSlice
-        }
-    }
-
-    var historyPageSize: Int {
-        switch self {
-        case .appRefresh:
-            return SyncConfig.maxHistoryResultsPerAppRefreshRequest
-        case .processing:
-            return SyncConfig.maxHistoryResultsPerProcessingRequest
-        }
-    }
-
-    var allowsExpensiveRecovery: Bool {
-        self == .processing
-    }
-}
-
-/// The model-v3 mailbox sync entry point used by `BGTask` launches. The
-/// production implementation owns and cancels the exact incremental run it
-/// starts, while tests can exercise the background hand-off without creating
-/// `BGTask` instances (which Apple does not expose public initializers for).
-@MainActor
-protocol BackgroundMailboxSyncExecuting: AnyObject, Sendable {
-    func performIncrementalSyncForBackground(
-        budget: BackgroundMailboxSyncBudget
-    ) async -> BackgroundMailboxSyncExecutionResult
-}
-
-extension SyncEngine: BackgroundMailboxSyncExecuting {}
-
-/// Main orchestrator for background sync operations
+/// Main orchestrator for background sync operations.
+///
+/// iOS only, like the rest of the BGTask layer: every `BG*` type is
+/// unavailable on macOS, where the foreground sync session runs for as long
+/// as the app does instead (`AppLifecyclePolicy`).
 final class BackgroundSyncManager {
     static let shared = BackgroundSyncManager()
 
@@ -500,3 +455,4 @@ final class BackgroundSyncManager {
             || activeRunKind == .maintenance
     }
 }
+#endif

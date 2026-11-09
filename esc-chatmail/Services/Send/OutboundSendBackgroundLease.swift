@@ -1,30 +1,23 @@
-#if canImport(UIKit)
-import UIKit
-#endif
+import Foundation
 
+/// Begins and ends the platform's background-time lease for one send:
+/// `UIKitOutboundBackgroundTaskManager` on iOS,
+/// `ProcessActivityOutboundBackgroundTaskManager` on the Mac
+/// (`PlatformOutboundBackgroundTaskManager` names the current one).
 @MainActor
 protocol OutboundBackgroundTaskManaging {
-    func begin(expirationHandler: @escaping @MainActor @Sendable () -> Void) -> UIBackgroundTaskIdentifier
-    func end(_ identifier: UIBackgroundTaskIdentifier)
-}
-
-@MainActor
-struct UIKitOutboundBackgroundTaskManager: OutboundBackgroundTaskManaging {
-    func begin(expirationHandler: @escaping @MainActor @Sendable () -> Void) -> UIBackgroundTaskIdentifier {
-        UIApplication.shared.beginBackgroundTask(withName: "Send message", expirationHandler: expirationHandler)
-    }
-
-    func end(_ identifier: UIBackgroundTaskIdentifier) {
-        UIApplication.shared.endBackgroundTask(identifier)
-    }
+    func begin(expirationHandler: @escaping @MainActor @Sendable () -> Void) -> OutboundBackgroundTaskIdentifier
+    func end(_ identifier: OutboundBackgroundTaskIdentifier)
 }
 
 /// Keeps send preflight, transmission, and local commit eligible to finish when
 /// the app backgrounds. UIKit controls the time budget; this is not a retry job.
+/// On the Mac the lease is a `ProcessInfo` activity that never expires, so
+/// `onExpiration` never runs there.
 @MainActor
 final class OutboundSendBackgroundLease {
     private let manager: any OutboundBackgroundTaskManaging
-    private var identifier = UIBackgroundTaskIdentifier.invalid
+    private var identifier = OutboundBackgroundTaskIdentifier.invalid
     private var hasEnded = false
 
     init(

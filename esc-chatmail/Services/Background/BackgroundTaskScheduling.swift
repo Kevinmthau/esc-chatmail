@@ -1,3 +1,4 @@
+#if os(iOS)
 import Foundation
 import BackgroundTasks
 
@@ -30,3 +31,4 @@ protocol BackgroundTaskScheduling: AnyObject {
 }
 
 extension BackgroundTaskScheduler: BackgroundTaskScheduling {}
+#endif

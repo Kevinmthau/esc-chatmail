@@ -61,6 +61,7 @@ final class OutboundTaskRegistry {
     private var transitionGeneration: UInt64 = 0
     private var entries: [UUID: Entry] = [:]
     private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+    private var outstandingSendWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     init(admissionOpen: Bool = false) {
         acceptsNewSends = admissionOpen
@@ -249,8 +250,53 @@ final class OutboundTaskRegistry {
         }
     }
 
+    /// Whether any send is between `reserve()` and its final `finish(_:)`:
+    /// preparing, waiting for its turn or connectivity, transmitting, or
+    /// recording its outcome.
+    var hasOutstandingSends: Bool {
+        !entries.isEmpty
+    }
+
+    /// Waits until no send is outstanding, without cancelling or otherwise
+    /// touching any of them — unlike `cancelAndAwaitAll()`, which account
+    /// teardown uses. Returns early, leaving every send alone, when the
+    /// calling task is cancelled; the Mac's quit path relies on that to bound
+    /// its wait (`OutboundSendTerminationWait`).
+    func waitUntilOutstandingSendsFinish() async {
+        guard !entries.isEmpty else { return }
+
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                // Runs synchronously on the main actor, so a cancellation hop
+                // below can only arrive after this has installed the waiter.
+                if entries.isEmpty || Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    outstandingSendWaiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.outstandingSendWaiters.removeValue(forKey: waiterID)?.resume()
+            }
+        }
+    }
+
+    /// Internal (not private) only so tests can tell when a
+    /// `waitUntilOutstandingSendsFinish()` caller is actually waiting.
+    var outstandingSendWaiterCount: Int {
+        outstandingSendWaiters.count
+    }
+
     private func resumeDrainWaitersIfNeeded() {
-        guard entries.isEmpty, !drainWaiters.isEmpty else { return }
+        guard entries.isEmpty else { return }
+
+        let outstandingWaiters = Array(outstandingSendWaiters.values)
+        outstandingSendWaiters.removeAll(keepingCapacity: false)
+        outstandingWaiters.forEach { $0.resume() }
+
+        guard !drainWaiters.isEmpty else { return }
 
         let waiters = drainWaiters
         drainWaiters.removeAll(keepingCapacity: false)

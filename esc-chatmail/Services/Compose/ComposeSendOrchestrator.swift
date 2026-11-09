@@ -217,7 +217,7 @@ struct ComposeSendOrchestrator {
     ) {
         self.sendService = sendService
         self.syncPerformer = syncPerformer
-        self.backgroundTaskManager = backgroundTaskManager ?? UIKitOutboundBackgroundTaskManager()
+        self.backgroundTaskManager = backgroundTaskManager ?? PlatformOutboundBackgroundTaskManager()
         self.networkPathMonitor = networkPathMonitor ?? OutboundNetworkPathMonitor.shared
         self.connectivityWaitClock = connectivityWaitClock
     }

@@ -7,7 +7,6 @@
 
 import SwiftUI
 import GoogleSignIn
-import BackgroundTasks
 
 private let appStartTime = Date()
 
@@ -20,7 +19,11 @@ private func logStartupTiming(_ message: String) {
 struct esc_chatmailApp: App {
     @StateObject private var dependencies = Dependencies.shared
     @Environment(\.scenePhase) var scenePhase
+    #if os(iOS)
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    #elseif os(macOS)
+    @NSApplicationDelegateAdaptor(MacAppDelegate.self) var appDelegate
+    #endif
 
     @State private var isInitialized = false
 
@@ -162,23 +165,31 @@ struct esc_chatmailApp: App {
         // matching stop, and the session would otherwise end with nothing
         // armed. Gated on canAccessMailbox (not isAuthenticated): revoked
         // credentials must start no sync work in either direction, matching
-        // the reauthentication flow's contract.
-        if dependencies.authSession.canAccessMailbox {
-            // `scenePhase` cannot be consulted here: this method runs inside
-            // AppLoadingView's `.task` closure, which captured the App-struct
-            // copy from the launch render — `@Environment` stores its resolved
-            // value inline, so that copy's `scenePhase` stays frozen at its
-            // launch-time value. Ask UIKit for the live state instead.
-            if UIApplication.shared.applicationState == .background {
-                dependencies.backgroundSyncManager.armBackgroundTasksForSceneBackground()
-            } else {
-                startForegroundSyncSession(
-                    reason: "appInitialized",
-                    triggerImmediateSync: true,
-                    processPendingActionsIfStarted: true
-                )
-            }
+        // the reauthentication flow's contract. The Mac always starts the
+        // session here: it has no BGTasks, and the session runs until quit.
+        //
+        // `scenePhase` cannot be consulted here: this method runs inside
+        // AppLoadingView's `.task` closure, which captured the App-struct
+        // copy from the launch render — `@Environment` stores its resolved
+        // value inline, so that copy's `scenePhase` stays frozen at its
+        // launch-time value. Ask UIKit for the live state instead.
+        performSyncAction(
+            AppLifecyclePolicy.syncActionAfterInitialization(
+                platform: .current,
+                isApplicationInBackground: isApplicationInBackground,
+                canAccessMailbox: dependencies.authSession.canAccessMailbox
+            ),
+            reason: "appInitialized"
+        )
+
+        #if os(macOS)
+        // Started only now, so an event can never start the session before
+        // the startup order above is satisfied — the same reason the iOS
+        // `.active` handler waits for `isInitialized`.
+        MacSystemLifecycleObserver.shared.start { event in
+            handleSystemEvent(event)
         }
+        #endif
 
         // 4. Ready to show main UI
         isInitialized = true
@@ -205,14 +216,27 @@ struct esc_chatmailApp: App {
     }
     
     private func configureBackgroundTasks() {
+        #if os(iOS)
         BackgroundSyncManager.shared.registerBackgroundTasks()
+        #endif
         // Constructing the singleton registers the three maintenance launch
         // handlers. BGTaskScheduler only delivers a task whose handler was
         // registered before the end of app launch, and a cold BGTask launch is
         // the normal delivery path for an eligible maintenance request — so
         // registration must not wait for initializeApp() to touch the service
-        // lazily after the first frame.
+        // lazily after the first frame. On the Mac this only records the jobs;
+        // `scheduleMaintenanceTasks()` starts their activities.
         _ = DatabaseMaintenanceService.shared
+    }
+
+    /// UIKit's live application state, for the reason `initializeApp()`
+    /// gives. The Mac has no such state and counts as in the foreground.
+    private var isApplicationInBackground: Bool {
+        #if os(iOS)
+        UIApplication.shared.applicationState == .background
+        #else
+        false
+        #endif
     }
     
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
@@ -222,43 +246,92 @@ struct esc_chatmailApp: App {
         // Dependencies graph mid-suite races the tests).
         if isRunningUnitTests { return }
 
-        switch newPhase {
-        case .background:
-            dependencies.foregroundSyncCoordinator.stop(reason: "sceneBackground")
-            // Arming policy (auth gate, guarded submits, the background
-            // assertion covering the async pending checks) lives in the
-            // manager so it stays testable — unconditional scheduling here
-            // once postponed the processing task indefinitely, because a
-            // re-submit with a pending identifier REPLACES the pending
-            // request. The manager's gate is canAccessMailbox, so revoked
-            // credentials arm nothing.
-            dependencies.backgroundSyncManager.armBackgroundTasksForSceneBackground()
-        case .active:
-            // Foreground sync is now app-scoped (independent of the conversation list lifecycle).
-            // Also process pending actions and duplicate cleanup.
-            // Gated on `isInitialized`: with the observer attached outside the
-            // gate, a pre-init activation could start foreground sync before
-            // `initializeApp` has started CacheCoordinator (a cold background
-            // launch's bootstrap can restore auth first) — init's completion
-            // starts sync itself once the startup order is satisfied.
-            if isInitialized && dependencies.authSession.canAccessMailbox {
-                startForegroundSyncSession(
-                    reason: "sceneActive",
-                    triggerImmediateSync: true,
-                    processPendingActionsIfStarted: true
-                )
-            }
-        case .inactive:
-            break
-        @unknown default:
-            break
+        // `.background` (iOS): stop foreground sync, then arm the background
+        // tasks (`armBackgroundTasksForSceneBackground()` below). On the Mac a
+        // hidden, minimized or closed window changes nothing: the app keeps
+        // running, and so does the session.
+        //
+        // `.active`: foreground sync is now app-scoped (independent of the
+        // conversation list lifecycle). Also process pending actions and
+        // duplicate cleanup. Gated on `isInitialized`: with the observer
+        // attached outside the gate, a pre-init activation could start
+        // foreground sync before `initializeApp` has started CacheCoordinator
+        // (a cold background launch's bootstrap can restore auth first) —
+        // init's completion starts sync itself once the startup order is
+        // satisfied.
+        let reason = newPhase == .background ? "sceneBackground" : "sceneActive"
+        performSyncAction(
+            AppLifecyclePolicy.syncAction(
+                forScenePhase: newPhase,
+                platform: .current,
+                isInitialized: isInitialized,
+                canAccessMailbox: dependencies.authSession.canAccessMailbox
+            ),
+            reason: reason
+        )
+    }
+
+    /// Mac only: activation, system sleep and wake
+    /// (`MacSystemLifecycleObserver`). The session pauses for sleep and starts
+    /// again, syncing at once, on wake and on activation.
+    private func handleSystemEvent(_ event: AppLifecyclePolicy.SystemEvent) {
+        let reason: String
+        switch event {
+        case .applicationDidBecomeActive:
+            reason = "applicationDidBecomeActive"
+        case .systemWillSleep:
+            reason = "systemWillSleep"
+        case .systemDidWake:
+            reason = "systemDidWake"
         }
+        performSyncAction(
+            AppLifecyclePolicy.syncAction(
+                forSystemEvent: event,
+                canAccessMailbox: dependencies.authSession.canAccessMailbox
+            ),
+            reason: reason
+        )
+    }
+
+    private func performSyncAction(_ action: AppLifecyclePolicy.SyncAction, reason: String) {
+        switch action {
+        case .none:
+            break
+        case .startForegroundSync:
+            startForegroundSyncSession(
+                reason: reason,
+                triggerImmediateSync: true,
+                processPendingActionsIfStarted: true
+            )
+        case .stopForegroundSync:
+            dependencies.foregroundSyncCoordinator.stop(reason: reason)
+        case .stopForegroundSyncAndArmBackgroundTasks:
+            dependencies.foregroundSyncCoordinator.stop(reason: reason)
+            armBackgroundTasksForSceneBackground()
+        case .armBackgroundTasks:
+            armBackgroundTasksForSceneBackground()
+        }
+    }
+
+    /// iOS only; `AppLifecyclePolicy` never asks the Mac to arm, since it has
+    /// no BGTasks.
+    private func armBackgroundTasksForSceneBackground() {
+        #if os(iOS)
+        // Arming policy (auth gate, guarded submits, the background
+        // assertion covering the async pending checks) lives in the
+        // manager so it stays testable — unconditional scheduling here
+        // once postponed the processing task indefinitely, because a
+        // re-submit with a pending identifier REPLACES the pending
+        // request. The manager's gate is canAccessMailbox, so revoked
+        // credentials arm nothing.
+        dependencies.backgroundSyncManager.armBackgroundTasksForSceneBackground()
+        #endif
     }
 
     private func handleAuthStateChange(_ isAuthenticated: Bool) {
         if isAuthenticated,
            dependencies.authSession.canAccessMailbox,
-           scenePhase == .active {
+           AppLifecyclePolicy.allowsForegroundSyncStartOnAuthChange(platform: .current, scenePhase: scenePhase) {
             reconcileAbandonedOptimisticSendsIfAuthenticated()
             startForegroundSyncSession(
                 reason: "authBecameAuthenticated",
@@ -273,7 +346,8 @@ struct esc_chatmailApp: App {
     private func handleReauthenticationRequirementChange(_ isRequired: Bool) {
         if isRequired {
             dependencies.foregroundSyncCoordinator.stop(reason: "reauthenticationRequired")
-        } else if dependencies.authSession.canAccessMailbox && scenePhase == .active {
+        } else if dependencies.authSession.canAccessMailbox,
+                  AppLifecyclePolicy.allowsForegroundSyncStartOnAuthChange(platform: .current, scenePhase: scenePhase) {
             reconcileAbandonedOptimisticSendsIfAuthenticated()
             startForegroundSyncSession(
                 reason: "reauthenticationCompleted",
@@ -318,6 +392,8 @@ struct esc_chatmailApp: App {
     }
 }
 
+#if os(iOS)
+/// The iOS app delegate. The Mac one is `MacAppDelegate`.
 class AppDelegate: NSObject, UIApplicationDelegate {
     func applicationWillTerminate(_ application: UIApplication) {
         // This is called when the app is about to terminate
@@ -328,3 +404,4 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         }
     }
 }
+#endif

@@ -1349,21 +1349,21 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
 @MainActor
 private final class MockOutboundBackgroundTaskManager: OutboundBackgroundTaskManaging {
-    var identifier = UIBackgroundTaskIdentifier(rawValue: 42)
+    var identifier = OutboundBackgroundTaskIdentifier(rawValue: 42)
     var expiresDuringBegin = false
     var onEnd: (() -> Void)?
     private(set) var beginCalls = 0
-    private(set) var endedIdentifiers: [UIBackgroundTaskIdentifier] = []
+    private(set) var endedIdentifiers: [OutboundBackgroundTaskIdentifier] = []
     private var expirationHandler: (@MainActor @Sendable () -> Void)?
 
-    func begin(expirationHandler: @escaping @MainActor @Sendable () -> Void) -> UIBackgroundTaskIdentifier {
+    func begin(expirationHandler: @escaping @MainActor @Sendable () -> Void) -> OutboundBackgroundTaskIdentifier {
         beginCalls += 1
         self.expirationHandler = expirationHandler
         if expiresDuringBegin { expirationHandler() }
         return identifier
     }
 
-    func end(_ identifier: UIBackgroundTaskIdentifier) {
+    func end(_ identifier: OutboundBackgroundTaskIdentifier) {
         endedIdentifiers.append(identifier)
         onEnd?()
     }

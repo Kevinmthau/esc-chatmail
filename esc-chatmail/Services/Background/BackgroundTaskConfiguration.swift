@@ -1,5 +1,4 @@
 import Foundation
-import BackgroundTasks
 
 /// Configuration for a background task
 struct BackgroundTaskConfiguration {
@@ -18,7 +17,8 @@ struct BackgroundTaskConfiguration {
     /// Whether the task requires external power
     let requiresExternalPower: Bool
 
-    /// Task types supported by iOS
+    /// Task types supported by iOS. The Mac's `BackgroundActivityTaskRegistry`
+    /// runs both as `NSBackgroundActivityScheduler` activities.
     enum TaskType {
         case appRefresh
         case processing

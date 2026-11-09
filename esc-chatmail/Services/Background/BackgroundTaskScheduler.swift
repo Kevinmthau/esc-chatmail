@@ -1,3 +1,4 @@
+#if os(iOS)
 import Foundation
 import BackgroundTasks
 
@@ -136,3 +137,4 @@ final class BackgroundTaskScheduler {
         }
     }
 }
+#endif
