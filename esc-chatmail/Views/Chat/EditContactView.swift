@@ -1,3 +1,6 @@
+#if os(iOS)
+// ContactsUI's contact card controller is iOS-only. On the Mac, `ContactPresenter`
+// (`Platform/ContactPresenter.swift`) opens the card in the Contacts app instead.
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -212,3 +215,4 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
         presentedNavController?.dismiss(animated: true)
     }
 }
+#endif

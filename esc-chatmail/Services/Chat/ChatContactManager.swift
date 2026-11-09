@@ -125,7 +125,7 @@ final class ChatContactManager: ObservableObject {
                     return
                 }
 
-                if #available(iOS 18.0, *), status == .limited {
+                if status.isLimitedAccess {
                     // Under limited access, the system contact picker always shows all contacts but does not
                     // automatically grant access to the selected contact for CNContactStore operations.
                     pendingSelectedContactIdentifierRequiringPermission = contactIdentifier
@@ -228,7 +228,7 @@ final class ChatContactManager: ObservableObject {
             return true
         }
 
-        if #available(iOS 18.0, *), status == .limited {
+        if status.isLimitedAccess {
             // Limited access can still create new contacts and edit permitted ones.
             return true
         }

@@ -1,5 +1,10 @@
 import Foundation
+#if os(macOS)
+// `QLPreviewItem` lives in QuickLookUI on the Mac and in QuickLook on iOS.
+import QuickLookUI
+#else
 import QuickLook
+#endif
 
 class AttachmentPreviewItem: NSObject, QLPreviewItem {
     let attachment: Attachment

@@ -18,4 +18,15 @@ struct QuickLookPresentation: Identifiable {
         self.previewItems = previewItems
         self.selectedIndex = selectedIndex
     }
+
+    /// The previewed files, in order, for a URL-based Quick Look (the Mac's `.quickLookPreview`).
+    var itemURLs: [URL] {
+        previewItems.compactMap(\.previewItemURL)
+    }
+
+    /// The file Quick Look opens on, for a URL-based Quick Look.
+    var selectedItemURL: URL? {
+        guard previewItems.indices.contains(selectedIndex) else { return nil }
+        return previewItems[selectedIndex].previewItemURL
+    }
 }

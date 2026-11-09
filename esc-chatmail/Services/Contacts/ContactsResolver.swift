@@ -77,7 +77,7 @@ actor ContactsResolver: ContactsResolving {
             return
         }
 
-        if #available(iOS 18.0, *), status == .limited {
+        if status.isLimitedAccess {
             // Limited access is treated as authorized for our purposes.
             return
         }
@@ -134,7 +134,7 @@ actor ContactsResolver: ContactsResolving {
         if status == .authorized {
             return true
         }
-        if #available(iOS 18.0, *), status == .limited {
+        if status.isLimitedAccess {
             return true
         }
         return false

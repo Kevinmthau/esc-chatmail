@@ -40,8 +40,11 @@ struct ParticipantRow: View {
                     Button("Create New Contact") {
                         onCreateNewContact()
                     }
-                    Button("Add to Existing Contact") {
-                        onAddToExistingContact()
+                    // Needs ContactsUI's picker, which the Mac does not have.
+                    if ContactsSheet.supportsContactPicker {
+                        Button("Add to Existing Contact") {
+                            onAddToExistingContact()
+                        }
                     }
                 } label: {
                     Image(systemName: "person.badge.plus")

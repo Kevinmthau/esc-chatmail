@@ -1,3 +1,6 @@
+#if os(iOS)
+// ContactsUI's new-contact controller is iOS-only. The Mac shows `OpenInContactsSheet`
+// through `ContactsSheet`.
 import SwiftUI
 import Contacts
 import ContactsUI
@@ -44,3 +47,4 @@ struct AddContactView: UIViewControllerRepresentable {
         }
     }
 }
+#endif

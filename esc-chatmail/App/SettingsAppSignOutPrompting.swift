@@ -1,8 +1,9 @@
 import Foundation
 
 /// The confirmation and failure UI of a Settings-app sign-out.
-/// `SettingsAppSignOutPrompter` is the UIKit implementation; tests substitute
-/// a fake that captures the action handlers.
+/// `SettingsAppSignOutPrompter` is the UIKit implementation (iOS) and
+/// `SettingsAppSignOutAlertPrompter` the SwiftUI-alert one (the Mac); tests
+/// substitute a fake that captures the action handlers.
 @MainActor
 protocol SettingsAppSignOutPrompting: AnyObject {
     /// Whether a confirmation is on screen or about to be.

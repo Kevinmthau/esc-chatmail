@@ -40,14 +40,10 @@ struct ChatView: View {
     }
 
     var body: some View {
-        if #available(iOS 18.0, *) {
-            content
-                .contactAccessPicker(isPresented: $viewModel.contactManager.showingContactAccessPicker) { identifiers in
-                    viewModel.contactManager.handleContactAccessPickerCompletion(identifiers)
-                }
-        } else {
-            content
-        }
+        content
+            .contactAccessPickerIfAvailable(isPresented: $viewModel.contactManager.showingContactAccessPicker) { identifiers in
+                viewModel.contactManager.handleContactAccessPickerCompletion(identifiers)
+            }
     }
 
     private var content: some View {
@@ -67,7 +63,7 @@ struct ChatView: View {
             }
         )
         .navigationTitle(navigationDisplayName)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .navigationBarBackButtonHidden(!allowsNavigationExit)
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -86,7 +82,7 @@ struct ChatView: View {
                     }
             }
 
-            ToolbarItemGroup(placement: .navigationBarTrailing) {
+            ToolbarItemGroup(placement: .trailingBarEdge) {
                 Menu {
                     if composerHasDraft || viewModel.draftRestoreFailed {
                         Button("Discard draft", role: .destructive) { viewModel.discardReplyDraft() }
@@ -119,7 +115,7 @@ struct ChatView: View {
                     title: Text("Contacts Access Needed"),
                     message: Text("Allow Contacts access in Settings to save this email to your contacts."),
                     primaryButton: .default(Text("Open Settings")) {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                        if let url = PlatformSettingsURL.contactsAccess {
                             openURL(url)
                         }
                     },
@@ -348,9 +344,9 @@ struct ChatView: View {
         case .forwardCompose(let context):
             makeForwardComposeView(context)
         case .addContact(let wrapper):
-            AddContactView(contact: wrapper.contact)
+            ContactsSheet(kind: .newContact(wrapper.contact))
         case .contactPicker:
-            ContactPickerView(
+            ContactsSheet(kind: .contactPicker(
                 onContactSelected: { contact in
                     viewModel.contactManager.handleContactSelected(contact)
                 },
@@ -359,7 +355,7 @@ struct ChatView: View {
                 },
                 // Use name-only rows for consistent search results when picking an existing contact.
                 displayedPropertyKeys: [] as [String]
-            )
+            ))
         case .participants:
             ParticipantsListView(
                 conversation: conversation,

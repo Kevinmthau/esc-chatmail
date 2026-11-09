@@ -10,7 +10,7 @@ struct ImageAttachmentBubble: View {
     @State private var reservedPresentation: InlineImagePresentationPolicy
 
     private var maxWidth: CGFloat {
-        min(UIScreen.main.bounds.width * 0.65, MessageBubbleStyle.standard.maxBubbleWidth)
+        min(PlatformScreen.width * 0.65, MessageBubbleStyle.standard.maxBubbleWidth)
     }
 
     init(

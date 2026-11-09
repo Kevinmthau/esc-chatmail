@@ -38,7 +38,7 @@ struct EmailReaderView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding()
                 .navigationTitle("Email")
-                .navigationBarTitleDisplayMode(.inline)
+                .inlineNavigationTitle()
             }
         }
     }

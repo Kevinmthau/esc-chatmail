@@ -30,8 +30,7 @@ struct SignInView: View {
             
             VStack(spacing: 16) {
                 TextField("Google account email (optional)", text: $loginHint)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.emailAddress)
+                    .emailAddressTextInput()
                     .textContentType(.username)
                     .autocorrectionDisabled()
                     .padding()
@@ -84,17 +83,16 @@ struct SignInView: View {
         isSigningIn = true
         errorMessage = nil
         
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootViewController = windowScene.windows.first?.rootViewController else {
+        guard let presentationAnchor = PresentationAnchorLookup.signInAnchor() else {
             errorMessage = "Unable to get root view controller"
             isSigningIn = false
             return
         }
-        
+
         Task {
             do {
                 try await authSession.signIn(
-                    presenting: rootViewController,
+                    presenting: presentationAnchor,
                     loginHint: loginHint
                 )
             } catch {

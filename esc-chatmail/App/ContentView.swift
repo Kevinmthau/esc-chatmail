@@ -44,20 +44,21 @@ struct ContentView: View {
         // On iPad, Settings can sit beside this app with both scenes staying
         // active, so no phase change follows the switch; look again when this
         // app's window regains focus.
-        .onReceive(NotificationCenter.default.publisher(for: UIWindow.didBecomeKeyNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: PlatformNotificationNames.windowDidBecomeKey)) { _ in
             evaluateSettingsAppSignOutRequest(isSceneActive: scenePhase == .active)
         }
         .onChange(of: authSession.isAuthenticated) {
             evaluateSettingsAppSignOutRequest(isSceneActive: scenePhase == .active)
         }
-        // Quick Look is a UIKit modal over the root hosting controller, not a
-        // sheet inside the mailbox, so removing the mailbox does not take it
-        // down; close it here or the previous account's attachment stays on
-        // screen over the sign-in view.
+        // Quick Look is a UIKit modal over the root hosting controller (the
+        // Quick Look panel on the Mac), not a sheet inside the mailbox, so
+        // removing the mailbox does not take it down; close it here or the
+        // previous account's attachment stays on screen over the sign-in view.
         .onChange(of: authSession.canAccessMailbox) { _, canAccessMailbox in
             guard !canAccessMailbox else { return }
-            QuickLookPreviewController.dismissAll()
+            AttachmentQuickLook.dismissAll()
         }
+        .settingsAppSignOutAlerts(for: settingsAppSignOut)
     }
 
     /// Stands in for the old in-app Settings screen's "Signing Out..." state

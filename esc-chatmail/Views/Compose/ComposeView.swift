@@ -70,7 +70,8 @@ struct ComposeView: View {
                 let email = selectedEmail ?? contact.primaryEmail
                 handleSelectedRecipient(email: email, displayName: contact.displayName)
             },
-            onContactButtonTapped: usesIMessagePresentation ? {
+            // The Mac has no contact picker (`ContactsSheet.supportsContactPicker`), so no button.
+            onContactButtonTapped: usesIMessagePresentation && ContactsSheet.supportsContactPicker ? {
                 showingContactPicker = true
             } : nil
         )
@@ -133,7 +134,7 @@ struct ComposeView: View {
             }
             .accessibilityIdentifier("ComposeViewRoot")
             .disabled(viewModel.isSending)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationTitle()
             .toolbar {
                 if !usesIMessagePresentation {
                     ToolbarItem(placement: .principal) {
@@ -141,7 +142,7 @@ struct ComposeView: View {
                             .font(.headline)
                     }
 
-                    ToolbarItem(placement: .navigationBarLeading) {
+                    ToolbarItem(placement: .leadingBarEdge) {
                         Button("Cancel") {
                             viewModel.discard()
                             dismiss()
@@ -149,7 +150,7 @@ struct ComposeView: View {
                         .disabled(viewModel.isSending)
                     }
 
-                    ToolbarItem(placement: .navigationBarTrailing) {
+                    ToolbarItem(placement: .trailingBarEdge) {
                         Button("Send") {
                             Task {
                                 if await viewModel.send() {
@@ -176,12 +177,13 @@ struct ComposeView: View {
             )
         }
         .sheet(isPresented: $showingContactPicker) {
-            ContactPickerView(
+            ContactsSheet(kind: .contactPicker(
                 onContactSelected: { contact in
                     handleContactPickerSelection(contact)
                 },
-                onCancel: { }
-            )
+                onCancel: { },
+                displayedPropertyKeys: nil
+            ))
         }
         .task {
             await viewModel.requestContactsAccess()

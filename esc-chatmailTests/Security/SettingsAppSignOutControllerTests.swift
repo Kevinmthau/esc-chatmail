@@ -181,6 +181,35 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         XCTAssertFalse(preferences.isSignOutRequested, "the user turns the switch on again to retry")
     }
 
+    // MARK: - Platform prompter
+
+    /// iOS keeps the UIKit prompter, which presents over any sheet; a SwiftUI alert on the root
+    /// view would never appear while one is up. So the iOS default must expose no SwiftUI-alert
+    /// prompter for `ContentView` to host.
+    ///
+    /// Revert-check: pointing `PlatformSettingsAppSignOutPrompter` at
+    /// `SettingsAppSignOutAlertPrompter` on iOS makes this fail.
+    func testDefaultPrompter_onIOS_isUIKitPrompter() {
+        let defaultController = SettingsAppSignOutController(preferences: preferences)
+
+        XCTAssertNil(defaultController.alertPrompter)
+    }
+
+    /// The Mac's SwiftUI-alert prompter is exposed so `ContentView` can show its alerts, and a
+    /// request raised through the controller reaches it.
+    ///
+    /// Revert-check: making `SettingsAppSignOutController.alertPrompter` return nil makes this fail.
+    func testAlertPrompter_injected_isExposedAndReceivesConfirmation() throws {
+        let alertPrompter = SettingsAppSignOutAlertPrompter()
+        let alertController = SettingsAppSignOutController(preferences: preferences, prompter: alertPrompter)
+        requestSignOut()
+
+        alertController.evaluate(account: account, isSceneActive: true)
+
+        XCTAssertTrue(try XCTUnwrap(alertController.alertPrompter) === alertPrompter)
+        XCTAssertTrue(alertPrompter.isConfirmationActive)
+    }
+
     // MARK: - Helpers
 
     private func requestSignOut() {

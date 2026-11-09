@@ -390,8 +390,11 @@ struct MessageBubble: View {
             if let statusLine {
                 Group {
                     if isInline {
-                        Text(statusLine.label).foregroundColor(Self.statusColor(statusLine)) +
-                            Text(verbatim: " · ").foregroundColor(.secondary)
+                        // Interpolated rather than joined with `+`, which macOS 26 deprecates (and
+                        // the Mac build's warnings-as-errors rejects); each part keeps its color.
+                        let label = Text(statusLine.label).foregroundColor(Self.statusColor(statusLine))
+                        let separator = Text(verbatim: " · ").foregroundColor(.secondary)
+                        Text("\(label)\(separator)")
                     } else {
                         // Own line: spacing lives inside the caption so an empty ZStack adds none.
                         Text(statusLine.label).foregroundColor(Self.statusColor(statusLine))

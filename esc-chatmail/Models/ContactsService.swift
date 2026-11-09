@@ -62,7 +62,7 @@ final class ContactsService: ObservableObject {
         if authorizationStatus == .authorized {
             return true
         }
-        if #available(iOS 18.0, *), authorizationStatus == .limited {
+        if authorizationStatus.isLimitedAccess {
             return true
         }
         return false

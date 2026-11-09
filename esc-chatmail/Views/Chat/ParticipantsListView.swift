@@ -56,9 +56,9 @@ struct ParticipantsListView: View {
                 }
             }
             .navigationTitle("Participants")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationTitle()
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .trailingBarEdge) {
                     Button("Done") {
                         dismiss()
                     }

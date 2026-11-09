@@ -1,3 +1,6 @@
+#if os(iOS)
+// UIKit alerts from the topmost view controller. The Mac uses
+// `SettingsAppSignOutAlertPrompter` (`PlatformSettingsAppSignOutPrompter`).
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -83,3 +86,4 @@ final class SettingsAppSignOutPrompter: SettingsAppSignOutPrompting {
         }
     }
 }
+#endif

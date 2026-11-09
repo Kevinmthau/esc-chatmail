@@ -1,3 +1,7 @@
+#if os(iOS)
+// UIKit modal presentation, used only by iOS-only presenters (`ContactPresenter`,
+// `SettingsAppSignOutPrompter`, `QuickLookPreviewController`). The Mac presents
+// through SwiftUI instead (`.alert`, `.quickLookPreview`, the Contacts app).
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -120,3 +124,4 @@ enum TopPresentableViewController {
         return topViewController
     }
 }
+#endif

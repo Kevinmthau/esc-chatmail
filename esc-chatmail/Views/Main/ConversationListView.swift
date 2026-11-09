@@ -203,7 +203,7 @@ struct ConversationListView: View {
     /// the system styles them — glass capsule and circle on iOS 26.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
+        ToolbarItem(placement: .leadingBarEdge) {
             Button(ConversationListChromePolicy.leadingButtonTitle(isSelecting: viewModel.isSelecting)) {
                 isSearchFieldFocused = false
                 withAnimation {
@@ -213,11 +213,11 @@ struct ConversationListView: View {
         }
         switch trailingToolbarItem {
         case .filterMenu:
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .trailingBarEdge) {
                 filterMenu
             }
         case let .selectAll(title, isEnabled):
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .trailingBarEdge) {
                 Button(title) {
                     viewModel.selectAllVisibleConversations()
                 }

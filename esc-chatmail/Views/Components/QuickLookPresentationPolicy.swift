@@ -1,3 +1,6 @@
+#if os(iOS)
+// Rules for iOS's present-and-retry loop (`QuickLookPreviewController.present`). The Mac's
+// `.quickLookPreview` presents synchronously and needs neither.
 import Foundation
 
 /// When `AttachmentGridView` clears its Quick Look state.
@@ -31,3 +34,4 @@ enum QuickLookPresentationPolicy {
         current == dismissed
     }
 }
+#endif

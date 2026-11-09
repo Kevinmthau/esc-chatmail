@@ -1,3 +1,6 @@
+#if os(iOS)
+// ContactsUI's contact picker is iOS-only. The Mac does not offer a picker
+// (`ContactsSheet.supportsContactPicker`).
 import SwiftUI
 import Contacts
 import ContactsUI
@@ -63,3 +66,4 @@ struct ContactPickerView: UIViewControllerRepresentable {
         }
     }
 }
+#endif
